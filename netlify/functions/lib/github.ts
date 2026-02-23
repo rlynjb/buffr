@@ -214,6 +214,25 @@ export async function getIssues(
   }
 }
 
+export async function getUserRepos(): Promise<string[]> {
+  try {
+    const repos: string[] = [];
+    let page = 1;
+    while (true) {
+      const items = await ghList(`/user/repos?per_page=100&page=${page}&sort=updated`);
+      if (items.length === 0) break;
+      for (const item of items) {
+        repos.push(item.full_name as string);
+      }
+      if (items.length < 100) break;
+      page++;
+    }
+    return repos;
+  } catch {
+    return [];
+  }
+}
+
 export async function analyzeRepo(
   owner: string,
   repo: string,

@@ -1,7 +1,7 @@
 import type { Context } from "@netlify/functions";
 import { getLLM } from "./lib/ai/provider";
 import { generateFileContent } from "./lib/ai/chains/file-generator";
-import { createRepo, pushFiles, getRepoInfo, analyzeRepo, getIssues } from "./lib/github";
+import { createRepo, pushFiles, getRepoInfo, analyzeRepo, getIssues, getUserRepos } from "./lib/github";
 import type { ScaffoldRequest, PlanFeature } from "../../src/lib/types";
 
 function generateScaffoldFiles(
@@ -163,18 +163,35 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
 }
 
 export default async function handler(req: Request, _context: Context) {
-  // GET handlers: ?validate=, ?analyze=, ?issues=
+  // GET handlers: ?validate=, ?analyze=, ?issues=, ?repos
   if (req.method === "GET") {
     const url = new URL(req.url);
     const validate = url.searchParams.get("validate");
     const analyze = url.searchParams.get("analyze");
     const issues = url.searchParams.get("issues");
+    const repos = url.searchParams.has("repos");
 
-    if (!validate && !analyze && !issues) {
+    if (!validate && !analyze && !issues && !repos) {
       return new Response(JSON.stringify({ error: "Method not allowed" }), {
         status: 405,
         headers: { "Content-Type": "application/json" },
       });
+    }
+
+    // ?repos — list all repos for the authenticated GitHub user
+    if (repos) {
+      try {
+        const repoList = await getUserRepos();
+        return new Response(JSON.stringify(repoList), {
+          headers: { "Content-Type": "application/json" },
+        });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Failed to fetch repos";
+        return new Response(JSON.stringify({ error: message }), {
+          status: 500,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
     }
 
     // ?analyze=owner/repo — full repo analysis + issues

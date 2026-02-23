@@ -96,3 +96,47 @@
 - **Notion integration foundation**: `NotionTask` interface added to `src/lib/types.ts` — defines the shape for tasks pulled from Notion (id, title, status, priority, tags, url)
 - **`NOTION_SETUP.md`**: Step-by-step guide for connecting a Notion tasks database to buffr — covers creating an internal integration, getting the token, sharing the database, extracting the database ID, expected table structure (Name + Status required; Priority + Tags optional), and the planned `NOTION_CONFIG` code-editable config pattern with property mappings and per-project database map
 - Groundwork for Notion as a pluggable data source in the `ActionContext` next-actions engine, alongside GitHub Issues
+
+## 2026-02-23 02:00 UTC
+
+### Changed
+- **Resume Card always shows all 4 cards** (Last Session, Plan, Open Issues, Next Actions) with descriptive placeholder text when empty, instead of hiding cards that have no data — gives users a clear picture of what each section does and how to populate it
+- **Removed all default/hardcoded Next Actions**: stripped out `actionsFromStack` (suggest test framework) and `actionsFromPhase` (generic idea/mvp/polish/deploy prompts) — Next Actions now only surfaces real data from sessions, activity, and GitHub issues
+- **Plan card placeholder** no longer leaks the auto-detected stack from repo analysis — only shows stack when a plan was actually generated via the wizard
+
+### Removed
+- `actionsFromStack` source function — suggested "Add a test framework" when no test framework detected in stack; removed as noise for loaded projects
+- `actionsFromPhase` source function — generic phase-based prompts ("Write a 1-sentence pitch", "Build the next feature", "Fix the top reported bug", "Set environment variables") that were redundant when real issues/sessions exist and meaningless filler when they don't
+- `"stack"` and `"phase"` removed from `NextAction.source` union type
+
+## 2026-02-23 02:30 UTC
+
+### Added
+- **Dashboard syncs with GitHub**: On load, the dashboard now fetches the authenticated user's GitHub repositories via `GET /user/repos` and cross-references them against buffr projects — only projects whose `githubRepo` still exists on your GitHub account are displayed
+- **Auto-cleanup of stale projects**: Buffr projects linked to repos that no longer exist on GitHub (deleted, transferred, or renamed) are automatically removed from Netlify Blobs in the background
+- `getUserRepos()` in `netlify/functions/lib/github.ts` — paginates through all user repos (handles 100+ repos)
+- `GET /scaffold?repos` backend endpoint — returns the full list of `owner/repo` strings for the authenticated user
+- `getUserRepos()` client function in `src/lib/api.ts`
+
+### Changed
+- Dashboard fetches projects and GitHub repos in parallel via `Promise.all` for faster load
+- Projects without a `githubRepo` field are treated as stale and cleaned up (previously only filtered client-side)
+- Comparison is case-insensitive to handle GitHub's case normalization
+
+## 2026-02-23 03:00 UTC
+
+### Changed
+- **Resume Card switched to tabbed layout**: Last Session, Open Issues, and Next Actions are now presented as tabs instead of three stacked cards — reduces vertical scrolling and lets the user focus on one section at a time
+  - Tab bar with accent underline on active tab, issue count shown in the "Open Issues" tab label
+  - Tab content renders inside a single card that visually connects to the tab bar (rounded top corners removed, top border removed)
+- **Plan card removed** from the Resume Card view — the project header and quick links already convey key project info; plan details will resurface in a future dedicated view
+
+## 2026-02-23 03:30 UTC
+
+### Added
+- **Action notes with persistence**: Each Next Actions item now has a textarea for adding notes, saved to Netlify Blobs per project — notes reload on page load so context is never lost between sessions
+  - New `action-notes` Netlify Blobs store keyed by project ID, stores `{ actionId: noteText }` map
+  - `netlify/functions/action-notes.ts` — `GET ?projectId=` to fetch all notes, `PUT ?projectId=` with `{ actionId, note }` to save or clear a note
+  - `netlify/functions/lib/storage/action-notes.ts` — storage module for the `action-notes` blob store
+  - `getActionNotes()` and `saveActionNote()` client functions in `src/lib/api.ts`
+- Notes are fetched in parallel alongside sessions and issues on Resume Card load

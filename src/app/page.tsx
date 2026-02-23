@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { ProjectCard } from "@/components/dashboard/project-card";
 import type { Project } from "@/lib/types";
-import { listProjects } from "@/lib/api";
+import { listProjects, deleteProject, getUserRepos } from "@/lib/api";
 
 export default function Dashboard() {
   const router = useRouter();
@@ -15,8 +15,29 @@ export default function Dashboard() {
   useEffect(() => {
     async function load() {
       try {
-        const data = await listProjects();
-        setProjects(data);
+        const [data, githubRepos] = await Promise.all([
+          listProjects(),
+          getUserRepos().catch(() => [] as string[]),
+        ]);
+
+        const repoSet = new Set(githubRepos.map((r) => r.toLowerCase()));
+
+        // Keep projects whose githubRepo still exists on GitHub
+        const active = data.filter(
+          (p) => p.githubRepo && repoSet.has(p.githubRepo.toLowerCase())
+        );
+        const stale = data.filter(
+          (p) => !p.githubRepo || !repoSet.has(p.githubRepo.toLowerCase())
+        );
+
+        setProjects(active);
+
+        // Clean up stale projects in background
+        for (const p of stale) {
+          deleteProject(p.id).catch((err) =>
+            console.warn(`Failed to delete stale project ${p.id}:`, err)
+          );
+        }
       } catch (err) {
         console.error("Failed to load projects:", err);
       } finally {

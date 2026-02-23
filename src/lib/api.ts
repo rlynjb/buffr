@@ -154,6 +154,29 @@ export async function getIssues(
   return request(`/scaffold?issues=${encodeURIComponent(ownerRepo)}`);
 }
 
+// List authenticated user's GitHub repos
+export async function getUserRepos(): Promise<string[]> {
+  return request("/scaffold?repos");
+}
+
+// Action Notes
+export async function getActionNotes(
+  projectId: string
+): Promise<Record<string, string>> {
+  return request(`/action-notes?projectId=${encodeURIComponent(projectId)}`);
+}
+
+export async function saveActionNote(
+  projectId: string,
+  actionId: string,
+  note: string
+): Promise<Record<string, string>> {
+  return request(`/action-notes?projectId=${encodeURIComponent(projectId)}`, {
+    method: "PUT",
+    body: JSON.stringify({ actionId, note }),
+  });
+}
+
 // Deploy
 export async function deployProject(
   data: DeployRequest
