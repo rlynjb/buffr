@@ -7,15 +7,6 @@ function store() {
   return getStore(STORE_NAME);
 }
 
-export async function getToolConfig(
-  integrationId: string
-): Promise<ToolConfig | null> {
-  const s = store();
-  const data = await s.get(integrationId, { type: "text" });
-  if (!data) return null;
-  return JSON.parse(data) as ToolConfig;
-}
-
 export async function listToolConfigs(): Promise<ToolConfig[]> {
   const s = store();
   const { blobs } = await s.list();

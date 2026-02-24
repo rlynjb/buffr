@@ -3,18 +3,12 @@
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import type { Project } from "@/lib/types";
+import { PHASE_BADGE_VARIANTS } from "@/lib/constants";
 
 interface ProjectCardProps {
   project: Project;
   onClick: () => void;
 }
-
-const phaseBadge: Record<string, "default" | "accent" | "warning" | "success"> = {
-  idea: "default",
-  mvp: "accent",
-  polish: "warning",
-  deploy: "success",
-};
 
 export function ProjectCard({ project, onClick }: ProjectCardProps) {
   const updatedAgo = getTimeAgo(project.updatedAt);
@@ -25,7 +19,7 @@ export function ProjectCard({ project, onClick }: ProjectCardProps) {
         <h3 className="font-semibold font-mono text-foreground">
           {project.name}
         </h3>
-        <Badge variant={phaseBadge[project.phase]}>{project.phase}</Badge>
+        <Badge variant={PHASE_BADGE_VARIANTS[project.phase]}>{project.phase}</Badge>
       </div>
 
       {project.stack && (

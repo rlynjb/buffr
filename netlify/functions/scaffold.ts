@@ -3,6 +3,133 @@ import { getLLM } from "./lib/ai/provider";
 import { generateFileContent } from "./lib/ai/chains/file-generator";
 import { createRepo, pushFiles, getRepoInfo, analyzeRepo, getIssues, getUserRepos } from "./lib/github";
 import type { ScaffoldRequest, PlanFeature } from "../../src/lib/types";
+import { json, errorResponse, classifyError } from "./lib/responses";
+
+function parseOwnerRepo(raw: string): [string, string] | null {
+  const ownerRepo = raw.replace(/\.git$/, "");
+  const [owner, repo] = ownerRepo.split("/");
+  if (!owner || !repo) return null;
+  return [owner, repo];
+}
+
+// GET ?repos
+async function handleRepos(): Promise<Response> {
+  try {
+    const repoList = await getUserRepos();
+    return json(repoList);
+  } catch (err) {
+    const { message, status } = classifyError(err, "Failed to fetch repos");
+    return errorResponse(message, status);
+  }
+}
+
+// GET ?analyze=owner/repo
+async function handleAnalyze(raw: string): Promise<Response> {
+  try {
+    const parsed = parseOwnerRepo(raw);
+    if (!parsed) return errorResponse("Invalid owner/repo format", 400);
+    const [owner, repo] = parsed;
+
+    const info = await getRepoInfo(`${owner}/${repo}`);
+    if (!info) return errorResponse("Repository not found", 404);
+
+    const [analysis, issueList] = await Promise.all([
+      analyzeRepo(owner, repo, info.defaultBranch),
+      getIssues(owner, repo),
+    ]);
+
+    return json({ ...analysis, issues: issueList, issueCount: issueList.length });
+  } catch (err) {
+    const { message, status } = classifyError(err, "Failed to analyze repository");
+    return errorResponse(message, status);
+  }
+}
+
+// GET ?issues=owner/repo
+async function handleIssues(raw: string): Promise<Response> {
+  try {
+    const parsed = parseOwnerRepo(raw);
+    if (!parsed) return errorResponse("Invalid owner/repo format", 400);
+    const [owner, repo] = parsed;
+
+    const issueList = await getIssues(owner, repo);
+    return json(issueList);
+  } catch (err) {
+    const { message, status } = classifyError(err, "Failed to fetch issues");
+    return errorResponse(message, status);
+  }
+}
+
+// GET ?validate=owner/repo
+async function handleValidate(raw: string): Promise<Response> {
+  try {
+    const ownerRepo = raw.replace(/\.git$/, "");
+    const info = await getRepoInfo(ownerRepo);
+    if (!info) return errorResponse("Repository not found or not accessible", 404);
+    return json(info);
+  } catch (err) {
+    const { message, status } = classifyError(err, "Failed to validate repository");
+    return errorResponse(message, status);
+  }
+}
+
+// POST — scaffold a new project
+async function handleScaffold(req: Request): Promise<Response> {
+  try {
+    const body = (await req.json()) as ScaffoldRequest;
+
+    // 1. Generate scaffold files
+    const scaffoldFiles = generateScaffoldFiles(
+      body.stack,
+      body.projectName,
+      body.features
+    );
+
+    // 2. Generate content for selected project files via LLM
+    const llm = getLLM(body.provider || "anthropic");
+    const featureNames = body.features
+      .filter((f) => f.checked)
+      .map((f) => f.name);
+
+    const fileGenPromises = body.selectedFiles.map(async (fileType) => {
+      const content = await generateFileContent(llm, {
+        fileType,
+        projectName: body.projectName,
+        description: body.description,
+        stack: body.stack,
+        features: featureNames,
+        constraints: body.constraints,
+        goals: body.goals,
+      });
+      return { path: fileType, content };
+    });
+
+    const generatedFiles = await Promise.all(fileGenPromises);
+
+    // 3. Combine all files
+    const allFiles = [...scaffoldFiles, ...generatedFiles];
+
+    // 4. Create GitHub repo
+    const { owner, repo, url } = await createRepo(
+      body.repoName,
+      body.repoDescription,
+      body.repoVisibility === "private"
+    );
+
+    // 5. Push all files
+    await pushFiles(owner, repo, allFiles, "Initial commit from buffr");
+
+    return json({
+      repoUrl: url,
+      githubRepo: `${owner}/${repo}`,
+      files: allFiles.map((f) => f.path),
+    });
+  } catch (err: unknown) {
+    console.error("scaffold function error:", err);
+    const { message, status } = classifyError(err, "Failed to scaffold project");
+    return errorResponse(message, status);
+  }
+}
 
 function generateScaffoldFiles(
   stack: string,
@@ -55,7 +182,6 @@ function generateScaffoldFiles(
     ),
   });
 
-  // tsconfig.json
   if (isTypescript) {
     files.push({
       path: "tsconfig.json",
@@ -86,14 +212,12 @@ function generateScaffoldFiles(
     });
   }
 
-  // Next.js config
   if (isNextjs) {
     files.push({
       path: `next.config.${extPlain}`,
       content: `import type { NextConfig } from "next";\n\nconst nextConfig: NextConfig = {};\n\nexport default nextConfig;\n`,
     });
 
-    // postcss config for Tailwind
     if (stack.toLowerCase().includes("tailwind")) {
       files.push({
         path: "postcss.config.mjs",
@@ -101,7 +225,6 @@ function generateScaffoldFiles(
       });
     }
 
-    // App layout
     files.push({
       path: `src/app/layout.${ext}`,
       content: `import type { Metadata } from "next";
@@ -122,7 +245,6 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
 `,
     });
 
-    // App page
     files.push({
       path: `src/app/page.${ext}`,
       content: `export default function Home() {
@@ -136,7 +258,6 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
 `,
     });
 
-    // Globals CSS
     files.push({
       path: "src/app/globals.css",
       content: stack.toLowerCase().includes("tailwind")
@@ -145,7 +266,6 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     });
   }
 
-  // Feature placeholder directories
   for (const feature of features.filter((f) => f.checked && f.phase === 1)) {
     const slug = feature.name
       .toLowerCase()
@@ -163,7 +283,6 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
 }
 
 export default async function handler(req: Request, _context: Context) {
-  // GET handlers: ?validate=, ?analyze=, ?issues=, ?repos
   if (req.method === "GET") {
     const url = new URL(req.url);
     const validate = url.searchParams.get("validate");
@@ -171,203 +290,14 @@ export default async function handler(req: Request, _context: Context) {
     const issues = url.searchParams.get("issues");
     const repos = url.searchParams.has("repos");
 
-    if (!validate && !analyze && !issues && !repos) {
-      return new Response(JSON.stringify({ error: "Method not allowed" }), {
-        status: 405,
-        headers: { "Content-Type": "application/json" },
-      });
-    }
-
-    // ?repos — list all repos for the authenticated GitHub user
-    if (repos) {
-      try {
-        const repoList = await getUserRepos();
-        return new Response(JSON.stringify(repoList), {
-          headers: { "Content-Type": "application/json" },
-        });
-      } catch (err) {
-        const message = err instanceof Error ? err.message : "Failed to fetch repos";
-        return new Response(JSON.stringify({ error: message }), {
-          status: 500,
-          headers: { "Content-Type": "application/json" },
-        });
-      }
-    }
-
-    // ?analyze=owner/repo — full repo analysis + issues
-    if (analyze) {
-      try {
-        const ownerRepo = analyze.replace(/\.git$/, "");
-        const [owner, repo] = ownerRepo.split("/");
-        if (!owner || !repo) {
-          return new Response(
-            JSON.stringify({ error: "Invalid owner/repo format" }),
-            { status: 400, headers: { "Content-Type": "application/json" } }
-          );
-        }
-
-        const info = await getRepoInfo(ownerRepo);
-        if (!info) {
-          return new Response(
-            JSON.stringify({ error: "Repository not found" }),
-            { status: 404, headers: { "Content-Type": "application/json" } }
-          );
-        }
-
-        const [analysis, issueList] = await Promise.all([
-          analyzeRepo(owner, repo, info.defaultBranch),
-          getIssues(owner, repo),
-        ]);
-
-        return new Response(
-          JSON.stringify({ ...analysis, issues: issueList, issueCount: issueList.length }),
-          { headers: { "Content-Type": "application/json" } }
-        );
-      } catch (err) {
-        const message = err instanceof Error ? err.message : "Failed to analyze repository";
-        return new Response(JSON.stringify({ error: message }), {
-          status: 500,
-          headers: { "Content-Type": "application/json" },
-        });
-      }
-    }
-
-    // ?issues=owner/repo — fetch open issues only
-    if (issues) {
-      try {
-        const ownerRepo = issues.replace(/\.git$/, "");
-        const [owner, repo] = ownerRepo.split("/");
-        if (!owner || !repo) {
-          return new Response(
-            JSON.stringify({ error: "Invalid owner/repo format" }),
-            { status: 400, headers: { "Content-Type": "application/json" } }
-          );
-        }
-        const issueList = await getIssues(owner, repo);
-        return new Response(JSON.stringify(issueList), {
-          headers: { "Content-Type": "application/json" },
-        });
-      } catch (err) {
-        const message = err instanceof Error ? err.message : "Failed to fetch issues";
-        return new Response(JSON.stringify({ error: message }), {
-          status: 500,
-          headers: { "Content-Type": "application/json" },
-        });
-      }
-    }
-
-    // ?validate=owner/repo — quick repo existence check
-    try {
-      const ownerRepo = validate!.replace(/\.git$/, "");
-      const info = await getRepoInfo(ownerRepo);
-      if (!info) {
-        return new Response(
-          JSON.stringify({ error: "Repository not found or not accessible" }),
-          { status: 404, headers: { "Content-Type": "application/json" } }
-        );
-      }
-      return new Response(JSON.stringify(info), {
-        headers: { "Content-Type": "application/json" },
-      });
-    } catch (err) {
-      const message = err instanceof Error ? err.message : "Failed to validate repository";
-      return new Response(JSON.stringify({ error: message }), {
-        status: 500,
-        headers: { "Content-Type": "application/json" },
-      });
-    }
+    if (repos) return handleRepos();
+    if (analyze) return handleAnalyze(analyze);
+    if (issues) return handleIssues(issues);
+    if (validate) return handleValidate(validate);
+    return errorResponse("Method not allowed", 405);
   }
 
-  if (req.method !== "POST") {
-    return new Response(JSON.stringify({ error: "Method not allowed" }), {
-      status: 405,
-      headers: { "Content-Type": "application/json" },
-    });
-  }
+  if (req.method === "POST") return handleScaffold(req);
 
-  try {
-    const body = (await req.json()) as ScaffoldRequest;
-
-    // 1. Generate scaffold files
-    const scaffoldFiles = generateScaffoldFiles(
-      body.stack,
-      body.projectName,
-      body.features
-    );
-
-    // 2. Generate content for selected project files via LLM
-    const llm = getLLM(body.provider || "anthropic");
-    const featureNames = body.features
-      .filter((f) => f.checked)
-      .map((f) => f.name);
-
-    const fileGenPromises = body.selectedFiles.map(async (fileType) => {
-      const content = await generateFileContent(llm, {
-        fileType,
-        projectName: body.projectName,
-        description: body.description,
-        stack: body.stack,
-        features: featureNames,
-        constraints: body.constraints,
-        goals: body.goals,
-      });
-      return { path: fileType, content };
-    });
-
-    const generatedFiles = await Promise.all(fileGenPromises);
-
-    // 3. Combine all files
-    const allFiles = [...scaffoldFiles, ...generatedFiles];
-
-    // 4. Create GitHub repo
-    const { owner, repo, url } = await createRepo(
-      body.repoName,
-      body.repoDescription,
-      body.repoVisibility === "private"
-    );
-
-    // 5. Push all files
-    await pushFiles(owner, repo, allFiles, "Initial commit from buffr");
-
-    return new Response(
-      JSON.stringify({
-        repoUrl: url,
-        githubRepo: `${owner}/${repo}`,
-        files: allFiles.map((f) => f.path),
-      }),
-      { headers: { "Content-Type": "application/json" } }
-    );
-  } catch (err: unknown) {
-    console.error("scaffold function error:", err);
-
-    let message = "Failed to scaffold project";
-    let status = 500;
-
-    if (err instanceof Error) {
-      const msg = err.message;
-      if (msg.includes("credit balance is too low") || msg.includes("insufficient")) {
-        message = "Your LLM provider account has insufficient credits. Please top up or switch providers.";
-        status = 402;
-      } else if (msg.includes("authentication") || msg.includes("API key") || msg.includes("Incorrect API key")) {
-        message = "Invalid API key for the selected provider. Check your .env file.";
-        status = 401;
-      } else if (msg.includes("GITHUB_TOKEN") || msg.includes("not configured")) {
-        message = msg;
-        status = 400;
-      } else if (msg.includes("rate limit") || msg.includes("Rate limit")) {
-        message = "Rate limited by the LLM provider. Wait a moment and try again.";
-        status = 429;
-      } else if (msg.includes("already exists") || msg.includes("name already exists")) {
-        message = "Repository name already exists. Go back and choose a different name.";
-        status = 422;
-      } else {
-        message = msg;
-      }
-    }
-
-    return new Response(JSON.stringify({ error: message }), {
-      status,
-      headers: { "Content-Type": "application/json" },
-    });
-  }
+  return errorResponse("Method not allowed", 405);
 }

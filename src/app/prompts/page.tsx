@@ -28,7 +28,6 @@ export default function PromptsPage() {
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
   const [tags, setTags] = useState("");
-  const [scope, setScope] = useState<"global" | string>("global");
 
   useEffect(() => {
     load();
@@ -50,7 +49,6 @@ export default function PromptsPage() {
     setTitle("");
     setBody("");
     setTags("");
-    setScope("global");
     setModalOpen(true);
   }
 
@@ -59,7 +57,6 @@ export default function PromptsPage() {
     setTitle(prompt.title);
     setBody(prompt.body);
     setTags(prompt.tags.join(", "));
-    setScope(prompt.scope);
     setModalOpen(true);
   }
 
@@ -74,7 +71,6 @@ export default function PromptsPage() {
         title,
         body,
         tags: parsedTags,
-        scope,
       });
       setPrompts((prev) =>
         prev.map((p) => (p.id === updated.id ? updated : p))
@@ -84,7 +80,6 @@ export default function PromptsPage() {
         title,
         body,
         tags: parsedTags,
-        scope,
       });
       setPrompts((prev) => [created, ...prev]);
     }
@@ -202,14 +197,9 @@ export default function PromptsPage() {
         <div className="space-y-3">
           {filtered.map((prompt) => (
             <Card key={prompt.id}>
-              <div className="flex items-start justify-between mb-2">
-                <h3 className="font-semibold text-sm text-foreground">
-                  {prompt.title}
-                </h3>
-                <Badge variant={prompt.scope === "global" ? "default" : "accent"}>
-                  {prompt.scope === "global" ? "global" : "project"}
-                </Badge>
-              </div>
+              <h3 className="font-semibold text-sm text-foreground mb-2">
+                {prompt.title}
+              </h3>
               <pre className="text-xs text-muted font-mono whitespace-pre-wrap line-clamp-3 mb-3">
                 {prompt.body}
               </pre>
@@ -273,23 +263,6 @@ export default function PromptsPage() {
             onChange={(e) => setTags(e.target.value)}
             placeholder="debug, react, performance"
           />
-          <div>
-            <label className="block text-sm font-medium text-foreground mb-2">
-              Scope
-            </label>
-            <div className="flex gap-4">
-              <label className="flex items-center gap-2 text-sm text-foreground cursor-pointer">
-                <input
-                  type="radio"
-                  name="scope"
-                  checked={scope === "global"}
-                  onChange={() => setScope("global")}
-                  className="accent-accent"
-                />
-                Global
-              </label>
-            </div>
-          </div>
           <div className="flex gap-3 justify-end">
             <Button
               variant="secondary"

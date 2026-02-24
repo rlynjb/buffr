@@ -7,15 +7,6 @@ function store() {
   return getStore(STORE_NAME);
 }
 
-export async function getCustomIntegration(
-  id: string
-): Promise<CustomIntegration | null> {
-  const s = store();
-  const data = await s.get(id, { type: "text" });
-  if (!data) return null;
-  return JSON.parse(data) as CustomIntegration;
-}
-
 export async function listCustomIntegrations(): Promise<CustomIntegration[]> {
   const s = store();
   const { blobs } = await s.list();

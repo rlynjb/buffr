@@ -3,25 +3,21 @@ import {
   getActionNotes,
   saveActionNotes,
 } from "./lib/storage/action-notes";
+import { json, errorResponse } from "./lib/responses";
 
 export default async function handler(req: Request, _context: Context) {
   const url = new URL(req.url);
   const projectId = url.searchParams.get("projectId");
 
   if (!projectId) {
-    return new Response(
-      JSON.stringify({ error: "projectId is required" }),
-      { status: 400, headers: { "Content-Type": "application/json" } }
-    );
+    return errorResponse("projectId is required", 400);
   }
 
   try {
     // GET — return all notes for a project
     if (req.method === "GET") {
       const notes = await getActionNotes(projectId);
-      return new Response(JSON.stringify(notes), {
-        headers: { "Content-Type": "application/json" },
-      });
+      return json(notes);
     }
 
     // PUT — update a single action's note
@@ -30,10 +26,7 @@ export default async function handler(req: Request, _context: Context) {
       const { actionId, note } = body as { actionId: string; note: string };
 
       if (!actionId) {
-        return new Response(
-          JSON.stringify({ error: "actionId is required" }),
-          { status: 400, headers: { "Content-Type": "application/json" } }
-        );
+        return errorResponse("actionId is required", 400);
       }
 
       const notes = await getActionNotes(projectId);
@@ -44,20 +37,12 @@ export default async function handler(req: Request, _context: Context) {
       }
       await saveActionNotes(projectId, notes);
 
-      return new Response(JSON.stringify(notes), {
-        headers: { "Content-Type": "application/json" },
-      });
+      return json(notes);
     }
 
-    return new Response(JSON.stringify({ error: "Method not allowed" }), {
-      status: 405,
-      headers: { "Content-Type": "application/json" },
-    });
+    return errorResponse("Method not allowed", 405);
   } catch (err) {
     console.error("action-notes function error:", err);
-    return new Response(
-      JSON.stringify({ error: "Internal server error" }),
-      { status: 500, headers: { "Content-Type": "application/json" } }
-    );
+    return errorResponse("Internal server error", 500);
   }
 }

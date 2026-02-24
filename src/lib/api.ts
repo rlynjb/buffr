@@ -86,22 +86,12 @@ export async function listSessions(projectId: string): Promise<Session[]> {
   );
 }
 
-export async function getSession(id: string): Promise<Session> {
-  return request<Session>(`/sessions?id=${encodeURIComponent(id)}`);
-}
-
 export async function createSession(
   data: Partial<Session>
 ): Promise<Session> {
   return request<Session>("/sessions", {
     method: "POST",
     body: JSON.stringify(data),
-  });
-}
-
-export async function deleteSession(id: string): Promise<void> {
-  await request(`/sessions?id=${encodeURIComponent(id)}`, {
-    method: "DELETE",
   });
 }
 
@@ -131,6 +121,18 @@ export async function scaffoldProject(
     method: "POST",
     body: JSON.stringify(data),
   });
+}
+
+// Validate repo exists
+export async function validateRepo(
+  ownerRepo: string
+): Promise<{
+  name: string;
+  description: string | null;
+  defaultBranch: string;
+  lastCommit: string;
+}> {
+  return request(`/scaffold?validate=${encodeURIComponent(ownerRepo)}`);
 }
 
 // Analyze repo
@@ -228,15 +230,6 @@ export async function saveIntegrationConfig(
       method: "PUT",
       body: JSON.stringify({ values, enabled }),
     }
-  );
-}
-
-export async function deleteIntegrationConfig(
-  integrationId: string
-): Promise<void> {
-  await request(
-    `/tools?integrationId=${encodeURIComponent(integrationId)}`,
-    { method: "DELETE" }
   );
 }
 

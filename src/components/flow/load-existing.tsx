@@ -6,20 +6,14 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
-import { createProject, analyzeRepo } from "@/lib/api";
+import { createProject, analyzeRepo, validateRepo } from "@/lib/api";
 import { AVAILABLE_PROJECT_FILES } from "@/lib/types";
 import type { GitHubIssue } from "@/lib/types";
+import { PHASE_BADGE_VARIANTS } from "@/lib/constants";
 
 interface LoadExistingProps {
   onLoaded: (projectId: string) => void;
 }
-
-const phaseBadge: Record<string, "default" | "accent" | "warning" | "success"> = {
-  idea: "default",
-  mvp: "accent",
-  polish: "warning",
-  deploy: "success",
-};
 
 interface RepoAnalysis {
   detectedStack: string;
@@ -68,25 +62,11 @@ export function LoadExisting({ onLoaded }: LoadExistingProps) {
         );
       }
 
-      const res = await fetch(
-        `/.netlify/functions/scaffold?validate=${encodeURIComponent(ownerRepo)}`
-      );
-
-      const text = await res.text();
-      let data: Record<string, unknown>;
-      try {
-        data = JSON.parse(text);
-      } catch {
-        throw new Error(text || `Validation failed (${res.status})`);
-      }
-
-      if (!res.ok) {
-        throw new Error((data.error as string) || "Repository not found or not accessible");
-      }
+      const data = await validateRepo(ownerRepo);
 
       setRepoInfo({
-        name: (data.name as string) || ownerRepo.split("/")[1],
-        description: (data.description as string | null) ?? null,
+        name: data.name || ownerRepo.split("/")[1],
+        description: data.description ?? null,
       });
       setShowFileOptions(true);
 
@@ -207,7 +187,7 @@ export function LoadExisting({ onLoaded }: LoadExistingProps) {
                 </div>
                 <div className="flex items-center gap-2">
                   <span className="text-muted">Phase: </span>
-                  <Badge variant={phaseBadge[analysis.detectedPhase]}>
+                  <Badge variant={PHASE_BADGE_VARIANTS[analysis.detectedPhase]}>
                     {analysis.detectedPhase}
                   </Badge>
                 </div>

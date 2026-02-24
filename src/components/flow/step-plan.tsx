@@ -42,8 +42,9 @@ export function StepPlan({
   onBack,
   regenerating,
 }: StepPlanProps) {
-  const phase1 = plan.features.filter((f) => f.phase === 1);
-  const phase2 = plan.features.filter((f) => f.phase === 2);
+  const indexed = plan.features.map((f, i) => ({ ...f, idx: i }));
+  const phase1 = indexed.filter((f) => f.phase === 1);
+  const phase2 = indexed.filter((f) => f.phase === 2);
 
   return (
     <div className="space-y-8 max-w-2xl">
@@ -95,33 +96,30 @@ export function StepPlan({
           Phase 1 &mdash; MVP
         </h3>
         <div className="space-y-1">
-          {plan.features.map((feature, i) => {
-            if (feature.phase !== 1) return null;
-            return (
-              <div key={i} className="flex items-start gap-2">
-                <div className="flex-1">
-                  <Checkbox
-                    checked={feature.checked}
-                    onChange={(checked) =>
-                      onUpdateFeature(i, { checked })
-                    }
-                    label={feature.name}
-                    description={feature.description}
-                  />
-                </div>
-                <Badge variant={complexityBadge[feature.complexity]}>
-                  {feature.complexity}
-                </Badge>
-                <button
-                  onClick={() => onMoveFeature(i, 2)}
-                  className="text-xs text-muted hover:text-foreground mt-1 shrink-0"
-                  title="Move to Phase 2"
-                >
-                  &#8594; P2
-                </button>
+          {phase1.map((feature) => (
+            <div key={feature.idx} className="flex items-start gap-2">
+              <div className="flex-1">
+                <Checkbox
+                  checked={feature.checked}
+                  onChange={(checked) =>
+                    onUpdateFeature(feature.idx, { checked })
+                  }
+                  label={feature.name}
+                  description={feature.description}
+                />
               </div>
-            );
-          })}
+              <Badge variant={complexityBadge[feature.complexity]}>
+                {feature.complexity}
+              </Badge>
+              <button
+                onClick={() => onMoveFeature(feature.idx, 2)}
+                className="text-xs text-muted hover:text-foreground mt-1 shrink-0"
+                title="Move to Phase 2"
+              >
+                &#8594; P2
+              </button>
+            </div>
+          ))}
           {phase1.length === 0 && (
             <p className="text-xs text-muted">No Phase 1 features</p>
           )}
@@ -134,33 +132,30 @@ export function StepPlan({
           Phase 2 &mdash; Enhancements
         </h3>
         <div className="space-y-1">
-          {plan.features.map((feature, i) => {
-            if (feature.phase !== 2) return null;
-            return (
-              <div key={i} className="flex items-start gap-2">
-                <div className="flex-1">
-                  <Checkbox
-                    checked={feature.checked}
-                    onChange={(checked) =>
-                      onUpdateFeature(i, { checked })
-                    }
-                    label={feature.name}
-                    description={feature.description}
-                  />
-                </div>
-                <Badge variant={complexityBadge[feature.complexity]}>
-                  {feature.complexity}
-                </Badge>
-                <button
-                  onClick={() => onMoveFeature(i, 1)}
-                  className="text-xs text-muted hover:text-foreground mt-1 shrink-0"
-                  title="Move to Phase 1"
-                >
-                  &#8592; P1
-                </button>
+          {phase2.map((feature) => (
+            <div key={feature.idx} className="flex items-start gap-2">
+              <div className="flex-1">
+                <Checkbox
+                  checked={feature.checked}
+                  onChange={(checked) =>
+                    onUpdateFeature(feature.idx, { checked })
+                  }
+                  label={feature.name}
+                  description={feature.description}
+                />
               </div>
-            );
-          })}
+              <Badge variant={complexityBadge[feature.complexity]}>
+                {feature.complexity}
+              </Badge>
+              <button
+                onClick={() => onMoveFeature(feature.idx, 1)}
+                className="text-xs text-muted hover:text-foreground mt-1 shrink-0"
+                title="Move to Phase 1"
+              >
+                &#8592; P1
+              </button>
+            </div>
+          ))}
           {phase2.length === 0 && (
             <p className="text-xs text-muted">No Phase 2 features</p>
           )}

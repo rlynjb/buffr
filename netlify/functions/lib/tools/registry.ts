@@ -12,14 +12,6 @@ export function registerTool(tool: Tool) {
   tools.set(tool.name, tool);
 }
 
-export function getTool(name: string): Tool | undefined {
-  return tools.get(name);
-}
-
-export function listTools(): Tool[] {
-  return Array.from(tools.values());
-}
-
 export function listToolsByIntegration(integrationId: string): Tool[] {
   return Array.from(tools.values()).filter(
     (t) => t.integrationId === integrationId

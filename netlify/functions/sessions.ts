@@ -7,6 +7,7 @@ import {
 } from "./lib/storage/sessions";
 import type { Session } from "../../src/lib/types";
 import { randomUUID } from "crypto";
+import { json, errorResponse } from "./lib/responses";
 
 export default async function handler(req: Request, _context: Context) {
   const url = new URL(req.url);
@@ -18,25 +19,15 @@ export default async function handler(req: Request, _context: Context) {
       if (id) {
         const session = await getSession(id);
         if (!session) {
-          return new Response(JSON.stringify({ error: "Session not found" }), {
-            status: 404,
-            headers: { "Content-Type": "application/json" },
-          });
+          return errorResponse("Session not found", 404);
         }
-        return new Response(JSON.stringify(session), {
-          headers: { "Content-Type": "application/json" },
-        });
+        return json(session);
       }
       if (projectId) {
         const sessions = await listSessionsByProject(projectId);
-        return new Response(JSON.stringify(sessions), {
-          headers: { "Content-Type": "application/json" },
-        });
+        return json(sessions);
       }
-      return new Response(
-        JSON.stringify({ error: "Provide id or projectId" }),
-        { status: 400, headers: { "Content-Type": "application/json" } }
-      );
+      return errorResponse("Provide id or projectId", 400);
     }
 
     if (req.method === "POST") {
@@ -48,38 +39,23 @@ export default async function handler(req: Request, _context: Context) {
         whatChanged: body.whatChanged || [],
         nextStep: body.nextStep || "",
         blockers: body.blockers || null,
-        gitSnapshot: body.gitSnapshot || null,
         createdAt: new Date().toISOString(),
       };
       const saved = await saveSession(session);
-      return new Response(JSON.stringify(saved), {
-        status: 201,
-        headers: { "Content-Type": "application/json" },
-      });
+      return json(saved, 201);
     }
 
     if (req.method === "DELETE") {
       if (!id) {
-        return new Response(
-          JSON.stringify({ error: "Session id required" }),
-          { status: 400, headers: { "Content-Type": "application/json" } }
-        );
+        return errorResponse("Session id required", 400);
       }
       await deleteSession(id);
-      return new Response(JSON.stringify({ ok: true }), {
-        headers: { "Content-Type": "application/json" },
-      });
+      return json({ ok: true });
     }
 
-    return new Response(JSON.stringify({ error: "Method not allowed" }), {
-      status: 405,
-      headers: { "Content-Type": "application/json" },
-    });
+    return errorResponse("Method not allowed", 405);
   } catch (err) {
     console.error("sessions function error:", err);
-    return new Response(
-      JSON.stringify({ error: "Internal server error" }),
-      { status: 500, headers: { "Content-Type": "application/json" } }
-    );
+    return errorResponse("Internal server error", 500);
   }
 }

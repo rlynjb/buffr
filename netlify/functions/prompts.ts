@@ -7,6 +7,7 @@ import {
 } from "./lib/storage/prompts";
 import type { Prompt } from "../../src/lib/types";
 import { randomUUID } from "crypto";
+import { json, errorResponse } from "./lib/responses";
 
 export default async function handler(req: Request, _context: Context) {
   const url = new URL(req.url);
@@ -18,14 +19,9 @@ export default async function handler(req: Request, _context: Context) {
       if (id) {
         const prompt = await getPrompt(id);
         if (!prompt) {
-          return new Response(JSON.stringify({ error: "Prompt not found" }), {
-            status: 404,
-            headers: { "Content-Type": "application/json" },
-          });
+          return errorResponse("Prompt not found", 404);
         }
-        return new Response(JSON.stringify(prompt), {
-          headers: { "Content-Type": "application/json" },
-        });
+        return json(prompt);
       }
       // List all, optionally filter by scope
       let prompts = await listPrompts();
@@ -34,9 +30,7 @@ export default async function handler(req: Request, _context: Context) {
           (p) => p.scope === "global" || p.scope === scope
         );
       }
-      return new Response(JSON.stringify(prompts), {
-        headers: { "Content-Type": "application/json" },
-      });
+      return json(prompts);
     }
 
     if (req.method === "POST") {
@@ -52,25 +46,16 @@ export default async function handler(req: Request, _context: Context) {
         updatedAt: now,
       };
       const saved = await savePrompt(prompt);
-      return new Response(JSON.stringify(saved), {
-        status: 201,
-        headers: { "Content-Type": "application/json" },
-      });
+      return json(saved, 201);
     }
 
     if (req.method === "PUT") {
       if (!id) {
-        return new Response(
-          JSON.stringify({ error: "Prompt id required" }),
-          { status: 400, headers: { "Content-Type": "application/json" } }
-        );
+        return errorResponse("Prompt id required", 400);
       }
       const existing = await getPrompt(id);
       if (!existing) {
-        return new Response(JSON.stringify({ error: "Prompt not found" }), {
-          status: 404,
-          headers: { "Content-Type": "application/json" },
-        });
+        return errorResponse("Prompt not found", 404);
       }
       const body = await req.json();
       const updated: Prompt = {
@@ -82,33 +67,20 @@ export default async function handler(req: Request, _context: Context) {
         updatedAt: new Date().toISOString(),
       };
       const saved = await savePrompt(updated);
-      return new Response(JSON.stringify(saved), {
-        headers: { "Content-Type": "application/json" },
-      });
+      return json(saved);
     }
 
     if (req.method === "DELETE") {
       if (!id) {
-        return new Response(
-          JSON.stringify({ error: "Prompt id required" }),
-          { status: 400, headers: { "Content-Type": "application/json" } }
-        );
+        return errorResponse("Prompt id required", 400);
       }
       await deletePrompt(id);
-      return new Response(JSON.stringify({ ok: true }), {
-        headers: { "Content-Type": "application/json" },
-      });
+      return json({ ok: true });
     }
 
-    return new Response(JSON.stringify({ error: "Method not allowed" }), {
-      status: 405,
-      headers: { "Content-Type": "application/json" },
-    });
+    return errorResponse("Method not allowed", 405);
   } catch (err) {
     console.error("prompts function error:", err);
-    return new Response(
-      JSON.stringify({ error: "Internal server error" }),
-      { status: 500, headers: { "Content-Type": "application/json" } }
-    );
+    return errorResponse("Internal server error", 500);
   }
 }

@@ -149,7 +149,7 @@ export async function getRepoInfo(ownerRepo: string): Promise<{
   }
 }
 
-export async function getRepoFiles(
+async function getRepoFiles(
   owner: string,
   repo: string,
   branch: string
@@ -165,7 +165,7 @@ export async function getRepoFiles(
   }
 }
 
-export async function getFileContent(
+async function getFileContent(
   owner: string,
   repo: string,
   path: string
@@ -214,11 +214,11 @@ export async function getIssues(
   }
 }
 
-export async function getUserRepos(): Promise<string[]> {
+export async function getUserRepos(maxPages = 10): Promise<string[]> {
   try {
     const repos: string[] = [];
     let page = 1;
-    while (true) {
+    while (page <= maxPages) {
       const items = await ghList(`/user/repos?per_page=100&page=${page}&sort=updated`);
       if (items.length === 0) break;
       for (const item of items) {

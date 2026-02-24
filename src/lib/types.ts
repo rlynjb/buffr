@@ -41,15 +41,7 @@ export interface Session {
   whatChanged: string[];
   nextStep: string;
   blockers: string | null;
-  gitSnapshot: GitSnapshot | null;
   createdAt: string;
-}
-
-export interface GitSnapshot {
-  branch?: string;
-  lastCommit?: string;
-  changedFiles?: string[];
-  dirty?: boolean;
 }
 
 export interface GitHubIssue {
@@ -58,15 +50,6 @@ export interface GitHubIssue {
   url: string;
   labels: string[];
   createdAt: string;
-}
-
-export interface NotionTask {
-  id: string;
-  title: string;
-  status: string;
-  priority: string | null;
-  tags: string[];
-  url: string;
 }
 
 export interface Prompt {

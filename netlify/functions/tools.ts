@@ -1,7 +1,6 @@
 import type { Context } from "@netlify/functions";
 import { listToolsByIntegration, executeTool } from "./lib/tools/registry";
 import { registerGitHubTools } from "./lib/tools/github";
-import { registerNotionTools } from "./lib/tools/notion";
 import {
   listToolConfigs,
   saveToolConfig,
@@ -13,10 +12,11 @@ import {
   deleteCustomIntegration,
 } from "./lib/storage/custom-integrations";
 import type { ToolConfig, ToolIntegration, CustomIntegration } from "../../src/lib/types";
+import { json } from "./lib/responses";
 
 // Register all tools on cold start
 registerGitHubTools();
-registerNotionTools();
+// registerNotionTools(); — Notion integration not yet implemented (see NOTION_SETUP.md)
 
 // Built-in integration metadata
 const BUILTIN_INTEGRATIONS: Record<
@@ -40,173 +40,167 @@ const BUILTIN_INTEGRATIONS: Record<
   },
 };
 
-function json(data: unknown, status = 200) {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { "Content-Type": "application/json" },
+// GET — list all integrations with status + tools
+async function handleList(): Promise<Response> {
+  const [configs, customIntegrations] = await Promise.all([
+    listToolConfigs(),
+    listCustomIntegrations(),
+  ]);
+  const configMap = new Map(configs.map((c) => [c.integrationId, c]));
+
+  const builtInList: ToolIntegration[] = Object.entries(BUILTIN_INTEGRATIONS).map(
+    ([id, meta]) => {
+      const config = configMap.get(id);
+      const tools = listToolsByIntegration(id).map((t) => ({
+        name: t.name,
+        description: t.description,
+        inputSchema: t.inputSchema,
+      }));
+
+      let status: ToolIntegration["status"] = "not_configured";
+      if (config?.enabled) {
+        const requiredFields = meta.configFields.filter((f) => f.key !== "databaseId");
+        const allFilled = requiredFields.every(
+          (f) => config.values[f.key]?.trim()
+        );
+        status = allFilled ? "connected" : "error";
+      }
+
+      if (id === "github" && !config?.enabled && process.env.GITHUB_TOKEN) {
+        status = "connected";
+      }
+
+      return {
+        id,
+        name: meta.name,
+        description: meta.description,
+        status,
+        tools,
+        configFields: meta.configFields,
+      };
+    }
+  );
+
+  const customList: ToolIntegration[] = customIntegrations.map((ci) => {
+    const config = configMap.get(ci.id);
+    let status: ToolIntegration["status"] = "not_configured";
+    if (config?.enabled) {
+      const allFilled = ci.configFields.every(
+        (f) => config.values[f.key]?.trim()
+      );
+      status = allFilled ? "connected" : "error";
+    }
+
+    return {
+      id: ci.id,
+      name: ci.name,
+      description: ci.description,
+      status,
+      tools: [],
+      configFields: ci.configFields,
+    };
   });
+
+  return json([...builtInList, ...customList]);
+}
+
+// POST ?execute — run a tool by name
+async function handleExecute(req: Request): Promise<Response> {
+  const body = await req.json();
+  const { toolName, input } = body as {
+    toolName: string;
+    input: Record<string, unknown>;
+  };
+
+  if (!toolName) return json({ error: "toolName is required" }, 400);
+
+  const result = await executeTool(toolName, input || {});
+  return json(result, result.ok ? 200 : 400);
+}
+
+// POST ?create — create a custom integration
+async function handleCreate(req: Request): Promise<Response> {
+  const body = await req.json();
+  const { name, description, configFields } = body as {
+    name: string;
+    description: string;
+    configFields: { key: string; label: string; secret: boolean }[];
+  };
+
+  if (!name?.trim()) return json({ error: "name is required" }, 400);
+
+  const id = name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "");
+
+  if (BUILTIN_INTEGRATIONS[id]) {
+    return json({ error: `"${id}" conflicts with a built-in integration` }, 400);
+  }
+
+  const integration: CustomIntegration = {
+    id,
+    name: name.trim(),
+    description: description?.trim() || "",
+    configFields: configFields || [],
+    createdAt: new Date().toISOString(),
+  };
+
+  const saved = await saveCustomIntegration(integration);
+  return json(saved);
+}
+
+// PUT ?integrationId=xxx — save config
+async function handleSaveConfig(req: Request, integrationId: string): Promise<Response> {
+  const body = await req.json();
+  const { values, enabled } = body as {
+    values: Record<string, string>;
+    enabled: boolean;
+  };
+
+  const config: ToolConfig = {
+    integrationId,
+    values: values || {},
+    enabled: enabled ?? true,
+    updatedAt: new Date().toISOString(),
+  };
+
+  const saved = await saveToolConfig(config);
+  return json(saved);
+}
+
+// DELETE ?integrationId=xxx — remove config + custom integration
+async function handleDelete(integrationId: string): Promise<Response> {
+  await deleteToolConfig(integrationId);
+
+  if (!BUILTIN_INTEGRATIONS[integrationId]) {
+    await deleteCustomIntegration(integrationId);
+  }
+
+  return json({ ok: true });
 }
 
 export default async function handler(req: Request, _context: Context) {
   const url = new URL(req.url);
 
   try {
-    // GET /tools — list all integrations (built-in + custom) with status + tools
-    if (req.method === "GET" && !url.searchParams.has("execute")) {
-      const [configs, customIntegrations] = await Promise.all([
-        listToolConfigs(),
-        listCustomIntegrations(),
-      ]);
-      const configMap = new Map(configs.map((c) => [c.integrationId, c]));
+    if (req.method === "GET") return handleList();
 
-      // Built-in integrations
-      const builtInList: ToolIntegration[] = Object.entries(BUILTIN_INTEGRATIONS).map(
-        ([id, meta]) => {
-          const config = configMap.get(id);
-          const tools = listToolsByIntegration(id).map((t) => ({
-            name: t.name,
-            description: t.description,
-            inputSchema: t.inputSchema,
-          }));
-
-          let status: ToolIntegration["status"] = "not_configured";
-          if (config?.enabled) {
-            const requiredFields = meta.configFields.filter((f) => f.key !== "databaseId");
-            const allFilled = requiredFields.every(
-              (f) => config.values[f.key]?.trim()
-            );
-            status = allFilled ? "connected" : "error";
-          }
-
-          // Special case: GitHub uses env var
-          if (id === "github" && !config?.enabled && process.env.GITHUB_TOKEN) {
-            status = "connected";
-          }
-
-          return {
-            id,
-            name: meta.name,
-            description: meta.description,
-            status,
-            tools,
-            configFields: meta.configFields,
-          };
-        }
-      );
-
-      // Custom integrations
-      const customList: ToolIntegration[] = customIntegrations.map((ci) => {
-        const config = configMap.get(ci.id);
-        let status: ToolIntegration["status"] = "not_configured";
-        if (config?.enabled) {
-          const allFilled = ci.configFields.every(
-            (f) => config.values[f.key]?.trim()
-          );
-          status = allFilled ? "connected" : "error";
-        }
-
-        return {
-          id: ci.id,
-          name: ci.name,
-          description: ci.description,
-          status,
-          tools: [],
-          configFields: ci.configFields,
-        };
-      });
-
-      return json([...builtInList, ...customList]);
+    if (req.method === "POST") {
+      if (url.searchParams.has("execute")) return handleExecute(req);
+      if (url.searchParams.has("create")) return handleCreate(req);
     }
 
-    // POST /tools?execute — execute a tool by name
-    if (req.method === "POST" && url.searchParams.has("execute")) {
-      const body = await req.json();
-      const { toolName, input } = body as {
-        toolName: string;
-        input: Record<string, unknown>;
-      };
-
-      if (!toolName) {
-        return json({ error: "toolName is required" }, 400);
-      }
-
-      const result = await executeTool(toolName, input || {});
-      return json(result, result.ok ? 200 : 400);
-    }
-
-    // POST /tools?create — create a custom integration
-    if (req.method === "POST" && url.searchParams.has("create")) {
-      const body = await req.json();
-      const { name, description, configFields } = body as {
-        name: string;
-        description: string;
-        configFields: { key: string; label: string; secret: boolean }[];
-      };
-
-      if (!name?.trim()) {
-        return json({ error: "name is required" }, 400);
-      }
-
-      const id = name
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, "-")
-        .replace(/^-|-$/g, "");
-
-      if (BUILTIN_INTEGRATIONS[id]) {
-        return json({ error: `"${id}" conflicts with a built-in integration` }, 400);
-      }
-
-      const integration: CustomIntegration = {
-        id,
-        name: name.trim(),
-        description: description?.trim() || "",
-        configFields: configFields || [],
-        createdAt: new Date().toISOString(),
-      };
-
-      const saved = await saveCustomIntegration(integration);
-      return json(saved);
-    }
-
-    // PUT /tools?integrationId=xxx — save config for an integration
     if (req.method === "PUT") {
       const integrationId = url.searchParams.get("integrationId");
-      if (!integrationId) {
-        return json({ error: "integrationId is required" }, 400);
-      }
-
-      const body = await req.json();
-      const { values, enabled } = body as {
-        values: Record<string, string>;
-        enabled: boolean;
-      };
-
-      const config: ToolConfig = {
-        integrationId,
-        values: values || {},
-        enabled: enabled ?? true,
-        updatedAt: new Date().toISOString(),
-      };
-
-      const saved = await saveToolConfig(config);
-      return json(saved);
+      if (!integrationId) return json({ error: "integrationId is required" }, 400);
+      return handleSaveConfig(req, integrationId);
     }
 
-    // DELETE /tools?integrationId=xxx — remove config (and custom integration if applicable)
     if (req.method === "DELETE") {
       const integrationId = url.searchParams.get("integrationId");
-      if (!integrationId) {
-        return json({ error: "integrationId is required" }, 400);
-      }
-
-      await deleteToolConfig(integrationId);
-
-      // If it's a custom integration, delete its definition too
-      if (!BUILTIN_INTEGRATIONS[integrationId]) {
-        await deleteCustomIntegration(integrationId);
-      }
-
-      return json({ ok: true });
+      if (!integrationId) return json({ error: "integrationId is required" }, 400);
+      return handleDelete(integrationId);
     }
 
     return json({ error: "Method not allowed" }, 405);

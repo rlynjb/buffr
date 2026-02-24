@@ -8,18 +8,16 @@ import type { Project, Session, GitHubIssue, Prompt } from "@/lib/types";
 import { generateNextActions, type NextAction, type ActionContext } from "@/lib/next-actions";
 import { listSessions, getIssues, getActionNotes, saveActionNote, listPrompts } from "@/lib/api";
 import { resolvePrompt } from "@/lib/resolve-prompt";
+import { PHASE_BADGE_VARIANTS } from "@/lib/constants";
+import { SessionTab } from "./session-tab";
+import { IssuesTab } from "./issues-tab";
+import { ActionsTab } from "./actions-tab";
+import { PromptsTab } from "./prompts-tab";
 
 interface ResumeCardProps {
   project: Project;
   onEndSession: () => void;
 }
-
-const phaseBadge: Record<string, "default" | "accent" | "warning" | "success"> = {
-  idea: "default",
-  mvp: "accent",
-  polish: "warning",
-  deploy: "success",
-};
 
 type Tab = "session" | "issues" | "actions" | "prompts";
 
@@ -102,6 +100,16 @@ export function ResumeCard({ project, onEndSession }: ResumeCardProps) {
     }
   }
 
+  // Pre-resolve prompt bodies for the tab
+  const resolvedBodies: Record<string, string> = {};
+  for (const prompt of prompts) {
+    resolvedBodies[prompt.id] = resolvePrompt(prompt.body, {
+      project,
+      lastSession,
+      issues,
+    });
+  }
+
   if (loading) {
     return (
       <Card className="animate-pulse">
@@ -122,7 +130,7 @@ export function ResumeCard({ project, onEndSession }: ResumeCardProps) {
             {project.description}
           </p>
         </div>
-        <Badge variant={phaseBadge[project.phase]}>{project.phase}</Badge>
+        <Badge variant={PHASE_BADGE_VARIANTS[project.phase]}>{project.phase}</Badge>
       </div>
 
       {/* Quick links */}
@@ -149,7 +157,7 @@ export function ResumeCard({ project, onEndSession }: ResumeCardProps) {
         )}
       </div>
 
-      {/* Tabbed view: Last Session / Open Issues / Next Actions */}
+      {/* Tabbed view */}
       <div>
         <div className="flex border-b border-border mb-0">
           {([
@@ -173,201 +181,32 @@ export function ResumeCard({ project, onEndSession }: ResumeCardProps) {
         </div>
 
         <Card className="rounded-t-none border-t-0">
-          {/* Last Session tab */}
           {activeTab === "session" && (
-            <>
-              {lastSession ? (
-                <div className="space-y-2 text-sm">
-                  {lastSession.goal && (
-                    <div>
-                      <span className="text-muted">Goal: </span>
-                      <span className="text-foreground">{lastSession.goal}</span>
-                    </div>
-                  )}
-                  {lastSession.nextStep && (
-                    <div>
-                      <span className="text-muted">Next: </span>
-                      <span className="text-foreground">{lastSession.nextStep}</span>
-                    </div>
-                  )}
-                  {lastSession.blockers && (
-                    <div>
-                      <span className="text-error">Blocked: </span>
-                      <span className="text-foreground">{lastSession.blockers}</span>
-                    </div>
-                  )}
-                  {lastSession.whatChanged.length > 0 && (
-                    <div>
-                      <span className="text-muted block mb-1">What changed:</span>
-                      <ul className="list-disc list-inside text-foreground space-y-0.5">
-                        {lastSession.whatChanged.map((item, i) => (
-                          <li key={i} className="text-sm">{item}</li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
-                  <div className="text-xs text-muted">
-                    {new Date(lastSession.createdAt).toLocaleDateString()} at{" "}
-                    {new Date(lastSession.createdAt).toLocaleTimeString()}
-                  </div>
-                </div>
-              ) : (
-                <div className="text-sm text-muted space-y-1">
-                  <p>This is where your last work session will appear. It tracks what you worked on, what changed, what to do next, and any blockers.</p>
-                  <p>Click &quot;End Session&quot; below when you&apos;re done working to log your progress.</p>
-                </div>
-              )}
-            </>
+            <SessionTab lastSession={lastSession} />
           )}
-
-          {/* Open Issues tab */}
           {activeTab === "issues" && (
-            <>
-              {issues.length > 0 ? (
-                <div className="space-y-2">
-                  {issues.slice(0, 5).map((issue) => (
-                    <div key={issue.number} className="text-sm">
-                      <a
-                        href={issue.url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-foreground hover:text-accent hover:underline"
-                      >
-                        <span className="text-muted font-mono mr-1.5">
-                          #{issue.number}
-                        </span>
-                        {issue.title}
-                      </a>
-                      {issue.labels.length > 0 && (
-                        <div className="flex gap-1 mt-1">
-                          {issue.labels.slice(0, 3).map((label) => (
-                            <Badge key={label} variant="default">
-                              {label}
-                            </Badge>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <div className="text-sm text-muted space-y-1">
-                  {project.githubRepo ? (
-                    <p>No open issues on this repository. When issues are created on GitHub, they&apos;ll appear here and feed into your Next Actions.</p>
-                  ) : (
-                    <p>This is where open GitHub issues will appear. Connect a GitHub repository to pull in issues, which also feed into your Next Actions as suggested tasks.</p>
-                  )}
-                </div>
-              )}
-            </>
+            <IssuesTab issues={issues} hasRepo={!!project.githubRepo} />
           )}
-
-          {/* Next Actions tab */}
           {activeTab === "actions" && (
-            <div className="space-y-3">
-              {actions.map((action) => (
-                <div
-                  key={action.id}
-                  className={`rounded-lg border border-border p-3 ${
-                    action.done
-                      ? "opacity-50"
-                      : action.skipped
-                        ? "opacity-30"
-                        : ""
-                  }`}
-                >
-                  <div className="flex items-center justify-between">
-                    <span className={`text-sm text-foreground ${action.done ? "line-through" : ""}`}>
-                      {action.text}
-                    </span>
-                    {!action.done && !action.skipped && (
-                      <div className="flex gap-2 shrink-0 ml-3">
-                        <button
-                          onClick={() => handleActionDone(action.id)}
-                          className="text-xs text-success hover:underline"
-                        >
-                          Done
-                        </button>
-                        <button
-                          onClick={() => handleActionSkip(action.id)}
-                          className="text-xs text-muted hover:underline"
-                        >
-                          Skip
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                  <div className="mt-2">
-                    <textarea
-                      value={notes[action.id] || ""}
-                      onChange={(e) =>
-                        setNotes((prev) => ({ ...prev, [action.id]: e.target.value }))
-                      }
-                      placeholder="Add notes..."
-                      rows={2}
-                      className="w-full rounded-md border border-border bg-background px-3 py-2 text-xs text-foreground placeholder:text-muted/50 focus:outline-none focus:ring-1 focus:ring-accent resize-y"
-                    />
-                    <button
-                      onClick={() => handleNoteSave(action.id)}
-                      disabled={savingNote === action.id}
-                      className="mt-1 text-xs text-accent hover:underline disabled:opacity-50"
-                    >
-                      {savingNote === action.id ? "Saving..." : "Save"}
-                    </button>
-                  </div>
-                </div>
-              ))}
-              {actions.length === 0 && (
-                <p className="text-sm text-muted">No actions suggested</p>
-              )}
-            </div>
+            <ActionsTab
+              actions={actions}
+              notes={notes}
+              savingNote={savingNote}
+              onDone={handleActionDone}
+              onSkip={handleActionSkip}
+              onNoteChange={(id, value) =>
+                setNotes((prev) => ({ ...prev, [id]: value }))
+              }
+              onNoteSave={handleNoteSave}
+            />
           )}
-
-          {/* Prompts tab */}
           {activeTab === "prompts" && (
-            <div className="space-y-3">
-              {prompts.length > 0 ? (
-                prompts.map((prompt) => (
-                  <div
-                    key={prompt.id}
-                    className="rounded-lg border border-border p-3"
-                  >
-                    <div className="flex items-center justify-between mb-1.5">
-                      <span className="text-sm font-medium text-foreground">
-                        {prompt.title}
-                      </span>
-                      <Badge variant={prompt.scope === "global" ? "default" : "accent"}>
-                        {prompt.scope === "global" ? "global" : "project"}
-                      </Badge>
-                    </div>
-                    <pre className="text-xs text-muted font-mono whitespace-pre-wrap mb-2 line-clamp-4">
-                      {resolvePrompt(prompt.body, { project, lastSession, issues })}
-                    </pre>
-                    {prompt.tags.length > 0 && (
-                      <div className="flex flex-wrap gap-1 mb-2">
-                        {prompt.tags.map((tag) => (
-                          <Badge key={tag} variant="default">
-                            {tag}
-                          </Badge>
-                        ))}
-                      </div>
-                    )}
-                    <button
-                      onClick={() => handleCopyPrompt(prompt)}
-                      className="text-xs text-accent hover:underline"
-                    >
-                      {copiedPrompt === prompt.id ? "Copied!" : "Copy"}
-                    </button>
-                  </div>
-                ))
-              ) : (
-                <p className="text-sm text-muted">
-                  No prompts yet. Add prompts from the{" "}
-                  <a href="/prompts" className="text-accent hover:underline">Prompt Library</a>{" "}
-                  to see them here with project context auto-filled.
-                </p>
-              )}
-            </div>
+            <PromptsTab
+              prompts={prompts}
+              resolvedBodies={resolvedBodies}
+              copiedId={copiedPrompt}
+              onCopy={handleCopyPrompt}
+            />
           )}
         </Card>
       </div>

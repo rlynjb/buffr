@@ -1,6 +1,6 @@
 import type { Project, Session, GitHubIssue } from "./types";
 
-export interface PromptContext {
+interface PromptContext {
   project?: Project | null;
   lastSession?: Session | null;
   issues?: GitHubIssue[];
