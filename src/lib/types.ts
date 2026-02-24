@@ -79,6 +79,36 @@ export interface Prompt {
   updatedAt: string;
 }
 
+export interface ToolDefinition {
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+}
+
+export interface ToolIntegration {
+  id: string; // "github" | "notion" | custom
+  name: string;
+  description: string;
+  status: "connected" | "error" | "not_configured";
+  tools: ToolDefinition[];
+  configFields: { key: string; label: string; secret: boolean }[];
+}
+
+export interface ToolConfig {
+  integrationId: string;
+  values: Record<string, string>; // e.g. { token: "...", databaseId: "..." }
+  enabled: boolean;
+  updatedAt: string;
+}
+
+export interface CustomIntegration {
+  id: string;
+  name: string;
+  description: string;
+  configFields: { key: string; label: string; secret: boolean }[];
+  createdAt: string;
+}
+
 export interface LLMProvider {
   name: string;
   label: string;

@@ -4,6 +4,9 @@ import type {
   Prompt,
   LLMProvider,
   GitHubIssue,
+  ToolIntegration,
+  ToolConfig,
+  CustomIntegration,
   GeneratePlanRequest,
   GeneratePlanResponse,
   ScaffoldRequest,
@@ -206,6 +209,62 @@ export async function updatePrompt(
 export async function deletePrompt(id: string): Promise<void> {
   await request(`/prompts?id=${encodeURIComponent(id)}`, {
     method: "DELETE",
+  });
+}
+
+// Tools / Integrations
+export async function listIntegrations(): Promise<ToolIntegration[]> {
+  return request<ToolIntegration[]>("/tools");
+}
+
+export async function saveIntegrationConfig(
+  integrationId: string,
+  values: Record<string, string>,
+  enabled: boolean
+): Promise<ToolConfig> {
+  return request<ToolConfig>(
+    `/tools?integrationId=${encodeURIComponent(integrationId)}`,
+    {
+      method: "PUT",
+      body: JSON.stringify({ values, enabled }),
+    }
+  );
+}
+
+export async function deleteIntegrationConfig(
+  integrationId: string
+): Promise<void> {
+  await request(
+    `/tools?integrationId=${encodeURIComponent(integrationId)}`,
+    { method: "DELETE" }
+  );
+}
+
+export async function createIntegration(data: {
+  name: string;
+  description: string;
+  configFields: { key: string; label: string; secret: boolean }[];
+}): Promise<CustomIntegration> {
+  return request<CustomIntegration>("/tools?create", {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function removeIntegration(integrationId: string): Promise<void> {
+  await request(
+    `/tools?integrationId=${encodeURIComponent(integrationId)}`,
+    { method: "DELETE" }
+  );
+}
+
+export async function executeToolAction(
+  toolName: string,
+  input: Record<string, unknown> = {}
+): Promise<{ ok: boolean; result?: unknown; error?: string }> {
+  return request("/tools?execute", {
+    method: "POST",
+    body: JSON.stringify({ toolName, input }),
   });
 }
 

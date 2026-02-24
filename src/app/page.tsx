@@ -87,6 +87,12 @@ export default function Dashboard() {
         >
           Prompts
         </button>
+        <button
+          onClick={() => router.push("/tools")}
+          className="flex-1 rounded-lg border border-dashed border-border p-4 text-sm text-muted hover:border-accent hover:text-accent transition-colors text-center cursor-pointer"
+        >
+          Tools
+        </button>
       </div>
 
       {/* Project List */}

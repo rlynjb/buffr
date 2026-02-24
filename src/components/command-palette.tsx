@@ -59,6 +59,16 @@ export function CommandPalette() {
       },
     },
     {
+      id: "tools",
+      label: "Tools & Integrations",
+      description: "Manage connected tools and MCP integrations",
+      kind: "action",
+      action: () => {
+        setOpen(false);
+        router.push("/tools");
+      },
+    },
+    {
       id: "dashboard",
       label: "Dashboard",
       description: "Go to the project dashboard",

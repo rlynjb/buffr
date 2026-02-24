@@ -165,3 +165,46 @@
   - Clipboard icon distinguishes prompts from navigation actions
   - "Prompt Library" navigation command added
 - **Dashboard quick action** — "Prompts" button added to the dashboard quick actions row alongside New Project and Load Existing
+
+## 2026-02-24 05:00 UTC
+
+### Added
+- **Tools & Integrations** — MCP-compatible tool registry with UI management page, laying the foundation for future MCP server exposure
+  - **Tool registry** (`netlify/functions/lib/tools/registry.ts`) — `registerTool()`, `getTool()`, `listTools()`, `listToolsByIntegration()`, `executeTool()` with `Tool` interface matching MCP pattern (name, description, inputSchema as JSON Schema, execute function)
+  - **GitHub tools** (`netlify/functions/lib/tools/github.ts`) — 6 tools wrapping existing GitHub functions: `github_get_repo`, `github_list_issues`, `github_list_repos`, `github_analyze_repo`, `github_create_repo`, `github_push_files`
+  - **Notion tool placeholders** (`netlify/functions/lib/tools/notion.ts`) — 3 tools registered with "not configured" errors: `notion_list_tasks`, `notion_get_task`, `notion_update_task`
+  - **Tool config storage** (`netlify/functions/lib/storage/tool-config.ts`) — `tool-config` Netlify Blobs store for persisting integration credentials and enabled state per integration
+  - **Tools Netlify Function** (`netlify/functions/tools.ts`) — `GET` lists all integrations with status/tools, `POST ?execute` runs a tool by name, `PUT ?integrationId=` saves config, `DELETE ?integrationId=` removes config
+  - `ToolDefinition`, `ToolIntegration`, `ToolConfig` types in `src/lib/types.ts`
+  - `listIntegrations()`, `saveIntegrationConfig()`, `deleteIntegrationConfig()`, `executeToolAction()` client functions in `src/lib/api.ts`
+- **`/tools` page** — integration management UI
+  - Integration cards showing name, description, status badge (Connected / Config Error / Not Configured), and available tools list
+  - Configure button opens modal with per-integration config fields (tokens as password inputs, IDs as text)
+  - Test button on each tool (when integration is connected) opens a JSON input modal, executes the tool, and displays the result
+  - Note about GitHub env var fallback (`GITHUB_TOKEN`) in config modal
+- **Dashboard quick action** — "Tools" button added to dashboard quick actions row
+- **Cmd+K command** — "Tools & Integrations" added to the command palette for quick navigation
+
+## 2026-02-24 05:30 UTC
+
+### Added
+- **Custom integrations** — users can now add their own MCP tool integrations from the `/tools` page via an "Add Integration" button
+  - **Add Integration modal** with name, description, and dynamic config fields builder (label + secret toggle per field, add/remove rows)
+  - Integration ID auto-generated from name (slugified)
+  - Validation prevents naming conflicts with built-in integrations (GitHub, Notion)
+  - Custom integrations appear alongside built-in ones with full Configure support
+  - **Remove button** on custom integrations — deletes both the integration definition and its saved config
+  - Built-in integrations labeled with a "built-in" badge and cannot be removed
+- **`CustomIntegration` type** in `src/lib/types.ts` — id, name, description, configFields, createdAt
+- **`custom-integrations` Netlify Blobs store** (`netlify/functions/lib/storage/custom-integrations.ts`) — CRUD for user-defined integration definitions
+- `createIntegration()` and `removeIntegration()` client functions in `src/lib/api.ts`
+
+### Changed
+- **`/tools` page header** now includes the "Add Integration" button; empty state shows "Add First Integration" CTA
+- **Tools Netlify Function** (`netlify/functions/tools.ts`):
+  - `GET` now merges built-in + custom integrations into a single list
+  - `POST ?create` endpoint to register a custom integration
+  - `DELETE` now also removes the custom integration definition (not just config) for non-built-in integrations
+  - Removed validation that blocked saving config for unknown integrations — custom integrations are now valid targets
+  - Renamed internal `INTEGRATIONS` to `BUILTIN_INTEGRATIONS` for clarity
+- GitHub-specific env var note in config modal now only shows for the GitHub integration instead of all integrations
