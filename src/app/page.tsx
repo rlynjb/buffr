@@ -81,6 +81,12 @@ export default function Dashboard() {
         >
           + Load Existing
         </button>
+        <button
+          onClick={() => router.push("/prompts")}
+          className="flex-1 rounded-lg border border-dashed border-border p-4 text-sm text-muted hover:border-accent hover:text-accent transition-colors text-center cursor-pointer"
+        >
+          Prompts
+        </button>
       </div>
 
       {/* Project List */}

@@ -4,9 +4,10 @@ import { useState, useEffect } from "react";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import type { Project, Session, GitHubIssue } from "@/lib/types";
+import type { Project, Session, GitHubIssue, Prompt } from "@/lib/types";
 import { generateNextActions, type NextAction, type ActionContext } from "@/lib/next-actions";
-import { listSessions, getIssues, getActionNotes, saveActionNote } from "@/lib/api";
+import { listSessions, getIssues, getActionNotes, saveActionNote, listPrompts } from "@/lib/api";
+import { resolvePrompt } from "@/lib/resolve-prompt";
 
 interface ResumeCardProps {
   project: Project;
@@ -20,7 +21,7 @@ const phaseBadge: Record<string, "default" | "accent" | "warning" | "success"> =
   deploy: "success",
 };
 
-type Tab = "session" | "issues" | "actions";
+type Tab = "session" | "issues" | "actions" | "prompts";
 
 export function ResumeCard({ project, onEndSession }: ResumeCardProps) {
   const [lastSession, setLastSession] = useState<Session | null>(null);
@@ -30,22 +31,26 @@ export function ResumeCard({ project, onEndSession }: ResumeCardProps) {
   const [activeTab, setActiveTab] = useState<Tab>("session");
   const [notes, setNotes] = useState<Record<string, string>>({});
   const [savingNote, setSavingNote] = useState<string | null>(null);
+  const [prompts, setPrompts] = useState<Prompt[]>([]);
+  const [copiedPrompt, setCopiedPrompt] = useState<string | null>(null);
 
   useEffect(() => {
     async function load() {
       try {
-        const [sessions, fetchedIssues, savedNotes] = await Promise.all([
+        const [sessions, fetchedIssues, savedNotes, fetchedPrompts] = await Promise.all([
           listSessions(project.id),
           project.githubRepo
             ? getIssues(project.githubRepo).catch(() => [] as GitHubIssue[])
             : Promise.resolve([] as GitHubIssue[]),
           getActionNotes(project.id).catch(() => ({} as Record<string, string>)),
+          listPrompts(project.id).catch(() => [] as Prompt[]),
         ]);
 
         const last = sessions.length > 0 ? sessions[0] : null;
         setLastSession(last);
         setIssues(fetchedIssues);
         setNotes(savedNotes);
+        setPrompts(fetchedPrompts);
 
         const ctx: ActionContext = {
           project,
@@ -72,6 +77,17 @@ export function ResumeCard({ project, onEndSession }: ResumeCardProps) {
     setActions((prev) =>
       prev.map((a) => (a.id === id ? { ...a, skipped: true } : a))
     );
+  }
+
+  async function handleCopyPrompt(prompt: Prompt) {
+    const resolved = resolvePrompt(prompt.body, {
+      project,
+      lastSession,
+      issues,
+    });
+    await navigator.clipboard.writeText(resolved);
+    setCopiedPrompt(prompt.id);
+    setTimeout(() => setCopiedPrompt(null), 1500);
   }
 
   async function handleNoteSave(actionId: string) {
@@ -140,6 +156,7 @@ export function ResumeCard({ project, onEndSession }: ResumeCardProps) {
             { key: "session" as Tab, label: "Last Session" },
             { key: "issues" as Tab, label: `Open Issues${issues.length > 0 ? ` (${issues.length})` : ""}` },
             { key: "actions" as Tab, label: "Next Actions" },
+            { key: "prompts" as Tab, label: `Prompts${prompts.length > 0 ? ` (${prompts.length})` : ""}` },
           ]).map((tab) => (
             <button
               key={tab.key}
@@ -302,6 +319,53 @@ export function ResumeCard({ project, onEndSession }: ResumeCardProps) {
               ))}
               {actions.length === 0 && (
                 <p className="text-sm text-muted">No actions suggested</p>
+              )}
+            </div>
+          )}
+
+          {/* Prompts tab */}
+          {activeTab === "prompts" && (
+            <div className="space-y-3">
+              {prompts.length > 0 ? (
+                prompts.map((prompt) => (
+                  <div
+                    key={prompt.id}
+                    className="rounded-lg border border-border p-3"
+                  >
+                    <div className="flex items-center justify-between mb-1.5">
+                      <span className="text-sm font-medium text-foreground">
+                        {prompt.title}
+                      </span>
+                      <Badge variant={prompt.scope === "global" ? "default" : "accent"}>
+                        {prompt.scope === "global" ? "global" : "project"}
+                      </Badge>
+                    </div>
+                    <pre className="text-xs text-muted font-mono whitespace-pre-wrap mb-2 line-clamp-4">
+                      {resolvePrompt(prompt.body, { project, lastSession, issues })}
+                    </pre>
+                    {prompt.tags.length > 0 && (
+                      <div className="flex flex-wrap gap-1 mb-2">
+                        {prompt.tags.map((tag) => (
+                          <Badge key={tag} variant="default">
+                            {tag}
+                          </Badge>
+                        ))}
+                      </div>
+                    )}
+                    <button
+                      onClick={() => handleCopyPrompt(prompt)}
+                      className="text-xs text-accent hover:underline"
+                    >
+                      {copiedPrompt === prompt.id ? "Copied!" : "Copy"}
+                    </button>
+                  </div>
+                ))
+              ) : (
+                <p className="text-sm text-muted">
+                  No prompts yet. Add prompts from the{" "}
+                  <a href="/prompts" className="text-accent hover:underline">Prompt Library</a>{" "}
+                  to see them here with project context auto-filled.
+                </p>
               )}
             </div>
           )}

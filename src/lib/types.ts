@@ -69,6 +69,16 @@ export interface NotionTask {
   url: string;
 }
 
+export interface Prompt {
+  id: string;
+  title: string;
+  body: string;
+  tags: string[];
+  scope: "global" | string; // "global" or a projectId
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface LLMProvider {
   name: string;
   label: string;

@@ -2,11 +2,14 @@
 
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useRouter } from "next/navigation";
+import type { Prompt } from "@/lib/types";
+import { listPrompts } from "@/lib/api";
 
 interface Command {
   id: string;
   label: string;
   description: string;
+  kind: "action" | "prompt";
   action: () => void;
 }
 
@@ -17,12 +20,19 @@ export function CommandPalette() {
   const [selectedIndex, setSelectedIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
   const overlayRef = useRef<HTMLDivElement>(null);
+  const [prompts, setPrompts] = useState<Prompt[]>([]);
+
+  useEffect(() => {
+    if (!open) return;
+    listPrompts().then(setPrompts).catch(() => setPrompts([]));
+  }, [open]);
 
   const commands: Command[] = [
     {
       id: "new-project",
       label: "New Project",
       description: "Start the project creation wizard",
+      kind: "action",
       action: () => {
         setOpen(false);
         router.push("/new");
@@ -32,20 +42,42 @@ export function CommandPalette() {
       id: "load-project",
       label: "Load Existing Project",
       description: "Connect an existing GitHub repository",
+      kind: "action",
       action: () => {
         setOpen(false);
         router.push("/load");
       },
     },
     {
+      id: "prompts",
+      label: "Prompt Library",
+      description: "Manage your collected prompts",
+      kind: "action",
+      action: () => {
+        setOpen(false);
+        router.push("/prompts");
+      },
+    },
+    {
       id: "dashboard",
       label: "Dashboard",
       description: "Go to the project dashboard",
+      kind: "action",
       action: () => {
         setOpen(false);
         router.push("/");
       },
     },
+    ...prompts.map((p) => ({
+      id: `prompt-${p.id}`,
+      label: p.title,
+      description: p.tags.length > 0 ? p.tags.join(", ") : "Prompt — copies to clipboard",
+      kind: "prompt" as const,
+      action: () => {
+        navigator.clipboard.writeText(p.body);
+        setOpen(false);
+      },
+    })),
   ];
 
   const filtered = commands.filter(
@@ -145,7 +177,10 @@ export function CommandPalette() {
                     : "text-foreground hover:bg-card-hover"
                 }`}
               >
-                <span className="block text-sm font-medium">
+                <span className="flex items-center gap-2 text-sm font-medium">
+                  {cmd.kind === "prompt" && (
+                    <span className="text-muted text-xs" title="Copy to clipboard">&#128203;</span>
+                  )}
                   {cmd.label}
                 </span>
                 <span className="block text-xs text-muted">

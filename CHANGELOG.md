@@ -140,3 +140,28 @@
   - `netlify/functions/lib/storage/action-notes.ts` — storage module for the `action-notes` blob store
   - `getActionNotes()` and `saveActionNote()` client functions in `src/lib/api.ts`
 - Notes are fetched in parallel alongside sessions and issues on Resume Card load
+
+## 2026-02-24 04:00 UTC
+
+### Added
+- **Prompt Library** — full-stack feature for storing, organizing, and reusing AI prompts across projects
+  - `Prompt` type in `src/lib/types.ts` — id, title, body (template), tags, scope (global or project-scoped), timestamps
+  - `prompt-library` Netlify Blobs store with `netlify/functions/lib/storage/prompts.ts`
+  - `netlify/functions/prompts.ts` — full CRUD (GET list/single with optional `?scope=` filter, POST create, PUT update, DELETE)
+  - `listPrompts()`, `createPrompt()`, `updatePrompt()`, `deletePrompt()` client functions in `src/lib/api.ts`
+- **`/prompts` page** — Prompt Library UI with search, tag filtering, create/edit modal, copy-to-clipboard, and delete
+  - Tag chips auto-extracted from all prompts for quick filtering
+  - Scope badge (global vs project) on each prompt card
+  - New/Edit modal with title, body (textarea), tags (comma-separated), and scope selector
+- **Template variable system** — `resolvePrompt()` utility in `src/lib/resolve-prompt.ts` replaces `{{variable}}` tokens with project context
+  - Supported variables: `{{project.name}}`, `{{project.stack}}`, `{{project.description}}`, `{{project.phase}}`, `{{project.goals}}`, `{{project.constraints}}`, `{{lastSession.goal}}`, `{{lastSession.nextStep}}`, `{{lastSession.blockers}}`, `{{issues}}`
+- **Prompts tab in Resume Card** — fourth tab alongside Last Session, Open Issues, Next Actions
+  - Shows all global + project-scoped prompts with template variables auto-filled from current project context
+  - Copy button copies the resolved (context-filled) prompt to clipboard
+  - Empty state links to the Prompt Library page
+- **Cmd+K integration** — prompts appear in the command palette alongside navigation commands
+  - Prompts fetched on palette open, searchable by title and tags
+  - Selecting a prompt copies its body to clipboard
+  - Clipboard icon distinguishes prompts from navigation actions
+  - "Prompt Library" navigation command added
+- **Dashboard quick action** — "Prompts" button added to the dashboard quick actions row alongside New Project and Load Existing

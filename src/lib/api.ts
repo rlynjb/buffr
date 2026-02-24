@@ -1,6 +1,7 @@
 import type {
   Project,
   Session,
+  Prompt,
   LLMProvider,
   GitHubIssue,
   GeneratePlanRequest,
@@ -174,6 +175,37 @@ export async function saveActionNote(
   return request(`/action-notes?projectId=${encodeURIComponent(projectId)}`, {
     method: "PUT",
     body: JSON.stringify({ actionId, note }),
+  });
+}
+
+// Prompts
+export async function listPrompts(scope?: string): Promise<Prompt[]> {
+  const q = scope ? `?scope=${encodeURIComponent(scope)}` : "";
+  return request<Prompt[]>(`/prompts${q}`);
+}
+
+export async function createPrompt(
+  data: Partial<Prompt>
+): Promise<Prompt> {
+  return request<Prompt>("/prompts", {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function updatePrompt(
+  id: string,
+  data: Partial<Prompt>
+): Promise<Prompt> {
+  return request<Prompt>(`/prompts?id=${encodeURIComponent(id)}`, {
+    method: "PUT",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function deletePrompt(id: string): Promise<void> {
+  await request(`/prompts?id=${encodeURIComponent(id)}`, {
+    method: "DELETE",
   });
 }
 
