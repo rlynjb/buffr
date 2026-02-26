@@ -1,3 +1,4 @@
+import { Badge } from "@/components/ui/badge";
 import type { Session } from "@/lib/types";
 
 interface SessionTabProps {
@@ -17,9 +18,12 @@ export function SessionTab({ lastSession }: SessionTabProps) {
   return (
     <div className="space-y-2 text-sm">
       {lastSession.goal && (
-        <div>
+        <div className="flex items-center gap-2">
           <span className="text-muted">Goal: </span>
           <span className="text-foreground">{lastSession.goal}</span>
+          {lastSession.detectedIntent && (
+            <Badge variant="default">{lastSession.detectedIntent}</Badge>
+          )}
         </div>
       )}
       {lastSession.nextStep && (

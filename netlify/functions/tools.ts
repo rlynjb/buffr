@@ -1,6 +1,8 @@
 import type { Context } from "@netlify/functions";
 import { listToolsByIntegration, executeTool } from "./lib/tools/registry";
 import { registerGitHubTools } from "./lib/tools/github";
+import { registerNotionTools } from "./lib/tools/notion";
+import { registerJiraTools } from "./lib/tools/jira";
 import {
   listToolConfigs,
   saveToolConfig,
@@ -16,7 +18,8 @@ import { json } from "./lib/responses";
 
 // Register all tools on cold start
 registerGitHubTools();
-// registerNotionTools(); — Notion integration not yet implemented (see NOTION_SETUP.md)
+registerNotionTools();
+registerJiraTools();
 
 // Built-in integration metadata
 const BUILTIN_INTEGRATIONS: Record<
@@ -36,6 +39,16 @@ const BUILTIN_INTEGRATIONS: Record<
     configFields: [
       { key: "token", label: "Notion Integration Token", secret: true },
       { key: "databaseId", label: "Notion Database ID", secret: false },
+    ],
+  },
+  jira: {
+    name: "Jira",
+    description: "Issue tracking and project management via Jira",
+    configFields: [
+      { key: "baseUrl", label: "Jira Base URL (e.g. https://yoursite.atlassian.net)", secret: false },
+      { key: "email", label: "Jira Account Email", secret: false },
+      { key: "apiToken", label: "Jira API Token", secret: true },
+      { key: "projectKey", label: "Default Project Key (e.g. PROJ)", secret: false },
     ],
   },
 };

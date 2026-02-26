@@ -44,6 +44,8 @@ export default async function handler(req: Request, _context: Context) {
         plan: body.plan || null,
         selectedFeatures: body.selectedFeatures || null,
         selectedFiles: body.selectedFiles || null,
+        dataSources: body.dataSources || (body.githubRepo ? ["github"] : []),
+        dismissedSuggestions: body.dismissedSuggestions || [],
         issueCount: body.issueCount ?? undefined,
         updatedAt: new Date().toISOString(),
       };

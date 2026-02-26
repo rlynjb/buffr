@@ -4,40 +4,21 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { ProjectCard } from "@/components/dashboard/project-card";
+import { ImportProjectModal } from "@/components/dashboard/import-project-modal";
 import type { Project } from "@/lib/types";
-import { listProjects, deleteProject, getUserRepos } from "@/lib/api";
+import { listProjects } from "@/lib/api";
 
 export default function Dashboard() {
   const router = useRouter();
   const [projects, setProjects] = useState<Project[]>([]);
   const [loading, setLoading] = useState(true);
+  const [importOpen, setImportOpen] = useState(false);
 
   useEffect(() => {
     async function load() {
       try {
-        const [data, githubRepos] = await Promise.all([
-          listProjects(),
-          getUserRepos().catch(() => [] as string[]),
-        ]);
-
-        const repoSet = new Set(githubRepos.map((r) => r.toLowerCase()));
-
-        // Keep projects whose githubRepo still exists on GitHub
-        const active = data.filter(
-          (p) => p.githubRepo && repoSet.has(p.githubRepo.toLowerCase())
-        );
-        const stale = data.filter(
-          (p) => !p.githubRepo || !repoSet.has(p.githubRepo.toLowerCase())
-        );
-
-        setProjects(active);
-
-        // Clean up stale projects in background
-        for (const p of stale) {
-          deleteProject(p.id).catch((err) =>
-            console.warn(`Failed to delete stale project ${p.id}:`, err)
-          );
-        }
+        const data = await listProjects();
+        setProjects(data);
       } catch (err) {
         console.error("Failed to load projects:", err);
       } finally {
@@ -46,6 +27,11 @@ export default function Dashboard() {
     }
     load();
   }, []);
+
+  function handleCreated(project: Project) {
+    setImportOpen(false);
+    router.push(`/project/${project.id}`);
+  }
 
   return (
     <div className="space-y-8">
@@ -59,27 +45,16 @@ export default function Dashboard() {
             Your projects, sessions, and momentum — all in one place.
           </p>
         </div>
-        <div className="flex gap-3">
-          <Button variant="secondary" onClick={() => router.push("/load")}>
-            Load Existing
-          </Button>
-          <Button onClick={() => router.push("/new")}>New Project</Button>
-        </div>
+        <Button onClick={() => setImportOpen(true)}>Import a project</Button>
       </div>
 
       {/* Quick Actions */}
       <div className="flex gap-3">
         <button
-          onClick={() => router.push("/new")}
+          onClick={() => setImportOpen(true)}
           className="flex-1 rounded-lg border border-dashed border-border p-4 text-sm text-muted hover:border-accent hover:text-accent transition-colors text-center cursor-pointer"
         >
-          + New Project
-        </button>
-        <button
-          onClick={() => router.push("/load")}
-          className="flex-1 rounded-lg border border-dashed border-border p-4 text-sm text-muted hover:border-accent hover:text-accent transition-colors text-center cursor-pointer"
-        >
-          + Load Existing
+          + Import a project
         </button>
         <button
           onClick={() => router.push("/prompts")}
@@ -108,10 +83,10 @@ export default function Dashboard() {
       ) : projects.length === 0 ? (
         <div className="text-center py-16">
           <p className="text-muted text-sm mb-4">
-            No projects yet. Create your first project to get started.
+            No projects yet. Import a GitHub repository to get started.
           </p>
-          <Button onClick={() => router.push("/new")}>
-            Create First Project
+          <Button onClick={() => setImportOpen(true)}>
+            Import a project
           </Button>
         </div>
       ) : (
@@ -125,6 +100,12 @@ export default function Dashboard() {
           ))}
         </div>
       )}
+
+      <ImportProjectModal
+        open={importOpen}
+        onClose={() => setImportOpen(false)}
+        onCreated={handleCreated}
+      />
     </div>
   );
 }

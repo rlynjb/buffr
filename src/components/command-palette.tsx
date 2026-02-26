@@ -29,26 +29,6 @@ export function CommandPalette() {
 
   const commands: Command[] = [
     {
-      id: "new-project",
-      label: "New Project",
-      description: "Start the project creation wizard",
-      kind: "action",
-      action: () => {
-        setOpen(false);
-        router.push("/new");
-      },
-    },
-    {
-      id: "load-project",
-      label: "Load Existing Project",
-      description: "Connect an existing GitHub repository",
-      kind: "action",
-      action: () => {
-        setOpen(false);
-        router.push("/load");
-      },
-    },
-    {
       id: "prompts",
       label: "Prompt Library",
       description: "Manage your collected prompts",
@@ -78,16 +58,18 @@ export function CommandPalette() {
         router.push("/");
       },
     },
-    ...prompts.map((p) => ({
-      id: `prompt-${p.id}`,
-      label: p.title,
-      description: p.tags.length > 0 ? p.tags.join(", ") : "Prompt — copies to clipboard",
-      kind: "prompt" as const,
-      action: () => {
-        navigator.clipboard.writeText(p.body);
-        setOpen(false);
-      },
-    })),
+    ...[...prompts]
+      .sort((a, b) => (b.usageCount || 0) - (a.usageCount || 0))
+      .map((p) => ({
+        id: `prompt-${p.id}`,
+        label: p.title,
+        description: p.tags.length > 0 ? p.tags.join(", ") : "Prompt — copies to clipboard",
+        kind: "prompt" as const,
+        action: () => {
+          navigator.clipboard.writeText(p.body);
+          setOpen(false);
+        },
+      })),
   ];
 
   const filtered = commands.filter(

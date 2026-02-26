@@ -3,16 +3,10 @@ import type {
   Session,
   Prompt,
   LLMProvider,
-  GitHubIssue,
   ToolIntegration,
   ToolConfig,
   CustomIntegration,
-  GeneratePlanRequest,
-  GeneratePlanResponse,
-  ScaffoldRequest,
-  ScaffoldResponse,
-  DeployRequest,
-  DeployResponse,
+  PromptResponse,
 } from "./types";
 
 const BASE = "/.netlify/functions";
@@ -101,68 +95,6 @@ export async function getProviders(): Promise<{
   defaultProvider: string;
 }> {
   return request("/providers");
-}
-
-// Generate plan
-export async function generatePlan(
-  data: GeneratePlanRequest
-): Promise<GeneratePlanResponse> {
-  return request<GeneratePlanResponse>("/generate", {
-    method: "POST",
-    body: JSON.stringify(data),
-  });
-}
-
-// Scaffold
-export async function scaffoldProject(
-  data: ScaffoldRequest
-): Promise<ScaffoldResponse & { githubRepo: string }> {
-  return request("/scaffold", {
-    method: "POST",
-    body: JSON.stringify(data),
-  });
-}
-
-// Validate repo exists
-export async function validateRepo(
-  ownerRepo: string
-): Promise<{
-  name: string;
-  description: string | null;
-  defaultBranch: string;
-  lastCommit: string;
-}> {
-  return request(`/scaffold?validate=${encodeURIComponent(ownerRepo)}`);
-}
-
-// Analyze repo
-export async function analyzeRepo(
-  ownerRepo: string
-): Promise<{
-  detectedStack: string;
-  frameworks: string[];
-  devTools: string[];
-  hasTests: boolean;
-  hasCI: boolean;
-  hasDeployConfig: boolean;
-  fileCount: number;
-  detectedPhase: "idea" | "mvp" | "polish" | "deploy";
-  issues: GitHubIssue[];
-  issueCount: number;
-}> {
-  return request(`/scaffold?analyze=${encodeURIComponent(ownerRepo)}`);
-}
-
-// Fetch issues on-demand
-export async function getIssues(
-  ownerRepo: string
-): Promise<GitHubIssue[]> {
-  return request(`/scaffold?issues=${encodeURIComponent(ownerRepo)}`);
-}
-
-// List authenticated user's GitHub repos
-export async function getUserRepos(): Promise<string[]> {
-  return request("/scaffold?repos");
 }
 
 // Action Notes
@@ -261,12 +193,51 @@ export async function executeToolAction(
   });
 }
 
-// Deploy
-export async function deployProject(
-  data: DeployRequest
-): Promise<DeployResponse & { buildId: string }> {
-  return request("/deploy", {
+// Session AI
+export async function summarizeSession(
+  activityItems: Array<{ title: string; source: string; timestamp?: string }>,
+  provider?: string,
+): Promise<{ bullets: string[] }> {
+  return request("/session-ai?summarize", {
     method: "POST",
-    body: JSON.stringify(data),
+    body: JSON.stringify({ activityItems, provider }),
+  });
+}
+
+export async function detectIntent(
+  goal: string,
+  whatChanged: string,
+  projectPhase: string,
+  provider?: string,
+): Promise<{ intent: string }> {
+  return request("/session-ai?intent", {
+    method: "POST",
+    body: JSON.stringify({ goal, whatChanged, projectPhase, provider }),
+  });
+}
+
+export async function suggestNextStep(
+  goal: string,
+  whatChanged: string,
+  currentNextStep?: string,
+  projectContext?: string,
+  openItems?: string,
+  provider?: string,
+): Promise<{ suggestedNextStep: string }> {
+  return request("/session-ai?suggest", {
+    method: "POST",
+    body: JSON.stringify({ goal, whatChanged, currentNextStep, projectContext, openItems, provider }),
+  });
+}
+
+// Run Prompt
+export async function runPrompt(
+  promptId: string,
+  projectId?: string,
+  provider?: string,
+): Promise<PromptResponse> {
+  return request<PromptResponse>("/run-prompt", {
+    method: "POST",
+    body: JSON.stringify({ promptId, projectId, provider }),
   });
 }

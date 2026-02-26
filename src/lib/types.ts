@@ -14,6 +14,8 @@ export interface Project {
   plan: ProjectPlan | null;
   selectedFeatures: string[] | null;
   selectedFiles: string[] | null;
+  dataSources?: string[];
+  dismissedSuggestions?: string[];
   issueCount?: number;
   updatedAt: string;
 }
@@ -41,6 +43,9 @@ export interface Session {
   whatChanged: string[];
   nextStep: string;
   blockers: string | null;
+  aiSummary?: string;
+  detectedIntent?: string;
+  suggestedNextStep?: string;
   createdAt: string;
 }
 
@@ -52,14 +57,30 @@ export interface GitHubIssue {
   createdAt: string;
 }
 
+export interface WorkItem {
+  id: string;
+  title: string;
+  status: string;
+  url: string;
+  source: string; // "github" | "notion" | "jira"
+  labels?: string[];
+  timestamp?: string;
+}
+
 export interface Prompt {
   id: string;
   title: string;
   body: string;
   tags: string[];
   scope: "global" | string; // "global" or a projectId
+  usageCount?: number;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface PromptResponse {
+  text: string;
+  suggestedActions?: Array<{ tool: string; params: Record<string, unknown>; label: string }>;
 }
 
 export interface ToolDefinition {
@@ -98,59 +119,3 @@ export interface LLMProvider {
   model: string;
 }
 
-export interface GeneratePlanRequest {
-  description: string;
-  constraints: string;
-  goals: string;
-  provider: string;
-  existingPlan?: ProjectPlan;
-}
-
-export interface GeneratePlanResponse {
-  plan: ProjectPlan;
-}
-
-export interface ScaffoldRequest {
-  projectName: string;
-  description: string;
-  stack: string;
-  features: PlanFeature[];
-  selectedFiles: string[];
-  repoName: string;
-  repoVisibility: "public" | "private";
-  repoDescription: string;
-  provider: string;
-  constraints: string;
-  goals: string;
-}
-
-export interface ScaffoldResponse {
-  repoUrl: string;
-  files: string[];
-}
-
-export interface DeployRequest {
-  githubRepo: string;
-  projectName: string;
-}
-
-export interface DeployResponse {
-  siteId: string;
-  siteUrl: string;
-}
-
-export const AVAILABLE_PROJECT_FILES = [
-  "AI_RULES.md",
-  "README.md",
-  "ARCHITECTURE.md",
-  "DEPLOYMENT.md",
-  ".eslintrc.json",
-  ".prettierrc",
-  ".env.example",
-  ".gitignore",
-  ".editorconfig",
-  "CONTRIBUTING.md",
-  "LICENSE",
-] as const;
-
-export const DEFAULT_STACK = "Next.js + TypeScript + Tailwind CSS + Netlify";

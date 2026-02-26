@@ -233,6 +233,100 @@ export async function getUserRepos(maxPages = 10): Promise<string[]> {
   }
 }
 
+export async function createIssue(
+  owner: string,
+  repo: string,
+  title: string,
+  body?: string,
+  labels?: string[],
+): Promise<{ number: number; url: string }> {
+  const data = await gh(`/repos/${owner}/${repo}/issues`, {
+    method: "POST",
+    body: JSON.stringify({
+      title,
+      body: body || "",
+      labels: labels || [],
+    }),
+  });
+  return {
+    number: data.number as number,
+    url: data.html_url as string,
+  };
+}
+
+export async function closeIssue(
+  owner: string,
+  repo: string,
+  issueNumber: number,
+): Promise<void> {
+  await gh(`/repos/${owner}/${repo}/issues/${issueNumber}`, {
+    method: "PATCH",
+    body: JSON.stringify({ state: "closed" }),
+  });
+}
+
+export async function getCommits(
+  owner: string,
+  repo: string,
+  since?: string,
+  limit: number = 30,
+): Promise<Array<{
+  sha: string;
+  message: string;
+  author: string;
+  date: string;
+  files?: string[];
+}>> {
+  try {
+    let path = `/repos/${owner}/${repo}/commits?per_page=${limit}`;
+    if (since) path += `&since=${encodeURIComponent(since)}`;
+    const items = await ghList(path);
+    return items.map((item) => {
+      const commit = item.commit as Record<string, unknown>;
+      const authorObj = commit.author as Record<string, unknown>;
+      return {
+        sha: (item.sha as string).substring(0, 7),
+        message: (commit.message as string).split("\n")[0],
+        author: (authorObj.name as string) || "unknown",
+        date: authorObj.date as string,
+      };
+    });
+  } catch {
+    return [];
+  }
+}
+
+export async function getDiffs(
+  owner: string,
+  repo: string,
+  base: string,
+  head: string = "HEAD",
+): Promise<{
+  files: Array<{
+    filename: string;
+    status: string;
+    additions: number;
+    deletions: number;
+    patch?: string;
+  }>;
+}> {
+  try {
+    const data = await gh(`/repos/${owner}/${repo}/compare/${base}...${head}`);
+    const files = (data.files as Array<Record<string, unknown>>) || [];
+    return {
+      files: files.slice(0, 50).map((f) => ({
+        filename: f.filename as string,
+        status: f.status as string,
+        additions: (f.additions as number) || 0,
+        deletions: (f.deletions as number) || 0,
+        patch: f.patch ? String(f.patch).substring(0, 500) : undefined,
+      })),
+    };
+  } catch {
+    return { files: [] };
+  }
+}
+
 export async function analyzeRepo(
   owner: string,
   repo: string,

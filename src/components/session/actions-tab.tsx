@@ -38,6 +38,7 @@ export function ActionsTab({
         >
           <div className="flex items-center justify-between">
             <span className={`text-sm text-foreground ${action.done ? "line-through" : ""}`}>
+              {action.source === "ai" && <span className="mr-1" title="AI suggested">&#10024;</span>}
               {action.text}
             </span>
             {!action.done && !action.skipped && (

@@ -1,4 +1,5 @@
 import { registerTool } from "./registry";
+import { queryTasks, getTask, createTask, updateTask } from "../notion";
 
 const INTEGRATION_ID = "notion";
 
@@ -10,13 +11,19 @@ export function registerNotionTools() {
     inputSchema: {
       type: "object",
       properties: {
-        databaseId: { type: "string", description: "Notion database ID" },
+        databaseId: { type: "string", description: "Notion database ID (uses default if omitted)" },
         status: { type: "string", description: "Filter by status (optional)" },
       },
-      required: ["databaseId"],
     },
-    execute: async () => {
-      throw new Error("Notion integration not configured. See NOTION_SETUP.md for setup instructions.");
+    execute: async (input) => {
+      const filter = input.status
+        ? { property: "Status", status: { equals: input.status as string } }
+        : undefined;
+      const items = await queryTasks(
+        input.databaseId as string | undefined,
+        filter,
+      );
+      return { items };
     },
   });
 
@@ -31,8 +38,30 @@ export function registerNotionTools() {
       },
       required: ["pageId"],
     },
-    execute: async () => {
-      throw new Error("Notion integration not configured. See NOTION_SETUP.md for setup instructions.");
+    execute: async (input) => {
+      return getTask(input.pageId as string);
+    },
+  });
+
+  registerTool({
+    name: "notion_create_task",
+    description: "Create a new task in a Notion database",
+    integrationId: INTEGRATION_ID,
+    inputSchema: {
+      type: "object",
+      properties: {
+        databaseId: { type: "string", description: "Notion database ID (uses default if omitted)" },
+        title: { type: "string", description: "Task title" },
+        status: { type: "string", description: "Initial status (optional)" },
+      },
+      required: ["title"],
+    },
+    execute: async (input) => {
+      return createTask(
+        input.databaseId as string | undefined,
+        input.title as string,
+        input.status as string | undefined,
+      );
     },
   });
 
@@ -48,8 +77,12 @@ export function registerNotionTools() {
       },
       required: ["pageId", "properties"],
     },
-    execute: async () => {
-      throw new Error("Notion integration not configured. See NOTION_SETUP.md for setup instructions.");
+    execute: async (input) => {
+      await updateTask(
+        input.pageId as string,
+        input.properties as Record<string, unknown>,
+      );
+      return { ok: true };
     },
   });
 }

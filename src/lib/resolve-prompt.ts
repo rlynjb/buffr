@@ -1,9 +1,9 @@
-import type { Project, Session, GitHubIssue } from "./types";
+import type { Project, Session, WorkItem } from "./types";
 
 interface PromptContext {
   project?: Project | null;
   lastSession?: Session | null;
-  issues?: GitHubIssue[];
+  issues?: WorkItem[];
 }
 
 /**
@@ -31,7 +31,7 @@ export function resolvePrompt(template: string, ctx: PromptContext): string {
   if (ctx.issues && ctx.issues.length > 0) {
     vars["issues"] = ctx.issues
       .slice(0, 5)
-      .map((i) => `#${i.number}: ${i.title}`)
+      .map((i) => `#${i.id}: ${i.title}`)
       .join("\n");
   }
 

@@ -1,20 +1,33 @@
-import type { Project, Session, GitHubIssue } from "./types";
+import type { Project, Session, WorkItem } from "./types";
 
 export interface NextAction {
   id: string;
   text: string;
   done: boolean;
   skipped: boolean;
-  source?: "session" | "activity" | "issue";
+  source?: "session" | "activity" | "issue" | "ai";
 }
 
 export interface ActionContext {
   project: Project;
   lastSession: Session | null;
-  issues?: GitHubIssue[];
+  workItems?: WorkItem[];
 }
 
 // --- Action source functions (priority order) ---
+
+function actionsFromAI(ctx: ActionContext): NextAction[] {
+  if (!ctx.lastSession?.suggestedNextStep) return [];
+  return [
+    {
+      id: `ai-${ctx.lastSession.id}`,
+      text: ctx.lastSession.suggestedNextStep,
+      done: false,
+      skipped: false,
+      source: "ai",
+    },
+  ];
+}
 
 function actionsFromSession(ctx: ActionContext): NextAction[] {
   if (!ctx.lastSession?.nextStep) return [];
@@ -49,11 +62,11 @@ function actionsFromActivity(ctx: ActionContext): NextAction[] {
   return [];
 }
 
-function actionsFromIssues(ctx: ActionContext): NextAction[] {
-  if (!ctx.issues || ctx.issues.length === 0) return [];
-  return ctx.issues.slice(0, 3).map((issue) => ({
-    id: `issue-${issue.number}`,
-    text: `Fix #${issue.number}: ${issue.title}`,
+function actionsFromWorkItems(ctx: ActionContext): NextAction[] {
+  if (!ctx.workItems || ctx.workItems.length === 0) return [];
+  return ctx.workItems.slice(0, 3).map((item) => ({
+    id: `issue-${item.id}`,
+    text: `Fix #${item.id}: ${item.title}`,
     done: false,
     skipped: false,
     source: "issue",
@@ -64,9 +77,10 @@ function actionsFromIssues(ctx: ActionContext): NextAction[] {
 
 export function generateNextActions(context: ActionContext): NextAction[] {
   const all: NextAction[] = [
+    ...actionsFromAI(context),
     ...actionsFromSession(context),
     ...actionsFromActivity(context),
-    ...actionsFromIssues(context),
+    ...actionsFromWorkItems(context),
   ];
 
   // Deduplicate by id, limit to 3

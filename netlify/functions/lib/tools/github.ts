@@ -6,6 +6,10 @@ import {
   analyzeRepo,
   createRepo,
   pushFiles,
+  createIssue,
+  closeIssue,
+  getCommits,
+  getDiffs,
 } from "../github";
 
 const INTEGRATION_ID = "github";
@@ -43,11 +47,22 @@ export function registerGitHubTools() {
       required: ["owner", "repo"],
     },
     execute: async (input) => {
-      return getIssues(
+      const raw = await getIssues(
         input.owner as string,
         input.repo as string,
-        (input.limit as number) || 10
+        (input.limit as number) || 10,
       );
+      return {
+        items: raw.map((issue) => ({
+          id: String(issue.number),
+          title: issue.title,
+          status: "open",
+          url: issue.url,
+          source: "github",
+          labels: issue.labels,
+          timestamp: issue.createdAt,
+        })),
+      };
     },
   });
 
@@ -75,11 +90,16 @@ export function registerGitHubTools() {
       required: ["owner", "repo"],
     },
     execute: async (input) => {
-      return analyzeRepo(
-        input.owner as string,
-        input.repo as string,
-        (input.branch as string) || "main"
-      );
+      const owner = input.owner as string;
+      const repo = input.repo as string;
+      const info = await getRepoInfo(`${owner}/${repo}`);
+      const branch = (input.branch as string) || info?.defaultBranch || "main";
+      const analysis = await analyzeRepo(owner, repo, branch);
+      return {
+        ...analysis,
+        description: info?.description || null,
+        defaultBranch: branch,
+      };
     },
   });
 
@@ -136,6 +156,103 @@ export function registerGitHubTools() {
         input.message as string
       );
       return { sha };
+    },
+  });
+
+  registerTool({
+    name: "github_create_issue",
+    description: "Create a new issue in a GitHub repository",
+    integrationId: INTEGRATION_ID,
+    inputSchema: {
+      type: "object",
+      properties: {
+        owner: { type: "string" },
+        repo: { type: "string" },
+        title: { type: "string" },
+        body: { type: "string" },
+        labels: { type: "array", items: { type: "string" } },
+      },
+      required: ["owner", "repo", "title"],
+    },
+    execute: async (input) => {
+      return createIssue(
+        input.owner as string,
+        input.repo as string,
+        input.title as string,
+        (input.body as string) || undefined,
+        (input.labels as string[]) || undefined,
+      );
+    },
+  });
+
+  registerTool({
+    name: "github_close_issue",
+    description: "Close an issue in a GitHub repository",
+    integrationId: INTEGRATION_ID,
+    inputSchema: {
+      type: "object",
+      properties: {
+        owner: { type: "string" },
+        repo: { type: "string" },
+        issueNumber: { type: "number" },
+      },
+      required: ["owner", "repo", "issueNumber"],
+    },
+    execute: async (input) => {
+      await closeIssue(
+        input.owner as string,
+        input.repo as string,
+        input.issueNumber as number,
+      );
+      return { ok: true };
+    },
+  });
+
+  registerTool({
+    name: "github_list_commits",
+    description: "List recent commits for a repository",
+    integrationId: INTEGRATION_ID,
+    inputSchema: {
+      type: "object",
+      properties: {
+        owner: { type: "string" },
+        repo: { type: "string" },
+        since: { type: "string", description: "ISO timestamp to filter commits after" },
+        limit: { type: "number", description: "Max commits to return (default 30)" },
+      },
+      required: ["owner", "repo"],
+    },
+    execute: async (input) => {
+      return getCommits(
+        input.owner as string,
+        input.repo as string,
+        (input.since as string) || undefined,
+        (input.limit as number) || 30,
+      );
+    },
+  });
+
+  registerTool({
+    name: "github_get_diffs",
+    description: "Get code diffs between two refs in a repository",
+    integrationId: INTEGRATION_ID,
+    inputSchema: {
+      type: "object",
+      properties: {
+        owner: { type: "string" },
+        repo: { type: "string" },
+        base: { type: "string", description: "Base ref (commit SHA, branch name)" },
+        head: { type: "string", description: "Head ref (default: HEAD)" },
+      },
+      required: ["owner", "repo", "base"],
+    },
+    execute: async (input) => {
+      return getDiffs(
+        input.owner as string,
+        input.repo as string,
+        input.base as string,
+        (input.head as string) || "HEAD",
+      );
     },
   });
 }
