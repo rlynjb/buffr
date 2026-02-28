@@ -65,7 +65,7 @@ export function EndSessionModal({
             const commitTool = getToolForCapability(source, "list_commits");
             if (commitTool) {
               try {
-                const res = await executeToolAction(commitTool, { owner, repo, since, limit: 15 });
+                const res = await executeToolAction(commitTool, { owner, repo, since });
                 if (res.ok && res.result) {
                   const commits = res.result as Array<{ message?: string; sha?: string; date?: string }>;
                   for (const c of commits) {
@@ -206,8 +206,7 @@ export function EndSessionModal({
       const changes = whatChanged
         .split("\n")
         .map((s) => s.replace(/^[•\-]\s*/, "").trim())
-        .filter(Boolean)
-        .slice(0, 5);
+        .filter(Boolean);
 
       let detectedIntentValue: string | undefined;
       if (hasLLM && goal && changes.length > 0) {
