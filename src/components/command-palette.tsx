@@ -14,11 +14,8 @@ import {
   IconSparkle,
   IconCheck,
 } from "@/components/icons";
+import { isReferencePrompt } from "@/lib/prompt-utils";
 import "./command-palette.css";
-
-function isReferencePrompt(body: string): boolean {
-  return !body.includes("{{");
-}
 
 interface Command {
   id: string;

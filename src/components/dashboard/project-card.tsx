@@ -4,6 +4,7 @@ import { Badge } from "@/components/ui/badge";
 import { SourceIcon, IconGitHub, IconGlobe, IconChevron } from "@/components/icons";
 import { PHASE_COLORS } from "@/lib/constants";
 import type { Project } from "@/lib/types";
+import { timeAgo } from "@/lib/format";
 import "./project-card.css";
 
 interface ProjectCardProps {
@@ -12,7 +13,7 @@ interface ProjectCardProps {
 }
 
 export function ProjectCard({ project, onClick }: ProjectCardProps) {
-  const updatedAgo = getTimeAgo(project.updatedAt);
+  const updatedAgo = timeAgo(project.updatedAt);
 
   return (
     <button onClick={onClick} className="project-card">
@@ -45,16 +46,4 @@ export function ProjectCard({ project, onClick }: ProjectCardProps) {
       </div>
     </button>
   );
-}
-
-function getTimeAgo(dateStr: string): string {
-  const diff = Date.now() - new Date(dateStr).getTime();
-  const secs = Math.floor(diff / 1000);
-  if (secs < 60) return "just now";
-  const mins = Math.floor(secs / 60);
-  if (mins < 60) return `${mins}m ago`;
-  const hours = Math.floor(mins / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  return `${days}d ago`;
 }

@@ -12,11 +12,3 @@ export const SOURCE_COLORS: Record<string, string> = {
   ai: "#c084fc",
   session: "#a78bfa",
 };
-
-// Legacy mapping — kept for any remaining consumers during migration
-export const PHASE_BADGE_VARIANTS: Record<string, "default" | "accent" | "warning" | "success"> = {
-  idea: "default",
-  mvp: "accent",
-  polish: "warning",
-  deploy: "success",
-};

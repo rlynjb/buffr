@@ -4,7 +4,6 @@ import { useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { SourceIcon, sourceColor, IconLink } from "@/components/icons";
 import type { WorkItem, Project } from "@/lib/types";
-import { DataSourceCheckboxes } from "./data-source-checkboxes";
 import "./issues-tab.css";
 
 interface IssuesTabProps {
@@ -53,10 +52,6 @@ export function IssuesTab({ items, hasDataSource, project, onDataSourceUpdate }:
         <span className="issues-tab__filter-count">
           {filtered.length} item{filtered.length !== 1 ? "s" : ""}
         </span>
-      </div>
-
-      <div className="hidden">
-        <DataSourceCheckboxes project={project} onUpdate={onDataSourceUpdate} />
       </div>
 
       {filtered.length === 0 ? (

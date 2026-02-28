@@ -35,7 +35,7 @@ export function Modal({ open, onClose, title, subtitle, children }: ModalProps) 
       }}
     >
       <div className="modal__backdrop" />
-      <div className="modal__content">
+      <div className="modal__content" role="dialog" aria-modal="true">
         <div className="modal__header">
           <div>
             <h3 className="modal__title">{title}</h3>
@@ -43,7 +43,7 @@ export function Modal({ open, onClose, title, subtitle, children }: ModalProps) 
               <p className="modal__subtitle">{subtitle}</p>
             )}
           </div>
-          <button onClick={onClose} className="modal__close">
+          <button onClick={onClose} className="modal__close" aria-label="Close">
             <IconX size={14} />
           </button>
         </div>

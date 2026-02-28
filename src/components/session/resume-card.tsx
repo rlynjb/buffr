@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import Link from "next/link";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -158,10 +158,13 @@ export function ResumeCard({ project, onEndSession }: ResumeCardProps) {
     setDataSources(updated.dataSources || []);
   }
 
-  const resolvedBodies: Record<string, string> = {};
-  for (const prompt of prompts) {
-    resolvedBodies[prompt.id] = resolvePrompt(prompt.body, { project, lastSession, issues: workItems });
-  }
+  const resolvedBodies = useMemo(() => {
+    const bodies: Record<string, string> = {};
+    for (const prompt of prompts) {
+      bodies[prompt.id] = resolvePrompt(prompt.body, { project, lastSession, issues: workItems });
+    }
+    return bodies;
+  }, [prompts, project, lastSession, workItems]);
 
   const tabs = [
     { id: "session" as Tab, label: "Last Session" },

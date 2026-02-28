@@ -57,7 +57,7 @@ export function EndSessionModal({
       const activityItems: Array<{ title: string; source: string; timestamp?: string }> = [];
 
       try {
-        const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+        const since24h = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
 
         const fetches = sources.map(async (source) => {
           if (source === "github" && project.githubRepo) {
@@ -65,7 +65,7 @@ export function EndSessionModal({
             const commitTool = getToolForCapability(source, "list_commits");
             if (commitTool) {
               try {
-                const res = await executeToolAction(commitTool, { owner, repo, since });
+                const res = await executeToolAction(commitTool, { owner, repo, since: since24h });
                 if (res.ok && res.result) {
                   const commits = res.result as Array<{ message?: string; sha?: string; date?: string }>;
                   for (const c of commits) {

@@ -17,27 +17,8 @@ import {
   deletePrompt,
   listIntegrations,
 } from "@/lib/api";
+import { isReferencePrompt, renderPromptTokens } from "@/lib/prompt-utils";
 import "./page.css";
-
-function isReferencePrompt(body: string): boolean {
-  return !body.includes("{{");
-}
-
-function renderTokens(body: string) {
-  return body.split(/({{.*?}})/).map((part, i) =>
-    part.startsWith("{{tool:") ? (
-      <span key={i} className="prompts-page__token--tool">
-        {part}
-      </span>
-    ) : part.startsWith("{{") ? (
-      <span key={i} className="prompts-page__token--variable">
-        {part}
-      </span>
-    ) : (
-      <span key={i}>{part}</span>
-    )
-  );
-}
 
 export default function PromptsPage() {
   const [prompts, setPrompts] = useState<Prompt[]>([]);
@@ -230,7 +211,7 @@ export default function PromptsPage() {
                     <span className="prompts-page__prompt-usage">{prompt.usageCount || 0}×</span>
                   </div>
                   <div className="prompts-page__prompt-preview">
-                    {renderTokens(prompt.body.slice(0, 120))}
+                    {renderPromptTokens(prompt.body.slice(0, 120), "prompts-page__token--tool", "prompts-page__token--variable")}
                   </div>
                 </div>
                 <div className="prompts-page__prompt-actions">

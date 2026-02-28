@@ -1,11 +1,12 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Badge } from "@/components/ui/badge";
 import { IconChevron, IconCopy, IconPlay, IconLoader, IconSparkle, IconCheck } from "@/components/icons";
 import type { Prompt, PromptResponse } from "@/lib/types";
 import { runPrompt, executeToolAction } from "@/lib/api";
 import { useProvider } from "@/context/provider-context";
+import { isReferencePrompt, renderPromptTokens } from "@/lib/prompt-utils";
 import "./prompts-tab.css";
 
 interface PromptsTabProps {
@@ -35,10 +36,6 @@ const TAG_TO_CATEGORY: Record<string, Category> = {
   reference: "reference", template: "reference", prompt: "reference",
 };
 
-function isReferencePrompt(body: string): boolean {
-  return !body.includes("{{");
-}
-
 function hasToolTokens(body: string): boolean {
   return /\{\{tool:\w+/.test(body);
 }
@@ -56,23 +53,11 @@ function getPromptCategory(prompt: Prompt): Category {
   return "dev";
 }
 
-function renderBody(body: string) {
-  return body.split(/({{.*?}})/).map((part, i) =>
-    part.startsWith("{{tool:") ? (
-      <span key={i} className="prompts-tab__token--tool">{part}</span>
-    ) : part.startsWith("{{") ? (
-      <span key={i} className="prompts-tab__token--variable">{part}</span>
-    ) : (
-      <span key={i}>{part}</span>
-    )
-  );
-}
-
 function useTypingEffect(text: string, speed: number = 8) {
   const [displayed, setDisplayed] = useState("");
   const [done, setDone] = useState(false);
 
-  useState(() => {
+  useEffect(() => {
     let i = 0;
     setDisplayed("");
     setDone(false);
@@ -87,7 +72,7 @@ function useTypingEffect(text: string, speed: number = 8) {
       }
     }, 16);
     return () => clearInterval(interval);
-  });
+  }, [text, speed]);
 
   return { displayed: done ? text : displayed, done };
 }
@@ -365,7 +350,7 @@ export function PromptsTab({
                       )}
                     </div>
                     <div className="prompts-tab__body-text">
-                      {renderBody(resolvedBodies[prompt.id] || prompt.body)}
+                      {renderPromptTokens(resolvedBodies[prompt.id] || prompt.body, "prompts-tab__token--tool", "prompts-tab__token--variable")}
                     </div>
                   </div>
 

@@ -46,7 +46,7 @@ export function NotificationProvider({ children }: { children: ReactNode }) {
   return (
     <NotificationContext.Provider value={{ notify }}>
       {children}
-      <div className="notification-container">
+      <div className="notification-container" aria-live="polite">
         {notifications.map((n) => (
           <NotificationToast
             key={n.id}

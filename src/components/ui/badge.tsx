@@ -5,7 +5,6 @@ import "./badge.css";
 interface BadgeProps {
   children: React.ReactNode;
   color?: string;
-  variant?: string;
   small?: boolean;
   className?: string;
 }

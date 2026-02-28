@@ -1,15 +1,9 @@
 import "./session-tab.css";
 import type { Session } from "@/lib/types";
+import { timeAgo } from "@/lib/format";
 
 interface SessionTabProps {
   lastSession: Session | null;
-}
-
-function timeAgo(iso: string): string {
-  const d = (Date.now() - new Date(iso).getTime()) / 1000;
-  if (d < 3600) return `${Math.floor(d / 60)}m ago`;
-  if (d < 86400) return `${Math.floor(d / 3600)}h ago`;
-  return `${Math.floor(d / 86400)}d ago`;
 }
 
 export function SessionTab({ lastSession }: SessionTabProps) {
