@@ -8,6 +8,7 @@ interface SummarizeInput {
 }
 
 interface SummarizeOutput {
+  goal: string;
   bullets: string[];
 }
 
@@ -18,6 +19,7 @@ function parseSummarizeOutput(raw: string): SummarizeOutput {
   }
   const parsed = JSON.parse(cleaned);
   return {
+    goal: typeof parsed.goal === "string" ? parsed.goal : "",
     bullets: Array.isArray(parsed.bullets) ? parsed.bullets.map(String) : [],
   };
 }

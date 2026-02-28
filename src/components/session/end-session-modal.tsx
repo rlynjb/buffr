@@ -6,7 +6,8 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { IconLoader, IconSparkle, SourceIcon, sourceColor } from "@/components/icons";
-import { createSession, updateProject, summarizeSession, suggestNextStep, detectIntent } from "@/lib/api";
+import { createSession, updateProject, summarizeSession, suggestNextStep, detectIntent, executeToolAction } from "@/lib/api";
+import { getToolForCapability } from "@/lib/data-sources";
 import { useProvider } from "@/context/provider-context";
 import type { Project } from "@/lib/types";
 
@@ -35,7 +36,6 @@ export function EndSessionModal({
   const hasLLM = providers.length > 0;
   const sources = project.dataSources || (project.githubRepo ? ["github"] : []);
 
-  // Multi-phase loading when modal opens
   useEffect(() => {
     if (!open) return;
     setPhase("fetching");
@@ -45,21 +45,129 @@ export function EndSessionModal({
     setBlockers("");
     setAiLabel("");
 
-    if (!hasLLM) {
-      // No LLM — skip straight to ready
+    if (!hasLLM || sources.length === 0) {
       setPhase("ready");
       return;
     }
 
-    const t1 = setTimeout(() => setPhase("summarizing"), 1200);
-    const t2 = setTimeout(() => {
-      setPhase("ready");
-      setAiLabel(`AI-ready — connected to ${sources.length} source${sources.length !== 1 ? "s" : ""}`);
-    }, 2400);
-    return () => {
-      clearTimeout(t1);
-      clearTimeout(t2);
-    };
+    let cancelled = false;
+
+    async function fetchAndSummarize() {
+      // Phase 1: Fetch activity from connected sources
+      const activityItems: Array<{ title: string; source: string; timestamp?: string }> = [];
+
+      try {
+        const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(); // last 24h
+
+        const fetches = sources.map(async (source) => {
+          // Try fetching commits (GitHub)
+          if (source === "github" && project.githubRepo) {
+            const [owner, repo] = project.githubRepo.split("/");
+            const commitTool = getToolForCapability(source, "list_commits");
+            if (commitTool) {
+              try {
+                const res = await executeToolAction(commitTool, { owner, repo, since, limit: 15 });
+                if (res.ok && res.result) {
+                  const commits = res.result as Array<{ message?: string; sha?: string; date?: string }>;
+                  for (const c of commits) {
+                    if (c.message) {
+                      activityItems.push({
+                        title: c.message.split("\n")[0],
+                        source: "github",
+                        timestamp: c.date,
+                      });
+                    }
+                  }
+                }
+              } catch {
+                // Commits fetch failed — continue
+              }
+            }
+          }
+
+          // Try fetching recent items (issues/tasks)
+          const activityTool = getToolForCapability(source, "list_recent_activity");
+          if (activityTool) {
+            try {
+              const params: Record<string, unknown> = {};
+              if (source === "github" && project.githubRepo) {
+                const [owner, repo] = project.githubRepo.split("/");
+                params.owner = owner;
+                params.repo = repo;
+                params.limit = 5;
+              }
+              const res = await executeToolAction(activityTool, params);
+              if (res.ok && res.result) {
+                const data = res.result as { items?: Array<{ title?: string; id?: string }> };
+                if (data.items) {
+                  for (const item of data.items.slice(0, 5)) {
+                    if (item.title) {
+                      activityItems.push({ title: item.title, source });
+                    }
+                  }
+                }
+              }
+            } catch {
+              // Activity fetch failed — continue
+            }
+          }
+        });
+
+        await Promise.all(fetches);
+      } catch {
+        // Fetch phase failed — fall through to ready with empty fields
+      }
+
+      if (cancelled) return;
+
+      // Phase 2: Summarize with AI
+      if (activityItems.length > 0) {
+        setPhase("summarizing");
+
+        try {
+          const summary = await summarizeSession(activityItems, selected);
+          if (cancelled) return;
+
+          if (summary.goal) {
+            setGoal(summary.goal);
+          }
+          if (summary.bullets.length > 0) {
+            setWhatChanged(summary.bullets.map((b) => `• ${b}`).join("\n"));
+          }
+
+          // Also try suggesting next step
+          try {
+            const suggestion = await suggestNextStep(
+              summary.goal || "",
+              summary.bullets.join("\n"),
+              "",
+              `${project.name} (${project.phase}): ${project.description}`,
+              "",
+              selected,
+            );
+            if (!cancelled && suggestion.suggestedNextStep) {
+              setNextStep(suggestion.suggestedNextStep);
+            }
+          } catch {
+            // Next step suggestion is optional
+          }
+
+          setAiLabel(
+            `AI-generated from ${activityItems.length} item${activityItems.length !== 1 ? "s" : ""} across ${sources.length} source${sources.length !== 1 ? "s" : ""}`
+          );
+        } catch {
+          // Summarization failed — show empty fields
+          setAiLabel("");
+        }
+      }
+
+      if (!cancelled) {
+        setPhase("ready");
+      }
+    }
+
+    fetchAndSummarize();
+    return () => { cancelled = true; };
   }, [open]);
 
   async function handleAutoFillChanges() {
@@ -67,7 +175,7 @@ export function EndSessionModal({
     try {
       const items = whatChanged
         .split("\n")
-        .map((s) => s.trim())
+        .map((s) => s.replace(/^[•\-]\s*/, "").trim())
         .filter(Boolean)
         .map((title) => ({ title, source: "session" }));
       const result = await summarizeSession(items, selected);
@@ -229,9 +337,10 @@ export function EndSessionModal({
                 </button>
               </div>
             </div>
-            <input
+            <textarea
               value={nextStep}
               onChange={(e) => setNextStep(e.target.value)}
+              rows={2}
               className="w-full px-3 py-2 rounded-lg bg-zinc-900/80 border border-zinc-700/50 text-zinc-200 text-sm placeholder:text-zinc-600 focus:outline-none focus:border-purple-500/50 transition-colors"
               placeholder="What's next?"
             />

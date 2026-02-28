@@ -198,7 +198,7 @@ export async function setDefaultDataSources(sources: string[]): Promise<void> {
 export async function summarizeSession(
   activityItems: Array<{ title: string; source: string; timestamp?: string }>,
   provider?: string,
-): Promise<{ bullets: string[] }> {
+): Promise<{ goal: string; bullets: string[] }> {
   return request("/session-ai?summarize", {
     method: "POST",
     body: JSON.stringify({ activityItems, provider }),
