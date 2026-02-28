@@ -11,18 +11,18 @@ interface ProgressStepProps {
 
 const statusIcons: Record<StepStatus, React.ReactNode> = {
   pending: (
-    <span className="h-5 w-5 rounded-full border-2 border-border" />
+    <span className="h-5 w-5 rounded-full border-2 border-zinc-700/50" />
   ),
   running: (
-    <span className="h-5 w-5 rounded-full border-2 border-accent border-t-transparent animate-spin" />
+    <span className="h-5 w-5 rounded-full border-2 border-purple-500 border-t-transparent animate-spin" />
   ),
   success: (
-    <span className="flex h-5 w-5 items-center justify-center rounded-full bg-success text-white text-xs">
+    <span className="flex h-5 w-5 items-center justify-center rounded-full bg-emerald-500 text-white text-xs">
       &#10003;
     </span>
   ),
   failed: (
-    <span className="flex h-5 w-5 items-center justify-center rounded-full bg-error text-white text-xs">
+    <span className="flex h-5 w-5 items-center justify-center rounded-full bg-red-500 text-white text-xs">
       &#10007;
     </span>
   ),
@@ -34,17 +34,23 @@ export function ProgressStep({ name, status, result, error }: ProgressStepProps)
       <div className="mt-0.5 shrink-0">{statusIcons[status]}</div>
       <div className="flex-1 min-w-0">
         <p
-          className={`text-sm ${status === "running" ? "text-accent font-medium" : status === "failed" ? "text-error" : "text-foreground"}`}
+          className={`text-sm ${
+            status === "running"
+              ? "text-purple-400 font-medium"
+              : status === "failed"
+                ? "text-red-400"
+                : "text-zinc-200"
+          }`}
         >
           {name}
         </p>
         {result && (
-          <p className="text-xs text-muted font-mono mt-0.5 truncate">
+          <p className="text-xs text-zinc-500 font-mono mt-0.5 truncate">
             {result}
           </p>
         )}
         {error && (
-          <p className="text-xs text-error mt-0.5">{error}</p>
+          <p className="text-xs text-red-400 mt-0.5">{error}</p>
         )}
       </div>
     </div>

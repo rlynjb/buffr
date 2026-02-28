@@ -1,15 +1,17 @@
 "use client";
 
 import { useEffect, useRef } from "react";
+import { IconX } from "@/components/icons";
 
 interface ModalProps {
   open: boolean;
   onClose: () => void;
   title: string;
+  subtitle?: string;
   children: React.ReactNode;
 }
 
-export function Modal({ open, onClose, title, children }: ModalProps) {
+export function Modal({ open, onClose, title, subtitle, children }: ModalProps) {
   const overlayRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -26,31 +28,30 @@ export function Modal({ open, onClose, title, children }: ModalProps) {
   return (
     <div
       ref={overlayRef}
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-center justify-center p-4"
       onClick={(e) => {
         if (e.target === overlayRef.current) onClose();
       }}
     >
-      <div className="w-full max-w-lg rounded-xl border border-border bg-card p-6 shadow-2xl">
-        <div className="mb-4 flex items-center justify-between">
-          <h2 className="text-lg font-semibold text-foreground">{title}</h2>
+      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" />
+      <div className="relative w-full max-w-lg rounded-2xl border border-zinc-700/60 bg-zinc-900 shadow-2xl animate-slideDown">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-zinc-800/60">
+          <div>
+            <h3 className="text-sm font-semibold text-zinc-100">{title}</h3>
+            {subtitle && (
+              <p className="text-xs text-zinc-500 mt-0.5">{subtitle}</p>
+            )}
+          </div>
           <button
             onClick={onClose}
-            className="text-muted hover:text-foreground transition-colors"
+            className="text-zinc-500 hover:text-zinc-300 transition-colors"
           >
-            <svg
-              width="20"
-              height="20"
-              viewBox="0 0 20 20"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-            >
-              <path d="M5 5l10 10M15 5L5 15" />
-            </svg>
+            <IconX size={14} />
           </button>
         </div>
-        {children}
+        <div className="px-5 py-4">
+          {children}
+        </div>
       </div>
     </div>
   );

@@ -165,13 +165,16 @@ async function getRepoFiles(
   }
 }
 
-async function getFileContent(
+export async function getFileContent(
   owner: string,
   repo: string,
-  path: string
+  path: string,
+  branch?: string,
 ): Promise<string | null> {
   try {
-    const data = await gh(`/repos/${owner}/${repo}/contents/${path}`);
+    let url = `/repos/${owner}/${repo}/contents/${path}`;
+    if (branch) url += `?ref=${encodeURIComponent(branch)}`;
+    const data = await gh(url);
     if ("content" in data && data.encoding === "base64") {
       return Buffer.from(data.content as string, "base64").toString("utf-8");
     }

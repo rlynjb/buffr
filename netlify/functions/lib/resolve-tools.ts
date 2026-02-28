@@ -25,10 +25,18 @@ export async function resolveToolTokens(
     let input: Record<string, unknown> = { ...defaultInput };
     if (paramStr) {
       try {
+        // Try JSON first
         input = { ...input, ...JSON.parse(paramStr) };
       } catch {
-        // If not valid JSON, treat as a single string value
-        input = { ...input, query: paramStr };
+        // Fall back to URL param format (key=value&key=value)
+        if (paramStr.includes("=")) {
+          const params = new URLSearchParams(paramStr);
+          for (const [key, value] of params.entries()) {
+            input[key] = value;
+          }
+        } else {
+          input = { ...input, query: paramStr };
+        }
       }
     }
 

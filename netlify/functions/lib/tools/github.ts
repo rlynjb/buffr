@@ -10,6 +10,7 @@ import {
   closeIssue,
   getCommits,
   getDiffs,
+  getFileContent,
 } from "../github";
 
 const INTEGRATION_ID = "github";
@@ -253,6 +254,34 @@ export function registerGitHubTools() {
         input.base as string,
         (input.head as string) || "HEAD",
       );
+    },
+  });
+
+  registerTool({
+    name: "github_get_file",
+    description: "Read a single file's contents from a GitHub repository",
+    integrationId: INTEGRATION_ID,
+    inputSchema: {
+      type: "object",
+      properties: {
+        owner: { type: "string" },
+        repo: { type: "string" },
+        path: { type: "string", description: "File path in the repo (e.g. CHANGELOG.md)" },
+        branch: { type: "string", description: "Branch name (optional, defaults to main)" },
+      },
+      required: ["owner", "repo", "path"],
+    },
+    execute: async (input) => {
+      const content = await getFileContent(
+        input.owner as string,
+        input.repo as string,
+        input.path as string,
+        (input.branch as string) || undefined,
+      );
+      if (content === null) {
+        throw new Error(`File not found: ${input.path}`);
+      }
+      return { content, path: input.path };
     },
   });
 }

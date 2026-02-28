@@ -13,19 +13,19 @@ interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
 
 const variantClasses: Record<Variant, string> = {
   primary:
-    "bg-accent text-white hover:bg-accent-hover disabled:opacity-50",
+    "bg-purple-600 hover:bg-purple-500 text-white border border-purple-500/40 disabled:opacity-40",
   secondary:
-    "bg-card border border-border text-foreground hover:bg-card-hover disabled:opacity-50",
+    "bg-zinc-800 border border-zinc-700/60 text-zinc-200 hover:bg-zinc-700 disabled:opacity-40",
   ghost:
-    "text-muted hover:text-foreground hover:bg-card disabled:opacity-50",
+    "text-zinc-400 hover:text-zinc-200 hover:bg-white/5 disabled:opacity-40",
   danger:
-    "bg-error/10 text-error border border-error/20 hover:bg-error/20 disabled:opacity-50",
+    "bg-red-500/10 text-red-400 border border-red-500/20 hover:bg-red-500/20 disabled:opacity-40",
 };
 
 const sizeClasses: Record<Size, string> = {
-  sm: "px-3 py-1.5 text-sm",
+  sm: "px-2.5 py-1 text-xs",
   md: "px-4 py-2 text-sm",
-  lg: "px-6 py-3 text-base",
+  lg: "px-6 py-2.5 text-sm",
 };
 
 export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
@@ -45,7 +45,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
       <button
         ref={ref}
         disabled={disabled || loading}
-        className={`inline-flex items-center justify-center gap-2 rounded-lg font-medium transition-colors cursor-pointer ${variantClasses[variant]} ${sizeClasses[size]} ${className}`}
+        className={`inline-flex items-center justify-center gap-1.5 rounded-lg font-medium transition-all cursor-pointer ${variantClasses[variant]} ${sizeClasses[size]} ${className}`}
         {...props}
       >
         {loading && (

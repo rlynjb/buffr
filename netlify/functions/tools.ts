@@ -8,12 +8,8 @@ import {
   saveToolConfig,
   deleteToolConfig,
 } from "./lib/storage/tool-config";
-import {
-  listCustomIntegrations,
-  saveCustomIntegration,
-  deleteCustomIntegration,
-} from "./lib/storage/custom-integrations";
-import type { ToolConfig, ToolIntegration, CustomIntegration } from "../../src/lib/types";
+import { getSettings, saveSettings } from "./lib/storage/settings";
+import type { ToolConfig, ToolIntegration } from "../../src/lib/types";
 import { json } from "./lib/responses";
 
 // Register all tools on cold start
@@ -55,13 +51,10 @@ const BUILTIN_INTEGRATIONS: Record<
 
 // GET — list all integrations with status + tools
 async function handleList(): Promise<Response> {
-  const [configs, customIntegrations] = await Promise.all([
-    listToolConfigs(),
-    listCustomIntegrations(),
-  ]);
+  const configs = await listToolConfigs();
   const configMap = new Map(configs.map((c) => [c.integrationId, c]));
 
-  const builtInList: ToolIntegration[] = Object.entries(BUILTIN_INTEGRATIONS).map(
+  const integrations: ToolIntegration[] = Object.entries(BUILTIN_INTEGRATIONS).map(
     ([id, meta]) => {
       const config = configMap.get(id);
       const tools = listToolsByIntegration(id).map((t) => ({
@@ -79,7 +72,14 @@ async function handleList(): Promise<Response> {
         status = allFilled ? "connected" : "error";
       }
 
+      // Auto-detect from env vars
       if (id === "github" && !config?.enabled && process.env.GITHUB_TOKEN) {
+        status = "connected";
+      }
+      if (id === "notion" && !config?.enabled && process.env.NOTION_TOKEN) {
+        status = "connected";
+      }
+      if (id === "jira" && !config?.enabled && process.env.JIRA_BASE_URL && process.env.JIRA_API_TOKEN) {
         status = "connected";
       }
 
@@ -94,27 +94,7 @@ async function handleList(): Promise<Response> {
     }
   );
 
-  const customList: ToolIntegration[] = customIntegrations.map((ci) => {
-    const config = configMap.get(ci.id);
-    let status: ToolIntegration["status"] = "not_configured";
-    if (config?.enabled) {
-      const allFilled = ci.configFields.every(
-        (f) => config.values[f.key]?.trim()
-      );
-      status = allFilled ? "connected" : "error";
-    }
-
-    return {
-      id: ci.id,
-      name: ci.name,
-      description: ci.description,
-      status,
-      tools: [],
-      configFields: ci.configFields,
-    };
-  });
-
-  return json([...builtInList, ...customList]);
+  return json(integrations);
 }
 
 // POST ?execute — run a tool by name
@@ -129,38 +109,6 @@ async function handleExecute(req: Request): Promise<Response> {
 
   const result = await executeTool(toolName, input || {});
   return json(result, result.ok ? 200 : 400);
-}
-
-// POST ?create — create a custom integration
-async function handleCreate(req: Request): Promise<Response> {
-  const body = await req.json();
-  const { name, description, configFields } = body as {
-    name: string;
-    description: string;
-    configFields: { key: string; label: string; secret: boolean }[];
-  };
-
-  if (!name?.trim()) return json({ error: "name is required" }, 400);
-
-  const id = name
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-|-$/g, "");
-
-  if (BUILTIN_INTEGRATIONS[id]) {
-    return json({ error: `"${id}" conflicts with a built-in integration` }, 400);
-  }
-
-  const integration: CustomIntegration = {
-    id,
-    name: name.trim(),
-    description: description?.trim() || "",
-    configFields: configFields || [],
-    createdAt: new Date().toISOString(),
-  };
-
-  const saved = await saveCustomIntegration(integration);
-  return json(saved);
 }
 
 // PUT ?integrationId=xxx — save config
@@ -182,29 +130,41 @@ async function handleSaveConfig(req: Request, integrationId: string): Promise<Re
   return json(saved);
 }
 
-// DELETE ?integrationId=xxx — remove config + custom integration
+// DELETE ?integrationId=xxx — remove config
 async function handleDelete(integrationId: string): Promise<Response> {
   await deleteToolConfig(integrationId);
-
-  if (!BUILTIN_INTEGRATIONS[integrationId]) {
-    await deleteCustomIntegration(integrationId);
-  }
-
   return json({ ok: true });
+}
+
+// GET ?defaultSources — get default data sources
+async function handleGetDefaultSources(): Promise<Response> {
+  const sources = await getSettings<string[]>("default-data-sources");
+  return json({ sources: sources || ["github"] });
+}
+
+// PUT ?defaultSources — set default data sources
+async function handleSetDefaultSources(req: Request): Promise<Response> {
+  const body = await req.json();
+  const { sources } = body as { sources: string[] };
+  await saveSettings("default-data-sources", sources || []);
+  return json({ sources });
 }
 
 export default async function handler(req: Request, _context: Context) {
   const url = new URL(req.url);
 
   try {
-    if (req.method === "GET") return handleList();
+    if (req.method === "GET") {
+      if (url.searchParams.has("defaultSources")) return handleGetDefaultSources();
+      return handleList();
+    }
 
     if (req.method === "POST") {
       if (url.searchParams.has("execute")) return handleExecute(req);
-      if (url.searchParams.has("create")) return handleCreate(req);
     }
 
     if (req.method === "PUT") {
+      if (url.searchParams.has("defaultSources")) return handleSetDefaultSources(req);
       const integrationId = url.searchParams.get("integrationId");
       if (!integrationId) return json({ error: "integrationId is required" }, 400);
       return handleSaveConfig(req, integrationId);

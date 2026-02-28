@@ -15,6 +15,7 @@ export interface Project {
   selectedFeatures: string[] | null;
   selectedFiles: string[] | null;
   dataSources?: string[];
+  githubIssuesSync?: boolean;
   dismissedSuggestions?: string[];
   issueCount?: number;
   updatedAt: string;
@@ -43,9 +44,16 @@ export interface Session {
   whatChanged: string[];
   nextStep: string;
   blockers: string | null;
+  gitSnapshot?: {
+    branch?: string;
+    lastCommit?: string;
+    changedFiles?: string[];
+    dirty?: boolean;
+  } | null;
   aiSummary?: string;
   detectedIntent?: string;
   suggestedNextStep?: string;
+  linkedSessionIds?: string[];
   createdAt: string;
 }
 
@@ -73,6 +81,7 @@ export interface Prompt {
   body: string;
   tags: string[];
   scope: "global" | string; // "global" or a projectId
+  projectId?: string | null;
   usageCount?: number;
   createdAt: string;
   updatedAt: string;
@@ -81,6 +90,8 @@ export interface Prompt {
 export interface PromptResponse {
   text: string;
   suggestedActions?: Array<{ tool: string; params: Record<string, unknown>; label: string }>;
+  resolvedVariables?: Array<{ token: string; toolName: string; success: boolean }>;
+  artifact?: boolean;
 }
 
 export interface ToolDefinition {
@@ -90,7 +101,7 @@ export interface ToolDefinition {
 }
 
 export interface ToolIntegration {
-  id: string; // "github" | "notion" | custom
+  id: string; // "github" | "notion" | "jira"
   name: string;
   description: string;
   status: "connected" | "error" | "not_configured";
@@ -100,17 +111,9 @@ export interface ToolIntegration {
 
 export interface ToolConfig {
   integrationId: string;
-  values: Record<string, string>; // e.g. { token: "...", databaseId: "..." }
+  values: Record<string, string>;
   enabled: boolean;
   updatedAt: string;
-}
-
-export interface CustomIntegration {
-  id: string;
-  name: string;
-  description: string;
-  configFields: { key: string; label: string; secret: boolean }[];
-  createdAt: string;
 }
 
 export interface LLMProvider {
@@ -118,4 +121,3 @@ export interface LLMProvider {
   label: string;
   model: string;
 }
-

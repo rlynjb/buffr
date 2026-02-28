@@ -50,22 +50,22 @@ export function TestToolModal({ toolName, open, onClose }: TestToolModalProps) {
     <Modal open={open} onClose={handleClose} title={`Test: ${toolName || ""}`}>
       <div className="space-y-4">
         <div>
-          <label className="block text-sm font-medium text-foreground mb-2">
+          <label className="text-[11px] text-zinc-500 uppercase tracking-wider font-semibold mb-1.5 block">
             Input (JSON)
           </label>
           <textarea
             value={input}
             onChange={(e) => setInput(e.target.value)}
             rows={4}
-            className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm font-mono text-foreground placeholder:text-muted/50 focus:outline-none focus:ring-1 focus:ring-accent resize-y"
+            className="w-full rounded-lg border border-zinc-700/50 bg-zinc-900/80 px-3 py-2 text-sm font-mono text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-purple-500/50 resize-y"
             placeholder='{"ownerRepo": "user/repo"}'
           />
         </div>
-        <Button onClick={handleTest} disabled={testing}>
+        <Button onClick={handleTest} loading={testing}>
           {testing ? "Running..." : "Execute"}
         </Button>
         {result && (
-          <pre className="rounded-lg border border-border bg-background p-3 text-xs font-mono text-foreground whitespace-pre-wrap max-h-64 overflow-y-auto">
+          <pre className="rounded-lg border border-zinc-800/60 bg-zinc-900/50 p-3 text-xs font-mono text-zinc-300 whitespace-pre-wrap max-h-64 overflow-y-auto">
             {result}
           </pre>
         )}

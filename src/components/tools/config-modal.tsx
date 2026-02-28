@@ -73,25 +73,25 @@ export function ConfigModal({
             }
           />
         ))}
-        <label className="flex items-center gap-2 text-sm text-foreground cursor-pointer">
+        <label className="flex items-center gap-2 text-sm text-zinc-200 cursor-pointer">
           <input
             type="checkbox"
             checked={enabled}
             onChange={(e) => setEnabled(e.target.checked)}
-            className="accent-accent"
+            className="accent-purple-500 w-3.5 h-3.5"
           />
           Enabled
         </label>
         {integration?.id === "github" && (
-          <p className="text-xs text-muted">
+          <p className="text-xs text-zinc-500">
             Note: GitHub also uses the{" "}
-            <code className="font-mono">GITHUB_TOKEN</code> environment
+            <code className="font-mono text-zinc-400">GITHUB_TOKEN</code> environment
             variable. If set on Netlify, GitHub tools work without configuring
             a token here.
           </p>
         )}
-        <div className="flex gap-3 justify-end">
-          <Button variant="secondary" onClick={onClose}>
+        <div className="flex gap-2 justify-end pt-2">
+          <Button variant="ghost" onClick={onClose}>
             Cancel
           </Button>
           <Button onClick={handleSave} disabled={saving}>

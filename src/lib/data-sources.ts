@@ -13,6 +13,7 @@ const DATA_SOURCE_TOOLS: Record<string, Record<string, string>> = {
     close_item: "github_close_issue",
     list_commits: "github_list_commits",
     get_diffs: "github_get_diffs",
+    get_file: "github_get_file",
   },
   notion: {
     list_open_items: "notion_list_tasks",

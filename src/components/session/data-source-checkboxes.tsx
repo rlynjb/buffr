@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { listIntegrations, updateProject } from "@/lib/api";
+import { SourceIcon, sourceColor } from "@/components/icons";
 import type { Project } from "@/lib/types";
 
 interface DataSourceCheckboxesProps {
@@ -44,18 +45,29 @@ export function DataSourceCheckboxes({ project, onUpdate }: DataSourceCheckboxes
   }
 
   return (
-    <div className="flex gap-3 items-center">
-      <span className="text-xs text-muted">Sources:</span>
+    <div className="flex items-center gap-3">
+      <span className="text-[10px] text-zinc-600 uppercase tracking-wider font-semibold">
+        Filter
+      </span>
       {connectedSources.map((source) => (
-        <label key={source} className="flex items-center gap-1 text-xs text-foreground cursor-pointer">
+        <label key={source} className="flex items-center gap-1.5 cursor-pointer group">
           <input
             type="checkbox"
             checked={enabled.includes(source)}
             onChange={() => toggle(source)}
             disabled={saving}
-            className="accent-accent"
+            className="accent-purple-500 w-3 h-3"
           />
-          {source}
+          <span
+            className="flex items-center gap-1 text-[11px] transition-opacity"
+            style={{
+              color: enabled.includes(source) ? sourceColor(source) : "#555",
+              opacity: enabled.includes(source) ? 1 : 0.5,
+            }}
+          >
+            <SourceIcon source={source} size={12} />
+            <span className="capitalize">{source}</span>
+          </span>
         </label>
       ))}
     </div>

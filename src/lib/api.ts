@@ -5,7 +5,6 @@ import type {
   LLMProvider,
   ToolIntegration,
   ToolConfig,
-  CustomIntegration,
   PromptResponse,
 } from "./types";
 
@@ -165,17 +164,6 @@ export async function saveIntegrationConfig(
   );
 }
 
-export async function createIntegration(data: {
-  name: string;
-  description: string;
-  configFields: { key: string; label: string; secret: boolean }[];
-}): Promise<CustomIntegration> {
-  return request<CustomIntegration>("/tools?create", {
-    method: "POST",
-    body: JSON.stringify(data),
-  });
-}
-
 export async function removeIntegration(integrationId: string): Promise<void> {
   await request(
     `/tools?integrationId=${encodeURIComponent(integrationId)}`,
@@ -190,6 +178,19 @@ export async function executeToolAction(
   return request("/tools?execute", {
     method: "POST",
     body: JSON.stringify({ toolName, input }),
+  });
+}
+
+// Default Data Sources
+export async function getDefaultDataSources(): Promise<string[]> {
+  const res = await request<{ sources: string[] }>("/tools?defaultSources");
+  return res.sources;
+}
+
+export async function setDefaultDataSources(sources: string[]): Promise<void> {
+  await request("/tools?defaultSources", {
+    method: "PUT",
+    body: JSON.stringify({ sources }),
   });
 }
 

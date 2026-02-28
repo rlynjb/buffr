@@ -4,6 +4,9 @@ import { useState } from "react";
 import { Modal } from "@/components/ui/modal";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { IconLoader, IconPlus } from "@/components/icons";
+import { PHASE_COLORS } from "@/lib/constants";
 import { executeToolAction, createProject } from "@/lib/api";
 import type { Project } from "@/lib/types";
 
@@ -13,52 +16,80 @@ interface ImportProjectModalProps {
   onCreated: (project: Project) => void;
 }
 
+interface AnalysisResult {
+  name: string;
+  detectedStack?: string;
+  detectedPhase?: "idea" | "mvp" | "polish" | "deploy";
+  description?: string;
+  frameworks?: string[];
+  devTools?: string[];
+  openIssues?: number;
+  lastCommit?: string;
+}
+
 export function ImportProjectModal({
   open,
   onClose,
   onCreated,
 }: ImportProjectModalProps) {
   const [ownerRepo, setOwnerRepo] = useState("");
+  const [analyzing, setAnalyzing] = useState(false);
   const [importing, setImporting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [result, setResult] = useState<AnalysisResult | null>(null);
 
-  async function handleImport() {
-    setError(null);
-    const trimmed = ownerRepo.trim().replace(/\.git$/, "");
+  function parseInput(raw: string): { owner: string; repo: string } | null {
+    const trimmed = raw.trim().replace(/\.git$/, "").replace(/^https?:\/\/github\.com\//, "");
     const parts = trimmed.split("/");
-    if (parts.length !== 2 || !parts[0] || !parts[1]) {
-      setError("Enter a valid owner/repo (e.g. acme/my-app)");
+    if (parts.length >= 2 && parts[0] && parts[1]) {
+      return { owner: parts[0], repo: parts[1] };
+    }
+    return null;
+  }
+
+  async function handleAnalyze() {
+    setError(null);
+    const parsed = parseInput(ownerRepo);
+    if (!parsed) {
+      setError("Enter owner/repo or a GitHub URL");
       return;
     }
-    const [owner, repo] = parts;
+
+    setAnalyzing(true);
+    try {
+      const res = await executeToolAction("github_analyze_repo", parsed);
+      if (!res.ok) throw new Error(res.error || "Failed to analyze repository");
+      const analysis = res.result as AnalysisResult;
+      setResult({
+        ...analysis,
+        name: parsed.repo,
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to analyze");
+    } finally {
+      setAnalyzing(false);
+    }
+  }
+
+  async function handleImport() {
+    if (!result) return;
+    const parsed = parseInput(ownerRepo);
+    if (!parsed) return;
 
     setImporting(true);
     try {
-      const res = await executeToolAction("github_analyze_repo", { owner, repo });
-      if (!res.ok) {
-        throw new Error(res.error || "Failed to analyze repository");
-      }
-
-      const analysis = res.result as {
-        detectedStack?: string;
-        detectedPhase?: "idea" | "mvp" | "polish" | "deploy";
-        description?: string;
-        frameworks?: string[];
-      };
-
       const project = await createProject({
-        name: repo,
-        description: analysis.description || "",
-        stack: analysis.detectedStack || "",
-        phase: analysis.detectedPhase || "mvp",
-        githubRepo: `${owner}/${repo}`,
+        name: result.name,
+        description: result.description || "",
+        stack: result.detectedStack || "",
+        phase: result.detectedPhase || "mvp",
+        githubRepo: `${parsed.owner}/${parsed.repo}`,
         repoVisibility: "private",
         dataSources: ["github"],
         constraints: "",
         goals: "",
       });
-
-      setOwnerRepo("");
+      handleClose();
       onCreated(project);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to import project");
@@ -68,39 +99,76 @@ export function ImportProjectModal({
   }
 
   function handleClose() {
-    if (importing) return;
+    if (analyzing || importing) return;
     setOwnerRepo("");
     setError(null);
+    setResult(null);
     onClose();
   }
 
+  const phase = result?.detectedPhase || "mvp";
+  const stack = result?.frameworks || (result?.detectedStack ? result.detectedStack.split(",").map((s) => s.trim()) : []);
+  const devTools = result?.devTools || [];
+
   return (
-    <Modal open={open} onClose={handleClose} title="Import a project">
+    <Modal
+      open={open}
+      onClose={handleClose}
+      title="Load Existing Project"
+      subtitle="Enter a GitHub repo URL. buffr will analyze it and set up tracking."
+    >
       <div className="space-y-4">
-        <Input
-          label="GitHub Repository"
-          placeholder="owner/repo"
-          value={ownerRepo}
-          onChange={(e) => {
-            setOwnerRepo(e.target.value);
-            setError(null);
-          }}
-          error={error || undefined}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !importing) handleImport();
-          }}
-        />
-        <p className="text-xs text-muted">
-          The repository will be analyzed to detect its stack and development phase.
-        </p>
-        <div className="flex gap-3 justify-end">
-          <Button variant="secondary" onClick={handleClose} disabled={importing}>
-            Cancel
-          </Button>
-          <Button onClick={handleImport} disabled={importing || !ownerRepo.trim()}>
-            {importing ? "Importing..." : "Import"}
+        <div className="flex gap-2">
+          <div className="flex-1">
+            <Input
+              value={ownerRepo}
+              onChange={(e) => { setOwnerRepo(e.target.value); setError(null); setResult(null); }}
+              placeholder="rein/recipe-hub or https://github.com/rein/recipe-hub"
+              mono
+              error={error || undefined}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !analyzing) handleAnalyze();
+              }}
+            />
+          </div>
+          <Button onClick={handleAnalyze} disabled={!ownerRepo.trim() || analyzing}>
+            {analyzing ? <><IconLoader size={14} /> Analyzing...</> : "Analyze"}
           </Button>
         </div>
+
+        {result && (
+          <div className="rounded-xl border border-zinc-800/60 bg-zinc-900/50 p-4 space-y-4 animate-fadeIn">
+            <div className="flex items-center gap-3">
+              <span className="text-zinc-200 font-medium text-sm font-mono">
+                {result.name}
+              </span>
+              <Badge color={PHASE_COLORS[phase]}>{phase}</Badge>
+              {result.openIssues != null && (
+                <span className="text-xs text-zinc-500">
+                  {result.openIssues} open issues
+                </span>
+              )}
+            </div>
+
+            {stack.length > 0 && (
+              <div className="flex flex-wrap gap-1.5">
+                {stack.map((s) => (
+                  <Badge key={s} color="#818cf8">{s}</Badge>
+                ))}
+                {devTools.map((t) => (
+                  <Badge key={t} small>{t}</Badge>
+                ))}
+              </div>
+            )}
+
+            <div className="flex justify-end gap-2 pt-1">
+              <Button variant="secondary" onClick={handleClose}>Cancel</Button>
+              <Button onClick={handleImport} disabled={importing}>
+                <IconPlus size={14} /> {importing ? "Importing..." : "Import Project"}
+              </Button>
+            </div>
+          </div>
+        )}
       </div>
     </Modal>
   );

@@ -1,29 +1,37 @@
 "use client";
 
-type BadgeVariant = "default" | "accent" | "success" | "warning" | "error";
-
-const variantClasses: Record<BadgeVariant, string> = {
-  default: "bg-card border border-border text-muted",
-  accent: "bg-accent/10 text-accent border border-accent/20",
-  success: "bg-success/10 text-success border border-success/20",
-  warning: "bg-warning/10 text-warning border border-warning/20",
-  error: "bg-error/10 text-error border border-error/20",
-};
-
 interface BadgeProps {
   children: React.ReactNode;
-  variant?: BadgeVariant;
+  color?: string;
+  variant?: string;
+  small?: boolean;
   className?: string;
 }
 
 export function Badge({
   children,
-  variant = "default",
+  color,
+  small,
   className = "",
 }: BadgeProps) {
+  if (color) {
+    return (
+      <span
+        className={`inline-flex items-center gap-1 ${small ? "px-1 py-0.5 text-[9px]" : "px-1.5 py-0.5 text-[10px]"} rounded font-semibold uppercase tracking-wider border ${className}`}
+        style={{
+          color,
+          backgroundColor: `${color}18`,
+          borderColor: `${color}30`,
+        }}
+      >
+        {children}
+      </span>
+    );
+  }
+
   return (
     <span
-      className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium font-mono ${variantClasses[variant]} ${className}`}
+      className={`inline-flex items-center gap-1 ${small ? "px-1 py-0.5 text-[9px]" : "px-1.5 py-0.5 text-[10px]"} rounded font-semibold uppercase tracking-wider bg-zinc-800/50 text-zinc-400 border border-zinc-700/50 ${className}`}
     >
       {children}
     </span>

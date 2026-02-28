@@ -1,18 +1,19 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+import { DM_Sans, JetBrains_Mono } from "next/font/google";
 import { ProviderProvider } from "@/context/provider-context";
 import { NotificationProvider } from "@/components/ui/notification";
 import { Nav } from "@/components/nav";
 import { CommandPalette } from "@/components/command-palette";
 import "./globals.css";
 
-const geistSans = Geist({
-  variable: "--font-geist-sans",
+const dmSans = DM_Sans({
+  variable: "--font-dm-sans",
   subsets: ["latin"],
+  weight: ["400", "500", "600", "700"],
 });
 
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
+const jetbrainsMono = JetBrains_Mono({
+  variable: "--font-jetbrains-mono",
   subsets: ["latin"],
 });
 
@@ -29,12 +30,12 @@ export default function RootLayout({
   return (
     <html lang="en" className="dark">
       <body
-        className={`${geistSans.variable} ${geistMono.variable} antialiased bg-background text-foreground font-sans`}
+        className={`${dmSans.variable} ${jetbrainsMono.variable} antialiased bg-background text-foreground font-sans`}
       >
         <ProviderProvider>
           <NotificationProvider>
             <Nav />
-            <main className="mx-auto max-w-5xl px-4 py-8">{children}</main>
+            <main className="mx-auto max-w-3xl px-4 py-8">{children}</main>
             <CommandPalette />
           </NotificationProvider>
         </ProviderProvider>

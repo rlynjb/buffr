@@ -1,9 +1,9 @@
 "use client";
 
-import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { SourceIcon, IconGitHub, IconGlobe, IconChevron } from "@/components/icons";
+import { PHASE_COLORS } from "@/lib/constants";
 import type { Project } from "@/lib/types";
-import { PHASE_BADGE_VARIANTS } from "@/lib/constants";
 
 interface ProjectCardProps {
   project: Project;
@@ -14,41 +14,46 @@ export function ProjectCard({ project, onClick }: ProjectCardProps) {
   const updatedAgo = getTimeAgo(project.updatedAt);
 
   return (
-    <Card hover onClick={onClick}>
-      <div className="flex items-start justify-between mb-2">
-        <h3 className="font-semibold font-mono text-foreground">
-          {project.name}
-        </h3>
-        <Badge variant={PHASE_BADGE_VARIANTS[project.phase]}>{project.phase}</Badge>
+    <button
+      onClick={onClick}
+      className="w-full flex items-center gap-4 px-4 py-3.5 rounded-xl border border-zinc-800/60 bg-zinc-900/30 hover:bg-zinc-800/30 hover:border-zinc-700/60 transition-all text-left group cursor-pointer"
+    >
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-2.5 mb-1">
+          <span className="text-sm font-medium text-zinc-200 font-mono">
+            {project.name}
+          </span>
+          <Badge color={PHASE_COLORS[project.phase]}>{project.phase}</Badge>
+          {project.dataSources?.map((ds) => (
+            <span key={ds} className="opacity-50">
+              <SourceIcon source={ds} size={12} />
+            </span>
+          ))}
+        </div>
+        <div className="flex items-center gap-3 text-[12px] text-zinc-500">
+          {project.stack && <span>{project.stack}</span>}
+          <span>·</span>
+          <span>{updatedAgo}</span>
+        </div>
       </div>
-
-      {project.stack && (
-        <p className="text-xs font-mono text-muted mb-2">{project.stack}</p>
-      )}
-
-      {project.description && (
-        <p className="text-sm text-muted line-clamp-2 mb-3">
-          {project.description}
-        </p>
-      )}
-
-      <div className="flex items-center gap-4 text-xs text-muted">
-        <span>{updatedAgo}</span>
+      <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
         {project.githubRepo && (
-          <span className="font-mono">{project.githubRepo}</span>
+          <span className="text-zinc-500"><IconGitHub size={14} /></span>
         )}
         {project.netlifySiteUrl && (
-          <span className="text-success">deployed</span>
+          <span className="text-zinc-500"><IconGlobe size={14} /></span>
         )}
+        <span className="text-zinc-600"><IconChevron size={12} /></span>
       </div>
-    </Card>
+    </button>
   );
 }
 
 function getTimeAgo(dateStr: string): string {
   const diff = Date.now() - new Date(dateStr).getTime();
-  const mins = Math.floor(diff / 60000);
-  if (mins < 1) return "just now";
+  const secs = Math.floor(diff / 1000);
+  if (secs < 60) return "just now";
+  const mins = Math.floor(secs / 60);
   if (mins < 60) return `${mins}m ago`;
   const hours = Math.floor(mins / 60);
   if (hours < 24) return `${hours}h ago`;
