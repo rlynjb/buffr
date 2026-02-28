@@ -129,7 +129,7 @@
   @apply border-t border-purple-500/10 px-4 py-3 space-y-3;
 }
 
-.prompts-tab__response-action-label {
+.prompts-tab__response-action-heading {
   @apply text-[11px] text-zinc-500 uppercase tracking-wider font-semibold;
 }
 
@@ -167,4 +167,69 @@
 
 .prompts-tab__refine-hint {
   @apply text-[11px] text-zinc-600 px-1;
+}
+
+.prompts-tab__response-body {
+  @apply px-4 py-3;
+}
+
+.prompts-tab__response-bold {
+  @apply text-zinc-100;
+}
+
+.prompts-tab__response-heading {
+  @apply text-zinc-100 font-semibold;
+}
+
+.prompts-tab__response-apply-list {
+  @apply space-y-1.5;
+}
+
+.prompts-tab__response-action-icon {
+  @apply text-purple-400;
+}
+
+.prompts-tab__response-action-label {
+  @apply flex-1 truncate;
+}
+
+.prompts-tab__response-action-success {
+  @apply text-emerald-400;
+}
+
+.prompts-tab__response-refine-section {
+  @apply space-y-1.5;
+}
+
+.prompts-tab__refine-icon {
+  @apply text-blue-400;
+}
+
+.prompts-tab__refine-label {
+  @apply flex-1;
+}
+
+.prompts-tab__empty-link {
+  @apply text-purple-400 hover:underline;
+}
+
+.prompts-tab__list {
+  @apply space-y-1.5;
+}
+
+.prompts-tab__prompt-info {
+  @apply flex items-center gap-2.5 min-w-0;
+}
+
+.prompts-tab__prompt-expanded {
+  @apply px-3 pb-3;
+  animation: fadeIn 0.2s ease-out;
+}
+
+.prompts-tab__body-header-row {
+  @apply flex items-center justify-between mb-1.5;
+}
+
+.prompts-tab__ref-actions {
+  @apply ml-6 flex gap-2;
 }

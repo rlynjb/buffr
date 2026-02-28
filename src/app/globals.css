@@ -72,3 +72,7 @@ input[type="checkbox"] {
 .animate-slideDown {
   animation: slideDown 0.15s ease-out;
 }
+
+.main__container {
+  @apply mx-auto max-w-3xl px-4 py-8;
+}

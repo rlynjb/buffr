@@ -27,3 +27,15 @@
 .nav__cmd-button {
   @apply flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg hover:bg-white/5 text-zinc-500 hover:text-zinc-300 text-xs transition-colors;
 }
+
+.nav__left {
+  @apply flex items-center gap-4;
+}
+
+.nav__right {
+  @apply flex items-center gap-2;
+}
+
+.nav__cmd-label {
+  @apply hidden sm:inline;
+}

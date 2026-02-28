@@ -49,7 +49,7 @@ export function TestToolModal({ toolName, open, onClose }: TestToolModalProps) {
 
   return (
     <Modal open={open} onClose={handleClose} title={`Test: ${toolName || ""}`}>
-      <div className="space-y-4">
+      <div className="test-modal__body">
         <div>
           <label className="test-modal__label">
             Input (JSON)

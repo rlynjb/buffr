@@ -1,3 +1,4 @@
+// TODO: Add route-segment layout.tsx with metadata export for SEO (can't export metadata from 'use client' pages)
 "use client";
 
 import { useEffect, useState } from "react";
@@ -124,7 +125,7 @@ export default function ToolsPage() {
                   style={{ color: isConnected ? sourceColor(s) : "#555" }}
                 >
                   <SourceIcon source={s} size={14} />
-                  <span className="capitalize">{s}</span>
+                  <span>{s}</span>
                 </span>
                 {!isConnected && <span className="tools-page__defaults-note">(not configured)</span>}
               </label>
@@ -134,18 +135,18 @@ export default function ToolsPage() {
       </div>
 
       {/* Integrations */}
-      <div className="tools-page__section-label mb-3">
+      <div className="tools-page__section-label tools-page__section-label--mb">
         Integrations
       </div>
 
       {loading ? (
-        <div className="space-y-3 mb-8">
+        <div className="tools-page__skeleton-list">
           {[1, 2, 3].map((i) => (
             <div key={i} className="tools-page__skeleton" />
           ))}
         </div>
       ) : (
-        <div className="grid gap-3 mb-8">
+        <div className="tools-page__integration-grid">
           {integrations.map((integration) => (
             <div key={integration.id} className="tools-page__integration">
               <span
@@ -197,7 +198,7 @@ export default function ToolsPage() {
         <div className="tools-page__section-label">
           Tool Registry ({filteredTools.length})
         </div>
-        <div className="flex items-center gap-2">
+        <div className="tools-page__registry-controls">
           <div className="tools-page__registry-search">
             <span className="tools-page__registry-search-icon">
               <IconSearch size={12} />
@@ -223,9 +224,9 @@ export default function ToolsPage() {
                 {f === "all" ? (
                   "All"
                 ) : (
-                  <span className="flex items-center gap-1" style={{ color: sourceColor(f) }}>
+                  <span className="tools-page__registry-filter-source" style={{ color: sourceColor(f) }}>
                     <SourceIcon source={f} size={10} />
-                    <span className="capitalize">{f}</span>
+                    <span>{f}</span>
                   </span>
                 )}
               </button>
@@ -240,7 +241,7 @@ export default function ToolsPage() {
           <span>Parameters</span>
           <span>Source</span>
         </div>
-        <div className="divide-y divide-zinc-800/30">
+        <div className="tools-page__registry-body">
           {filteredTools.map((tool) => (
             <div key={tool.name} className="tools-page__registry-row">
               <div>

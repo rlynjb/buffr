@@ -54,7 +54,7 @@ export function ConfigModal({
       onClose={onClose}
       title={`Configure ${integration?.name || ""}`}
     >
-      <div className="space-y-4">
+      <div className="config-modal__body">
         {integration?.configFields.map((field) => (
           <Input
             key={field.key}

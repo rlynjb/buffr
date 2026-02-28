@@ -12,6 +12,10 @@
   @apply text-center py-16;
 }
 
+.project-page__skeleton {
+  @apply space-y-4;
+}
+
 .project-page__not-found-text {
   @apply text-muted;
 }

@@ -67,3 +67,15 @@
 .actions-tab__note-save {
   @apply text-[10px] text-purple-400 hover:text-purple-300 transition-colors disabled:opacity-50 cursor-pointer;
 }
+
+.actions-tab__list {
+  @apply space-y-1.5;
+}
+
+.actions-tab__action-buttons {
+  @apply flex gap-1;
+}
+
+.actions-tab__note-actions {
+  @apply flex gap-2;
+}

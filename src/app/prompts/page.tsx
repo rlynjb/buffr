@@ -1,3 +1,4 @@
+// TODO: Add route-segment layout.tsx with metadata export for SEO (can't export metadata from 'use client' pages)
 "use client";
 
 import { useEffect, useState } from "react";
@@ -172,7 +173,7 @@ export default function PromptsPage() {
 
       {/* Prompt list */}
       {loading ? (
-        <div className="space-y-2">
+        <div className="prompts-page__list">
           {[1, 2, 3].map((i) => (
             <div key={i} className="prompts-page__skeleton" />
           ))}
@@ -191,7 +192,7 @@ export default function PromptsPage() {
           )}
         </div>
       ) : (
-        <div className="space-y-2">
+        <div className="prompts-page__list">
           {filtered.map((prompt) => {
             const isRef = isReferencePrompt(prompt.body);
 
@@ -219,6 +220,7 @@ export default function PromptsPage() {
                     onClick={() => openEdit(prompt)}
                     className="prompts-page__prompt-action-btn"
                     title="Edit"
+                    aria-label="Edit prompt"
                   >
                     <IconEdit size={14} />
                   </button>
@@ -226,6 +228,7 @@ export default function PromptsPage() {
                     onClick={() => handleCopy(prompt)}
                     className="prompts-page__prompt-action-btn"
                     title="Copy"
+                    aria-label="Copy prompt"
                   >
                     <IconCopy size={14} />
                   </button>
@@ -233,6 +236,7 @@ export default function PromptsPage() {
                     onClick={() => handleDelete(prompt.id)}
                     className="prompts-page__prompt-action-btn--delete"
                     title="Delete"
+                    aria-label="Delete prompt"
                   >
                     <IconTrash size={14} />
                   </button>
@@ -275,7 +279,7 @@ export default function PromptsPage() {
         onClose={() => setModalOpen(false)}
         title={editing ? "Edit Prompt" : "New Prompt"}
       >
-        <div className="space-y-4">
+        <div className="prompts-page__modal-form">
           <Input
             label="Title"
             value={title}

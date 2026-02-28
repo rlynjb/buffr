@@ -67,6 +67,7 @@ export function EndSessionModal({
               try {
                 const res = await executeToolAction(commitTool, { owner, repo, since: since24h });
                 if (res.ok && res.result) {
+                  // TODO: Consider typed API wrappers to avoid type assertions on executeToolAction results
                   const commits = res.result as Array<{ message?: string; sha?: string; date?: string }>;
                   for (const c of commits) {
                     if (c.message) {
@@ -163,7 +164,7 @@ export function EndSessionModal({
 
     fetchAndSummarize();
     return () => { cancelled = true; };
-  }, [open]);
+  }, [open, hasLLM, sources, selected]);
 
   async function handleAutoFillChanges() {
     if (!whatChanged.trim()) return;
@@ -262,7 +263,7 @@ export function EndSessionModal({
 
       {/* Ready phase */}
       {phase === "ready" && (
-        <div className="space-y-4 animate-fadeIn">
+        <div className="end-session__form">
           {aiLabel && (
             <div className="end-session__ai-label">
               <IconSparkle size={10} /> {aiLabel}
@@ -277,10 +278,10 @@ export function EndSessionModal({
           />
 
           {/* What Changed */}
-          <div className="space-y-1.5">
+          <div className="end-session__field-group">
             <div className="end-session__field-header">
-              <label className="end-session__field-label">What Changed</label>
-              <div className="flex gap-1">
+              <label htmlFor="end-session-what-changed" className="end-session__field-label">What Changed</label>
+              <div className="end-session__field-buttons">
                 {hasLLM && whatChanged.trim() && (
                   <button onClick={handleAutoFillChanges} className="end-session__field-btn--ai">
                     AI Summarize
@@ -292,6 +293,7 @@ export function EndSessionModal({
               </div>
             </div>
             <textarea
+              id="end-session-what-changed"
               value={whatChanged}
               onChange={(e) => setWhatChanged(e.target.value)}
               rows={4}
@@ -301,10 +303,10 @@ export function EndSessionModal({
           </div>
 
           {/* Next Step */}
-          <div className="space-y-1.5">
+          <div className="end-session__field-group">
             <div className="end-session__field-header">
-              <label className="end-session__field-label">Next Step</label>
-              <div className="flex gap-1">
+              <label htmlFor="end-session-next-step" className="end-session__field-label">Next Step</label>
+              <div className="end-session__field-buttons">
                 {hasLLM && goal.trim() && (
                   <button onClick={handleSuggestNext} className="end-session__field-btn--ai">
                     AI Suggest
@@ -316,6 +318,7 @@ export function EndSessionModal({
               </div>
             </div>
             <textarea
+              id="end-session-next-step"
               value={nextStep}
               onChange={(e) => setNextStep(e.target.value)}
               rows={2}

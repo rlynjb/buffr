@@ -11,3 +11,7 @@
 .test-modal__result {
   @apply rounded-lg border border-zinc-800/60 bg-zinc-900/50 p-3 text-xs font-mono text-zinc-300 whitespace-pre-wrap max-h-64 overflow-y-auto;
 }
+
+.test-modal__body {
+  @apply space-y-4;
+}

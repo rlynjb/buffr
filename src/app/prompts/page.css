@@ -163,3 +163,11 @@
 .prompts-page__modal-hint {
   @apply text-[10px] text-zinc-600 mt-1;
 }
+
+.prompts-page__list {
+  @apply space-y-2;
+}
+
+.prompts-page__modal-form {
+  @apply space-y-4;
+}

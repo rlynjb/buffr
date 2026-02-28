@@ -17,7 +17,11 @@
 }
 
 .issues-tab__filter-source-text {
-  @apply flex items-center gap-1 text-[11px] transition-opacity;
+  @apply flex items-center gap-1 text-[11px] transition-opacity capitalize;
+}
+
+.issues-tab__list {
+  @apply space-y-1;
 }
 
 .issues-tab__filter-count {

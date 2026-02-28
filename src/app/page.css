@@ -31,3 +31,7 @@
 .dashboard__empty-text {
   @apply text-zinc-500 text-sm mb-4;
 }
+
+.dashboard__list {
+  @apply space-y-2;
+}

@@ -19,7 +19,7 @@ export function Nav() {
 
   return (
     <nav className="nav">
-      <div className="flex items-center gap-4">
+      <div className="nav__left">
         <Link href="/" className="nav__logo">
           <div className="nav__logo-icon">
             <span className="nav__logo-icon-text">b</span>
@@ -30,7 +30,7 @@ export function Nav() {
           <span className="nav__breadcrumb">{label}</span>
         )}
       </div>
-      <div className="flex items-center gap-2">
+      <div className="nav__right">
         <button
           onClick={() => {
             window.dispatchEvent(
@@ -40,7 +40,7 @@ export function Nav() {
           className="nav__cmd-button"
         >
           <IconCmd size={14} />
-          <span className="hidden sm:inline">Cmd+K</span>
+          <span className="nav__cmd-label">Cmd+K</span>
         </button>
         <ProviderSwitcher />
       </div>

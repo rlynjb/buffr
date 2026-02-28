@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import Link from "next/link";
 import { Badge } from "@/components/ui/badge";
 import { IconChevron, IconCopy, IconPlay, IconLoader, IconSparkle, IconCheck } from "@/components/icons";
 import type { Prompt, PromptResponse } from "@/lib/types";
@@ -116,16 +117,16 @@ function PromptResponseView({
 
   return (
     <div className="prompts-tab__response">
-      <div className="px-4 py-3">
+      <div className="prompts-tab__response-body">
         <div className="prompts-tab__response-header">
           <IconSparkle size={10} /> AI Response
         </div>
         <div className="prompts-tab__response-text">
           {displayed.split(/(\*\*.*?\*\*)/).map((p, i) =>
             p.startsWith("**") && p.endsWith("**") ? (
-              <strong key={i} className="text-zinc-100">{p.slice(2, -2)}</strong>
+              <strong key={i} className="prompts-tab__response-bold">{p.slice(2, -2)}</strong>
             ) : p.startsWith("##") ? (
-              <span key={i} className="text-zinc-100 font-semibold">{p.replace(/^##\s*/, "")}</span>
+              <span key={i} className="prompts-tab__response-heading">{p.replace(/^##\s*/, "")}</span>
             ) : (
               <span key={i}>{p}</span>
             )
@@ -137,8 +138,8 @@ function PromptResponseView({
       {done && (response.suggestedActions?.length || response.artifact) && (
         <div className="prompts-tab__response-actions">
           {response.suggestedActions && response.suggestedActions.length > 0 && (
-            <div className="space-y-1.5">
-              <div className="prompts-tab__response-action-label">Apply</div>
+            <div className="prompts-tab__response-apply-list">
+              <div className="prompts-tab__response-action-heading">Apply</div>
               {response.suggestedActions.map((action, idx) => {
                 const key = `${promptId}-${idx}`;
                 const st = actionStates[key] || "idle";
@@ -149,12 +150,12 @@ function PromptResponseView({
                     disabled={st !== "idle"}
                     className={`prompts-tab__response-action-btn ${actionStateClass[st]}`}
                   >
-                    <span className="text-purple-400">
+                    <span className="prompts-tab__response-action-icon">
                       <IconSparkle size={14} />
                     </span>
-                    <span className="flex-1 truncate">{action.label}</span>
+                    <span className="prompts-tab__response-action-label">{action.label}</span>
                     {st === "running" && <IconLoader size={14} />}
-                    {st === "success" && <span className="text-emerald-400"><IconCheck size={14} /></span>}
+                    {st === "success" && <span className="prompts-tab__response-action-success"><IconCheck size={14} /></span>}
                   </button>
                 );
               })}
@@ -162,16 +163,16 @@ function PromptResponseView({
           )}
 
           {response.artifact && (
-            <div className="space-y-1.5">
-              <div className="prompts-tab__response-action-label">Refine with local context</div>
+            <div className="prompts-tab__response-refine-section">
+              <div className="prompts-tab__response-action-heading">Refine with local context</div>
               <button
                 onClick={handleCopyRefine}
                 className={`prompts-tab__refine-btn ${
                   copied ? "prompts-tab__refine-btn--copied" : "prompts-tab__refine-btn--default"
                 }`}
               >
-                <span className="text-blue-400">{copied ? <IconCheck size={14} /> : <IconCopy size={14} />}</span>
-                <span className="flex-1">{copied ? "Copied to clipboard" : "Copy response + context for Claude Code"}</span>
+                <span className="prompts-tab__refine-icon">{copied ? <IconCheck size={14} /> : <IconCopy size={14} />}</span>
+                <span className="prompts-tab__refine-label">{copied ? "Copied to clipboard" : "Copy response + context for Claude Code"}</span>
               </button>
               <p className="prompts-tab__refine-hint">
                 Copies the AI output with your project context. Paste into Claude Code to refine with your local codebase.
@@ -247,7 +248,7 @@ export function PromptsTab({
     return (
       <div className="prompts-tab__empty">
         No prompts yet. Add prompts from the{" "}
-        <a href="/prompts" className="text-purple-400 hover:underline">Prompt Library</a>{" "}
+        <Link href="/prompts" className="prompts-tab__empty-link">Prompt Library</Link>{" "}
         to see them here with project context auto-filled.
       </div>
     );
@@ -276,7 +277,7 @@ export function PromptsTab({
       </div>
 
       {/* Accordion list */}
-      <div className="space-y-1.5">
+      <div className="prompts-tab__list">
         {filtered.map((prompt) => {
           const isExpanded = expandedId === prompt.id;
           const response = responses[prompt.id];
@@ -294,10 +295,19 @@ export function PromptsTab({
             >
               {/* Header */}
               <div
+                role="button"
+                tabIndex={0}
                 onClick={() => setExpandedId(isExpanded ? null : prompt.id)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    setExpandedId(isExpanded ? null : prompt.id);
+                  }
+                }}
                 className="prompts-tab__prompt-header"
+                aria-expanded={isExpanded}
               >
-                <div className="flex items-center gap-2.5 min-w-0">
+                <div className="prompts-tab__prompt-info">
                   <span
                     className={`prompts-tab__prompt-chevron ${
                       isExpanded ? "prompts-tab__prompt-chevron--open" : "prompts-tab__prompt-chevron--closed"
@@ -334,10 +344,10 @@ export function PromptsTab({
 
               {/* Expanded content */}
               {isExpanded && (
-                <div className="px-3 pb-3 animate-fadeIn">
+                <div className="prompts-tab__prompt-expanded">
                   {/* Body preview */}
                   <div className="prompts-tab__body-preview">
-                    <div className="flex items-center justify-between mb-1.5">
+                    <div className="prompts-tab__body-header-row">
                       <div className="prompts-tab__body-header">
                         {isReference
                           ? "Reference Prompt"
@@ -355,7 +365,7 @@ export function PromptsTab({
                   </div>
 
                   {isReference && (
-                    <div className="ml-6 flex gap-2">
+                    <div className="prompts-tab__ref-actions">
                       <button
                         onClick={(e) => { e.stopPropagation(); onCopy(prompt); }}
                         className="prompts-tab__ref-copy-btn"

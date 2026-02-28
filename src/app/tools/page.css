@@ -33,7 +33,7 @@
 }
 
 .tools-page__defaults-source {
-  @apply flex items-center gap-1 text-sm;
+  @apply flex items-center gap-1 text-sm capitalize;
 }
 
 .tools-page__defaults-note {
@@ -138,4 +138,28 @@
 
 .tools-page__registry-empty {
   @apply px-4 py-6 text-center text-xs text-zinc-600;
+}
+
+.tools-page__section-label--mb {
+  @apply mb-3;
+}
+
+.tools-page__skeleton-list {
+  @apply space-y-3 mb-8;
+}
+
+.tools-page__integration-grid {
+  @apply grid gap-3 mb-8;
+}
+
+.tools-page__registry-controls {
+  @apply flex items-center gap-2;
+}
+
+.tools-page__registry-filter-source {
+  @apply flex items-center gap-1 capitalize;
+}
+
+.tools-page__registry-body {
+  @apply divide-y divide-zinc-800/30;
 }

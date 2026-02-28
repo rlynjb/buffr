@@ -44,7 +44,7 @@ export function ProviderProvider({ children }: { children: ReactNode }) {
         const stored = localStorage.getItem("buffr-provider");
         const valid = data.providers.find((p) => p.name === stored);
         if (valid) {
-          setSelectedState(stored!);
+          setSelectedState(valid.name);
         } else if (data.providers.length > 0) {
           const def = data.providers.find(
             (p) => p.name === data.defaultProvider

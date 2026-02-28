@@ -28,7 +28,7 @@ type Tab = "session" | "items" | "actions" | "prompts";
 export function ResumeCard({ project, onEndSession }: ResumeCardProps) {
   const [lastSession, setLastSession] = useState<Session | null>(null);
   const [workItems, setWorkItems] = useState<WorkItem[]>([]);
-  const [dataSources, setDataSources] = useState<string[]>(project.dataSources || (project.githubRepo ? ["github"] : []));
+  const [dataSources] = useState<string[]>(project.dataSources || (project.githubRepo ? ["github"] : []));
   const [actions, setActions] = useState<NextAction[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<Tab>("session");
@@ -47,6 +47,7 @@ export function ResumeCard({ project, onEndSession }: ResumeCardProps) {
     try {
       const res = await executeToolAction("github_analyze_repo", { owner, repo });
       if (res.ok && res.result) {
+        // TODO: Consider typed API wrappers to avoid type assertions on executeToolAction results
         const analysis = res.result as {
           detectedStack?: string;
           detectedPhase?: "idea" | "mvp" | "polish" | "deploy";
@@ -154,10 +155,6 @@ export function ResumeCard({ project, onEndSession }: ResumeCardProps) {
     }
   }
 
-  function handleDataSourceUpdate(updated: Project) {
-    setDataSources(updated.dataSources || []);
-  }
-
   const resolvedBodies = useMemo(() => {
     const bodies: Record<string, string> = {};
     for (const prompt of prompts) {
@@ -175,7 +172,7 @@ export function ResumeCard({ project, onEndSession }: ResumeCardProps) {
 
   if (loading) {
     return (
-      <div className="animate-pulse">
+      <div className="resume-card__skeleton">
         <div className="resume-card__skeleton-bar" />
         <div className="resume-card__skeleton-block" />
       </div>
@@ -237,7 +234,7 @@ export function ResumeCard({ project, onEndSession }: ResumeCardProps) {
       {suggestions.slice(0, 2).map((s) => (
         <div key={s.id} className="resume-card__suggestion">
           <span className="resume-card__suggestion-text">
-            <span className="text-amber-400">&#128161;</span>
+            <span className="resume-card__suggestion-icon">&#128161;</span>
             {s.text}
           </span>
           <span className="resume-card__suggestion-actions">
@@ -296,7 +293,7 @@ export function ResumeCard({ project, onEndSession }: ResumeCardProps) {
             items={workItems}
             hasDataSource={(project.dataSources || []).length > 0 || !!project.githubRepo}
             project={project}
-            onDataSourceUpdate={handleDataSourceUpdate}
+
           />
         )}
         {activeTab === "actions" && (

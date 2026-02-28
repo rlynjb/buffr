@@ -12,6 +12,7 @@ interface ModalProps {
   children: React.ReactNode;
 }
 
+// TODO: Add focus trap to keep keyboard focus within modal while open (consider focus-trap library)
 export function Modal({ open, onClose, title, subtitle, children }: ModalProps) {
   const overlayRef = useRef<HTMLDivElement>(null);
 

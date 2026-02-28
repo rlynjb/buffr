@@ -28,7 +28,7 @@ export function Checkbox({
         disabled={disabled}
         className="checkbox__input"
       />
-      <div className="flex-1 min-w-0">
+      <div className="checkbox__content">
         <span className="checkbox__text">{label}</span>
         {description && (
           <p className="checkbox__description">{description}</p>

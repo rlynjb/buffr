@@ -19,3 +19,7 @@
 .config-modal__footer {
   @apply flex gap-2 justify-end pt-2;
 }
+
+.config-modal__body {
+  @apply space-y-4;
+}

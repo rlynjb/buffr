@@ -10,10 +10,9 @@ interface IssuesTabProps {
   items: WorkItem[];
   hasDataSource: boolean;
   project: Project;
-  onDataSourceUpdate: (updated: Project) => void;
 }
 
-export function IssuesTab({ items, hasDataSource, project, onDataSourceUpdate }: IssuesTabProps) {
+export function IssuesTab({ items, hasDataSource, project }: IssuesTabProps) {
   const [enabledSources, setEnabledSources] = useState<string[]>(
     project.dataSources || (project.githubRepo ? ["github"] : [])
   );
@@ -45,7 +44,7 @@ export function IssuesTab({ items, hasDataSource, project, onDataSourceUpdate }:
               }}
             >
               <SourceIcon source={s} size={12} />
-              <span className="capitalize">{s}</span>
+              <span>{s}</span>
             </span>
           </label>
         ))}
@@ -61,7 +60,7 @@ export function IssuesTab({ items, hasDataSource, project, onDataSourceUpdate }:
             : "Connect a data source like GitHub, Notion, or Jira to pull in issues and tasks."}
         </div>
       ) : (
-        <div className="space-y-1">
+        <div className="issues-tab__list">
           {filtered.slice(0, 15).map((item) => (
             <a
               key={`${item.source}-${item.id}`}

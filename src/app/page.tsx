@@ -73,7 +73,7 @@ export default function Dashboard() {
       </div>
 
       {loading ? (
-        <div className="space-y-2">
+        <div className="dashboard__list">
           {[1, 2, 3].map((i) => (
             <div key={i} className="dashboard__skeleton" />
           ))}
@@ -88,7 +88,7 @@ export default function Dashboard() {
           </Button>
         </div>
       ) : (
-        <div className="space-y-2">
+        <div className="dashboard__list">
           {projects.map((project) => (
             <ProjectCard
               key={project.id}

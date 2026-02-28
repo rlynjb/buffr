@@ -213,14 +213,14 @@ export function CommandPalette() {
                 >
                   {cmd.icon}
                 </span>
-                <div className="flex-1 min-w-0">
+                <div className="command-palette__item-content">
                   <div className="command-palette__item-label">{cmd.label}</div>
                   <div className="command-palette__item-description">
                     {cmd.description}
                   </div>
                 </div>
                 {cmd.kind === "prompt" && (
-                  <span className="flex gap-1 shrink-0">
+                  <span className="command-palette__item-badges">
                     <Badge color="#c084fc" small>Run</Badge>
                     <Badge small>Copy</Badge>
                   </span>

@@ -36,7 +36,7 @@ export function ActionsTab({
   }
 
   return (
-    <div className="space-y-1.5">
+    <div className="actions-tab__list">
       {actions.map((action) => (
         <div
           key={action.id}
@@ -65,7 +65,7 @@ export function ActionsTab({
               </Badge>
             )}
             {!action.done && !action.skipped && (
-              <div className="flex gap-1">
+              <div className="actions-tab__action-buttons">
                 <button
                   onClick={() => setNoteOpen(noteOpen === action.id ? null : action.id)}
                   className="actions-tab__action-btn--note"
@@ -94,7 +94,7 @@ export function ActionsTab({
                 <span className="actions-tab__note-hint">
                   <IconSparkle size={10} /> AI-suggested — edit freely
                 </span>
-                <div className="flex gap-2">
+                <div className="actions-tab__note-actions">
                   <button
                     onClick={() => onNoteChange(action.id, "")}
                     className="actions-tab__note-clear"

@@ -39,3 +39,16 @@
 .end-session__footer {
   @apply flex justify-end gap-2 pt-2;
 }
+
+.end-session__form {
+  @apply space-y-4;
+  animation: fadeIn 0.2s ease-out;
+}
+
+.end-session__field-group {
+  @apply space-y-1.5;
+}
+
+.end-session__field-buttons {
+  @apply flex gap-1;
+}

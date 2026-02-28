@@ -118,7 +118,7 @@ export function ImportProjectModal({
       title="Load Existing Project"
       subtitle="Enter a GitHub repo URL. buffr will analyze it and set up tracking."
     >
-      <div className="space-y-4">
+      <div className="import-modal__body">
         <div className="import-modal__form">
           <div className="import-modal__input">
             <Input

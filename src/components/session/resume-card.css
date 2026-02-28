@@ -95,3 +95,11 @@
 .resume-card__intent-label {
   @apply text-purple-200;
 }
+
+.resume-card__skeleton {
+  @apply animate-pulse;
+}
+
+.resume-card__suggestion-icon {
+  @apply text-amber-400;
+}

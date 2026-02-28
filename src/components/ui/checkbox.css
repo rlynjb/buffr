@@ -20,6 +20,10 @@
   @apply text-sm text-foreground;
 }
 
+.checkbox__content {
+  @apply flex-1 min-w-0;
+}
+
 .checkbox__description {
   @apply text-xs text-muted mt-0.5;
 }

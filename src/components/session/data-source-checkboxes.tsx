@@ -65,7 +65,7 @@ export function DataSourceCheckboxes({ project, onUpdate }: DataSourceCheckboxes
             }}
           >
             <SourceIcon source={source} size={12} />
-            <span className="capitalize">{source}</span>
+            <span>{source}</span>
           </span>
         </label>
       ))}

@@ -16,7 +16,7 @@ export function SessionTab({ lastSession }: SessionTabProps) {
   }
 
   return (
-    <div className="space-y-4">
+    <div className="session-tab__content">
       {lastSession.goal && (
         <div>
           <div className="session-tab__label">Goal</div>
@@ -26,7 +26,7 @@ export function SessionTab({ lastSession }: SessionTabProps) {
       {lastSession.whatChanged.length > 0 && (
         <div>
           <div className="session-tab__label--changes">What Changed</div>
-          <div className="space-y-1">
+          <div className="session-tab__change-list">
             {lastSession.whatChanged.map((w, i) => (
               <div key={i} className="session-tab__change">
                 <span className="session-tab__change-dot">·</span>

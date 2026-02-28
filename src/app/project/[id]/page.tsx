@@ -32,7 +32,7 @@ export default function ProjectPage() {
 
   if (loading) {
     return (
-      <div className="space-y-4">
+      <div className="project-page__skeleton">
         <div className="project-page__skeleton-bar" />
         <div className="project-page__skeleton-block" />
       </div>

@@ -17,5 +17,5 @@
 }
 
 .data-source-checkboxes__source {
-  @apply flex items-center gap-1 text-[11px] transition-opacity;
+  @apply flex items-center gap-1 text-[11px] transition-opacity capitalize;
 }

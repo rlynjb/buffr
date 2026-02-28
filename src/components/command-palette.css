@@ -65,6 +65,14 @@
   @apply text-sm text-zinc-200;
 }
 
+.command-palette__item-content {
+  @apply flex-1 min-w-0;
+}
+
+.command-palette__item-badges {
+  @apply flex gap-1 shrink-0;
+}
+
 .command-palette__item-description {
   @apply text-[11px] text-zinc-500 truncate;
 }
