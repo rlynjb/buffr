@@ -1,5 +1,7 @@
 "use client";
 
+import "./badge.css";
+
 interface BadgeProps {
   children: React.ReactNode;
   color?: string;
@@ -17,12 +19,12 @@ export function Badge({
   if (color) {
     return (
       <span
-        className={`inline-flex items-center gap-1 ${small ? "px-1 py-0.5 text-[9px]" : "px-1.5 py-0.5 text-[10px]"} rounded font-semibold uppercase tracking-wider border ${className}`}
+        className={`badge badge--colored ${small ? "badge--small" : ""} ${className}`}
         style={{
-          color,
-          backgroundColor: `${color}18`,
-          borderColor: `${color}30`,
-        }}
+          "--badge-color": color,
+          "--badge-bg": `${color}18`,
+          "--badge-border": `${color}30`,
+        } as React.CSSProperties}
       >
         {children}
       </span>
@@ -31,7 +33,7 @@ export function Badge({
 
   return (
     <span
-      className={`inline-flex items-center gap-1 ${small ? "px-1 py-0.5 text-[9px]" : "px-1.5 py-0.5 text-[10px]"} rounded font-semibold uppercase tracking-wider bg-zinc-800/50 text-zinc-400 border border-zinc-700/50 ${className}`}
+      className={`badge badge--default ${small ? "badge--small" : ""} ${className}`}
     >
       {children}
     </span>

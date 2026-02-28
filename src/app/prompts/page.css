@@ -1,0 +1,165 @@
+@reference "../globals.css";
+
+.prompts-page__back {
+  @apply flex items-center gap-1.5 text-sm text-zinc-500 hover:text-zinc-300 mb-6 transition-colors;
+}
+
+.prompts-page__header {
+  @apply flex items-center justify-between mb-6;
+}
+
+.prompts-page__title {
+  @apply text-lg font-semibold text-zinc-100;
+}
+
+.prompts-page__filter-row {
+  @apply flex items-center gap-3 mb-5;
+}
+
+.prompts-page__search {
+  @apply relative flex-1;
+}
+
+.prompts-page__search-icon {
+  @apply absolute left-3 top-1/2 -translate-y-1/2 text-zinc-600;
+}
+
+.prompts-page__search-input {
+  @apply w-full pl-9 pr-3 py-2 rounded-lg bg-zinc-900/80 border border-zinc-700/50 text-sm text-zinc-300 placeholder:text-zinc-600 focus:outline-none focus:border-purple-500/40 transition-colors;
+}
+
+.prompts-page__tag-filter {
+  @apply flex rounded-lg border border-zinc-700/50 overflow-hidden;
+}
+
+.prompts-page__tag-btn {
+  @apply px-2.5 py-1.5 text-[11px] font-medium transition-colors cursor-pointer;
+}
+
+.prompts-page__tag-btn--active {
+  @apply bg-zinc-700/50 text-zinc-200;
+}
+
+.prompts-page__tag-btn--inactive {
+  @apply text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50;
+}
+
+.prompts-page__skeleton {
+  @apply h-16 rounded-xl border border-zinc-800/60 bg-zinc-900/30 animate-pulse;
+}
+
+.prompts-page__empty {
+  @apply text-center py-16;
+}
+
+.prompts-page__empty-text {
+  @apply text-zinc-500 text-sm mb-4;
+}
+
+.prompts-page__prompt {
+  @apply flex items-center gap-3 px-4 py-3 rounded-xl border border-zinc-800/60 bg-zinc-900/30 hover:border-zinc-700/60 transition-colors;
+}
+
+.prompts-page__prompt-icon--ref {
+  @apply text-zinc-500;
+}
+
+.prompts-page__prompt-icon--dynamic {
+  @apply text-purple-400;
+}
+
+.prompts-page__prompt-body {
+  @apply flex-1 min-w-0;
+}
+
+.prompts-page__prompt-header {
+  @apply flex items-center gap-2;
+}
+
+.prompts-page__prompt-title {
+  @apply text-sm font-medium text-zinc-200 truncate;
+}
+
+.prompts-page__prompt-usage {
+  @apply text-[10px] text-zinc-600;
+}
+
+.prompts-page__prompt-preview {
+  @apply text-xs text-zinc-500 truncate mt-0.5;
+}
+
+.prompts-page__prompt-actions {
+  @apply flex items-center gap-1 shrink-0 opacity-0 transition-opacity;
+}
+
+.prompts-page__prompt:hover .prompts-page__prompt-actions {
+  @apply opacity-100;
+}
+
+.prompts-page__prompt-action-btn {
+  @apply p-1.5 rounded text-zinc-500 hover:text-zinc-200 hover:bg-white/5 transition-colors cursor-pointer;
+}
+
+.prompts-page__prompt-action-btn--delete {
+  @apply p-1.5 rounded text-zinc-500 hover:text-red-400 hover:bg-white/5 transition-colors cursor-pointer;
+}
+
+.prompts-page__prompt-copied {
+  @apply text-[10px] text-emerald-400 shrink-0;
+}
+
+.prompts-page__token--tool {
+  @apply px-1 py-0.5 rounded bg-purple-500/15 text-purple-300 text-[11px] font-mono;
+}
+
+.prompts-page__token--variable {
+  @apply px-1 py-0.5 rounded bg-blue-500/15 text-blue-300 text-[11px] font-mono;
+}
+
+.prompts-page__tools-ref {
+  @apply mt-8 p-4 rounded-xl border border-zinc-800/60 bg-zinc-900/30;
+}
+
+.prompts-page__tools-ref-label {
+  @apply text-[11px] text-zinc-500 uppercase tracking-wider font-semibold mb-2;
+}
+
+.prompts-page__tools-ref-desc {
+  @apply text-xs text-zinc-600 mb-3;
+}
+
+.prompts-page__tools-ref-list {
+  @apply flex flex-wrap gap-2;
+}
+
+.prompts-page__tools-ref-item {
+  @apply text-xs font-mono px-2 py-1 rounded border border-zinc-700/50 bg-zinc-800/30;
+}
+
+.prompts-page__scope-label {
+  @apply text-[11px] text-zinc-500 uppercase tracking-wider font-semibold mb-2 block;
+}
+
+.prompts-page__scope-toggle {
+  @apply flex rounded-lg border border-zinc-700/50 overflow-hidden w-fit;
+}
+
+.prompts-page__scope-btn {
+  @apply px-3 py-1.5 text-xs font-medium transition-colors cursor-pointer;
+}
+
+.prompts-page__scope-btn--active {
+  @apply bg-zinc-700/50 text-zinc-200;
+}
+
+.prompts-page__scope-btn--inactive {
+  @apply text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50;
+}
+
+.prompts-page__modal-footer {
+  @apply flex gap-2 justify-end pt-2;
+}
+
+.prompts-page__modal-hint {
+  @apply text-[10px] text-zinc-600 mt-1;
+}

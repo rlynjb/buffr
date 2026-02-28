@@ -6,6 +6,7 @@ import { ResumeCard } from "@/components/session/resume-card";
 import { EndSessionModal } from "@/components/session/end-session-modal";
 import { getProject } from "@/lib/api";
 import type { Project } from "@/lib/types";
+import "./page.css";
 
 export default function ProjectPage() {
   const params = useParams();
@@ -32,16 +33,16 @@ export default function ProjectPage() {
   if (loading) {
     return (
       <div className="space-y-4">
-        <div className="h-8 w-48 rounded bg-card animate-pulse" />
-        <div className="h-32 rounded-xl border border-border bg-card animate-pulse" />
+        <div className="project-page__skeleton-bar" />
+        <div className="project-page__skeleton-block" />
       </div>
     );
   }
 
   if (!project) {
     return (
-      <div className="text-center py-16">
-        <p className="text-muted">Project not found.</p>
+      <div className="project-page__not-found">
+        <p className="project-page__not-found-text">Project not found.</p>
       </div>
     );
   }

@@ -1,0 +1,34 @@
+@reference "../../app/globals.css";
+
+.import-modal__form {
+  @apply flex gap-2;
+}
+
+.import-modal__input {
+  @apply flex-1;
+}
+
+.import-modal__result {
+  @apply rounded-xl border border-zinc-800/60 bg-zinc-900/50 p-4 space-y-4;
+  animation: fadeIn 0.15s ease-out;
+}
+
+.import-modal__result-header {
+  @apply flex items-center gap-3;
+}
+
+.import-modal__result-name {
+  @apply text-zinc-200 font-medium text-sm font-mono;
+}
+
+.import-modal__result-issues {
+  @apply text-xs text-zinc-500;
+}
+
+.import-modal__result-tags {
+  @apply flex flex-wrap gap-1.5;
+}
+
+.import-modal__result-footer {
+  @apply flex justify-end gap-2 pt-1;
+}

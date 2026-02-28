@@ -1,5 +1,7 @@
 "use client";
 
+import "./checkbox.css";
+
 interface CheckboxProps {
   checked: boolean;
   onChange: (checked: boolean) => void;
@@ -17,19 +19,19 @@ export function Checkbox({
 }: CheckboxProps) {
   return (
     <label
-      className={`flex items-start gap-3 py-1.5 ${disabled ? "opacity-50" : "cursor-pointer"}`}
+      className={`checkbox ${disabled ? "checkbox--disabled" : "checkbox--enabled"}`}
     >
       <input
         type="checkbox"
         checked={checked}
         onChange={(e) => onChange(e.target.checked)}
         disabled={disabled}
-        className="mt-0.5 h-4 w-4 rounded border-border bg-card text-accent accent-accent focus:ring-accent cursor-pointer"
+        className="checkbox__input"
       />
       <div className="flex-1 min-w-0">
-        <span className="text-sm text-foreground">{label}</span>
+        <span className="checkbox__text">{label}</span>
         {description && (
-          <p className="text-xs text-muted mt-0.5">{description}</p>
+          <p className="checkbox__description">{description}</p>
         )}
       </div>
     </label>

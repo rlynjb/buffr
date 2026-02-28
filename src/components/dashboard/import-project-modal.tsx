@@ -9,6 +9,7 @@ import { IconLoader, IconPlus } from "@/components/icons";
 import { PHASE_COLORS } from "@/lib/constants";
 import { executeToolAction, createProject } from "@/lib/api";
 import type { Project } from "@/lib/types";
+import "./import-project-modal.css";
 
 interface ImportProjectModalProps {
   open: boolean;
@@ -118,8 +119,8 @@ export function ImportProjectModal({
       subtitle="Enter a GitHub repo URL. buffr will analyze it and set up tracking."
     >
       <div className="space-y-4">
-        <div className="flex gap-2">
-          <div className="flex-1">
+        <div className="import-modal__form">
+          <div className="import-modal__input">
             <Input
               value={ownerRepo}
               onChange={(e) => { setOwnerRepo(e.target.value); setError(null); setResult(null); }}
@@ -137,21 +138,21 @@ export function ImportProjectModal({
         </div>
 
         {result && (
-          <div className="rounded-xl border border-zinc-800/60 bg-zinc-900/50 p-4 space-y-4 animate-fadeIn">
-            <div className="flex items-center gap-3">
-              <span className="text-zinc-200 font-medium text-sm font-mono">
+          <div className="import-modal__result">
+            <div className="import-modal__result-header">
+              <span className="import-modal__result-name">
                 {result.name}
               </span>
               <Badge color={PHASE_COLORS[phase]}>{phase}</Badge>
               {result.openIssues != null && (
-                <span className="text-xs text-zinc-500">
+                <span className="import-modal__result-issues">
                   {result.openIssues} open issues
                 </span>
               )}
             </div>
 
             {stack.length > 0 && (
-              <div className="flex flex-wrap gap-1.5">
+              <div className="import-modal__result-tags">
                 {stack.map((s) => (
                   <Badge key={s} color="#818cf8">{s}</Badge>
                 ))}
@@ -161,7 +162,7 @@ export function ImportProjectModal({
               </div>
             )}
 
-            <div className="flex justify-end gap-2 pt-1">
+            <div className="import-modal__result-footer">
               <Button variant="secondary" onClick={handleClose}>Cancel</Button>
               <Button onClick={handleImport} disabled={importing}>
                 <IconPlus size={14} /> {importing ? "Importing..." : "Import Project"}

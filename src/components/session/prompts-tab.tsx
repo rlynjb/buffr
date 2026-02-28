@@ -6,6 +6,7 @@ import { IconChevron, IconCopy, IconPlay, IconLoader, IconSparkle, IconCheck } f
 import type { Prompt, PromptResponse } from "@/lib/types";
 import { runPrompt, executeToolAction } from "@/lib/api";
 import { useProvider } from "@/context/provider-context";
+import "./prompts-tab.css";
 
 interface PromptsTabProps {
   prompts: Prompt[];
@@ -58,13 +59,9 @@ function getPromptCategory(prompt: Prompt): Category {
 function renderBody(body: string) {
   return body.split(/({{.*?}})/).map((part, i) =>
     part.startsWith("{{tool:") ? (
-      <span key={i} className="px-1 py-0.5 rounded bg-purple-500/15 text-purple-300 text-[11px] font-mono">
-        {part}
-      </span>
+      <span key={i} className="prompts-tab__token--tool">{part}</span>
     ) : part.startsWith("{{") ? (
-      <span key={i} className="px-1 py-0.5 rounded bg-blue-500/15 text-blue-300 text-[11px] font-mono">
-        {part}
-      </span>
+      <span key={i} className="prompts-tab__token--variable">{part}</span>
     ) : (
       <span key={i}>{part}</span>
     )
@@ -125,13 +122,20 @@ function PromptResponseView({
     setTimeout(() => setCopied(false), 2000);
   }
 
+  const actionStateClass: Record<string, string> = {
+    idle: "prompts-tab__response-action-btn--idle",
+    running: "prompts-tab__response-action-btn--running",
+    success: "prompts-tab__response-action-btn--success",
+    error: "prompts-tab__response-action-btn--error",
+  };
+
   return (
-    <div className="ml-6 rounded-xl border border-purple-500/20 bg-purple-500/[0.03] overflow-hidden">
+    <div className="prompts-tab__response">
       <div className="px-4 py-3">
-        <div className="text-[11px] text-purple-400/60 uppercase tracking-wider font-semibold mb-2 flex items-center gap-1.5">
+        <div className="prompts-tab__response-header">
           <IconSparkle size={10} /> AI Response
         </div>
-        <div className="text-sm text-zinc-300 leading-relaxed whitespace-pre-wrap">
+        <div className="prompts-tab__response-text">
           {displayed.split(/(\*\*.*?\*\*)/).map((p, i) =>
             p.startsWith("**") && p.endsWith("**") ? (
               <strong key={i} className="text-zinc-100">{p.slice(2, -2)}</strong>
@@ -141,17 +145,15 @@ function PromptResponseView({
               <span key={i}>{p}</span>
             )
           )}
-          {!done && (
-            <span className="inline-block w-0.5 h-4 bg-purple-400 ml-0.5 animate-pulse align-text-bottom" />
-          )}
+          {!done && <span className="prompts-tab__response-cursor" />}
         </div>
       </div>
 
       {done && (response.suggestedActions?.length || response.artifact) && (
-        <div className="border-t border-purple-500/10 px-4 py-3 space-y-3">
+        <div className="prompts-tab__response-actions">
           {response.suggestedActions && response.suggestedActions.length > 0 && (
             <div className="space-y-1.5">
-              <div className="text-[11px] text-zinc-500 uppercase tracking-wider font-semibold">Apply</div>
+              <div className="prompts-tab__response-action-label">Apply</div>
               {response.suggestedActions.map((action, idx) => {
                 const key = `${promptId}-${idx}`;
                 const st = actionStates[key] || "idle";
@@ -160,15 +162,7 @@ function PromptResponseView({
                     key={idx}
                     onClick={() => handleAction(idx, action.tool, action.params)}
                     disabled={st !== "idle"}
-                    className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-left text-sm transition-all cursor-pointer ${
-                      st === "idle"
-                        ? "bg-zinc-800/50 hover:bg-zinc-800 text-zinc-200 border border-zinc-700/50"
-                        : st === "running"
-                          ? "bg-zinc-800/30 text-zinc-400 border border-zinc-700/30"
-                          : st === "success"
-                            ? "bg-emerald-500/10 text-emerald-300 border border-emerald-500/20"
-                            : "bg-red-500/10 text-red-300 border border-red-500/20"
-                    }`}
+                    className={`prompts-tab__response-action-btn ${actionStateClass[st]}`}
                   >
                     <span className="text-purple-400">
                       <IconSparkle size={14} />
@@ -184,19 +178,17 @@ function PromptResponseView({
 
           {response.artifact && (
             <div className="space-y-1.5">
-              <div className="text-[11px] text-zinc-500 uppercase tracking-wider font-semibold">Refine with local context</div>
+              <div className="prompts-tab__response-action-label">Refine with local context</div>
               <button
                 onClick={handleCopyRefine}
-                className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-left text-sm transition-all border cursor-pointer ${
-                  copied
-                    ? "bg-emerald-500/10 text-emerald-300 border-emerald-500/20"
-                    : "bg-zinc-800/50 hover:bg-zinc-800 text-zinc-200 border-zinc-700/50"
+                className={`prompts-tab__refine-btn ${
+                  copied ? "prompts-tab__refine-btn--copied" : "prompts-tab__refine-btn--default"
                 }`}
               >
                 <span className="text-blue-400">{copied ? <IconCheck size={14} /> : <IconCopy size={14} />}</span>
                 <span className="flex-1">{copied ? "Copied to clipboard" : "Copy response + context for Claude Code"}</span>
               </button>
-              <p className="text-[11px] text-zinc-600 px-1">
+              <p className="prompts-tab__refine-hint">
                 Copies the AI output with your project context. Paste into Claude Code to refine with your local codebase.
               </p>
             </div>
@@ -268,7 +260,7 @@ export function PromptsTab({
 
   if (prompts.length === 0) {
     return (
-      <div className="py-8 text-center text-sm text-zinc-600">
+      <div className="prompts-tab__empty">
         No prompts yet. Add prompts from the{" "}
         <a href="/prompts" className="text-purple-400 hover:underline">Prompt Library</a>{" "}
         to see them here with project context auto-filled.
@@ -279,21 +271,21 @@ export function PromptsTab({
   return (
     <div>
       {/* Category filter */}
-      <div className="flex items-center gap-1.5 pb-3 mb-3 border-b border-zinc-800/50">
+      <div className="prompts-tab__category-filter">
         {CATEGORIES.map((cat) => (
           <button
             key={cat.key}
             onClick={() => setActiveCategory(cat.key)}
-            className={`px-2.5 py-1 rounded-lg text-[11px] font-medium transition-colors cursor-pointer ${
+            className={`prompts-tab__category ${
               activeCategory === cat.key
-                ? "bg-zinc-700/50 text-zinc-200"
-                : "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50"
+                ? "prompts-tab__category--active"
+                : "prompts-tab__category--inactive"
             }`}
           >
             {cat.label}
           </button>
         ))}
-        <span className="text-[10px] text-zinc-600 ml-auto">
+        <span className="prompts-tab__count">
           {filtered.length} prompt{filtered.length !== 1 ? "s" : ""}
         </span>
       </div>
@@ -311,36 +303,34 @@ export function PromptsTab({
           return (
             <div
               key={prompt.id}
-              className={`rounded-xl border transition-colors ${
-                isExpanded
-                  ? "border-zinc-700/60 bg-zinc-800/20"
-                  : "border-transparent hover:bg-white/[0.02]"
+              className={`prompts-tab__prompt ${
+                isExpanded ? "prompts-tab__prompt--expanded" : "prompts-tab__prompt--collapsed"
               }`}
             >
               {/* Header */}
               <div
                 onClick={() => setExpandedId(isExpanded ? null : prompt.id)}
-                className="flex items-center justify-between py-2.5 px-3 cursor-pointer group"
+                className="prompts-tab__prompt-header"
               >
                 <div className="flex items-center gap-2.5 min-w-0">
                   <span
-                    className={`transition-transform duration-200 text-zinc-500 ${
-                      isExpanded ? "rotate-0" : "-rotate-90"
+                    className={`prompts-tab__prompt-chevron ${
+                      isExpanded ? "prompts-tab__prompt-chevron--open" : "prompts-tab__prompt-chevron--closed"
                     }`}
                   >
                     <IconChevron size={12} />
                   </span>
-                  <span className="text-sm text-zinc-200 font-medium truncate">{prompt.title}</span>
+                  <span className="prompts-tab__prompt-title">{prompt.title}</span>
                   {prompt.tags.slice(0, 2).map((t) => (
                     <Badge key={t} color="#555" small>{t}</Badge>
                   ))}
-                  <span className="text-[10px] text-zinc-600">{prompt.usageCount || 0}×</span>
+                  <span className="prompts-tab__prompt-usage">{prompt.usageCount || 0}×</span>
                   {prompt.scope === "project" && <Badge color="#60a5fa" small>project</Badge>}
                 </div>
-                <div className="flex items-center gap-1 shrink-0 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity">
+                <div className="prompts-tab__prompt-actions">
                   <button
                     onClick={(e) => { e.stopPropagation(); onCopy(prompt); }}
-                    className="flex items-center gap-1 px-2 py-1 rounded text-xs text-zinc-400 hover:text-zinc-200 hover:bg-white/5 transition-colors cursor-pointer"
+                    className="prompts-tab__prompt-btn--copy"
                   >
                     <IconCopy size={12} /> {copiedId === prompt.id ? "Copied!" : "Copy"}
                   </button>
@@ -348,7 +338,7 @@ export function PromptsTab({
                     <button
                       onClick={(e) => handleRun(prompt, e)}
                       disabled={isRunning}
-                      className="flex items-center gap-1 px-2 py-1 rounded text-xs text-purple-400 hover:text-purple-200 hover:bg-purple-500/10 transition-colors disabled:opacity-50 cursor-pointer"
+                      className="prompts-tab__prompt-btn--run"
                     >
                       {isRunning ? <IconLoader size={12} /> : <IconPlay size={12} />}
                       {isRunning ? "Running..." : "Run"}
@@ -361,9 +351,9 @@ export function PromptsTab({
               {isExpanded && (
                 <div className="px-3 pb-3 animate-fadeIn">
                   {/* Body preview */}
-                  <div className="ml-6 mb-3 px-3 py-2.5 rounded-lg bg-zinc-900/80 border border-zinc-800/60">
+                  <div className="prompts-tab__body-preview">
                     <div className="flex items-center justify-between mb-1.5">
-                      <div className="text-[11px] text-zinc-500 uppercase tracking-wider font-semibold">
+                      <div className="prompts-tab__body-header">
                         {isReference
                           ? "Reference Prompt"
                           : hasTools
@@ -371,36 +361,31 @@ export function PromptsTab({
                             : "Template — resolves variables"}
                       </div>
                       {isReference && (
-                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-zinc-700/40 text-zinc-400">
-                          Copy-paste ready
-                        </span>
+                        <span className="prompts-tab__body-ref-badge">Copy-paste ready</span>
                       )}
                     </div>
-                    <div className="text-[13px] text-zinc-400 leading-relaxed whitespace-pre-wrap">
+                    <div className="prompts-tab__body-text">
                       {renderBody(resolvedBodies[prompt.id] || prompt.body)}
                     </div>
                   </div>
 
-                  {/* Reference prompt: single copy button */}
                   {isReference && (
                     <div className="ml-6 flex gap-2">
                       <button
                         onClick={(e) => { e.stopPropagation(); onCopy(prompt); }}
-                        className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm bg-zinc-800/50 hover:bg-zinc-800 text-zinc-200 border border-zinc-700/50 transition-colors cursor-pointer"
+                        className="prompts-tab__ref-copy-btn"
                       >
                         <IconCopy size={14} /> {copiedId === prompt.id ? "Copied!" : "Copy to Clipboard"}
                       </button>
                     </div>
                   )}
 
-                  {/* Running state */}
                   {isRunnable && isRunning && (
-                    <div className="ml-6 flex items-center gap-2 px-3 py-3 text-sm text-zinc-400">
+                    <div className="prompts-tab__running">
                       <IconLoader size={14} /> Resolving tools and calling AI...
                     </div>
                   )}
 
-                  {/* Response */}
                   {isRunnable && response && !isRunning && (
                     <PromptResponseView
                       response={response}

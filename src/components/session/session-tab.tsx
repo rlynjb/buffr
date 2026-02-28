@@ -1,3 +1,4 @@
+import "./session-tab.css";
 import type { Session } from "@/lib/types";
 
 interface SessionTabProps {
@@ -14,7 +15,7 @@ function timeAgo(iso: string): string {
 export function SessionTab({ lastSession }: SessionTabProps) {
   if (!lastSession) {
     return (
-      <div className="py-8 text-center text-sm text-zinc-600">
+      <div className="session-tab__empty">
         No sessions yet. Start your first session!
       </div>
     );
@@ -24,21 +25,17 @@ export function SessionTab({ lastSession }: SessionTabProps) {
     <div className="space-y-4">
       {lastSession.goal && (
         <div>
-          <div className="text-[11px] text-zinc-500 uppercase tracking-wider font-semibold mb-1">
-            Goal
-          </div>
-          <div className="text-sm text-zinc-200">{lastSession.goal}</div>
+          <div className="session-tab__label">Goal</div>
+          <div className="session-tab__value">{lastSession.goal}</div>
         </div>
       )}
       {lastSession.whatChanged.length > 0 && (
         <div>
-          <div className="text-[11px] text-zinc-500 uppercase tracking-wider font-semibold mb-1.5">
-            What Changed
-          </div>
+          <div className="session-tab__label--changes">What Changed</div>
           <div className="space-y-1">
             {lastSession.whatChanged.map((w, i) => (
-              <div key={i} className="text-sm text-zinc-300 flex items-start gap-2">
-                <span className="text-zinc-600 mt-0.5">·</span>
+              <div key={i} className="session-tab__change">
+                <span className="session-tab__change-dot">·</span>
                 {w}
               </div>
             ))}
@@ -47,21 +44,17 @@ export function SessionTab({ lastSession }: SessionTabProps) {
       )}
       {lastSession.nextStep && (
         <div>
-          <div className="text-[11px] text-zinc-500 uppercase tracking-wider font-semibold mb-1">
-            Next Step
-          </div>
-          <div className="text-sm text-zinc-200">{lastSession.nextStep}</div>
+          <div className="session-tab__label">Next Step</div>
+          <div className="session-tab__value">{lastSession.nextStep}</div>
         </div>
       )}
       {lastSession.blockers && (
         <div>
-          <div className="text-[11px] text-red-400/60 uppercase tracking-wider font-semibold mb-1">
-            Blockers
-          </div>
-          <div className="text-sm text-red-300/80">{lastSession.blockers}</div>
+          <div className="session-tab__label--blocker">Blockers</div>
+          <div className="session-tab__value--blocker">{lastSession.blockers}</div>
         </div>
       )}
-      <div className="text-[11px] text-zinc-600">{timeAgo(lastSession.createdAt)}</div>
+      <div className="session-tab__timestamp">{timeAgo(lastSession.createdAt)}</div>
     </div>
   );
 }

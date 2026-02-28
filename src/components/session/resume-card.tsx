@@ -16,6 +16,7 @@ import { SessionTab } from "./session-tab";
 import { IssuesTab } from "./issues-tab";
 import { ActionsTab } from "./actions-tab";
 import { PromptsTab } from "./prompts-tab";
+import "./resume-card.css";
 
 interface ResumeCardProps {
   project: Project;
@@ -172,39 +173,36 @@ export function ResumeCard({ project, onEndSession }: ResumeCardProps) {
   if (loading) {
     return (
       <div className="animate-pulse">
-        <div className="h-8 w-48 bg-zinc-800/50 rounded mb-4" />
-        <div className="h-32 bg-zinc-900/30 rounded-xl border border-zinc-800/60" />
+        <div className="resume-card__skeleton-bar" />
+        <div className="resume-card__skeleton-block" />
       </div>
     );
   }
 
   return (
     <div>
-      <Link
-        href="/"
-        className="flex items-center gap-1.5 text-sm text-zinc-500 hover:text-zinc-300 mb-4 transition-colors"
-      >
+      <Link href="/" className="resume-card__back">
         <IconBack size={14} /> Dashboard
       </Link>
 
-      <div className="flex items-start justify-between mb-4">
+      <div className="resume-card__header">
         <div>
-          <div className="flex items-center gap-2.5 mb-1">
-            <span className="text-lg font-semibold text-zinc-100 font-mono">
+          <div className="resume-card__name-row">
+            <span className="resume-card__name">
               {currentProject.name}
             </span>
             <Badge color={PHASE_COLORS[currentProject.phase]}>
               {currentProject.phase}
             </Badge>
           </div>
-          <div className="flex items-center gap-3 text-xs text-zinc-500">
+          <div className="resume-card__meta">
             {currentProject.stack && <span>{currentProject.stack}</span>}
             {currentProject.githubRepo && (
               <a
                 href={`https://github.com/${currentProject.githubRepo}`}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="flex items-center gap-1 hover:text-zinc-300 transition-colors"
+                className="resume-card__meta-link"
               >
                 <IconGitHub size={12} /> {currentProject.githubRepo}
               </a>
@@ -214,7 +212,7 @@ export function ResumeCard({ project, onEndSession }: ResumeCardProps) {
                 href={currentProject.netlifySiteUrl}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="flex items-center gap-1 hover:text-zinc-300 transition-colors"
+                className="resume-card__meta-link"
               >
                 <IconGlobe size={12} /> Site
               </a>
@@ -223,7 +221,7 @@ export function ResumeCard({ project, onEndSession }: ResumeCardProps) {
               <button
                 onClick={handleSync}
                 disabled={syncing}
-                className="hover:text-zinc-300 transition-colors disabled:opacity-50 cursor-pointer"
+                className="resume-card__sync-btn"
               >
                 {syncing ? "Syncing..." : "Sync"}
               </button>
@@ -234,24 +232,18 @@ export function ResumeCard({ project, onEndSession }: ResumeCardProps) {
       </div>
 
       {suggestions.slice(0, 2).map((s) => (
-        <div
-          key={s.id}
-          className="flex items-center justify-between px-3 py-2 mb-2 rounded-lg border border-amber-500/20 bg-amber-500/5 text-amber-200 text-[13px]"
-        >
-          <span className="flex items-center gap-2">
+        <div key={s.id} className="resume-card__suggestion">
+          <span className="resume-card__suggestion-text">
             <span className="text-amber-400">&#128161;</span>
             {s.text}
           </span>
-          <span className="flex gap-1.5">
+          <span className="resume-card__suggestion-actions">
             {s.actionRoute ? (
-              <a
-                href={s.actionRoute}
-                className="px-2.5 py-0.5 rounded bg-amber-500/20 hover:bg-amber-500/30 text-amber-100 text-xs font-medium transition-colors"
-              >
+              <a href={s.actionRoute} className="resume-card__suggestion-action">
                 Do it
               </a>
             ) : (
-              <span className="px-2.5 py-0.5 rounded bg-amber-500/20 text-amber-100 text-xs font-medium">
+              <span className="resume-card__suggestion-label">
                 {s.actionLabel}
               </span>
             )}
@@ -261,7 +253,7 @@ export function ResumeCard({ project, onEndSession }: ResumeCardProps) {
                 await updateProject(project.id, { dismissedSuggestions: dismissed }).catch(() => {});
                 setSuggestions((prev) => prev.filter((x) => x.id !== s.id));
               }}
-              className="px-2 py-0.5 rounded hover:bg-white/5 text-amber-300/50 text-xs transition-colors cursor-pointer"
+              className="resume-card__suggestion-dismiss"
             >
               Dismiss
             </button>
@@ -270,23 +262,23 @@ export function ResumeCard({ project, onEndSession }: ResumeCardProps) {
       ))}
 
       {lastSession?.detectedIntent && (
-        <div className="flex items-center gap-2 mb-3 px-3 py-1.5 rounded-lg bg-purple-500/5 border border-purple-500/15">
-          <span className="text-purple-400"><IconSparkle size={14} /></span>
-          <span className="text-xs text-purple-300/80">
-            You were working on: <strong className="text-purple-200">{lastSession.detectedIntent}</strong>
+        <div className="resume-card__intent">
+          <span className="resume-card__intent-icon"><IconSparkle size={14} /></span>
+          <span className="resume-card__intent-text">
+            You were working on: <strong className="resume-card__intent-label">{lastSession.detectedIntent}</strong>
           </span>
         </div>
       )}
 
-      <div className="flex gap-1 mb-4 border-b border-zinc-800/60">
+      <div className="resume-card__tabs">
         {tabs.map((t) => (
           <button
             key={t.id}
             onClick={() => setActiveTab(t.id)}
-            className={`px-3 py-2 text-sm font-medium transition-colors border-b-2 -mb-px cursor-pointer ${
+            className={`resume-card__tab ${
               activeTab === t.id
-                ? "text-zinc-200 border-purple-500"
-                : "text-zinc-500 border-transparent hover:text-zinc-300"
+                ? "resume-card__tab--active"
+                : "resume-card__tab--inactive"
             }`}
           >
             {t.label}
@@ -294,7 +286,7 @@ export function ResumeCard({ project, onEndSession }: ResumeCardProps) {
         ))}
       </div>
 
-      <div className="animate-fadeIn">
+      <div className="resume-card__tab-content">
         {activeTab === "session" && <SessionTab lastSession={lastSession} />}
         {activeTab === "items" && (
           <IssuesTab

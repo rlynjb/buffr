@@ -1,0 +1,21 @@
+@reference "../../app/globals.css";
+
+.data-source-checkboxes {
+  @apply flex items-center gap-3;
+}
+
+.data-source-checkboxes__label {
+  @apply text-[10px] text-zinc-600 uppercase tracking-wider font-semibold;
+}
+
+.data-source-checkboxes__option {
+  @apply flex items-center gap-1.5 cursor-pointer;
+}
+
+.data-source-checkboxes__checkbox {
+  @apply accent-purple-500 w-3 h-3;
+}
+
+.data-source-checkboxes__source {
+  @apply flex items-center gap-1 text-[11px] transition-opacity;
+}

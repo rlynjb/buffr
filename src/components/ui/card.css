@@ -1,0 +1,9 @@
+@reference "../../app/globals.css";
+
+.card {
+  @apply rounded-xl border border-border bg-card p-5;
+}
+
+.card--hoverable {
+  @apply cursor-pointer transition-colors hover:bg-card-hover hover:border-muted/30;
+}

@@ -14,6 +14,7 @@ import {
   IconSparkle,
   IconCheck,
 } from "@/components/icons";
+import "./command-palette.css";
 
 function isReferencePrompt(body: string): boolean {
   return !body.includes("{{");
@@ -178,57 +179,46 @@ export function CommandPalette() {
   if (!open) return null;
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-start justify-center pt-[15vh]"
-      onClick={() => setOpen(false)}
-    >
-      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" />
+    <div className="command-palette" onClick={() => setOpen(false)}>
+      <div className="command-palette__backdrop" />
       <div
-        className="relative w-full max-w-lg rounded-xl border border-zinc-700/60 bg-zinc-900 shadow-2xl overflow-hidden animate-slideDown"
+        className="command-palette__panel"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex items-center gap-3 px-4 py-3 border-b border-zinc-800">
-          <IconSearch size={16} className="text-zinc-500 shrink-0" />
+        <div className="command-palette__search">
+          <IconSearch size={16} className="command-palette__search-icon" />
           <input
             ref={inputRef}
             type="text"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Search commands, prompts..."
-            className="flex-1 bg-transparent text-sm text-zinc-200 placeholder:text-zinc-500 focus:outline-none"
+            className="command-palette__search-input"
           />
-          <kbd className="shrink-0 px-1.5 py-0.5 rounded bg-zinc-800 text-[10px] text-zinc-500 border border-zinc-700/50 font-mono">
-            ESC
-          </kbd>
+          <kbd className="command-palette__search-kbd">ESC</kbd>
         </div>
-        <div className="max-h-[320px] overflow-y-auto py-1.5">
+        <div className="command-palette__results">
           {filtered.length === 0 ? (
-            <div className="px-4 py-6 text-center text-sm text-zinc-500">
-              No results
-            </div>
+            <div className="command-palette__empty">No results</div>
           ) : (
             filtered.map((cmd, i) => (
               <button
                 key={cmd.id}
                 onClick={cmd.action}
-                className={`w-full flex items-center gap-3 px-4 py-2.5 text-left transition-colors group cursor-pointer ${
-                  i === selectedIndex
-                    ? "bg-white/[0.04]"
-                    : "hover:bg-white/[0.04]"
+                className={`command-palette__item ${
+                  i === selectedIndex ? "command-palette__item--selected" : ""
                 }`}
               >
                 <span
-                  className={`shrink-0 ${
-                    cmd.kind === "prompt"
-                      ? "text-purple-400"
-                      : "text-zinc-500"
-                  } group-hover:text-zinc-300 transition-colors`}
+                  className={`command-palette__item-icon ${
+                    cmd.kind === "prompt" ? "command-palette__item-icon--prompt" : ""
+                  }`}
                 >
                   {cmd.icon}
                 </span>
                 <div className="flex-1 min-w-0">
-                  <div className="text-sm text-zinc-200">{cmd.label}</div>
-                  <div className="text-[11px] text-zinc-500 truncate">
+                  <div className="command-palette__item-label">{cmd.label}</div>
+                  <div className="command-palette__item-description">
                     {cmd.description}
                   </div>
                 </div>

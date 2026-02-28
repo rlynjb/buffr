@@ -8,6 +8,7 @@ import {
   type ReactNode,
 } from "react";
 import { IconX } from "@/components/icons";
+import "./notification.css";
 
 type NotificationType = "error" | "success" | "info";
 
@@ -45,7 +46,7 @@ export function NotificationProvider({ children }: { children: ReactNode }) {
   return (
     <NotificationContext.Provider value={{ notify }}>
       {children}
-      <div className="fixed bottom-4 right-4 z-[100] flex flex-col gap-2 max-w-md">
+      <div className="notification-container">
         {notifications.map((n) => (
           <NotificationToast
             key={n.id}
@@ -62,10 +63,10 @@ export function useNotification() {
   return useContext(NotificationContext);
 }
 
-const typeStyles: Record<NotificationType, string> = {
-  error: "border-red-500/30 bg-red-500/10 text-red-300",
-  success: "border-emerald-500/30 bg-emerald-500/10 text-emerald-300",
-  info: "border-purple-500/30 bg-purple-500/10 text-purple-300",
+const typeClasses: Record<NotificationType, string> = {
+  error: "notification--error",
+  success: "notification--success",
+  info: "notification--info",
 };
 
 function NotificationToast({
@@ -76,14 +77,9 @@ function NotificationToast({
   onDismiss: () => void;
 }) {
   return (
-    <div
-      className={`flex items-start gap-3 rounded-lg border px-4 py-3 shadow-lg backdrop-blur-sm animate-slideDown ${typeStyles[notification.type]}`}
-    >
-      <p className="flex-1 text-sm">{notification.message}</p>
-      <button
-        onClick={onDismiss}
-        className="shrink-0 opacity-60 hover:opacity-100 transition-opacity cursor-pointer"
-      >
+    <div className={`notification ${typeClasses[notification.type]}`}>
+      <p className="notification__message">{notification.message}</p>
+      <button onClick={onDismiss} className="notification__dismiss">
         <IconX size={14} />
       </button>
     </div>

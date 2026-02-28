@@ -1,0 +1,70 @@
+@reference "../app/globals.css";
+
+.command-palette {
+  @apply fixed inset-0 z-50 flex items-start justify-center pt-[15vh];
+}
+
+.command-palette__backdrop {
+  @apply absolute inset-0 bg-black/60 backdrop-blur-sm;
+}
+
+.command-palette__panel {
+  @apply relative w-full max-w-lg rounded-xl border border-zinc-700/60 bg-zinc-900 shadow-2xl overflow-hidden;
+  animation: slideDown 0.15s ease-out;
+}
+
+.command-palette__search {
+  @apply flex items-center gap-3 px-4 py-3 border-b border-zinc-800;
+}
+
+.command-palette__search-icon {
+  @apply text-zinc-500 shrink-0;
+}
+
+.command-palette__search-input {
+  @apply flex-1 bg-transparent text-sm text-zinc-200 placeholder:text-zinc-500 focus:outline-none;
+}
+
+.command-palette__search-kbd {
+  @apply shrink-0 px-1.5 py-0.5 rounded bg-zinc-800 text-[10px] text-zinc-500 border border-zinc-700/50 font-mono;
+}
+
+.command-palette__results {
+  @apply max-h-[320px] overflow-y-auto py-1.5;
+}
+
+.command-palette__empty {
+  @apply px-4 py-6 text-center text-sm text-zinc-500;
+}
+
+.command-palette__item {
+  @apply w-full flex items-center gap-3 px-4 py-2.5 text-left transition-colors cursor-pointer;
+}
+
+.command-palette__item--selected {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.command-palette__item:not(.command-palette__item--selected):hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.command-palette__item-icon {
+  @apply shrink-0 text-zinc-500 transition-colors;
+}
+
+.command-palette__item:hover .command-palette__item-icon {
+  @apply text-zinc-300;
+}
+
+.command-palette__item-icon--prompt {
+  @apply text-purple-400;
+}
+
+.command-palette__item-label {
+  @apply text-sm text-zinc-200;
+}
+
+.command-palette__item-description {
+  @apply text-[11px] text-zinc-500 truncate;
+}

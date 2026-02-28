@@ -1,0 +1,25 @@
+@reference "../../app/globals.css";
+
+.checkbox {
+  @apply flex items-start gap-3 py-1.5;
+}
+
+.checkbox--disabled {
+  @apply opacity-50;
+}
+
+.checkbox--enabled {
+  @apply cursor-pointer;
+}
+
+.checkbox__input {
+  @apply mt-0.5 h-4 w-4 rounded border-border bg-card text-accent accent-accent focus:ring-accent cursor-pointer;
+}
+
+.checkbox__text {
+  @apply text-sm text-foreground;
+}
+
+.checkbox__description {
+  @apply text-xs text-muted mt-0.5;
+}

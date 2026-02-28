@@ -10,6 +10,7 @@ import { createSession, updateProject, summarizeSession, suggestNextStep, detect
 import { getToolForCapability } from "@/lib/data-sources";
 import { useProvider } from "@/context/provider-context";
 import type { Project } from "@/lib/types";
+import "./end-session-modal.css";
 
 interface EndSessionModalProps {
   open: boolean;
@@ -53,14 +54,12 @@ export function EndSessionModal({
     let cancelled = false;
 
     async function fetchAndSummarize() {
-      // Phase 1: Fetch activity from connected sources
       const activityItems: Array<{ title: string; source: string; timestamp?: string }> = [];
 
       try {
-        const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(); // last 24h
+        const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
 
         const fetches = sources.map(async (source) => {
-          // Try fetching commits (GitHub)
           if (source === "github" && project.githubRepo) {
             const [owner, repo] = project.githubRepo.split("/");
             const commitTool = getToolForCapability(source, "list_commits");
@@ -85,7 +84,6 @@ export function EndSessionModal({
             }
           }
 
-          // Try fetching recent items (issues/tasks)
           const activityTool = getToolForCapability(source, "list_recent_activity");
           if (activityTool) {
             try {
@@ -115,12 +113,11 @@ export function EndSessionModal({
 
         await Promise.all(fetches);
       } catch {
-        // Fetch phase failed — fall through to ready with empty fields
+        // Fetch phase failed
       }
 
       if (cancelled) return;
 
-      // Phase 2: Summarize with AI
       if (activityItems.length > 0) {
         setPhase("summarizing");
 
@@ -135,7 +132,6 @@ export function EndSessionModal({
             setWhatChanged(summary.bullets.map((b) => `• ${b}`).join("\n"));
           }
 
-          // Also try suggesting next step
           try {
             const suggestion = await suggestNextStep(
               summary.goal || "",
@@ -156,7 +152,6 @@ export function EndSessionModal({
             `AI-generated from ${activityItems.length} item${activityItems.length !== 1 ? "s" : ""} across ${sources.length} source${sources.length !== 1 ? "s" : ""}`
           );
         } catch {
-          // Summarization failed — show empty fields
           setAiLabel("");
         }
       }
@@ -249,14 +244,14 @@ export function EndSessionModal({
     <Modal open={open} onClose={onClose} title="End Session">
       {/* Loading phases */}
       {phase !== "ready" && (
-        <div className="py-8 text-center">
-          <div className="flex items-center justify-center gap-2 text-sm text-zinc-400 mb-3">
+        <div className="end-session__loading">
+          <div className="end-session__loading-text">
             <IconLoader size={14} />
             {phase === "fetching"
               ? `Fetching activity from ${sources.length} source${sources.length !== 1 ? "s" : ""}...`
               : "Summarizing with AI..."}
           </div>
-          <div className="flex justify-center gap-2">
+          <div className="end-session__loading-sources">
             {sources.map((s) => (
               <Badge key={s} color={sourceColor(s)}>
                 <SourceIcon source={s} size={10} /> {s}
@@ -270,7 +265,7 @@ export function EndSessionModal({
       {phase === "ready" && (
         <div className="space-y-4 animate-fadeIn">
           {aiLabel && (
-            <div className="flex items-center gap-1.5 text-[11px] text-purple-400/70">
+            <div className="end-session__ai-label">
               <IconSparkle size={10} /> {aiLabel}
             </div>
           )}
@@ -282,25 +277,17 @@ export function EndSessionModal({
             placeholder="What were you working on?"
           />
 
-          {/* What Changed — with Accept/Clear */}
+          {/* What Changed */}
           <div className="space-y-1.5">
-            <div className="flex items-center justify-between">
-              <label className="text-[11px] text-zinc-500 uppercase tracking-wider font-semibold">
-                What Changed
-              </label>
+            <div className="end-session__field-header">
+              <label className="end-session__field-label">What Changed</label>
               <div className="flex gap-1">
                 {hasLLM && whatChanged.trim() && (
-                  <button
-                    onClick={handleAutoFillChanges}
-                    className="px-1.5 py-0.5 rounded text-[10px] text-purple-400 hover:bg-purple-500/10 transition-colors cursor-pointer"
-                  >
+                  <button onClick={handleAutoFillChanges} className="end-session__field-btn--ai">
                     AI Summarize
                   </button>
                 )}
-                <button
-                  onClick={() => setWhatChanged("")}
-                  className="px-1.5 py-0.5 rounded text-[10px] text-zinc-500 hover:bg-white/5 transition-colors cursor-pointer"
-                >
+                <button onClick={() => setWhatChanged("")} className="end-session__field-btn--clear">
                   Clear
                 </button>
               </div>
@@ -309,30 +296,22 @@ export function EndSessionModal({
               value={whatChanged}
               onChange={(e) => setWhatChanged(e.target.value)}
               rows={4}
-              className="w-full px-3 py-2 rounded-lg bg-zinc-900/80 border border-zinc-700/50 text-zinc-200 text-sm placeholder:text-zinc-600 focus:outline-none focus:border-purple-500/50 transition-colors"
+              className="end-session__textarea"
               placeholder="What did you change? (one per line)"
             />
           </div>
 
-          {/* Next Step — with Accept/Clear */}
+          {/* Next Step */}
           <div className="space-y-1.5">
-            <div className="flex items-center justify-between">
-              <label className="text-[11px] text-zinc-500 uppercase tracking-wider font-semibold">
-                Next Step
-              </label>
+            <div className="end-session__field-header">
+              <label className="end-session__field-label">Next Step</label>
               <div className="flex gap-1">
                 {hasLLM && goal.trim() && (
-                  <button
-                    onClick={handleSuggestNext}
-                    className="px-1.5 py-0.5 rounded text-[10px] text-purple-400 hover:bg-purple-500/10 transition-colors cursor-pointer"
-                  >
+                  <button onClick={handleSuggestNext} className="end-session__field-btn--ai">
                     AI Suggest
                   </button>
                 )}
-                <button
-                  onClick={() => setNextStep("")}
-                  className="px-1.5 py-0.5 rounded text-[10px] text-zinc-500 hover:bg-white/5 transition-colors cursor-pointer"
-                >
+                <button onClick={() => setNextStep("")} className="end-session__field-btn--clear">
                   Clear
                 </button>
               </div>
@@ -341,7 +320,7 @@ export function EndSessionModal({
               value={nextStep}
               onChange={(e) => setNextStep(e.target.value)}
               rows={2}
-              className="w-full px-3 py-2 rounded-lg bg-zinc-900/80 border border-zinc-700/50 text-zinc-200 text-sm placeholder:text-zinc-600 focus:outline-none focus:border-purple-500/50 transition-colors"
+              className="end-session__textarea"
               placeholder="What's next?"
             />
           </div>
@@ -353,13 +332,9 @@ export function EndSessionModal({
             placeholder="Anything blocking progress?"
           />
 
-          <div className="flex justify-end gap-2 pt-2">
-            <Button variant="ghost" onClick={onClose}>
-              Cancel
-            </Button>
-            <Button onClick={handleSave} loading={saving} disabled={!goal.trim()}>
-              Save Session
-            </Button>
+          <div className="end-session__footer">
+            <Button variant="ghost" onClick={onClose}>Cancel</Button>
+            <Button onClick={handleSave} loading={saving} disabled={!goal.trim()}>Save Session</Button>
           </div>
         </div>
       )}

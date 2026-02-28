@@ -1,5 +1,7 @@
 "use client";
 
+import "./card.css";
+
 interface CardProps {
   children: React.ReactNode;
   className?: string;
@@ -16,7 +18,7 @@ export function Card({
   return (
     <div
       onClick={onClick}
-      className={`rounded-xl border border-border bg-card p-5 ${hover ? "cursor-pointer transition-colors hover:bg-card-hover hover:border-muted/30" : ""} ${className}`}
+      className={`card ${hover ? "card--hoverable" : ""} ${className}`}
     >
       {children}
     </div>

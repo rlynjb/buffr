@@ -1,0 +1,30 @@
+@reference "../../app/globals.css";
+
+.notification-container {
+  @apply fixed bottom-4 right-4 z-[100] flex flex-col gap-2 max-w-md;
+}
+
+.notification {
+  @apply flex items-start gap-3 rounded-lg border px-4 py-3 shadow-lg backdrop-blur-sm;
+  animation: slideDown 0.15s ease-out;
+}
+
+.notification--error {
+  @apply border-red-500/30 bg-red-500/10 text-red-300;
+}
+
+.notification--success {
+  @apply border-emerald-500/30 bg-emerald-500/10 text-emerald-300;
+}
+
+.notification--info {
+  @apply border-purple-500/30 bg-purple-500/10 text-purple-300;
+}
+
+.notification__message {
+  @apply flex-1 text-sm;
+}
+
+.notification__dismiss {
+  @apply shrink-0 opacity-60 hover:opacity-100 transition-opacity cursor-pointer;
+}

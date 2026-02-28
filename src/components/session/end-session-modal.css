@@ -1,0 +1,41 @@
+@reference "../../app/globals.css";
+
+.end-session__loading {
+  @apply py-8 text-center;
+}
+
+.end-session__loading-text {
+  @apply flex items-center justify-center gap-2 text-sm text-zinc-400 mb-3;
+}
+
+.end-session__loading-sources {
+  @apply flex justify-center gap-2;
+}
+
+.end-session__ai-label {
+  @apply flex items-center gap-1.5 text-[11px] text-purple-400/70;
+}
+
+.end-session__field-header {
+  @apply flex items-center justify-between;
+}
+
+.end-session__field-label {
+  @apply text-[11px] text-zinc-500 uppercase tracking-wider font-semibold;
+}
+
+.end-session__field-btn--ai {
+  @apply px-1.5 py-0.5 rounded text-[10px] text-purple-400 hover:bg-purple-500/10 transition-colors cursor-pointer;
+}
+
+.end-session__field-btn--clear {
+  @apply px-1.5 py-0.5 rounded text-[10px] text-zinc-500 hover:bg-white/5 transition-colors cursor-pointer;
+}
+
+.end-session__textarea {
+  @apply w-full px-3 py-2 rounded-lg bg-zinc-900/80 border border-zinc-700/50 text-zinc-200 text-sm placeholder:text-zinc-600 focus:outline-none focus:border-purple-500/50 transition-colors;
+}
+
+.end-session__footer {
+  @apply flex justify-end gap-2 pt-2;
+}

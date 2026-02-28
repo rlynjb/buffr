@@ -1,10 +1,10 @@
 "use client";
 
 import { useState } from "react";
-import { SourceIcon, sourceColor } from "@/components/icons";
-import { IconSparkle } from "@/components/icons";
+import { SourceIcon, sourceColor, IconSparkle } from "@/components/icons";
 import { Badge } from "@/components/ui/badge";
 import type { NextAction } from "@/lib/next-actions";
+import "./actions-tab.css";
 
 interface ActionsTabProps {
   actions: NextAction[];
@@ -31,9 +31,7 @@ export function ActionsTab({
 
   if (actions.length === 0) {
     return (
-      <div className="py-8 text-center text-sm text-zinc-600">
-        No actions suggested yet.
-      </div>
+      <div className="actions-tab__empty">No actions suggested yet.</div>
     );
   }
 
@@ -42,21 +40,21 @@ export function ActionsTab({
       {actions.map((action) => (
         <div
           key={action.id}
-          className={`rounded-lg border transition-all ${
+          className={`actions-tab__action ${
             action.done
-              ? "border-emerald-500/20 bg-emerald-500/5 opacity-60"
+              ? "actions-tab__action--done"
               : action.skipped
-                ? "border-zinc-800/40 opacity-30"
-                : "border-zinc-800/40 hover:bg-white/[0.02]"
+                ? "actions-tab__action--skipped"
+                : "actions-tab__action--default"
           }`}
         >
-          <div className="flex items-center gap-3 px-3 py-2.5">
+          <div className="actions-tab__action-row">
             <span style={{ color: sourceColor(action.source || "ai") }}>
               <SourceIcon source={action.source || "ai"} size={14} />
             </span>
             <span
-              className={`text-sm flex-1 ${
-                action.done ? "line-through text-zinc-500" : "text-zinc-200"
+              className={`actions-tab__action-text ${
+                action.done ? "actions-tab__action-text--done" : ""
               }`}
             >
               {action.text}
@@ -70,50 +68,43 @@ export function ActionsTab({
               <div className="flex gap-1">
                 <button
                   onClick={() => setNoteOpen(noteOpen === action.id ? null : action.id)}
-                  className="px-1.5 py-0.5 rounded text-[10px] text-zinc-500 hover:text-zinc-300 hover:bg-white/5 transition-colors cursor-pointer"
+                  className="actions-tab__action-btn--note"
                 >
                   Note
                 </button>
-                <button
-                  onClick={() => onDone(action.id)}
-                  className="px-2 py-0.5 rounded text-[10px] text-emerald-400 hover:bg-emerald-500/10 transition-colors cursor-pointer"
-                >
+                <button onClick={() => onDone(action.id)} className="actions-tab__action-btn--done">
                   Done
                 </button>
-                <button
-                  onClick={() => onSkip(action.id)}
-                  className="px-2 py-0.5 rounded text-[10px] text-zinc-500 hover:text-zinc-300 hover:bg-white/5 transition-colors cursor-pointer"
-                >
+                <button onClick={() => onSkip(action.id)} className="actions-tab__action-btn--skip">
                   Skip
                 </button>
               </div>
             )}
           </div>
 
-          {/* Expandable note */}
           {noteOpen === action.id && (
-            <div className="px-3 pb-2.5">
+            <div className="actions-tab__note">
               <textarea
                 rows={3}
                 value={notes[action.id] ?? DEFAULT_NOTE}
                 onChange={(e) => onNoteChange(action.id, e.target.value)}
-                className="w-full px-2.5 py-1.5 rounded-lg bg-zinc-900/80 border border-zinc-700/50 text-xs text-zinc-300 placeholder:text-zinc-600 focus:outline-none focus:border-purple-500/40 transition-colors leading-relaxed"
+                className="actions-tab__note-textarea"
               />
-              <div className="flex items-center justify-between mt-1.5">
-                <span className="text-[10px] text-zinc-600 flex items-center gap-1">
+              <div className="actions-tab__note-footer">
+                <span className="actions-tab__note-hint">
                   <IconSparkle size={10} /> AI-suggested — edit freely
                 </span>
                 <div className="flex gap-2">
                   <button
                     onClick={() => onNoteChange(action.id, "")}
-                    className="text-[10px] text-zinc-500 hover:text-zinc-300 transition-colors cursor-pointer"
+                    className="actions-tab__note-clear"
                   >
                     Clear
                   </button>
                   <button
                     onClick={() => onNoteSave(action.id)}
                     disabled={savingNote === action.id}
-                    className="text-[10px] text-purple-400 hover:text-purple-300 transition-colors disabled:opacity-50 cursor-pointer"
+                    className="actions-tab__note-save"
                   >
                     {savingNote === action.id ? "Saving..." : "Save"}
                   </button>

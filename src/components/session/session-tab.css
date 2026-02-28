@@ -1,0 +1,37 @@
+@reference "../../app/globals.css";
+
+.session-tab__empty {
+  @apply py-8 text-center text-sm text-zinc-600;
+}
+
+.session-tab__label {
+  @apply text-[11px] text-zinc-500 uppercase tracking-wider font-semibold mb-1;
+}
+
+.session-tab__label--blocker {
+  @apply text-[11px] text-red-400/60 uppercase tracking-wider font-semibold mb-1;
+}
+
+.session-tab__label--changes {
+  @apply text-[11px] text-zinc-500 uppercase tracking-wider font-semibold mb-1.5;
+}
+
+.session-tab__value {
+  @apply text-sm text-zinc-200;
+}
+
+.session-tab__value--blocker {
+  @apply text-sm text-red-300/80;
+}
+
+.session-tab__change {
+  @apply text-sm text-zinc-300 flex items-start gap-2;
+}
+
+.session-tab__change-dot {
+  @apply text-zinc-600 mt-0.5;
+}
+
+.session-tab__timestamp {
+  @apply text-[11px] text-zinc-600;
+}

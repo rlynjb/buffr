@@ -17,6 +17,7 @@ import {
   deletePrompt,
   listIntegrations,
 } from "@/lib/api";
+import "./page.css";
 
 function isReferencePrompt(body: string): boolean {
   return !body.includes("{{");
@@ -25,11 +26,11 @@ function isReferencePrompt(body: string): boolean {
 function renderTokens(body: string) {
   return body.split(/({{.*?}})/).map((part, i) =>
     part.startsWith("{{tool:") ? (
-      <span key={i} className="px-1 py-0.5 rounded bg-purple-500/15 text-purple-300 text-[11px] font-mono">
+      <span key={i} className="prompts-page__token--tool">
         {part}
       </span>
     ) : part.startsWith("{{") ? (
-      <span key={i} className="px-1 py-0.5 rounded bg-blue-500/15 text-blue-300 text-[11px] font-mono">
+      <span key={i} className="prompts-page__token--variable">
         {part}
       </span>
     ) : (
@@ -134,24 +135,21 @@ export default function PromptsPage() {
 
   return (
     <div>
-      <Link
-        href="/"
-        className="flex items-center gap-1.5 text-sm text-zinc-500 hover:text-zinc-300 mb-6 transition-colors"
-      >
+      <Link href="/" className="prompts-page__back">
         <IconBack size={14} /> Dashboard
       </Link>
 
-      <div className="flex items-center justify-between mb-6">
-        <h1 className="text-lg font-semibold text-zinc-100">Prompt Library</h1>
+      <div className="prompts-page__header">
+        <h1 className="prompts-page__title">Prompt Library</h1>
         <Button size="sm" onClick={openNew}>
           <IconPlus size={14} /> New Prompt
         </Button>
       </div>
 
       {/* Search + Tag Filter */}
-      <div className="flex items-center gap-3 mb-5">
-        <div className="relative flex-1">
-          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-600">
+      <div className="prompts-page__filter-row">
+        <div className="prompts-page__search">
+          <span className="prompts-page__search-icon">
             <IconSearch size={14} />
           </span>
           <input
@@ -159,17 +157,17 @@ export default function PromptsPage() {
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Search prompts..."
-            className="w-full pl-9 pr-3 py-2 rounded-lg bg-zinc-900/80 border border-zinc-700/50 text-sm text-zinc-300 placeholder:text-zinc-600 focus:outline-none focus:border-purple-500/40 transition-colors"
+            className="prompts-page__search-input"
           />
         </div>
         {allTags.length > 0 && (
-          <div className="flex rounded-lg border border-zinc-700/50 overflow-hidden">
+          <div className="prompts-page__tag-filter">
             <button
               onClick={() => setActiveTag(null)}
-              className={`px-2.5 py-1.5 text-[11px] font-medium transition-colors cursor-pointer ${
+              className={`prompts-page__tag-btn ${
                 !activeTag
-                  ? "bg-zinc-700/50 text-zinc-200"
-                  : "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50"
+                  ? "prompts-page__tag-btn--active"
+                  : "prompts-page__tag-btn--inactive"
               }`}
             >
               All
@@ -178,10 +176,10 @@ export default function PromptsPage() {
               <button
                 key={tag}
                 onClick={() => setActiveTag(activeTag === tag ? null : tag)}
-                className={`px-2.5 py-1.5 text-[11px] font-medium transition-colors cursor-pointer ${
+                className={`prompts-page__tag-btn ${
                   activeTag === tag
-                    ? "bg-zinc-700/50 text-zinc-200"
-                    : "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50"
+                    ? "prompts-page__tag-btn--active"
+                    : "prompts-page__tag-btn--inactive"
                 }`}
               >
                 {tag}
@@ -195,12 +193,12 @@ export default function PromptsPage() {
       {loading ? (
         <div className="space-y-2">
           {[1, 2, 3].map((i) => (
-            <div key={i} className="h-16 rounded-xl border border-zinc-800/60 bg-zinc-900/30 animate-pulse" />
+            <div key={i} className="prompts-page__skeleton" />
           ))}
         </div>
       ) : filtered.length === 0 ? (
-        <div className="text-center py-16">
-          <p className="text-zinc-500 text-sm mb-4">
+        <div className="prompts-page__empty">
+          <p className="prompts-page__empty-text">
             {prompts.length === 0
               ? "No prompts yet. Add your first prompt to get started."
               : "No prompts match your search."}
@@ -217,52 +215,49 @@ export default function PromptsPage() {
             const isRef = isReferencePrompt(prompt.body);
 
             return (
-              <div
-                key={prompt.id}
-                className="flex items-center gap-3 px-4 py-3 rounded-xl border border-zinc-800/60 bg-zinc-900/30 hover:border-zinc-700/60 transition-colors group"
-              >
-                <span className={isRef ? "text-zinc-500" : "text-purple-400"}>
+              <div key={prompt.id} className="prompts-page__prompt">
+                <span className={isRef ? "prompts-page__prompt-icon--ref" : "prompts-page__prompt-icon--dynamic"}>
                   <IconPrompt size={16} />
                 </span>
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm font-medium text-zinc-200 truncate">{prompt.title}</span>
+                <div className="prompts-page__prompt-body">
+                  <div className="prompts-page__prompt-header">
+                    <span className="prompts-page__prompt-title">{prompt.title}</span>
                     {isRef && <Badge color="#71717a" small>reference</Badge>}
                     {prompt.tags.slice(0, 3).map((tag) => (
                       <Badge key={tag} color="#555" small>{tag}</Badge>
                     ))}
                     {prompt.scope === "project" && <Badge color="#60a5fa" small>project</Badge>}
-                    <span className="text-[10px] text-zinc-600">{prompt.usageCount || 0}×</span>
+                    <span className="prompts-page__prompt-usage">{prompt.usageCount || 0}×</span>
                   </div>
-                  <div className="text-xs text-zinc-500 truncate mt-0.5">
+                  <div className="prompts-page__prompt-preview">
                     {renderTokens(prompt.body.slice(0, 120))}
                   </div>
                 </div>
-                <div className="flex items-center gap-1 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
+                <div className="prompts-page__prompt-actions">
                   <button
                     onClick={() => openEdit(prompt)}
-                    className="p-1.5 rounded text-zinc-500 hover:text-zinc-200 hover:bg-white/5 transition-colors cursor-pointer"
+                    className="prompts-page__prompt-action-btn"
                     title="Edit"
                   >
                     <IconEdit size={14} />
                   </button>
                   <button
                     onClick={() => handleCopy(prompt)}
-                    className="p-1.5 rounded text-zinc-500 hover:text-zinc-200 hover:bg-white/5 transition-colors cursor-pointer"
+                    className="prompts-page__prompt-action-btn"
                     title="Copy"
                   >
                     <IconCopy size={14} />
                   </button>
                   <button
                     onClick={() => handleDelete(prompt.id)}
-                    className="p-1.5 rounded text-zinc-500 hover:text-red-400 hover:bg-white/5 transition-colors cursor-pointer"
+                    className="prompts-page__prompt-action-btn--delete"
                     title="Delete"
                   >
                     <IconTrash size={14} />
                   </button>
                 </div>
                 {copied === prompt.id && (
-                  <span className="text-[10px] text-emerald-400 shrink-0">Copied!</span>
+                  <span className="prompts-page__prompt-copied">Copied!</span>
                 )}
               </div>
             );
@@ -272,18 +267,18 @@ export default function PromptsPage() {
 
       {/* Available Tools Reference */}
       {allTools.length > 0 && (
-        <div className="mt-8 p-4 rounded-xl border border-zinc-800/60 bg-zinc-900/30">
-          <div className="text-[11px] text-zinc-500 uppercase tracking-wider font-semibold mb-2">
+        <div className="prompts-page__tools-ref">
+          <div className="prompts-page__tools-ref-label">
             Available Tools
           </div>
-          <p className="text-xs text-zinc-600 mb-3">
-            Use <code className="px-1 py-0.5 rounded bg-purple-500/15 text-purple-300 text-[11px] font-mono">{"{{tool:name}}"}</code> in your prompt body to inject tool output.
+          <p className="prompts-page__tools-ref-desc">
+            Use <code className="prompts-page__token--tool">{"{{tool:name}}"}</code> in your prompt body to inject tool output.
           </p>
-          <div className="flex flex-wrap gap-2">
+          <div className="prompts-page__tools-ref-list">
             {allTools.map((t) => (
               <span
                 key={t.name}
-                className="text-xs font-mono px-2 py-1 rounded border border-zinc-700/50 bg-zinc-800/30"
+                className="prompts-page__tools-ref-item"
                 style={{ color: sourceColor(t.integration) }}
               >
                 {t.name}
@@ -315,7 +310,7 @@ export default function PromptsPage() {
               rows={6}
               mono
             />
-            <p className="text-[10px] text-zinc-600 mt-1">
+            <p className="prompts-page__modal-hint">
               Variables: {"{{project.name}}"}, {"{{project.stack}}"}, {"{{lastSession.goal}}"}. Tools: {"{{tool:name}}"}.
             </p>
           </div>
@@ -326,33 +321,33 @@ export default function PromptsPage() {
             placeholder="debug, react, performance"
           />
           <div>
-            <label className="text-[11px] text-zinc-500 uppercase tracking-wider font-semibold mb-2 block">
+            <label className="prompts-page__scope-label">
               Scope
             </label>
-            <div className="flex rounded-lg border border-zinc-700/50 overflow-hidden w-fit">
+            <div className="prompts-page__scope-toggle">
               <button
                 onClick={() => setScope("global")}
-                className={`px-3 py-1.5 text-xs font-medium transition-colors cursor-pointer ${
+                className={`prompts-page__scope-btn ${
                   scope === "global"
-                    ? "bg-zinc-700/50 text-zinc-200"
-                    : "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50"
+                    ? "prompts-page__scope-btn--active"
+                    : "prompts-page__scope-btn--inactive"
                 }`}
               >
                 Global
               </button>
               <button
                 onClick={() => setScope("project")}
-                className={`px-3 py-1.5 text-xs font-medium transition-colors cursor-pointer ${
+                className={`prompts-page__scope-btn ${
                   scope === "project"
-                    ? "bg-zinc-700/50 text-zinc-200"
-                    : "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50"
+                    ? "prompts-page__scope-btn--active"
+                    : "prompts-page__scope-btn--inactive"
                 }`}
               >
                 Project
               </button>
             </div>
           </div>
-          <div className="flex gap-2 justify-end pt-2">
+          <div className="prompts-page__modal-footer">
             <Button variant="ghost" onClick={() => setModalOpen(false)}>
               Cancel
             </Button>

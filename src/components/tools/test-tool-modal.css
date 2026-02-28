@@ -1,0 +1,13 @@
+@reference "../../app/globals.css";
+
+.test-modal__label {
+  @apply text-[11px] text-zinc-500 uppercase tracking-wider font-semibold mb-1.5 block;
+}
+
+.test-modal__textarea {
+  @apply w-full rounded-lg border border-zinc-700/50 bg-zinc-900/80 px-3 py-2 text-sm font-mono text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-purple-500/50 resize-y;
+}
+
+.test-modal__result {
+  @apply rounded-lg border border-zinc-800/60 bg-zinc-900/50 p-3 text-xs font-mono text-zinc-300 whitespace-pre-wrap max-h-64 overflow-y-auto;
+}

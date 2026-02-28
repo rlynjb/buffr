@@ -1,0 +1,17 @@
+@reference "../../globals.css";
+
+.project-page__skeleton-bar {
+  @apply h-8 w-48 rounded bg-card animate-pulse;
+}
+
+.project-page__skeleton-block {
+  @apply h-32 rounded-xl border border-border bg-card animate-pulse;
+}
+
+.project-page__not-found {
+  @apply text-center py-16;
+}
+
+.project-page__not-found-text {
+  @apply text-muted;
+}

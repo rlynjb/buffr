@@ -1,6 +1,7 @@
 "use client";
 
 import { type InputHTMLAttributes, forwardRef } from "react";
+import "./input.css";
 
 interface InputProps extends InputHTMLAttributes<HTMLInputElement> {
   label?: string;
@@ -12,22 +13,19 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(
   function Input({ label, error, mono, className = "", id, ...props }, ref) {
     const inputId = id || label?.toLowerCase().replace(/\s+/g, "-");
     return (
-      <div className="space-y-1.5">
+      <div className="input">
         {label && (
-          <label
-            htmlFor={inputId}
-            className="text-[11px] text-zinc-500 uppercase tracking-wider font-semibold"
-          >
+          <label htmlFor={inputId} className="input__label">
             {label}
           </label>
         )}
         <input
           ref={ref}
           id={inputId}
-          className={`w-full rounded-lg border border-zinc-700/50 bg-zinc-900/80 px-3 py-2 text-sm text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-purple-500/50 focus:ring-1 focus:ring-purple-500/20 transition-colors ${mono ? "font-mono" : ""} ${error ? "border-error" : ""} ${className}`}
+          className={`input__field ${mono ? "input__field--mono" : ""} ${error ? "input__field--error" : ""} ${className}`}
           {...props}
         />
-        {error && <p className="text-xs text-error">{error}</p>}
+        {error && <p className="input__error">{error}</p>}
       </div>
     );
   }

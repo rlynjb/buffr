@@ -1,0 +1,41 @@
+@reference "../../app/globals.css";
+
+.project-card {
+  @apply w-full flex items-center gap-4 px-4 py-3.5 rounded-xl border border-zinc-800/60 bg-zinc-900/30 hover:bg-zinc-800/30 hover:border-zinc-700/60 transition-all text-left cursor-pointer;
+}
+
+.project-card__body {
+  @apply flex-1 min-w-0;
+}
+
+.project-card__name-row {
+  @apply flex items-center gap-2.5 mb-1;
+}
+
+.project-card__name {
+  @apply text-sm font-medium text-zinc-200 font-mono;
+}
+
+.project-card__source-icon {
+  @apply opacity-50;
+}
+
+.project-card__meta {
+  @apply flex items-center gap-3 text-[12px] text-zinc-500;
+}
+
+.project-card__actions {
+  @apply flex items-center gap-2 opacity-0 transition-opacity;
+}
+
+.project-card:hover .project-card__actions {
+  @apply opacity-100;
+}
+
+.project-card__actions-icon {
+  @apply text-zinc-500;
+}
+
+.project-card__actions-chevron {
+  @apply text-zinc-600;
+}

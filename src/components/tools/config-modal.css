@@ -1,0 +1,21 @@
+@reference "../../app/globals.css";
+
+.config-modal__enabled {
+  @apply flex items-center gap-2 text-sm text-zinc-200 cursor-pointer;
+}
+
+.config-modal__enabled-checkbox {
+  @apply accent-purple-500 w-3.5 h-3.5;
+}
+
+.config-modal__note {
+  @apply text-xs text-zinc-500;
+}
+
+.config-modal__note-code {
+  @apply font-mono text-zinc-400;
+}
+
+.config-modal__footer {
+  @apply flex gap-2 justify-end pt-2;
+}

@@ -1,0 +1,25 @@
+@reference "../../app/globals.css";
+
+.input {
+  @apply space-y-1.5;
+}
+
+.input__label {
+  @apply text-[11px] text-zinc-500 uppercase tracking-wider font-semibold;
+}
+
+.input__field {
+  @apply w-full rounded-lg border border-zinc-700/50 bg-zinc-900/80 px-3 py-2 text-sm text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-purple-500/50 focus:ring-1 focus:ring-purple-500/20 transition-colors;
+}
+
+.input__field--mono {
+  @apply font-mono;
+}
+
+.input__field--error {
+  @apply border-error;
+}
+
+.input__error {
+  @apply text-xs text-error;
+}

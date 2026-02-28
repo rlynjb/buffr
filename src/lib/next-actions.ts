@@ -83,12 +83,15 @@ export function generateNextActions(context: ActionContext): NextAction[] {
     ...actionsFromWorkItems(context),
   ];
 
-  // Deduplicate by id, limit to 3
-  const seen = new Set<string>();
+  // Deduplicate by id AND by text content, limit to 3
+  const seenIds = new Set<string>();
+  const seenTexts = new Set<string>();
   const unique: NextAction[] = [];
   for (const action of all) {
-    if (!seen.has(action.id)) {
-      seen.add(action.id);
+    const normalizedText = action.text.trim().toLowerCase();
+    if (!seenIds.has(action.id) && !seenTexts.has(normalizedText)) {
+      seenIds.add(action.id);
+      seenTexts.add(normalizedText);
       unique.push(action);
     }
   }

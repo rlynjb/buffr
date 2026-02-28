@@ -1,0 +1,69 @@
+@reference "../../app/globals.css";
+
+.actions-tab__empty {
+  @apply py-8 text-center text-sm text-zinc-600;
+}
+
+.actions-tab__action {
+  @apply rounded-lg border transition-all;
+}
+
+.actions-tab__action--done {
+  @apply border-emerald-500/20 bg-emerald-500/5 opacity-60;
+}
+
+.actions-tab__action--skipped {
+  @apply border-zinc-800/40 opacity-30;
+}
+
+.actions-tab__action--default {
+  @apply border-zinc-800/40 hover:bg-white/[0.02];
+}
+
+.actions-tab__action-row {
+  @apply flex items-center gap-3 px-3 py-2.5;
+}
+
+.actions-tab__action-text {
+  @apply text-sm flex-1 text-zinc-200;
+}
+
+.actions-tab__action-text--done {
+  @apply line-through text-zinc-500;
+}
+
+.actions-tab__action-btn--note {
+  @apply px-1.5 py-0.5 rounded text-[10px] text-zinc-500 hover:text-zinc-300 hover:bg-white/5 transition-colors cursor-pointer;
+}
+
+.actions-tab__action-btn--done {
+  @apply px-2 py-0.5 rounded text-[10px] text-emerald-400 hover:bg-emerald-500/10 transition-colors cursor-pointer;
+}
+
+.actions-tab__action-btn--skip {
+  @apply px-2 py-0.5 rounded text-[10px] text-zinc-500 hover:text-zinc-300 hover:bg-white/5 transition-colors cursor-pointer;
+}
+
+.actions-tab__note {
+  @apply px-3 pb-2.5;
+}
+
+.actions-tab__note-textarea {
+  @apply w-full px-2.5 py-1.5 rounded-lg bg-zinc-900/80 border border-zinc-700/50 text-xs text-zinc-300 placeholder:text-zinc-600 focus:outline-none focus:border-purple-500/40 transition-colors leading-relaxed;
+}
+
+.actions-tab__note-footer {
+  @apply flex items-center justify-between mt-1.5;
+}
+
+.actions-tab__note-hint {
+  @apply text-[10px] text-zinc-600 flex items-center gap-1;
+}
+
+.actions-tab__note-clear {
+  @apply text-[10px] text-zinc-500 hover:text-zinc-300 transition-colors cursor-pointer;
+}
+
+.actions-tab__note-save {
+  @apply text-[10px] text-purple-400 hover:text-purple-300 transition-colors disabled:opacity-50 cursor-pointer;
+}

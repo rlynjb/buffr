@@ -1,0 +1,33 @@
+@reference "./globals.css";
+
+.dashboard__header {
+  @apply flex items-center justify-between mb-6;
+}
+
+.dashboard__title {
+  @apply text-lg font-semibold text-zinc-100;
+}
+
+.dashboard__quick-nav {
+  @apply flex gap-2 mb-5;
+}
+
+.dashboard__quick-nav-btn {
+  @apply flex items-center gap-2 px-3 py-2 rounded-lg border border-zinc-800/50 bg-zinc-900/20 hover:bg-zinc-800/30 hover:border-zinc-700/50 text-sm text-zinc-400 hover:text-zinc-200 transition-all cursor-pointer;
+}
+
+.dashboard__quick-nav-count {
+  @apply text-[10px] text-zinc-600;
+}
+
+.dashboard__skeleton {
+  @apply h-16 rounded-xl border border-zinc-800/60 bg-zinc-900/30 animate-pulse;
+}
+
+.dashboard__empty {
+  @apply text-center py-16;
+}
+
+.dashboard__empty-text {
+  @apply text-zinc-500 text-sm mb-4;
+}

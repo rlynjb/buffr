@@ -4,6 +4,7 @@ import { Badge } from "@/components/ui/badge";
 import { SourceIcon, IconGitHub, IconGlobe, IconChevron } from "@/components/icons";
 import { PHASE_COLORS } from "@/lib/constants";
 import type { Project } from "@/lib/types";
+import "./project-card.css";
 
 interface ProjectCardProps {
   project: Project;
@@ -14,36 +15,33 @@ export function ProjectCard({ project, onClick }: ProjectCardProps) {
   const updatedAgo = getTimeAgo(project.updatedAt);
 
   return (
-    <button
-      onClick={onClick}
-      className="w-full flex items-center gap-4 px-4 py-3.5 rounded-xl border border-zinc-800/60 bg-zinc-900/30 hover:bg-zinc-800/30 hover:border-zinc-700/60 transition-all text-left group cursor-pointer"
-    >
-      <div className="flex-1 min-w-0">
-        <div className="flex items-center gap-2.5 mb-1">
-          <span className="text-sm font-medium text-zinc-200 font-mono">
+    <button onClick={onClick} className="project-card">
+      <div className="project-card__body">
+        <div className="project-card__name-row">
+          <span className="project-card__name">
             {project.name}
           </span>
           <Badge color={PHASE_COLORS[project.phase]}>{project.phase}</Badge>
           {project.dataSources?.map((ds) => (
-            <span key={ds} className="opacity-50">
+            <span key={ds} className="project-card__source-icon">
               <SourceIcon source={ds} size={12} />
             </span>
           ))}
         </div>
-        <div className="flex items-center gap-3 text-[12px] text-zinc-500">
+        <div className="project-card__meta">
           {project.stack && <span>{project.stack}</span>}
           <span>·</span>
           <span>{updatedAgo}</span>
         </div>
       </div>
-      <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+      <div className="project-card__actions">
         {project.githubRepo && (
-          <span className="text-zinc-500"><IconGitHub size={14} /></span>
+          <span className="project-card__actions-icon"><IconGitHub size={14} /></span>
         )}
         {project.netlifySiteUrl && (
-          <span className="text-zinc-500"><IconGlobe size={14} /></span>
+          <span className="project-card__actions-icon"><IconGlobe size={14} /></span>
         )}
-        <span className="text-zinc-600"><IconChevron size={12} /></span>
+        <span className="project-card__actions-chevron"><IconChevron size={12} /></span>
       </div>
     </button>
   );

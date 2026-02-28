@@ -6,6 +6,7 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { saveIntegrationConfig } from "@/lib/api";
 import type { ToolIntegration } from "@/lib/types";
+import "./config-modal.css";
 
 interface ConfigModalProps {
   integration: ToolIntegration | null;
@@ -73,24 +74,24 @@ export function ConfigModal({
             }
           />
         ))}
-        <label className="flex items-center gap-2 text-sm text-zinc-200 cursor-pointer">
+        <label className="config-modal__enabled">
           <input
             type="checkbox"
             checked={enabled}
             onChange={(e) => setEnabled(e.target.checked)}
-            className="accent-purple-500 w-3.5 h-3.5"
+            className="config-modal__enabled-checkbox"
           />
           Enabled
         </label>
         {integration?.id === "github" && (
-          <p className="text-xs text-zinc-500">
+          <p className="config-modal__note">
             Note: GitHub also uses the{" "}
-            <code className="font-mono text-zinc-400">GITHUB_TOKEN</code> environment
+            <code className="config-modal__note-code">GITHUB_TOKEN</code> environment
             variable. If set on Netlify, GitHub tools work without configuring
             a token here.
           </p>
         )}
-        <div className="flex gap-2 justify-end pt-2">
+        <div className="config-modal__footer">
           <Button variant="ghost" onClick={onClose}>
             Cancel
           </Button>
