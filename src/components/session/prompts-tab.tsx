@@ -3,7 +3,7 @@
 import { useState, useEffect } from "react";
 import Link from "next/link";
 import { Badge } from "@/components/ui/badge";
-import { IconChevron, IconCopy, IconPlay, IconLoader, IconSparkle, IconCheck } from "@/components/icons";
+import { IconChevron, IconCopy, IconPlay, IconLoader, IconSparkle, IconCheck, IconLayers } from "@/components/icons";
 import type { Prompt, PromptResponse } from "@/lib/types";
 import { runPrompt, executeToolAction } from "@/lib/api";
 import { useProvider } from "@/context/provider-context";
@@ -25,6 +25,7 @@ const CATEGORIES = [
   { key: "session", label: "Session" },
   { key: "quality", label: "Quality & Review" },
   { key: "reference", label: "Reference" },
+  { key: "from-dev", label: "from .dev/" },
 ] as const;
 
 type Category = typeof CATEGORIES[number]["key"];
@@ -200,15 +201,18 @@ export function PromptsTab({
 
   const hasLLM = providers.length > 0;
 
-  const categoryCounts: Record<Category, number> = { all: prompts.length, setup: 0, dev: 0, session: 0, quality: 0, reference: 0 };
+  const categoryCounts: Record<Category, number> = { all: prompts.length, setup: 0, dev: 0, session: 0, quality: 0, reference: 0, "from-dev": 0 };
   for (const p of prompts) {
     const cat = getPromptCategory(p);
     categoryCounts[cat]++;
+    if (p.source === "dev") categoryCounts["from-dev"]++;
   }
 
   const filtered = activeCategory === "all"
     ? prompts
-    : prompts.filter((p) => getPromptCategory(p) === activeCategory);
+    : activeCategory === "from-dev"
+      ? prompts.filter((p) => p.source === "dev")
+      : prompts.filter((p) => getPromptCategory(p) === activeCategory);
 
   async function handleRun(prompt: Prompt, e: React.MouseEvent) {
     e.stopPropagation();
@@ -316,6 +320,9 @@ export function PromptsTab({
                     <IconChevron size={12} />
                   </span>
                   <span className="prompts-tab__prompt-title">{prompt.title}</span>
+                  {prompt.source === "dev" && (
+                    <Badge color="#34d399" small><IconLayers size={10} /> .dev/</Badge>
+                  )}
                   {prompt.tags.slice(0, 2).map((t) => (
                     <Badge key={t} color="#555" small>{t}</Badge>
                   ))}
@@ -355,6 +362,11 @@ export function PromptsTab({
                             ? "Template — resolves tools + variables"
                             : "Template — resolves variables"}
                       </div>
+                      {prompt.source === "dev" && prompt.devFilename && (
+                        <span className="prompts-tab__dev-sync-badge">
+                          <IconLayers size={10} /> synced with .dev/prompts/{prompt.devFilename}
+                        </span>
+                      )}
                       {isReference && (
                         <span className="prompts-tab__body-ref-badge">Copy-paste ready</span>
                       )}

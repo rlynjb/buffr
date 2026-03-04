@@ -2,9 +2,9 @@ import { useState, useEffect, useRef, useCallback } from "react";
 
 // ━━━ MOCK DATA ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 const PROJECTS = [
-  { id: "p1", name: "recipe-hub", stack: "Next.js + TypeScript + Tailwind", phase: "mvp", githubRepo: "rein/recipe-hub", netlifySiteUrl: "https://recipe-hub.netlify.app", dataSources: ["github", "jira"], lastGoal: "Wire up Stripe webhook", updatedAt: "2026-02-25T14:30:00Z", dismissedSuggestions: [] },
-  { id: "p2", name: "buffr", stack: "Next.js + TypeScript + Tailwind + Netlify", phase: "mvp", githubRepo: "rein/buffr", netlifySiteUrl: "https://buffr.netlify.app", dataSources: ["github"], lastGoal: "Build Phase 2 mapping table", updatedAt: "2026-02-27T10:00:00Z", dismissedSuggestions: ["deploy"] },
-  { id: "p3", name: "portfolio-v3", stack: "Astro + Tailwind", phase: "polish", githubRepo: "rein/portfolio-v3", netlifySiteUrl: null, dataSources: ["github", "notion"], lastGoal: "Add case studies section", updatedAt: "2026-02-10T09:00:00Z", dismissedSuggestions: [] },
+  { id: "p1", name: "recipe-hub", stack: "Next.js + TypeScript + Tailwind", phase: "mvp", githubRepo: "rein/recipe-hub", netlifySiteUrl: "https://recipe-hub.netlify.app", dataSources: ["github", "jira"], lastGoal: "Wire up Stripe webhook", updatedAt: "2026-02-25T14:30:00Z", dismissedSuggestions: [], devFolder: { status: "generated", lastScan: "2026-02-24T10:00:00Z", gapScore: { aligned: 14, partial: 6, gap: 4 }, adapters: ["claude", "cursor"] } },
+  { id: "p2", name: "buffr", stack: "Next.js + TypeScript + Tailwind + Netlify", phase: "mvp", githubRepo: "rein/buffr", netlifySiteUrl: "https://buffr.netlify.app", dataSources: ["github"], lastGoal: "Build Phase 2 mapping table", updatedAt: "2026-02-27T10:00:00Z", dismissedSuggestions: ["deploy"], devFolder: { status: "generated", lastScan: "2026-02-27T08:00:00Z", gapScore: { aligned: 18, partial: 3, gap: 2 }, adapters: ["claude"] } },
+  { id: "p3", name: "portfolio-v3", stack: "Astro + Tailwind", phase: "polish", githubRepo: "rein/portfolio-v3", netlifySiteUrl: null, dataSources: ["github", "notion"], lastGoal: "Add case studies section", updatedAt: "2026-02-10T09:00:00Z", dismissedSuggestions: [], devFolder: null },
 ];
 
 const SESSIONS = {
@@ -29,36 +29,42 @@ const NEXT_ACTIONS = [
 
 const PROMPTS = [
   // ── Project Setup & Standards ──
-  { id: "pr1", title: "Generate AI Rules", body: "Create an .ai-rules file for {{project.name}} based on the {{project.stack}} stack. Include coding standards, naming conventions, file organization patterns, and common pitfalls to avoid.\n\n{{tool:github_get_repo}}\n{{tool:github_analyze_repo}}", tags: ["setup", "standards"], usageCount: 14, scope: "project" },
-  { id: "pr2", title: "Generate Architecture Doc", body: "Write ARCHITECTURE.md for {{project.name}}. Describe the system structure, key directories, data flow, tech decisions and tradeoffs, and deployment model.\n\nStack: {{project.stack}}\nGoals: {{project.goals}}\n\n{{tool:github_analyze_repo}}", tags: ["setup", "docs"], usageCount: 11, scope: "project" },
-  { id: "pr3", title: "Update Changelog", body: "Review recent activity and generate/update CHANGELOG.md entries for {{project.name}}. Group by: Added, Changed, Fixed, Removed. Use semantic versioning.\n\n{{tool:github_list_commits}}\n{{tool:github_list_issues:state=closed}}\n{{tool:jira_list_resolved}}", tags: ["docs", "release"], usageCount: 9, scope: "project" },
-  { id: "pr4", title: "Generate QA Feature Map", body: "Create features_qa.md for {{project.name}}: a testing-focused feature map.\n\nFor each feature, list:\n- What it does\n- Happy path steps\n- Edge cases to test\n- What \"broken\" looks like\n- Priority: critical / high / medium / low\n\n{{tool:github_list_issues}}\n{{tool:github_analyze_repo}}", tags: ["qa", "docs"], usageCount: 5, scope: "project" },
-  { id: "pr5", title: "Generate Product Feature Map", body: "Create features_product.md for {{project.name}}: a product-focused feature map.\n\nFor each feature, describe:\n- User value (why it matters)\n- Current state: shipped / in-progress / planned\n- Dependencies\n- Success criteria\n\n{{tool:github_list_issues}}\n{{tool:notion_list_tasks}}\n{{tool:jira_list_issues}}", tags: ["product", "docs"], usageCount: 4, scope: "project" },
-  { id: "pr6", title: "Generate Deployment Guide", body: "Write DEPLOYMENT.md for {{project.name}}. Cover:\n- Environment setup and required env vars\n- Build steps\n- Deploy pipeline\n- Rollback process\n- Monitoring and health checks\n\nStack: {{project.stack}}\nConstraints: {{project.constraints}}", tags: ["setup", "deploy"], usageCount: 3, scope: "project" },
+  { id: "pr1", title: "Generate AI Rules", body: "Create an .ai-rules file for {{project.name}} based on the {{project.stack}} stack. Include coding standards, naming conventions, file organization patterns, and common pitfalls to avoid.\n\n{{tool:github_get_repo}}\n{{tool:github_analyze_repo}}", tags: ["setup", "standards"], usageCount: 14, scope: "project", source: "library" },
+  { id: "pr2", title: "Generate Architecture Doc", body: "Write ARCHITECTURE.md for {{project.name}}. Describe the system structure, key directories, data flow, tech decisions and tradeoffs, and deployment model.\n\nStack: {{project.stack}}\nGoals: {{project.goals}}\n\n{{tool:github_analyze_repo}}", tags: ["setup", "docs"], usageCount: 11, scope: "project", source: "library" },
+  { id: "pr3", title: "Update Changelog", body: "Review recent activity and generate/update CHANGELOG.md entries for {{project.name}}. Group by: Added, Changed, Fixed, Removed. Use semantic versioning.\n\n{{tool:github_list_commits}}\n{{tool:github_list_issues:state=closed}}\n{{tool:jira_list_resolved}}", tags: ["docs", "release"], usageCount: 9, scope: "project", source: "library" },
+  { id: "pr4", title: "Generate QA Feature Map", body: "Create features_qa.md for {{project.name}}: a testing-focused feature map.\n\nFor each feature, list:\n- What it does\n- Happy path steps\n- Edge cases to test\n- What \"broken\" looks like\n- Priority: critical / high / medium / low\n\n{{tool:github_list_issues}}\n{{tool:github_analyze_repo}}", tags: ["qa", "docs"], usageCount: 5, scope: "project", source: "library" },
+  { id: "pr5", title: "Generate Product Feature Map", body: "Create features_product.md for {{project.name}}: a product-focused feature map.\n\nFor each feature, describe:\n- User value (why it matters)\n- Current state: shipped / in-progress / planned\n- Dependencies\n- Success criteria\n\n{{tool:github_list_issues}}\n{{tool:notion_list_tasks}}\n{{tool:jira_list_issues}}", tags: ["product", "docs"], usageCount: 4, scope: "project", source: "library" },
+  { id: "pr6", title: "Generate Deployment Guide", body: "Write DEPLOYMENT.md for {{project.name}}. Cover:\n- Environment setup and required env vars\n- Build steps\n- Deploy pipeline\n- Rollback process\n- Monitoring and health checks\n\nStack: {{project.stack}}\nConstraints: {{project.constraints}}", tags: ["setup", "deploy"], usageCount: 3, scope: "project", source: "library" },
 
   // ── Active Development ──
-  { id: "pr7", title: "Generate Diagram", body: "Create a Mermaid diagram for {{project.name}} showing the system architecture.\n\nInclude: key components, data flow between them, external services, and storage layers.\n\nStack: {{project.stack}}\n{{tool:github_analyze_repo}}", tags: ["visual", "architecture"], usageCount: 8, scope: "project" },
-  { id: "pr8", title: "Triage Open Items", body: "Review all open items across my tools for {{project.name}}. Categorize by:\n\n1. Blocking other work (do first)\n2. Quick wins under 30 min\n3. Stale items (>7 days untouched)\n4. Can be deferred\n\nRecommend what to tackle in my next session.\n\n{{tool:github_list_issues:state=open}}\n{{tool:jira_list_issues:status=open}}\n{{tool:notion_list_tasks:status=To Do}}", tags: ["planning", "triage"], usageCount: 12, scope: "global" },
-  { id: "pr9", title: "Draft Issue from Context", body: "Based on my last session, draft a GitHub issue for the next piece of work on {{project.name}}.\n\nLast goal: {{lastSession.goal}}\nNext step: {{lastSession.nextStep}}\nBlockers: {{lastSession.blockers}}\n\nInclude: clear title, description, acceptance criteria, and suggested labels.\n\n{{tool:github_list_issues:state=open&limit=5}}", tags: ["github", "workflow"], usageCount: 7, scope: "global" },
-  { id: "pr10", title: "Refactor Assessment", body: "Analyze the {{project.name}} codebase and identify areas that need refactoring. Consider:\n\n- Code duplication\n- Oversized components or functions\n- Missing error handling\n- Inconsistent patterns\n- Performance concerns\n\nPrioritize by impact and effort.\n\n{{tool:github_analyze_repo}}\n{{tool:github_get_diffs}}", tags: ["code-quality", "planning"], usageCount: 3, scope: "project" },
+  { id: "pr7", title: "Generate Diagram", body: "Create a Mermaid diagram for {{project.name}} showing the system architecture.\n\nInclude: key components, data flow between them, external services, and storage layers.\n\nStack: {{project.stack}}\n{{tool:github_analyze_repo}}", tags: ["visual", "architecture"], usageCount: 8, scope: "project", source: "library" },
+  { id: "pr8", title: "Triage Open Items", body: "Review all open items across my tools for {{project.name}}. Categorize by:\n\n1. Blocking other work (do first)\n2. Quick wins under 30 min\n3. Stale items (>7 days untouched)\n4. Can be deferred\n\nRecommend what to tackle in my next session.\n\n{{tool:github_list_issues:state=open}}\n{{tool:jira_list_issues:status=open}}\n{{tool:notion_list_tasks:status=To Do}}", tags: ["planning", "triage"], usageCount: 12, scope: "global", source: "library" },
+  { id: "pr9", title: "Draft Issue from Context", body: "Based on my last session, draft a GitHub issue for the next piece of work on {{project.name}}.\n\nLast goal: {{lastSession.goal}}\nNext step: {{lastSession.nextStep}}\nBlockers: {{lastSession.blockers}}\n\nInclude: clear title, description, acceptance criteria, and suggested labels.\n\n{{tool:github_list_issues:state=open&limit=5}}", tags: ["github", "workflow"], usageCount: 7, scope: "global", source: "library" },
+  { id: "pr10", title: "Refactor Assessment", body: "Analyze the {{project.name}} codebase and identify areas that need refactoring. Consider:\n\n- Code duplication\n- Oversized components or functions\n- Missing error handling\n- Inconsistent patterns\n- Performance concerns\n\nPrioritize by impact and effort.\n\n{{tool:github_analyze_repo}}\n{{tool:github_get_diffs}}", tags: ["code-quality", "planning"], usageCount: 3, scope: "project", source: "library" },
 
   // ── Session Lifecycle ──
-  { id: "pr11", title: "Session Kickoff Brief", body: "Give me a 30-second briefing to start my session on {{project.name}}.\n\n- What was I working on?\n- What's the next logical step?\n- What's the current state of open work?\n- Anything I should be aware of?\n\nLast goal: {{lastSession.goal}}\nNext step: {{lastSession.nextStep}}\nBlockers: {{lastSession.blockers}}\n\n{{tool:github_list_issues:state=open&limit=5}}\n{{tool:github_list_commits}}", tags: ["session", "context"], usageCount: 15, scope: "global" },
-  { id: "pr12", title: "End-of-Session Summary", body: "Summarize what happened this session on {{project.name}}.\n\nInclude: code changes, closed items, and what's still open. Format as a bullet list I can paste into the session form.\n\n{{tool:github_get_diffs}}\n{{tool:github_list_issues:state=closed}}\n{{tool:jira_list_resolved}}", tags: ["session", "summary"], usageCount: 10, scope: "global" },
-  { id: "pr13", title: "Weekly Progress Report", body: "Write a short weekly progress summary for {{project.name}}.\n\nSections: What shipped, What's in progress, What's blocked.\n\n{{tool:github_list_commits}}\n{{tool:github_list_issues:state=closed}}\n{{tool:jira_list_resolved}}\n{{tool:notion_list_tasks:status=Done}}", tags: ["reporting", "summary"], usageCount: 6, scope: "global" },
+  { id: "pr11", title: "Session Kickoff Brief", body: "Give me a 30-second briefing to start my session on {{project.name}}.\n\n- What was I working on?\n- What's the next logical step?\n- What's the current state of open work?\n- Anything I should be aware of?\n\nLast goal: {{lastSession.goal}}\nNext step: {{lastSession.nextStep}}\nBlockers: {{lastSession.blockers}}\n\n{{tool:github_list_issues:state=open&limit=5}}\n{{tool:github_list_commits}}", tags: ["session", "context"], usageCount: 15, scope: "global", source: "library" },
+  { id: "pr12", title: "End-of-Session Summary", body: "Summarize what happened this session on {{project.name}}.\n\nInclude: code changes, closed items, and what's still open. Format as a bullet list I can paste into the session form.\n\n{{tool:github_get_diffs}}\n{{tool:github_list_issues:state=closed}}\n{{tool:jira_list_resolved}}", tags: ["session", "summary"], usageCount: 10, scope: "global", source: "library" },
+  { id: "pr13", title: "Weekly Progress Report", body: "Write a short weekly progress summary for {{project.name}}.\n\nSections: What shipped, What's in progress, What's blocked.\n\n{{tool:github_list_commits}}\n{{tool:github_list_issues:state=closed}}\n{{tool:jira_list_resolved}}\n{{tool:notion_list_tasks:status=Done}}", tags: ["reporting", "summary"], usageCount: 6, scope: "global", source: "library" },
 
   // ── Quality & Review ──
-  { id: "pr14", title: "Pre-Deploy Checklist", body: "Generate a pre-deploy checklist for {{project.name}} based on {{project.stack}}.\n\nInclude:\n- Env vars verified\n- Build passes locally\n- Tests passing\n- Migration steps (if any)\n- Feature flags\n- Rollback plan\n- Open bugs that might block\n\n{{tool:github_list_issues:state=open&labels=bug}}", tags: ["deploy", "qa"], usageCount: 4, scope: "project" },
-  { id: "pr15", title: "Write PR Description", body: "Write a pull request description for {{project.name}}.\n\nRecent commits:\n{{tool:github_list_commits}}\n\nCode changes:\n{{tool:github_get_diffs}}\n\nFeature context: {{lastSession.goal}}\n\nInclude: summary, what changed, how to test, and any notes for reviewers.", tags: ["github", "workflow"], usageCount: 8, scope: "global" },
-  { id: "pr16", title: "Dependency Review", body: "Review the dependencies in {{project.name}} for:\n\n- Outdated packages that need updating\n- Known security vulnerabilities\n- Unused imports that can be removed\n- Better alternatives to current packages\n\nStack: {{project.stack}}\n{{tool:github_analyze_repo}}", tags: ["maintenance", "code-quality"], usageCount: 2, scope: "project" },
+  { id: "pr14", title: "Pre-Deploy Checklist", body: "Generate a pre-deploy checklist for {{project.name}} based on {{project.stack}}.\n\nInclude:\n- Env vars verified\n- Build passes locally\n- Tests passing\n- Migration steps (if any)\n- Feature flags\n- Rollback plan\n- Open bugs that might block\n\n{{tool:github_list_issues:state=open&labels=bug}}", tags: ["deploy", "qa"], usageCount: 4, scope: "project", source: "library" },
+  { id: "pr15", title: "Write PR Description", body: "Write a pull request description for {{project.name}}.\n\nRecent commits:\n{{tool:github_list_commits}}\n\nCode changes:\n{{tool:github_get_diffs}}\n\nFeature context: {{lastSession.goal}}\n\nInclude: summary, what changed, how to test, and any notes for reviewers.", tags: ["github", "workflow"], usageCount: 8, scope: "global", source: "library" },
+  { id: "pr16", title: "Dependency Review", body: "Review the dependencies in {{project.name}} for:\n\n- Outdated packages that need updating\n- Known security vulnerabilities\n- Unused imports that can be removed\n- Better alternatives to current packages\n\nStack: {{project.stack}}\n{{tool:github_analyze_repo}}", tags: ["maintenance", "code-quality"], usageCount: 2, scope: "project", source: "library" },
 
   // ── Reference Prompts (plain text — copy-paste into Claude Code or other tools) ──
-  { id: "pr17", title: "TypeScript System Prompt", body: "You are a senior TypeScript developer. Follow these standards:\n\n- Strict mode always. No `any` unless explicitly justified with a comment.\n- Prefer `interface` over `type` for object shapes. Use `type` for unions and intersections.\n- Use `const` by default. `let` only when reassignment is necessary. Never `var`.\n- Functions: max 40 lines. If longer, extract. Single responsibility.\n- Error handling: never swallow errors. Always `catch` with typed errors or rethrow.\n- Naming: PascalCase for types/interfaces/components, camelCase for variables/functions, UPPER_SNAKE for constants.\n- Imports: group by external → internal → types. No circular imports.\n- No default exports except for React page/layout components.\n- Prefer early returns over nested conditionals.\n- All async functions must have error boundaries.\n- Comments explain WHY, not WHAT. Code should explain what.", tags: ["reference", "standards"], usageCount: 24, scope: "global" },
-  { id: "pr18", title: "Code Review Checklist", body: "When reviewing code, check each item:\n\n□ Does it do what the PR description says?\n□ Are there any unhandled edge cases?\n□ Error handling: are errors caught, logged, and surfaced to the user?\n□ Naming: are variables, functions, and files named clearly?\n□ Duplication: is there copy-pasted code that should be extracted?\n□ Performance: any unnecessary re-renders, N+1 queries, or missing memoization?\n□ Security: user input validated? SQL injection? XSS? Auth checks?\n□ Tests: are the important paths covered? Are edge cases tested?\n□ Types: are types accurate, or are there `any` escapes?\n□ Accessibility: semantic HTML? ARIA labels? Keyboard navigation?\n□ Dependencies: any new packages? Are they justified and maintained?\n□ Documentation: do public APIs and complex logic have comments?", tags: ["reference", "code-quality"], usageCount: 18, scope: "global" },
-  { id: "pr19", title: "React Component Prompt", body: "Build React components following these rules:\n\n- Functional components only. No class components.\n- Props: define with interface, destructure in signature. Always provide defaults for optional props.\n- State: useState for simple, useReducer for complex. Never mutate state directly.\n- Effects: always include cleanup. Specify dependency arrays explicitly. No missing deps.\n- Memoization: useMemo for expensive computations, useCallback for callbacks passed to children. Don't over-memoize.\n- Composition over prop drilling. Use context sparingly — only for truly global state.\n- One component per file. Co-locate styles, tests, and types.\n- Loading/error/empty states: every component that fetches data must handle all three.\n- Event handlers: prefix with `handle` (handleClick, handleSubmit).\n- Avoid inline styles. Use Tailwind classes or CSS modules.\n- Keep components under 150 lines. Extract sub-components when logic grows.", tags: ["reference", "standards"], usageCount: 16, scope: "global" },
-  { id: "pr20", title: "Git Commit Message Format", body: "Write commit messages in this format:\n\ntype(scope): short description\n\nOptional longer body explaining WHY the change was made,\nnot what was changed (the diff shows that).\n\nTypes:\n- feat: new feature\n- fix: bug fix\n- refactor: code restructuring (no behavior change)\n- docs: documentation only\n- style: formatting, semicolons, etc (no code change)\n- test: adding or fixing tests\n- chore: build, CI, deps, tooling\n- perf: performance improvement\n\nRules:\n- Subject line: max 72 chars, imperative mood (\"add\" not \"added\")\n- No period at end of subject\n- Blank line between subject and body\n- Reference issue numbers: \"Closes #42\" or \"Relates to BUFF-15\"", tags: ["reference", "workflow"], usageCount: 20, scope: "global" },
-  { id: "pr21", title: "API Endpoint Prompt", body: "When building API endpoints, follow these patterns:\n\n- RESTful naming: /api/resources (plural), /api/resources/:id\n- HTTP methods: GET (read), POST (create), PUT/PATCH (update), DELETE (remove)\n- Always validate request body and query params at the boundary\n- Return consistent response shape: { data, error, meta }\n- Status codes: 200 (ok), 201 (created), 400 (bad request), 401 (unauthorized), 404 (not found), 500 (server error)\n- Error responses include: code, message, and optionally details\n- Pagination: use cursor-based for large datasets, offset for small\n- Rate limiting: include X-RateLimit headers\n- Auth: validate tokens before any business logic\n- Logging: log request method, path, status, and duration. Never log tokens or PII.\n- Timeouts: set reasonable timeouts for external API calls (5s default)\n- Idempotency: POST/PUT should be safe to retry", tags: ["reference", "standards"], usageCount: 10, scope: "global" },
-  { id: "pr22", title: "Bug Report Template", body: "## Bug Report\n\n**Title:** [Clear, specific description]\n\n**Environment:**\n- Browser/OS:\n- App version:\n- User role:\n\n**Steps to Reproduce:**\n1. Go to...\n2. Click on...\n3. Observe...\n\n**Expected Behavior:**\nWhat should happen.\n\n**Actual Behavior:**\nWhat actually happens.\n\n**Screenshots/Logs:**\n[Attach if applicable]\n\n**Severity:**\n- Critical: app crashes, data loss\n- High: feature broken, no workaround\n- Medium: feature broken, workaround exists\n- Low: cosmetic, minor inconvenience\n\n**Additional Context:**\nAnything else relevant.", tags: ["reference", "workflow"], usageCount: 8, scope: "global" },
+  { id: "pr17", title: "TypeScript System Prompt", body: "You are a senior TypeScript developer. Follow these standards:\n\n- Strict mode always. No `any` unless explicitly justified with a comment.\n- Prefer `interface` over `type` for object shapes. Use `type` for unions and intersections.\n- Use `const` by default. `let` only when reassignment is necessary. Never `var`.\n- Functions: max 40 lines. If longer, extract. Single responsibility.\n- Error handling: never swallow errors. Always `catch` with typed errors or rethrow.\n- Naming: PascalCase for types/interfaces/components, camelCase for variables/functions, UPPER_SNAKE for constants.\n- Imports: group by external → internal → types. No circular imports.\n- No default exports except for React page/layout components.\n- Prefer early returns over nested conditionals.\n- All async functions must have error boundaries.\n- Comments explain WHY, not WHAT. Code should explain what.", tags: ["reference", "standards"], usageCount: 24, scope: "global", source: "library" },
+  { id: "pr18", title: "Code Review Checklist", body: "When reviewing code, check each item:\n\n□ Does it do what the PR description says?\n□ Are there any unhandled edge cases?\n□ Error handling: are errors caught, logged, and surfaced to the user?\n□ Naming: are variables, functions, and files named clearly?\n□ Duplication: is there copy-pasted code that should be extracted?\n□ Performance: any unnecessary re-renders, N+1 queries, or missing memoization?\n□ Security: user input validated? SQL injection? XSS? Auth checks?\n□ Tests: are the important paths covered? Are edge cases tested?\n□ Types: are types accurate, or are there `any` escapes?\n□ Accessibility: semantic HTML? ARIA labels? Keyboard navigation?\n□ Dependencies: any new packages? Are they justified and maintained?\n□ Documentation: do public APIs and complex logic have comments?", tags: ["reference", "code-quality"], usageCount: 18, scope: "global", source: "library" },
+  { id: "pr19", title: "React Component Prompt", body: "Build React components following these rules:\n\n- Functional components only. No class components.\n- Props: define with interface, destructure in signature. Always provide defaults for optional props.\n- State: useState for simple, useReducer for complex. Never mutate state directly.\n- Effects: always include cleanup. Specify dependency arrays explicitly. No missing deps.\n- Memoization: useMemo for expensive computations, useCallback for callbacks passed to children. Don't over-memoize.\n- Composition over prop drilling. Use context sparingly — only for truly global state.\n- One component per file. Co-locate styles, tests, and types.\n- Loading/error/empty states: every component that fetches data must handle all three.\n- Event handlers: prefix with `handle` (handleClick, handleSubmit).\n- Avoid inline styles. Use Tailwind classes or CSS modules.\n- Keep components under 150 lines. Extract sub-components when logic grows.", tags: ["reference", "standards"], usageCount: 16, scope: "global", source: "library" },
+  { id: "pr20", title: "Git Commit Message Format", body: "Write commit messages in this format:\n\ntype(scope): short description\n\nOptional longer body explaining WHY the change was made,\nnot what was changed (the diff shows that).\n\nTypes:\n- feat: new feature\n- fix: bug fix\n- refactor: code restructuring (no behavior change)\n- docs: documentation only\n- style: formatting, semicolons, etc (no code change)\n- test: adding or fixing tests\n- chore: build, CI, deps, tooling\n- perf: performance improvement\n\nRules:\n- Subject line: max 72 chars, imperative mood (\"add\" not \"added\")\n- No period at end of subject\n- Blank line between subject and body\n- Reference issue numbers: \"Closes #42\" or \"Relates to BUFF-15\"", tags: ["reference", "workflow"], usageCount: 20, scope: "global", source: "library" },
+  { id: "pr21", title: "API Endpoint Prompt", body: "When building API endpoints, follow these patterns:\n\n- RESTful naming: /api/resources (plural), /api/resources/:id\n- HTTP methods: GET (read), POST (create), PUT/PATCH (update), DELETE (remove)\n- Always validate request body and query params at the boundary\n- Return consistent response shape: { data, error, meta }\n- Status codes: 200 (ok), 201 (created), 400 (bad request), 401 (unauthorized), 404 (not found), 500 (server error)\n- Error responses include: code, message, and optionally details\n- Pagination: use cursor-based for large datasets, offset for small\n- Rate limiting: include X-RateLimit headers\n- Auth: validate tokens before any business logic\n- Logging: log request method, path, status, and duration. Never log tokens or PII.\n- Timeouts: set reasonable timeouts for external API calls (5s default)\n- Idempotency: POST/PUT should be safe to retry", tags: ["reference", "standards"], usageCount: 10, scope: "global", source: "library" },
+  { id: "pr22", title: "Bug Report Template", body: "## Bug Report\n\n**Title:** [Clear, specific description]\n\n**Environment:**\n- Browser/OS:\n- App version:\n- User role:\n\n**Steps to Reproduce:**\n1. Go to...\n2. Click on...\n3. Observe...\n\n**Expected Behavior:**\nWhat should happen.\n\n**Actual Behavior:**\nWhat actually happens.\n\n**Screenshots/Logs:**\n[Attach if applicable]\n\n**Severity:**\n- Critical: app crashes, data loss\n- High: feature broken, no workaround\n- Medium: feature broken, workaround exists\n- Low: cosmetic, minor inconvenience\n\n**Additional Context:**\nAnything else relevant.", tags: ["reference", "workflow"], usageCount: 8, scope: "global", source: "library" },
+
+  // ── From .dev/ (imported on scan, synced bidirectionally) ──
+  { id: "dev-audit", title: "Audit Codebase", body: "Act as a senior developer specializing in Next.js, React, and TypeScript.\n\nPerform a comprehensive code quality audit focused on the standards in .dev/standards/frontend.md and .dev/standards/backend.md.\n\nCheck against the gap analysis in .dev/gap-analysis.md — prioritize closing 🔴 gaps.\n\n{{tool:github_analyze_repo}}\n{{tool:github_get_file:path=.dev/gap-analysis.md}}", tags: ["audit", "code-quality"], usageCount: 6, scope: "project", source: "dev", devFilename: "audit.md" },
+  { id: "dev-cleanup", title: "Run Cleanup", body: "Review the tech debt inventory in .dev/context/TECH_DEBT.md.\n\nPrioritize items by severity (high → medium → low).\nFor each high-severity item, suggest a concrete fix with code location.\n\nFocus on:\n- FIXME and HACK comments\n- Missing error boundaries\n- `any` type escapes\n\n{{tool:github_get_file:path=.dev/context/TECH_DEBT.md}}", tags: ["cleanup", "tech-debt"], usageCount: 4, scope: "project", source: "dev", devFilename: "cleanup.md" },
+  { id: "dev-new-feature", title: "Scaffold New Feature", body: "Create a new feature following this project's conventions.\n\nRefer to:\n- .dev/context/CONVENTIONS.md for naming and structure\n- .dev/templates/component.md for component pattern\n- .dev/templates/api-endpoint.md for API pattern\n- .dev/templates/test.md for test pattern\n\nMatch the existing codebase style exactly.\n\n{{tool:github_get_file:path=.dev/context/CONVENTIONS.md}}", tags: ["scaffold", "dev"], usageCount: 3, scope: "project", source: "dev", devFilename: "new-feature.md" },
+  { id: "dev-changelog", title: "Generate Changelog Entry", body: "Generate a changelog entry following the format already established in CHANGELOG.md.\n\nReview recent commits and closed issues to determine what changed.\nGroup by: Added, Changed, Fixed, Removed.\nUse semantic versioning.\n\n{{tool:github_list_commits}}\n{{tool:github_list_issues:state=closed}}\n{{tool:github_get_file:path=CHANGELOG.md}}", tags: ["docs", "release"], usageCount: 5, scope: "project", source: "dev", devFilename: "changelog.md" },
 ];
 
 const TOOLS_DATA = [
@@ -114,6 +120,12 @@ const I = {
   edit: <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>,
   trash: <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>,
   prompt: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>,
+  scan: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 7V5a2 2 0 012-2h2"/><path d="M17 3h2a2 2 0 012 2v2"/><path d="M21 17v2a2 2 0 01-2 2h-2"/><path d="M7 21H5a2 2 0 01-2-2v-2"/><line x1="7" y1="12" x2="17" y2="12"/></svg>,
+  fileTree: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 3v18h18"/><path d="M7 7h2v2H7z"/><path d="M11 7h6"/><path d="M11 11h4"/><path d="M7 15h2v2H7z"/><path d="M11 15h6"/></svg>,
+  shield: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>,
+  eye: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>,
+  layers: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>,
+  refresh: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 11-2.12-9.36L23 10"/></svg>,
 };
 
 const srcIcon = (s) => s === "github" ? I.github : s === "jira" ? I.jira : s === "notion" ? I.notion : s === "ai" ? I.sparkle : s === "session" ? I.back : null;
@@ -234,7 +246,7 @@ function CommandPalette({ open, onClose, onAction, prompts }) {
 }
 
 // ━━━ NAV BAR ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-function NavBar({ page, onNavigate, onPalette }) {
+function NavBar({ page, onNavigate, onPalette, onLogout }) {
   const [provider, setProvider] = useState("anthropic");
   const providers = [
     { id: "anthropic", label: "Claude", model: "claude-sonnet-4-20250514" },
@@ -251,8 +263,8 @@ function NavBar({ page, onNavigate, onPalette }) {
           <span className="text-sm font-semibold text-zinc-200 hidden sm:inline" style={{ fontFamily: mono }}>buffr</span>
         </button>
         <div className="flex items-center gap-1 text-xs text-zinc-600">
-          {["dashboard", "project", "tools", "prompts"].map(p => page === p && (
-            <span key={p} className="px-2 py-0.5 rounded bg-zinc-800/60 text-zinc-400 capitalize">{p === "project" ? "Resume Card" : p === "prompts" ? "Prompt Library" : p}</span>
+          {["dashboard", "project", "dev-folder", "tools", "prompts"].map(p => page === p && (
+            <span key={p} className="px-2 py-0.5 rounded bg-zinc-800/60 text-zinc-400 capitalize">{p === "project" ? "Resume Card" : p === "prompts" ? "Prompt Library" : p === "dev-folder" ? ".dev/" : p}</span>
           ))}
         </div>
       </div>
@@ -263,6 +275,9 @@ function NavBar({ page, onNavigate, onPalette }) {
         <select value={provider} onChange={e => setProvider(e.target.value)} className="bg-zinc-800/80 border border-zinc-700/50 rounded-lg px-2 py-1.5 text-xs text-zinc-300 focus:outline-none focus:border-purple-500/40 cursor-pointer">
           {providers.map(p => <option key={p.id} value={p.id}>{p.label} — {p.model}</option>)}
         </select>
+        <button onClick={onLogout} className="px-2 py-1.5 rounded-lg hover:bg-red-500/10 text-zinc-600 hover:text-red-400 text-xs transition-colors" title="Sign out">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+        </button>
       </div>
     </nav>
   );
@@ -299,6 +314,7 @@ function Dashboard({ onNavigate, externalShowLoad, onLoadShown }) {
               <div className="flex items-center gap-2.5 mb-1">
                 <span className="text-sm font-medium text-zinc-200" style={{ fontFamily: mono }}>{p.name}</span>
                 <Badge color={phaseColor(p.phase)}>{p.phase}</Badge>
+                {p.devFolder && <span className="text-emerald-500 opacity-60" title=".dev/ generated">{I.layers}</span>}
                 {p.dataSources.map(ds => <span key={ds} style={{ color: srcColor(ds) }} className="opacity-50">{srcIcon(ds)}</span>)}
               </div>
               <div className="flex items-center gap-3 text-[12px] text-zinc-500">
@@ -407,8 +423,9 @@ function ResumeCard({ project, onNavigate }) {
   ];
 
   const suggestions = [];
-  if (!project.netlifySiteUrl && !project.dismissedSuggestions.includes("deploy")) suggestions.push("Set up deploy — connect to Netlify for automatic deployments");
-  if (project.dataSources.length <= 1 && !project.dismissedSuggestions.includes("sources")) suggestions.push("Connect a data source — add Notion or Jira for richer context");
+  if (!project.devFolder && !project.dismissedSuggestions.includes("dev-folder")) suggestions.push({ text: "Generate .dev/ folder — scan your repo for project intelligence", action: "dev-folder" });
+  if (!project.netlifySiteUrl && !project.dismissedSuggestions.includes("deploy")) suggestions.push({ text: "Set up deploy — connect to Netlify for automatic deployments", action: "deploy" });
+  if (project.dataSources.length <= 1 && !project.dismissedSuggestions.includes("sources")) suggestions.push({ text: "Connect a data source — add Notion or Jira for richer context", action: "sources" });
 
   return (
     <div className="max-w-3xl mx-auto px-4 py-6">
@@ -425,9 +442,11 @@ function ResumeCard({ project, onNavigate }) {
             <span>{project.stack}</span>
             {project.githubRepo && <a className="flex items-center gap-1 hover:text-zinc-300 transition-colors">{I.github} {project.githubRepo}</a>}
             {project.netlifySiteUrl && <a className="flex items-center gap-1 hover:text-zinc-300 transition-colors">{I.globe} Site</a>}
+            {project.devFolder && <button onClick={() => onNavigate("dev-folder", project.id)} className="flex items-center gap-1 text-emerald-500/70 hover:text-emerald-400 transition-colors">{I.layers} .dev/</button>}
           </div>
         </div>
         <div className="flex items-center gap-2">
+          {project.devFolder && <Btn size="sm" onClick={() => onNavigate("dev-folder", project.id)}>{I.layers} .dev/</Btn>}
           <Btn variant="primary" size="sm" onClick={() => setEndSession(true)}>End Session</Btn>
         </div>
       </div>
@@ -435,9 +454,9 @@ function ResumeCard({ project, onNavigate }) {
       {/* Adaptive Suggestions */}
       {suggestions.slice(0, 2).map((s, i) => (
         <div key={i} className="flex items-center justify-between px-3 py-2 mb-2 rounded-lg border border-amber-500/20 bg-amber-500/5 text-amber-200 text-[13px]">
-          <span className="flex items-center gap-2"><span className="text-amber-400">💡</span>{s}</span>
+          <span className="flex items-center gap-2"><span className="text-amber-400">💡</span>{s.text}</span>
           <span className="flex gap-1.5">
-            <button className="px-2.5 py-0.5 rounded bg-amber-500/20 hover:bg-amber-500/30 text-amber-100 text-xs font-medium transition-colors">Do it</button>
+            <button onClick={() => s.action === "dev-folder" ? onNavigate("dev-folder", project.id) : null} className="px-2.5 py-0.5 rounded bg-amber-500/20 hover:bg-amber-500/30 text-amber-100 text-xs font-medium transition-colors">Do it</button>
             <button className="px-2 py-0.5 rounded hover:bg-white/5 text-amber-300/50 text-xs transition-colors">Dismiss</button>
           </span>
         </div>
@@ -587,9 +606,10 @@ function PromptsTab() {
     { id: "session", label: "Session", tags: ["session", "context", "summary", "reporting"] },
     { id: "qa", label: "Quality & Review", tags: ["qa", "deploy", "maintenance"] },
     { id: "reference", label: "Reference", tags: ["reference"] },
+    { id: "from-dev", label: "from .dev/" },
   ];
 
-  const filtered = catFilter === "all" ? PROMPTS : PROMPTS.filter(p => {
+  const filtered = catFilter === "all" ? PROMPTS : catFilter === "from-dev" ? PROMPTS.filter(p => p.source === "dev") : PROMPTS.filter(p => {
     const cat = categories.find(c => c.id === catFilter);
     return cat && p.tags.some(t => cat.tags.includes(t));
   });
@@ -648,6 +668,7 @@ function PromptsTab() {
                 <div className="flex items-center gap-2.5 min-w-0">
                   <span className={`transition-transform duration-200 text-zinc-500 ${isExp ? "rotate-0" : "-rotate-90"}`}>{I.chevron}</span>
                   <span className="text-sm text-zinc-200 font-medium truncate">{p.title}</span>
+                  {p.source === "dev" && <Badge color="#34d399" small>{I.layers} .dev/</Badge>}
                   {p.tags.map(t => <Badge key={t} color="#555" small>{t}</Badge>)}
                   <span className="text-[10px] text-zinc-600">{p.usageCount}×</span>
                   {p.scope === "project" && <Badge color="#60a5fa" small>project</Badge>}
@@ -664,7 +685,10 @@ function PromptsTab() {
                       <div className="text-[11px] text-zinc-500 uppercase tracking-wider font-semibold">
                         {!hasAnyTokens(p.body) ? "Reference Prompt" : hasToolTokens(p.body) ? "Template — resolves tools + variables" : "Template — resolves variables"}
                       </div>
-                      {!hasAnyTokens(p.body) && <span className="text-[10px] px-1.5 py-0.5 rounded bg-zinc-700/40 text-zinc-400">Copy-paste ready</span>}
+                      <div className="flex items-center gap-2">
+                        {p.source === "dev" && <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-400 flex items-center gap-1">{I.layers} synced with .dev/prompts/{p.devFilename}</span>}
+                        {!hasAnyTokens(p.body) && <span className="text-[10px] px-1.5 py-0.5 rounded bg-zinc-700/40 text-zinc-400">Copy-paste ready</span>}
+                      </div>
                     </div>
                     <div className="text-[13px] text-zinc-400 leading-relaxed whitespace-pre-wrap">{renderBody(p.body)}</div>
                   </div>
@@ -945,7 +969,7 @@ function PromptsLibrary({ onNavigate }) {
   const allTags = [...new Set(prompts.flatMap(p => p.tags))];
 
   const filtered = prompts.filter(p =>
-    (tagFilter === "all" || p.tags.includes(tagFilter)) &&
+    (tagFilter === "all" || tagFilter === "from-dev" ? (tagFilter === "from-dev" ? p.source === "dev" : true) : p.tags.includes(tagFilter)) &&
     (search === "" || p.title.toLowerCase().includes(search.toLowerCase()) || p.body.toLowerCase().includes(search.toLowerCase()))
   ).sort((a, b) => b.usageCount - a.usageCount);
 
@@ -1002,6 +1026,7 @@ function PromptsLibrary({ onNavigate }) {
         </div>
         <div className="flex rounded-lg border border-zinc-700/50 overflow-hidden">
           <button onClick={() => setTagFilter("all")} className={`px-2.5 py-1.5 text-[11px] font-medium transition-colors ${tagFilter === "all" ? "bg-zinc-700/50 text-zinc-200" : "text-zinc-500 hover:text-zinc-300"}`}>All</button>
+          <button onClick={() => setTagFilter("from-dev")} className={`px-2.5 py-1.5 text-[11px] font-medium transition-colors ${tagFilter === "from-dev" ? "bg-emerald-500/20 text-emerald-300" : "text-zinc-500 hover:text-zinc-300"}`}>.dev/</button>
           {allTags.map(t => (
             <button key={t} onClick={() => setTagFilter(t)} className={`px-2.5 py-1.5 text-[11px] font-medium transition-colors ${tagFilter === t ? "bg-zinc-700/50 text-zinc-200" : "text-zinc-500 hover:text-zinc-300"}`}>{t}</button>
           ))}
@@ -1022,6 +1047,7 @@ function PromptsLibrary({ onNavigate }) {
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-2 mb-1.5">
                   <span className="text-sm font-medium text-zinc-200">{p.title}</span>
+                  {p.source === "dev" && <Badge color="#34d399" small>{I.layers} .dev/</Badge>}
                   {isRef && <Badge color="#78716c" small>reference</Badge>}
                   {p.tags.map(t => <Badge key={t} color="#555" small>{t}</Badge>)}
                   {p.scope === "project" && <Badge color="#60a5fa" small>project</Badge>}
@@ -1091,8 +1117,407 @@ function PromptsLibrary({ onNavigate }) {
   );
 }
 
+// ━━━ DEV FOLDER PAGE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+function DevFolderPage({ project, onNavigate }) {
+  const [scanPhase, setScanPhase] = useState(project.devFolder ? "done" : "idle"); // idle → scanning → analyzing → generating → done
+  const [activeSection, setActiveSection] = useState("overview");
+  const [expandedFile, setExpandedFile] = useState(null);
+
+  const handleScan = () => {
+    setScanPhase("scanning");
+    setTimeout(() => setScanPhase("analyzing"), 1500);
+    setTimeout(() => setScanPhase("generating"), 3500);
+    setTimeout(() => setScanPhase("done"), 5500);
+  };
+
+  const gapData = [
+    { practice: "Error boundaries", industry: "Required for production", project: "Not implemented", status: "gap" },
+    { practice: "Custom hooks for reuse", industry: "Strongly recommended", project: "Partially adopted", status: "partial" },
+    { practice: "Effect cleanup", industry: "Universal best practice", project: "Consistently followed", status: "aligned" },
+    { practice: "Test co-location", industry: "Growing consensus", project: "Separate __tests__/ dir", status: "partial" },
+    { practice: "Server components default", industry: "Official recommendation", project: "Mostly followed", status: "aligned" },
+    { practice: "Metadata on all pages", industry: "SEO best practice", project: "Missing on 4 pages", status: "gap" },
+    { practice: "next/image usage", industry: "Performance standard", project: "2 raw <img> tags", status: "partial" },
+    { practice: "Input sanitization", industry: "Universal requirement", project: "Inconsistent", status: "gap" },
+    { practice: "Env var validation", industry: "Recommended", project: "Not implemented", status: "gap" },
+    { practice: "No secrets in code", industry: "Universal requirement", project: "All clean", status: "aligned" },
+    { practice: "Strict TypeScript", industry: "Recommended for production", project: "Enabled", status: "aligned" },
+    { practice: "No any types", industry: "Strong recommendation", project: "12 any escapes found", status: "partial" },
+    { practice: "WCAG 2.1 AA compliance", industry: "Legal requirement in many regions", project: "No ARIA labels detected", status: "gap" },
+    { practice: "Semantic HTML", industry: "Universal best practice", project: "Mostly div-based", status: "gap" },
+  ];
+
+  const aligned = gapData.filter(g => g.status === "aligned").length;
+  const partial = gapData.filter(g => g.status === "partial").length;
+  const gaps = gapData.filter(g => g.status === "gap").length;
+
+  const fileTree = [
+    { path: "context/PROJECT.md", ownership: "reviewable", desc: "Project overview, stack, architecture", hasUpdate: true },
+    { path: "context/CONVENTIONS.md", ownership: "reviewable", desc: "Naming, structure, coding patterns" },
+    { path: "context/TECH_DEBT.md", ownership: "reviewable", desc: "12 TODOs, 3 FIXMEs, 2 HACKs found", hasUpdate: true },
+    { path: "context/DECISIONS.md", ownership: "append-only", desc: "8 architectural decisions detected" },
+    { path: "industry/react.md", ownership: "system", desc: "Industry-standard React patterns" },
+    { path: "industry/nextjs.md", ownership: "system", desc: "Industry-standard Next.js conventions" },
+    { path: "industry/tailwind.md", ownership: "system", desc: "Industry-standard Tailwind practices" },
+    { path: "industry/typescript.md", ownership: "system", desc: "Industry-standard TypeScript practices" },
+    { path: "industry/security.md", ownership: "system", desc: "OWASP-based security practices" },
+    { path: "industry/testing.md", ownership: "system", desc: "Testing approaches & coverage standards" },
+    { path: "standards/frontend.md", ownership: "reviewable", desc: "How this project does frontend" },
+    { path: "standards/backend.md", ownership: "reviewable", desc: "How this project does backend" },
+    { path: "standards/css.md", ownership: "reviewable", desc: "How this project handles styling" },
+    { path: "standards/typescript.md", ownership: "reviewable", desc: "How this project uses types" },
+    { path: "gap-analysis.md", ownership: "system", desc: "Industry vs project comparison" },
+    { path: "prompts/audit.md", ownership: "user", desc: "Audit prompt scoped to this stack" },
+    { path: "prompts/cleanup.md", ownership: "user", desc: "Cleanup prompt targeting detected issues" },
+    { path: "prompts/new-feature.md", ownership: "user", desc: "Scaffolding matching repo patterns" },
+    { path: "templates/component.md", ownership: "user", desc: "Template from existing components" },
+    { path: "templates/api-endpoint.md", ownership: "user", desc: "Template from existing endpoints" },
+    { path: "templates/test.md", ownership: "user", desc: "Template from existing tests" },
+    { path: "adapters/CLAUDE.md", ownership: "user", desc: "Auto-generated Claude Code config" },
+    { path: "adapters/.cursorrules", ownership: "user", desc: "Auto-generated Cursor config" },
+  ];
+
+  const ownershipColor = (o) => o === "system" ? "#60a5fa" : o === "reviewable" ? "#fbbf24" : o === "append-only" ? "#a78bfa" : "#34d399";
+  const ownershipLabel = (o) => o === "system" ? "System-managed" : o === "reviewable" ? "Reviewable" : o === "append-only" ? "Append-only" : "User-owned";
+  const statusIcon = (s) => s === "aligned" ? "🟢" : s === "partial" ? "🟡" : "🔴";
+
+  const sections = [
+    { id: "overview", label: "Overview" },
+    { id: "gap", label: "Gap Analysis" },
+    { id: "files", label: "File Tree" },
+    { id: "adapters", label: "Adapters" },
+  ];
+
+  return (
+    <div className="max-w-4xl mx-auto px-4 py-6">
+      <button onClick={() => onNavigate("project", project.id)} className="flex items-center gap-1.5 text-sm text-zinc-500 hover:text-zinc-300 mb-4 transition-colors">{I.back} {project.name}</button>
+
+      {/* Header */}
+      <div className="flex items-start justify-between mb-6">
+        <div>
+          <div className="flex items-center gap-2.5 mb-1">
+            <span className="text-emerald-400">{I.layers}</span>
+            <span className="text-lg font-semibold text-zinc-100">.dev/ <span className="text-zinc-500 font-normal">for</span> <span style={{ fontFamily: mono }}>{project.name}</span></span>
+          </div>
+          <p className="text-xs text-zinc-500">Project intelligence — industry standards, conventions, gap analysis, and AI tool configs</p>
+        </div>
+        <div className="flex gap-2">
+          {scanPhase === "done" && <Btn size="sm" onClick={handleScan}>{I.refresh} Re-scan</Btn>}
+          {scanPhase === "done" && <Btn variant="primary" size="sm">{I.github} Push to Repo</Btn>}
+        </div>
+      </div>
+
+      {/* Scan CTA — shown if no .dev/ exists */}
+      {scanPhase === "idle" && (
+        <div className="rounded-xl border border-dashed border-zinc-700/60 bg-zinc-900/30 p-8 text-center mb-6">
+          <div className="text-emerald-400 mb-3 flex justify-center">{I.scan}</div>
+          <h3 className="text-sm font-medium text-zinc-200 mb-1">No .dev/ folder detected</h3>
+          <p className="text-xs text-zinc-500 mb-4 max-w-md mx-auto">Scan your repo to generate a complete project intelligence folder — industry standards, coding conventions, gap analysis, and AI tool configs.</p>
+          <Btn variant="primary" onClick={handleScan}>{I.scan} Scan Repository</Btn>
+        </div>
+      )}
+
+      {/* Scanning progress */}
+      {(scanPhase === "scanning" || scanPhase === "analyzing" || scanPhase === "generating") && (
+        <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/[0.03] p-6 mb-6">
+          <div className="flex items-center gap-3 mb-4">
+            {I.loader}
+            <span className="text-sm text-zinc-200 font-medium">
+              {scanPhase === "scanning" ? "Scanning repository…" : scanPhase === "analyzing" ? "Analyzing patterns & conventions…" : "Generating .dev/ files…"}
+            </span>
+          </div>
+          <div className="flex gap-2">
+            {["scanning", "analyzing", "generating"].map((phase, i) => (
+              <div key={phase} className="flex-1">
+                <div className="h-1.5 rounded-full overflow-hidden bg-zinc-800">
+                  <div className={`h-full rounded-full transition-all duration-1000 ${
+                    (scanPhase === "scanning" && i === 0) || (scanPhase === "analyzing" && i <= 1) || (scanPhase === "generating") ? "bg-emerald-500" : "bg-zinc-700"
+                  }`} style={{ width: scanPhase === phase ? "60%" : (["scanning", "analyzing", "generating"].indexOf(scanPhase) > i ? "100%" : "0%") }} />
+                </div>
+                <span className="text-[10px] text-zinc-600 mt-1 block capitalize">{phase}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Main content — shown when .dev/ exists */}
+      {scanPhase === "done" && (
+        <>
+          {/* Section tabs */}
+          <div className="flex gap-1 mb-5 border-b border-zinc-800/60">
+            {sections.map(s => (
+              <button key={s.id} onClick={() => setActiveSection(s.id)} className={`px-3 py-2 text-sm font-medium transition-colors border-b-2 -mb-px ${activeSection === s.id ? "text-zinc-200 border-emerald-500" : "text-zinc-500 border-transparent hover:text-zinc-300"}`}>{s.label}</button>
+            ))}
+          </div>
+
+          {/* Overview */}
+          {activeSection === "overview" && (
+            <div className="space-y-4" style={{ animation: "fadeIn .2s ease-out" }}>
+              {/* Gap score summary */}
+              <div className="grid grid-cols-3 gap-3">
+                <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/[0.04] p-4 text-center">
+                  <div className="text-2xl font-semibold text-emerald-400 mb-1">{aligned}</div>
+                  <div className="text-[11px] text-zinc-500 uppercase tracking-wider font-semibold">Aligned</div>
+                </div>
+                <div className="rounded-xl border border-amber-500/20 bg-amber-500/[0.04] p-4 text-center">
+                  <div className="text-2xl font-semibold text-amber-400 mb-1">{partial}</div>
+                  <div className="text-[11px] text-zinc-500 uppercase tracking-wider font-semibold">Partial</div>
+                </div>
+                <div className="rounded-xl border border-red-500/20 bg-red-500/[0.04] p-4 text-center">
+                  <div className="text-2xl font-semibold text-red-400 mb-1">{gaps}</div>
+                  <div className="text-[11px] text-zinc-500 uppercase tracking-wider font-semibold">Gaps</div>
+                </div>
+              </div>
+
+              {/* Detected stack */}
+              <div className="rounded-xl border border-zinc-800/60 bg-zinc-900/30 p-4">
+                <div className="text-[11px] text-zinc-500 uppercase tracking-wider font-semibold mb-3">Detected Stack</div>
+                <div className="flex flex-wrap gap-1.5">
+                  {["Next.js 16", "React 19", "TypeScript 5.4", "Tailwind CSS 4", "Netlify Functions", "Node.js 22"].map(t => (
+                    <Badge key={t} color="#34d399">{t}</Badge>
+                  ))}
+                </div>
+              </div>
+
+              {/* Industry standards coverage */}
+              <div className="rounded-xl border border-zinc-800/60 bg-zinc-900/30 p-4">
+                <div className="text-[11px] text-zinc-500 uppercase tracking-wider font-semibold mb-3">Industry Standards Included</div>
+                <div className="grid grid-cols-2 gap-2">
+                  {["React Patterns", "Next.js Conventions", "TypeScript Practices", "Tailwind CSS", "Security (OWASP)", "Testing Standards"].map(s => (
+                    <div key={s} className="flex items-center gap-2 text-xs text-zinc-400">
+                      <span className="text-blue-400">{I.fileTree}</span> {s}
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Tech debt summary */}
+              <div className="rounded-xl border border-zinc-800/60 bg-zinc-900/30 p-4">
+                <div className="text-[11px] text-zinc-500 uppercase tracking-wider font-semibold mb-3">Tech Debt Inventory</div>
+                <div className="space-y-1.5">
+                  {[
+                    { type: "TODO", count: 12, severity: "low" },
+                    { type: "FIXME", count: 3, severity: "medium" },
+                    { type: "HACK", count: 2, severity: "high" },
+                    { type: "Missing types (any)", count: 12, severity: "medium" },
+                    { type: "No error boundaries", count: 1, severity: "high" },
+                  ].map(d => (
+                    <div key={d.type} className="flex items-center gap-3 text-xs">
+                      <span className={`w-1.5 h-1.5 rounded-full ${d.severity === "high" ? "bg-red-400" : d.severity === "medium" ? "bg-amber-400" : "bg-zinc-500"}`} />
+                      <span className="text-zinc-400 flex-1">{d.type}</span>
+                      <span className="text-zinc-600" style={{ fontFamily: mono }}>{d.count}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Last scan info */}
+              <div className="flex items-center justify-between text-[11px] text-zinc-600 px-1">
+                <span>Last scanned: {project.devFolder?.lastScan ? timeAgo(project.devFolder.lastScan) : "just now"}</span>
+                <span>{fileTree.length} files generated</span>
+              </div>
+            </div>
+          )}
+
+          {/* Gap Analysis */}
+          {activeSection === "gap" && (
+            <div style={{ animation: "fadeIn .2s ease-out" }}>
+              <div className="rounded-xl border border-zinc-800/60 bg-zinc-900/30 overflow-hidden">
+                <div className="grid grid-cols-[1fr,1fr,1fr,auto] gap-0 text-[11px] uppercase tracking-wider font-semibold text-zinc-500 px-4 py-2.5 border-b border-zinc-800/40 bg-zinc-900/50">
+                  <span>Practice</span>
+                  <span>Industry Standard</span>
+                  <span>This Project</span>
+                  <span className="w-8 text-center">Gap</span>
+                </div>
+                {gapData.map((g, i) => (
+                  <div key={i} className={`grid grid-cols-[1fr,1fr,1fr,auto] gap-0 px-4 py-2.5 text-xs ${i % 2 === 0 ? "" : "bg-zinc-900/20"} ${g.status === "gap" ? "border-l-2 border-l-red-500/40" : ""}`}>
+                    <span className="text-zinc-200 font-medium">{g.practice}</span>
+                    <span className="text-zinc-500">{g.industry}</span>
+                    <span className={`${g.status === "gap" ? "text-red-400/80" : g.status === "partial" ? "text-amber-400/80" : "text-emerald-400/80"}`}>{g.project}</span>
+                    <span className="w-8 text-center">{statusIcon(g.status)}</span>
+                  </div>
+                ))}
+              </div>
+              <div className="flex items-center gap-4 mt-3 text-[10px] text-zinc-600 px-1">
+                <span>🟢 Aligned ({aligned})</span>
+                <span>🟡 Partial ({partial})</span>
+                <span>🔴 Gap ({gaps})</span>
+              </div>
+            </div>
+          )}
+
+          {/* File Tree */}
+          {activeSection === "files" && (
+            <div className="space-y-0.5" style={{ animation: "fadeIn .2s ease-out" }}>
+              {/* Ownership legend */}
+              <div className="flex items-center gap-4 mb-3 text-[10px] text-zinc-600 px-1">
+                {["system", "reviewable", "append-only", "user"].map(o => (
+                  <span key={o} className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm" style={{ background: ownershipColor(o) }} /> {ownershipLabel(o)}</span>
+                ))}
+              </div>
+              {fileTree.map(f => {
+                const dir = f.path.split("/")[0];
+                const prevDir = fileTree[fileTree.indexOf(f) - 1]?.path.split("/")[0];
+                const showDir = dir !== prevDir;
+                return (
+                  <div key={f.path}>
+                    {showDir && <div className="text-[10px] text-zinc-600 uppercase tracking-wider font-semibold mt-3 mb-1 px-2">{dir}/</div>}
+                    <button onClick={() => setExpandedFile(expandedFile === f.path ? null : f.path)} className="w-full flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-white/[0.02] transition-colors text-left group">
+                      <span className="w-2 h-2 rounded-sm shrink-0" style={{ background: ownershipColor(f.ownership) }} />
+                      <span className="text-xs text-zinc-300 flex-1" style={{ fontFamily: mono }}>{f.path.split("/").pop()}</span>
+                      {f.hasUpdate && <span className="px-1.5 py-0.5 rounded text-[9px] bg-amber-500/15 text-amber-400 font-medium">update pending</span>}
+                      <span className="text-[10px] text-zinc-600 opacity-0 group-hover:opacity-100 transition-opacity">{I.eye} preview</span>
+                    </button>
+                    {expandedFile === f.path && (
+                      <div className="ml-7 mb-2 px-3 py-2 rounded-lg bg-zinc-900/60 border border-zinc-800/40 text-xs text-zinc-500" style={{ animation: "fadeIn .15s ease-out" }}>
+                        <div className="flex items-center justify-between mb-1">
+                          <span>{f.desc}</span>
+                          <Badge color={ownershipColor(f.ownership)} small>{ownershipLabel(f.ownership)}</Badge>
+                        </div>
+                        {f.ownership === "system" && <span className="text-[10px] text-blue-400/60">Regenerated on every re-scan</span>}
+                        {f.ownership === "reviewable" && <span className="text-[10px] text-amber-400/60">Changes proposed as diff — you review and approve</span>}
+                        {f.ownership === "user" && <span className="text-[10px] text-emerald-400/60">Your file — never overwritten by buffr</span>}
+                        {f.ownership === "append-only" && <span className="text-[10px] text-purple-400/60">buffr only adds new entries, never edits or removes</span>}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {/* Adapters */}
+          {activeSection === "adapters" && (
+            <div className="space-y-3" style={{ animation: "fadeIn .2s ease-out" }}>
+              {[
+                { name: "Claude Code", file: "CLAUDE.md", icon: "C", detected: true, color: "#c084fc", desc: "Points Claude to .dev/ files for project context, conventions, and templates" },
+                { name: "Cursor", file: ".cursorrules", icon: "⌘", detected: true, color: "#22d3ee", desc: "Loads .dev/ standards into Cursor's context for inline suggestions" },
+                { name: "GitHub Copilot", file: "copilot-instructions.md", icon: "⊙", detected: false, color: "#8b949e", desc: "References .dev/ coding guidelines for Copilot completions" },
+                { name: "Windsurf", file: ".windsurfrules", icon: "W", detected: false, color: "#34d399", desc: "Loads .dev/ context into Windsurf coding sessions" },
+                { name: "Aider", file: ".aider.conf.yml", icon: "A", detected: false, color: "#fbbf24", desc: "Includes .dev/ files in Aider's context window" },
+                { name: "Continue", file: ".continuerules", icon: "→", detected: false, color: "#f472b6", desc: "Maps .dev/ standards to Continue's format" },
+              ].map(a => (
+                <div key={a.name} className={`flex items-center gap-4 px-4 py-3.5 rounded-xl border transition-colors ${a.detected ? "border-zinc-700/60 bg-zinc-900/30" : "border-zinc-800/40 bg-zinc-900/10 opacity-60"}`}>
+                  <div className="w-8 h-8 rounded-lg flex items-center justify-center text-sm font-bold shrink-0" style={{ background: `${a.color}18`, color: a.color, border: `1px solid ${a.color}30` }}>{a.icon}</div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 mb-0.5">
+                      <span className="text-sm font-medium text-zinc-200">{a.name}</span>
+                      {a.detected && <Badge color="#34d399" small>detected</Badge>}
+                      <span className="text-[10px] text-zinc-600" style={{ fontFamily: mono }}>{a.file}</span>
+                    </div>
+                    <span className="text-[11px] text-zinc-500">{a.desc}</span>
+                  </div>
+                  <div className="flex gap-1.5 shrink-0">
+                    {a.detected ? (
+                      <>
+                        <Btn size="sm">{I.eye} Preview</Btn>
+                        <Btn variant="primary" size="sm">{I.refresh} Regenerate</Btn>
+                      </>
+                    ) : (
+                      <Btn size="sm">Generate</Btn>
+                    )}
+                  </div>
+                </div>
+              ))}
+              <p className="text-[11px] text-zinc-600 px-1">Adapters are thin config files that point your AI coding tool to .dev/ — they reference the universal layer, never duplicate content.</p>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+// ━━━ LOGIN PAGE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+function LoginPage({ onLogin }) {
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState(false);
+  const [loading, setLoading] = useState(false);
+
+  const handleSubmit = (e) => {
+    e.preventDefault();
+    setLoading(true);
+    setError(false);
+    setTimeout(() => {
+      if (username === "rein" && password === "buffr2026") {
+        onLogin();
+      } else {
+        setError(true);
+        setLoading(false);
+      }
+    }, 600);
+  };
+
+  return (
+    <div className="min-h-screen bg-zinc-950 flex items-center justify-center px-4" style={{ fontFamily: fonts }}>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+        ::selection { background: #7c3aed40; }
+      `}</style>
+      <div className="w-full max-w-sm" style={{ animation: "fadeIn .3s ease-out" }}>
+        <div className="flex flex-col items-center mb-8">
+          <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-purple-500 to-indigo-600 flex items-center justify-center mb-3">
+            <span className="text-sm font-black text-white" style={{ fontFamily: mono }}>b</span>
+          </div>
+          <h1 className="text-lg font-semibold text-zinc-100" style={{ fontFamily: mono }}>buffr</h1>
+          <p className="text-xs text-zinc-500 mt-1">Developer continuity & momentum</p>
+        </div>
+
+        <div className="rounded-xl border border-zinc-800/60 bg-zinc-900/30 p-6">
+          <div className="space-y-4">
+            <div className="space-y-1.5">
+              <label className="text-[11px] text-zinc-500 uppercase tracking-wider font-semibold">Username</label>
+              <input
+                type="text"
+                value={username}
+                onChange={e => { setUsername(e.target.value); setError(false); }}
+                placeholder="Enter username"
+                autoFocus
+                className="w-full px-3 py-2.5 rounded-lg bg-zinc-900/80 border border-zinc-700/50 text-zinc-200 text-sm placeholder:text-zinc-600 focus:outline-none focus:border-purple-500/50 focus:ring-1 focus:ring-purple-500/20 transition-colors"
+                style={{ fontFamily: mono }}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-[11px] text-zinc-500 uppercase tracking-wider font-semibold">Password</label>
+              <input
+                type="password"
+                value={password}
+                onChange={e => { setPassword(e.target.value); setError(false); }}
+                placeholder="Enter password"
+                onKeyDown={e => e.key === "Enter" && handleSubmit(e)}
+                className="w-full px-3 py-2.5 rounded-lg bg-zinc-900/80 border border-zinc-700/50 text-zinc-200 text-sm placeholder:text-zinc-600 focus:outline-none focus:border-purple-500/50 focus:ring-1 focus:ring-purple-500/20 transition-colors"
+              />
+            </div>
+
+            {error && (
+              <div className="text-xs text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2" style={{ animation: "fadeIn .15s ease-out" }}>
+                Invalid username or password
+              </div>
+            )}
+
+            <button
+              onClick={handleSubmit}
+              disabled={loading || !username.trim() || !password.trim()}
+              className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-purple-600 hover:bg-purple-500 text-white text-sm font-medium border border-purple-500/40 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              {loading ? I.loader : null}
+              {loading ? "Signing in…" : "Sign in"}
+            </button>
+          </div>
+        </div>
+
+        <p className="text-[10px] text-zinc-700 text-center mt-4">Single-user access — credentials set in environment variables</p>
+      </div>
+    </div>
+  );
+}
+
 // ━━━ MAIN APP ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 export default function App() {
+  const [authed, setAuthed] = useState(false);
   const [page, setPage] = useState("dashboard");
   const [activeProject, setActiveProject] = useState(null);
   const [palette, setPalette] = useState(false);
@@ -1103,6 +1528,9 @@ export default function App() {
       setActiveProject(PROJECTS.find(p => p.id === projectId) || PROJECTS[0]);
       setPage("project");
       setShowLoadModal(false);
+    } else if (target === "dev-folder" && projectId) {
+      setActiveProject(PROJECTS.find(p => p.id === projectId) || PROJECTS[0]);
+      setPage("dev-folder");
     } else {
       setPage(target);
       if (target === "dashboard") setActiveProject(null);
@@ -1118,6 +1546,8 @@ export default function App() {
     else if (action === "end-session") {}
   }, [navigate]);
 
+  if (!authed) return <LoginPage onLogin={() => setAuthed(true)} />;
+
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-300" style={{ fontFamily: fonts }}>
       <style>{`
@@ -1129,11 +1559,12 @@ export default function App() {
         ::selection { background: #7c3aed40; }
       `}</style>
 
-      <NavBar page={page} onNavigate={navigate} onPalette={() => setPalette(true)} />
+      <NavBar page={page} onNavigate={navigate} onPalette={() => setPalette(true)} onLogout={() => setAuthed(false)} />
       <CommandPalette open={palette} onClose={() => setPalette(false)} onAction={handleAction} prompts={PROMPTS} />
 
       {page === "dashboard" && <Dashboard onNavigate={navigate} externalShowLoad={showLoadModal} onLoadShown={() => setShowLoadModal(false)} />}
       {page === "project" && activeProject && <ResumeCard project={activeProject} onNavigate={navigate} />}
+      {page === "dev-folder" && activeProject && <DevFolderPage project={activeProject} onNavigate={navigate} />}
       {page === "tools" && <ToolsPage onNavigate={navigate} />}
       {page === "prompts" && <PromptsLibrary onNavigate={navigate} />}
     </div>

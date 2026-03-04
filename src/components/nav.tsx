@@ -14,8 +14,11 @@ const pageLabels: Record<string, string> = {
 export function Nav() {
   const pathname = usePathname();
 
-  const isProject = pathname.startsWith("/project/");
-  const label = isProject ? "Resume Card" : pageLabels[pathname] || null;
+  const label = pathname.startsWith("/project/")
+    ? "Resume Card"
+    : pathname.startsWith("/dev-folder/")
+      ? ".dev/"
+      : pageLabels[pathname] || null;
 
   return (
     <nav className="nav">

@@ -107,3 +107,11 @@
 .resume-card__suggestion-icon {
   @apply text-amber-400;
 }
+
+.resume-card__dev-link {
+  @apply text-emerald-500/70 hover:text-emerald-400;
+}
+
+.resume-card__header-actions {
+  @apply flex items-center gap-2;
+}

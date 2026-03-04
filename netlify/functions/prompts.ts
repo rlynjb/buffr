@@ -43,6 +43,8 @@ export default async function handler(req: Request, _context: Context) {
         body: body.body || "",
         tags: body.tags || [],
         scope: body.scope || "global",
+        source: body.source || "library",
+        devFilename: body.devFilename || null,
         createdAt: now,
         updatedAt: now,
       };
@@ -65,6 +67,8 @@ export default async function handler(req: Request, _context: Context) {
         body: body.body ?? existing.body,
         tags: body.tags ?? existing.tags,
         scope: body.scope ?? existing.scope,
+        source: body.source ?? existing.source,
+        devFilename: body.devFilename ?? existing.devFilename,
         updatedAt: new Date().toISOString(),
       };
       const saved = await savePrompt(updated);

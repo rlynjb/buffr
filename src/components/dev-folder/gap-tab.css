@@ -1,0 +1,53 @@
+@reference "../../app/globals.css";
+
+.gap-tab__table {
+  @apply rounded-xl border border-zinc-800/60 bg-zinc-900/30 overflow-hidden;
+}
+
+.gap-tab__header {
+  @apply grid grid-cols-[1fr,1fr,1fr,auto] gap-0 text-[11px] uppercase tracking-wider font-semibold text-zinc-500 px-4 py-2.5 border-b border-zinc-800/40 bg-zinc-900/50;
+}
+
+.gap-tab__header-status {
+  @apply w-8 text-center;
+}
+
+.gap-tab__row {
+  @apply grid grid-cols-[1fr,1fr,1fr,auto] gap-0 px-4 py-2.5 text-xs;
+}
+
+.gap-tab__row--gap {
+  @apply border-l-2 border-l-red-500/40;
+}
+
+.gap-tab__row--alt {
+  @apply bg-zinc-900/20;
+}
+
+.gap-tab__practice {
+  @apply text-zinc-200 font-medium;
+}
+
+.gap-tab__industry {
+  @apply text-zinc-500;
+}
+
+.gap-tab__project--aligned {
+  @apply text-emerald-400/80;
+}
+
+.gap-tab__project--partial {
+  @apply text-amber-400/80;
+}
+
+.gap-tab__project--gap {
+  @apply text-red-400/80;
+}
+
+.gap-tab__status {
+  @apply w-8 text-center;
+}
+
+.gap-tab__legend {
+  @apply flex items-center gap-4 mt-3 text-[10px] text-zinc-600 px-1;
+}

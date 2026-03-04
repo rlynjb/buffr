@@ -1,0 +1,54 @@
+@reference "../../app/globals.css";
+
+.file-tree-tab__legend {
+  @apply flex items-center gap-4 mb-3 text-[10px] text-zinc-600 px-1;
+}
+
+.file-tree-tab__legend-item {
+  @apply flex items-center gap-1;
+}
+
+.file-tree-tab__legend-swatch {
+  @apply w-2 h-2 rounded-sm;
+}
+
+.file-tree-tab__dir-header {
+  @apply text-[10px] text-zinc-600 uppercase tracking-wider font-semibold mt-3 mb-1 px-2;
+}
+
+.file-tree-tab__file-row {
+  @apply w-full flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-white/[0.02] transition-colors text-left cursor-pointer;
+}
+
+.file-tree-tab__ownership-dot {
+  @apply w-2 h-2 rounded-sm shrink-0;
+}
+
+.file-tree-tab__filename {
+  @apply text-xs text-zinc-300 flex-1 font-mono;
+}
+
+.file-tree-tab__preview-hint {
+  @apply flex items-center gap-1 text-[10px] text-zinc-600 opacity-0 transition-opacity;
+}
+
+.file-tree-tab__file-row:hover .file-tree-tab__preview-hint {
+  @apply opacity-100;
+}
+
+.file-tree-tab__expanded {
+  @apply ml-7 mb-2 px-3 py-2 rounded-lg bg-zinc-900/60 border border-zinc-800/40 text-xs text-zinc-500;
+  animation: fadeIn 0.15s ease-out;
+}
+
+.file-tree-tab__expanded-path {
+  @apply font-mono text-zinc-400 mb-1;
+}
+
+.file-tree-tab__expanded-meta {
+  @apply flex items-center justify-between mb-1;
+}
+
+.file-tree-tab__expanded-explanation {
+  @apply text-[10px];
+}

@@ -18,7 +18,24 @@ export interface Project {
   githubIssuesSync?: boolean;
   dismissedSuggestions?: string[];
   issueCount?: number;
+  devFolder?: DevFolder | null;
   updatedAt: string;
+}
+
+export type DevFolderStatus = "none" | "generated" | "stale";
+
+export interface DevFolderGapScore {
+  aligned: number;
+  partial: number;
+  gap: number;
+}
+
+export interface DevFolder {
+  status: DevFolderStatus;
+  lastScan: string | null;
+  scanResultId: string | null;
+  gapScore: DevFolderGapScore | null;
+  adapters: string[];
 }
 
 export interface ProjectPlan {
@@ -57,6 +74,76 @@ export interface Session {
   createdAt: string;
 }
 
+// .dev/ scan types
+
+export interface ScanResultFile {
+  path: string;
+  type: "file" | "dir";
+  size?: number;
+}
+
+export interface DetectedPattern {
+  category: string;
+  pattern: string;
+  confidence: "high" | "medium" | "low";
+  evidence: string[];
+}
+
+export interface TechDebtItem {
+  type: string;
+  file: string;
+  line?: number;
+  severity: "high" | "medium" | "low";
+  text: string;
+}
+
+export interface GapAnalysisEntry {
+  practice: string;
+  industry: string;
+  project: string;
+  status: "aligned" | "partial" | "gap";
+  category: string;
+}
+
+export interface ScanResult {
+  id: string;
+  projectId: string;
+  repoFullName: string;
+  status: "idle" | "scanning" | "analyzing" | "generating" | "done" | "failed";
+  detectedStack: string[];
+  fileTree: ScanResultFile[];
+  parsedConfigs: { file: string; content: Record<string, unknown> }[];
+  detectedPatterns: DetectedPattern[];
+  techDebtItems: TechDebtItem[];
+  gitActivity: { recentCommits: number; activePaths: string[]; lastCommitDate: string };
+  generatedFiles: { path: string; content: string; ownership: string }[];
+  gapAnalysis: GapAnalysisEntry[];
+  detectedAdapters: string[];
+  analysisSource?: "llm" | "rule-based";
+  error: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+// Industry knowledge base types
+
+export interface IndustryStandard {
+  id: string;
+  technology: string;
+  version: string;
+  title: string;
+  content: string;
+  sections: string[];
+  updatedAt: string;
+}
+
+export interface IndustryKBMeta {
+  technology: string;
+  version: string;
+  lastSeeded: string;
+  entryCount: number;
+}
+
 export interface GitHubIssue {
   number: number;
   title: string;
@@ -83,6 +170,8 @@ export interface Prompt {
   scope: "global" | string; // "global" or a projectId
   projectId?: string | null;
   usageCount?: number;
+  source?: "library" | "dev";
+  devFilename?: string | null;
   createdAt: string;
   updatedAt: string;
 }

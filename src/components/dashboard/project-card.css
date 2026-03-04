@@ -16,6 +16,10 @@
   @apply text-sm font-medium text-zinc-200 font-mono;
 }
 
+.project-card__dev-icon {
+  @apply text-emerald-500 opacity-60;
+}
+
 .project-card__source-icon {
   @apply opacity-50;
 }

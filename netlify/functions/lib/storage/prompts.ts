@@ -7,11 +7,19 @@ function store() {
   return getStore(STORE_NAME);
 }
 
+function normalizePrompt(raw: Prompt): Prompt {
+  return {
+    ...raw,
+    source: raw.source ?? "library",
+    devFilename: raw.devFilename ?? null,
+  };
+}
+
 export async function getPrompt(id: string): Promise<Prompt | null> {
   const s = store();
   const data = await s.get(id, { type: "text" });
   if (!data) return null;
-  return JSON.parse(data) as Prompt;
+  return normalizePrompt(JSON.parse(data) as Prompt);
 }
 
 export async function listPrompts(): Promise<Prompt[]> {
@@ -21,7 +29,7 @@ export async function listPrompts(): Promise<Prompt[]> {
   for (const blob of blobs) {
     const data = await s.get(blob.key, { type: "text" });
     if (data) {
-      prompts.push(JSON.parse(data) as Prompt);
+      prompts.push(normalizePrompt(JSON.parse(data) as Prompt));
     }
   }
   return prompts.sort(

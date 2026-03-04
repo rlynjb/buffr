@@ -4,7 +4,7 @@ import { useState, useEffect, useMemo } from "react";
 import Link from "next/link";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { IconBack, IconGitHub, IconGlobe, IconSparkle } from "@/components/icons";
+import { IconBack, IconGitHub, IconGlobe, IconSparkle, IconLayers } from "@/components/icons";
 import { PHASE_COLORS } from "@/lib/constants";
 import type { Project, Session, WorkItem, Prompt } from "@/lib/types";
 import { generateNextActions, type NextAction, type ActionContext } from "@/lib/next-actions";
@@ -220,6 +220,11 @@ export function ResumeCard({ project, onEndSession }: ResumeCardProps) {
                 <IconGlobe size={12} /> Site
               </a>
             )}
+            {currentProject.devFolder && (
+              <Link href={`/dev-folder/${currentProject.id}`} className="resume-card__meta-link resume-card__dev-link">
+                <IconLayers size={12} /> .dev/
+              </Link>
+            )}
             {currentProject.githubRepo && (
               <button
                 onClick={handleSync}
@@ -231,7 +236,14 @@ export function ResumeCard({ project, onEndSession }: ResumeCardProps) {
             )}
           </div>
         </div>
-        <Button size="sm" onClick={onEndSession}>End Session</Button>
+        <div className="resume-card__header-actions">
+          {currentProject.devFolder && (
+            <Link href={`/dev-folder/${currentProject.id}`}>
+              <Button size="sm" variant="secondary"><IconLayers size={14} /> .dev/</Button>
+            </Link>
+          )}
+          <Button size="sm" onClick={onEndSession}>End Session</Button>
+        </div>
       </div>
 
       {suggestions.slice(0, 2).map((s) => (

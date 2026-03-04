@@ -1,0 +1,101 @@
+@reference "../../app/globals.css";
+
+.overview-tab {
+  @apply space-y-4;
+}
+
+/* ── Gap score cards ── */
+
+.overview-tab__score-grid {
+  @apply grid grid-cols-3 gap-3;
+}
+
+.overview-tab__score-card {
+  @apply rounded-xl border p-4 text-center;
+}
+
+.overview-tab__score-card--aligned {
+  @apply border-emerald-500/20 bg-emerald-500/[0.04];
+}
+
+.overview-tab__score-card--partial {
+  @apply border-amber-500/20 bg-amber-500/[0.04];
+}
+
+.overview-tab__score-card--gaps {
+  @apply border-red-500/20 bg-red-500/[0.04];
+}
+
+.overview-tab__score-value--aligned {
+  @apply text-2xl font-bold text-emerald-400;
+}
+
+.overview-tab__score-value--partial {
+  @apply text-2xl font-bold text-amber-400;
+}
+
+.overview-tab__score-value--gaps {
+  @apply text-2xl font-bold text-red-400;
+}
+
+.overview-tab__score-label {
+  @apply text-[11px] text-zinc-500;
+}
+
+/* ── Card wrapper ── */
+
+.overview-tab__card {
+  @apply rounded-xl border border-zinc-800/60 bg-zinc-900/30 p-4;
+}
+
+/* ── Section heading ── */
+
+.overview-tab__heading {
+  @apply text-[11px] uppercase font-semibold text-zinc-500 mb-2;
+}
+
+/* ── Detected stack ── */
+
+.overview-tab__stack-list {
+  @apply flex flex-wrap gap-1.5;
+}
+
+/* ── Tech debt inventory ── */
+
+.overview-tab__debt-list {
+  @apply space-y-2;
+}
+
+.overview-tab__debt-item {
+  @apply flex items-center gap-2 text-sm text-zinc-300;
+}
+
+.overview-tab__debt-dot {
+  @apply w-1.5 h-1.5 rounded-full shrink-0;
+}
+
+.overview-tab__debt-dot--high {
+  @apply bg-red-400;
+}
+
+.overview-tab__debt-dot--medium {
+  @apply bg-amber-400;
+}
+
+.overview-tab__debt-dot--low {
+  @apply bg-zinc-500;
+}
+
+.overview-tab__debt-type {
+  @apply flex-1;
+}
+
+.overview-tab__debt-count {
+  @apply font-mono text-zinc-500;
+}
+
+/* ── Footer ── */
+
+.overview-tab__footer {
+  @apply flex justify-between text-[11px] text-zinc-600;
+}

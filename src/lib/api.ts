@@ -6,6 +6,8 @@ import type {
   ToolIntegration,
   ToolConfig,
   PromptResponse,
+  ScanResult,
+  IndustryStandard,
 } from "./types";
 
 const BASE = "/.netlify/functions";
@@ -240,5 +242,48 @@ export async function runPrompt(
   return request<PromptResponse>("/run-prompt", {
     method: "POST",
     body: JSON.stringify({ promptId, projectId, provider }),
+  });
+}
+
+// Scan Results
+export async function getScanResult(id: string): Promise<ScanResult> {
+  return request<ScanResult>(`/scan-results?id=${encodeURIComponent(id)}`);
+}
+
+export async function listScanResults(projectId: string): Promise<ScanResult[]> {
+  return request<ScanResult[]>(`/scan-results?projectId=${encodeURIComponent(projectId)}`);
+}
+
+// Industry KB
+export async function listStandards(): Promise<IndustryStandard[]> {
+  return request<IndustryStandard[]>("/industry-kb");
+}
+
+export async function getStandard(technology: string): Promise<IndustryStandard> {
+  return request<IndustryStandard>(`/industry-kb?technology=${encodeURIComponent(technology)}`);
+}
+
+export async function seedIndustryKB(force = false): Promise<{ seeded: string[]; skipped: string[] }> {
+  return request("/industry-kb?seed", {
+    method: "POST",
+    body: JSON.stringify({ force }),
+  });
+}
+
+// Trigger scan / generate .dev/
+export async function triggerScan(projectId: string, provider?: string): Promise<ScanResult> {
+  return request<ScanResult>("/generate-dev", {
+    method: "POST",
+    body: JSON.stringify({ projectId, provider }),
+  });
+}
+
+// Push .dev/ files to GitHub repo
+export async function pushDevFiles(
+  scanResultId: string
+): Promise<{ sha: string }> {
+  return request<{ sha: string }>("/generate-dev?push", {
+    method: "POST",
+    body: JSON.stringify({ scanResultId }),
   });
 }
