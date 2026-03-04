@@ -1,6 +1,9 @@
+// TODO: Add .withRetry() to LLM invocation for transient failures
+// TODO: Add input truncation strategy to prevent exceeding model context window
 import { RunnableSequence } from "@langchain/core/runnables";
 import { HumanMessage, SystemMessage } from "@langchain/core/messages";
 import { BaseChatModel } from "@langchain/core/language_models/chat_models";
+import { stripCodeBlock } from "../parse-utils";
 
 interface PromptChainInput {
   resolvedPrompt: string;
@@ -24,10 +27,7 @@ The suggestedActions array is optional — only include it if there are clear fo
 The artifact flag is optional — only set to true if the response is a generated document or file content.`;
 
 function parsePromptOutput(raw: string): PromptChainOutput {
-  let cleaned = raw.trim();
-  if (cleaned.startsWith("```")) {
-    cleaned = cleaned.replace(/^```(?:json)?\n?/, "").replace(/\n?```$/, "");
-  }
+  const cleaned = stripCodeBlock(raw);
 
   try {
     const parsed = JSON.parse(cleaned);

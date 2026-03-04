@@ -1,3 +1,4 @@
+// TODO: listSessionsByProject fetches ALL sessions and filters in memory — consider indexed storage for scale
 import { getStore } from "@netlify/blobs";
 import type { Session } from "../../../../src/lib/types";
 

@@ -1,3 +1,5 @@
+// TODO: Add authentication middleware — this endpoint is publicly accessible
+// TODO: Add rate limiting for LLM calls to prevent abuse
 import type { Context } from "@netlify/functions";
 import { getLLM } from "./lib/ai/provider";
 import { createSummarizeChain } from "./lib/ai/chains/session-summarizer";
@@ -18,9 +20,12 @@ export default async function handler(req: Request, _context: Context) {
     const llm = getLLM(provider);
 
     if (url.searchParams.has("summarize")) {
+      if (!Array.isArray(body.activityItems) || body.activityItems.length === 0) {
+        return errorResponse("activityItems array is required", 400);
+      }
       const chain = createSummarizeChain(llm);
       const result = await chain.invoke({
-        activityItems: body.activityItems || [],
+        activityItems: body.activityItems,
       });
       return json(result);
     }

@@ -2,6 +2,7 @@ import { RunnableSequence } from "@langchain/core/runnables";
 import { HumanMessage, SystemMessage } from "@langchain/core/messages";
 import { BaseChatModel } from "@langchain/core/language_models/chat_models";
 import { SUGGEST_SYSTEM_PROMPT, buildSuggestPrompt } from "../prompts/session-prompts";
+import { stripCodeBlock } from "../parse-utils";
 
 interface SuggestInput {
   goal: string;
@@ -16,12 +17,13 @@ interface SuggestOutput {
 }
 
 function parseSuggestOutput(raw: string): SuggestOutput {
-  let cleaned = raw.trim();
-  if (cleaned.startsWith("```")) {
-    cleaned = cleaned.replace(/^```(?:json)?\n?/, "").replace(/\n?```$/, "");
+  const cleaned = stripCodeBlock(raw);
+  try {
+    const parsed = JSON.parse(cleaned);
+    return { suggestedNextStep: String(parsed.suggestedNextStep || "") };
+  } catch {
+    return { suggestedNextStep: cleaned };
   }
-  const parsed = JSON.parse(cleaned);
-  return { suggestedNextStep: String(parsed.suggestedNextStep || "") };
 }
 
 export function createSuggestChain(llm: BaseChatModel) {

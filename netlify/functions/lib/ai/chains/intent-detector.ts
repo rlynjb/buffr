@@ -2,6 +2,7 @@ import { RunnableSequence } from "@langchain/core/runnables";
 import { HumanMessage, SystemMessage } from "@langchain/core/messages";
 import { BaseChatModel } from "@langchain/core/language_models/chat_models";
 import { INTENT_SYSTEM_PROMPT, buildIntentPrompt } from "../prompts/session-prompts";
+import { stripCodeBlock } from "../parse-utils";
 
 interface IntentInput {
   goal: string;
@@ -14,12 +15,13 @@ interface IntentOutput {
 }
 
 function parseIntentOutput(raw: string): IntentOutput {
-  let cleaned = raw.trim();
-  if (cleaned.startsWith("```")) {
-    cleaned = cleaned.replace(/^```(?:json)?\n?/, "").replace(/\n?```$/, "");
+  const cleaned = stripCodeBlock(raw);
+  try {
+    const parsed = JSON.parse(cleaned);
+    return { intent: String(parsed.intent || "") };
+  } catch {
+    return { intent: cleaned };
   }
-  const parsed = JSON.parse(cleaned);
-  return { intent: String(parsed.intent || "") };
 }
 
 export function createIntentChain(llm: BaseChatModel) {

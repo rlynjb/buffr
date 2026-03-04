@@ -35,6 +35,7 @@ export default async function handler(req: Request, _context: Context) {
 
     if (req.method === "POST") {
       const body = await req.json();
+      if (!body.title?.trim()) return errorResponse("title is required", 400);
       const now = new Date().toISOString();
       const prompt: Prompt = {
         id: randomUUID(),

@@ -32,6 +32,7 @@ export default async function handler(req: Request, _context: Context) {
 
     if (req.method === "POST") {
       const body = await req.json();
+      if (!body.projectId) return errorResponse("projectId is required", 400);
       const session: Session = {
         id: randomUUID(),
         projectId: body.projectId,

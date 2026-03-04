@@ -2,6 +2,10 @@ import { createHash } from "crypto";
 
 const NETLIFY_API_BASE = "https://api.netlify.com/api/v1";
 
+function escapeHtml(str: string): string {
+  return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
 function getToken(): string {
   const token = process.env.NETLIFY_TOKEN;
   if (!token) throw new Error("NETLIFY_TOKEN not configured. Add NETLIFY_TOKEN to your .env file.");
@@ -57,12 +61,14 @@ async function deployPlaceholder(
   projectName: string,
   githubRepo: string
 ): Promise<void> {
+  const safeName = escapeHtml(projectName);
+  const safeRepo = escapeHtml(githubRepo);
   const html = `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>${projectName}</title>
+  <title>${safeName}</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { font-family: system-ui, sans-serif; background: #0a0a0a; color: #e5e5e5; display: flex; align-items: center; justify-content: center; min-height: 100vh; }
@@ -78,12 +84,12 @@ async function deployPlaceholder(
 </head>
 <body>
   <div class="container">
-    <h1>${projectName}</h1>
+    <h1>${safeName}</h1>
     <p>Scaffolded by <strong>buffr</strong></p>
     <div class="steps">
       <p style="color:#e5e5e5;margin-bottom:1rem;">Next steps:</p>
       <ol>
-        <li>Clone: <code>git clone https://github.com/${githubRepo}</code></li>
+        <li>Clone: <code>git clone https://github.com/${safeRepo}</code></li>
         <li>Install: <code>npm install</code></li>
         <li>Run: <code>npm run dev</code></li>
         <li><a href="https://app.netlify.com" target="_blank">Link repo in Netlify dashboard</a> to enable builds</li>

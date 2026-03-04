@@ -1,3 +1,6 @@
+// TODO: Add authentication middleware — this endpoint is publicly accessible
+// TODO: Add rate limiting for LLM calls to prevent abuse
+// TODO: Add streaming support via llm.stream() for long prompt responses
 import type { Context } from "@netlify/functions";
 import { getLLM } from "./lib/ai/provider";
 import { createPromptChain } from "./lib/ai/chains/prompt-chain";
@@ -8,14 +11,9 @@ import { listSessionsByProject } from "./lib/storage/sessions";
 import { listToolsByIntegration } from "./lib/tools/registry";
 import { json, errorResponse, classifyError } from "./lib/responses";
 
-// Import tool registrations to ensure tools are available
-import { registerGitHubTools } from "./lib/tools/github";
-import { registerNotionTools } from "./lib/tools/notion";
-import { registerJiraTools } from "./lib/tools/jira";
+import { registerAllTools } from "./lib/tools/register-all";
 
-registerGitHubTools();
-registerNotionTools();
-registerJiraTools();
+registerAllTools();
 
 /**
  * Simple synchronous variable resolution (mirrors src/lib/resolve-prompt.ts).

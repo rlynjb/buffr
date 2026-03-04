@@ -62,7 +62,18 @@ export default async function handler(req: Request, _context: Context) {
         return errorResponse("Project not found", 404);
       }
       const body = await req.json();
-      const updated = { ...existing, ...body, id: existing.id };
+      // Whitelist allowed fields to prevent arbitrary field injection
+      const allowedFields = [
+        "name", "description", "constraints", "goals", "stack", "phase",
+        "githubRepo", "repoVisibility", "netlifySiteId", "netlifySiteUrl", "plan",
+        "selectedFeatures", "selectedFiles", "dataSources", "dismissedSuggestions",
+        "lastSessionId", "issueCount",
+      ];
+      const updates: Record<string, unknown> = {};
+      for (const key of allowedFields) {
+        if (key in body) updates[key] = body[key];
+      }
+      const updated = { ...existing, ...updates };
       const saved = await saveProject(updated);
       return json(saved);
     }

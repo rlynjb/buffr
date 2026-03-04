@@ -1,8 +1,6 @@
 import type { Context } from "@netlify/functions";
 import { listToolsByIntegration, executeTool } from "./lib/tools/registry";
-import { registerGitHubTools } from "./lib/tools/github";
-import { registerNotionTools } from "./lib/tools/notion";
-import { registerJiraTools } from "./lib/tools/jira";
+import { registerAllTools } from "./lib/tools/register-all";
 import {
   listToolConfigs,
   saveToolConfig,
@@ -10,12 +8,10 @@ import {
 } from "./lib/storage/tool-config";
 import { getSettings, saveSettings } from "./lib/storage/settings";
 import type { ToolConfig, ToolIntegration } from "../../src/lib/types";
-import { json } from "./lib/responses";
+import { json, errorResponse, classifyError } from "./lib/responses";
 
 // Register all tools on cold start
-registerGitHubTools();
-registerNotionTools();
-registerJiraTools();
+registerAllTools();
 
 // Built-in integration metadata
 const BUILTIN_INTEGRATIONS: Record<
@@ -105,7 +101,7 @@ async function handleExecute(req: Request): Promise<Response> {
     input: Record<string, unknown>;
   };
 
-  if (!toolName) return json({ error: "toolName is required" }, 400);
+  if (!toolName) return errorResponse("toolName is required", 400);
 
   const result = await executeTool(toolName, input || {});
   return json(result, result.ok ? 200 : 400);
@@ -166,19 +162,20 @@ export default async function handler(req: Request, _context: Context) {
     if (req.method === "PUT") {
       if (url.searchParams.has("defaultSources")) return handleSetDefaultSources(req);
       const integrationId = url.searchParams.get("integrationId");
-      if (!integrationId) return json({ error: "integrationId is required" }, 400);
+      if (!integrationId) return errorResponse("integrationId is required", 400);
       return handleSaveConfig(req, integrationId);
     }
 
     if (req.method === "DELETE") {
       const integrationId = url.searchParams.get("integrationId");
-      if (!integrationId) return json({ error: "integrationId is required" }, 400);
+      if (!integrationId) return errorResponse("integrationId is required", 400);
       return handleDelete(integrationId);
     }
 
-    return json({ error: "Method not allowed" }, 405);
+    return errorResponse("Method not allowed", 405);
   } catch (err) {
     console.error("tools function error:", err);
-    return json({ error: "Internal server error" }, 500);
+    const { message, status } = classifyError(err, "Internal server error");
+    return errorResponse(message, status);
   }
 }
