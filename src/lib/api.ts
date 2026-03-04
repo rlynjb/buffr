@@ -66,6 +66,12 @@ export async function updateProject(
   });
 }
 
+export async function deleteProject(id: string): Promise<void> {
+  await request(`/projects?id=${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+}
+
 // Sessions
 export async function listSessions(projectId: string): Promise<Session[]> {
   return request<Session[]>(

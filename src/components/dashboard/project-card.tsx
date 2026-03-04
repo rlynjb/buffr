@@ -1,7 +1,7 @@
 "use client";
 
 import { Badge } from "@/components/ui/badge";
-import { SourceIcon, IconGitHub, IconGlobe, IconChevron } from "@/components/icons";
+import { SourceIcon, IconGitHub, IconGlobe, IconChevron, IconTrash } from "@/components/icons";
 import { PHASE_COLORS } from "@/lib/constants";
 import type { Project } from "@/lib/types";
 import { timeAgo } from "@/lib/format";
@@ -10,9 +10,10 @@ import "./project-card.css";
 interface ProjectCardProps {
   project: Project;
   onClick: () => void;
+  onDelete: (project: Project) => void;
 }
 
-export function ProjectCard({ project, onClick }: ProjectCardProps) {
+export function ProjectCard({ project, onClick, onDelete }: ProjectCardProps) {
   const updatedAgo = timeAgo(project.updatedAt);
 
   return (
@@ -29,6 +30,9 @@ export function ProjectCard({ project, onClick }: ProjectCardProps) {
             </span>
           ))}
         </div>
+        {project.description && (
+          <div className="project-card__description">{project.description}</div>
+        )}
         <div className="project-card__meta">
           {project.stack && <span>{project.stack}</span>}
           <span>·</span>
@@ -42,6 +46,13 @@ export function ProjectCard({ project, onClick }: ProjectCardProps) {
         {project.netlifySiteUrl && (
           <span className="project-card__actions-icon"><IconGlobe size={14} /></span>
         )}
+        <button
+          onClick={(e) => { e.stopPropagation(); onDelete(project); }}
+          className="project-card__actions-delete"
+          aria-label={`Delete ${project.name}`}
+        >
+          <IconTrash size={13} />
+        </button>
         <span className="project-card__actions-chevron"><IconChevron size={12} /></span>
       </div>
     </button>

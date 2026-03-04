@@ -195,6 +195,9 @@ export function ResumeCard({ project, onEndSession }: ResumeCardProps) {
               {currentProject.phase}
             </Badge>
           </div>
+          {currentProject.description && (
+            <div className="resume-card__description">{currentProject.description}</div>
+          )}
           <div className="resume-card__meta">
             {currentProject.stack && <span>{currentProject.stack}</span>}
             {currentProject.githubRepo && (
