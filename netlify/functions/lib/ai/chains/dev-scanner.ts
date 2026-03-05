@@ -51,17 +51,44 @@ Return valid JSON with this exact shape:
 Guidelines:
 - detectedStack: Extract individual technologies from the project stack (e.g., "Next.js", "TypeScript", "Tailwind CSS")
 - detectedPatterns: Identify 4-8 patterns the project likely uses based on its stack and description. Categories: "architecture", "styling", "state-management", "testing", "deployment", "api-design"
-- techDebtItems: Identify 3-6 potential tech debt risks based on the project phase and stack. Use realistic file paths like "src/components/..." or "package.json"
-- gapAnalysis: Compare the project against industry best practices. Include 8-12 entries across categories like "testing", "security", "performance", "accessibility", "documentation", "ci-cd", "error-handling", "monitoring". Mix of aligned, partial, and gap statuses
-- generatedFiles: Generate 5-8 .dev/ files. Always include:
-  - .dev/CONVENTIONS.md (ownership: "reviewable") — coding conventions based on detected stack
-  - .dev/ARCHITECTURE.md (ownership: "reviewable") — architecture overview
-  - .dev/STANDARDS.md (ownership: "system") — industry standards summary
-  - .dev/TECH_DEBT.md (ownership: "append-only") — tech debt inventory
-  - .dev/prompts/review.md (ownership: "user") — a code review prompt template
-  - .dev/prompts/planning.md (ownership: "user") — a planning prompt template
-  Optionally add adapter configs if relevant
-- detectedAdapters: List AI coding tools that likely apply. Options: "claude-code", "cursor", "copilot", "windsurf", "aider", "continue". Include "claude-code" and "cursor" by default, add others if the stack suggests them
+- techDebtItems: Identify 3-6 potential tech debt risks based on the project phase and stack. Use realistic file paths
+- gapAnalysis: Compare the project against industry best practices. Include 8-14 entries across categories like "testing", "security", "performance", "accessibility", "documentation", "ci-cd", "error-handling", "monitoring". Mix of aligned, partial, and gap statuses
+- generatedFiles: Generate the full .dev/ folder structure. Always include ALL of these files:
+
+  **context/** (project-specific context):
+  - .dev/context/PROJECT.md (ownership: "reviewable") — project overview, stack, architecture, signals
+  - .dev/context/CONVENTIONS.md (ownership: "reviewable") — coding conventions, naming patterns, structure
+  - .dev/context/TECH_DEBT.md (ownership: "reviewable") — tech debt inventory with priorities
+  - .dev/context/DECISIONS.md (ownership: "append-only") — architectural decisions detected
+
+  **industry/** (industry best practices — system-managed):
+  - .dev/industry/security.md (ownership: "system") — OWASP-based security practices
+  - .dev/industry/testing.md (ownership: "system") — testing approaches & coverage standards
+  - Plus one .md per detected technology (e.g., .dev/industry/react.md, .dev/industry/nextjs.md)
+
+  **standards/** (how THIS project does things):
+  - .dev/standards/frontend.md (ownership: "reviewable") — frontend patterns for this project
+  - .dev/standards/backend.md (ownership: "reviewable") — backend patterns for this project
+  - .dev/standards/css.md (ownership: "reviewable") — styling approach for this project
+  - .dev/standards/typescript.md (ownership: "reviewable") — TypeScript usage (if applicable)
+
+  **gap-analysis.md** (ownership: "system") — full gap analysis table in markdown
+
+  **prompts/** (scoped prompts):
+  - .dev/prompts/audit.md (ownership: "user") — audit prompt scoped to this stack
+  - .dev/prompts/cleanup.md (ownership: "user") — cleanup prompt targeting detected issues
+  - .dev/prompts/new-feature.md (ownership: "user") — scaffolding matching repo patterns
+
+  **templates/** (code templates):
+  - .dev/templates/component.md (ownership: "user") — component template from existing patterns
+  - .dev/templates/api-endpoint.md (ownership: "user") — API endpoint template
+  - .dev/templates/test.md (ownership: "user") — test template
+
+  **adapters/** (AI tool configs):
+  - .dev/adapters/CLAUDE.md (ownership: "user") — Claude Code config pointing to .dev/ files
+  - .dev/adapters/.cursorrules (ownership: "user") — Cursor config pointing to .dev/ files
+
+- detectedAdapters: List AI coding tools that likely apply. Options: "claude-code", "cursor", "copilot", "windsurf", "aider", "continue". Include "claude-code" and "cursor" by default
 
 Make the analysis realistic and specific to the project's actual stack, not generic boilerplate.`;
 

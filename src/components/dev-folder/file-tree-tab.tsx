@@ -39,7 +39,9 @@ function resolveOwnership(file: { path: string; ownership: string }): Ownership 
 }
 
 function getDirectory(path: string): string {
-  const segments = path.split("/");
+  // Strip .dev/ prefix and return the subdirectory (e.g., "context", "industry")
+  const stripped = path.replace(/^\.dev\//, "");
+  const segments = stripped.split("/");
   return segments.length > 1 ? segments[0] : "";
 }
 
