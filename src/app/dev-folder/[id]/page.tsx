@@ -335,6 +335,24 @@ export default function DevFolderPage() {
     }
   }
 
+  async function handleAdapterGenerate(adapterId: string, path: string, content: string) {
+    if (!scanResult) return;
+    const newFile = { path, content, ownership: "user" };
+    const updatedFiles = [...scanResult.generatedFiles, newFile];
+    const updatedAdapters = [...scanResult.detectedAdapters, adapterId];
+    await updateScanResult(scanResult.id, { generatedFiles: updatedFiles, detectedAdapters: updatedAdapters });
+    setScanResult({ ...scanResult, generatedFiles: updatedFiles, detectedAdapters: updatedAdapters });
+  }
+
+  async function handleAdapterRegenerate(_adapterId: string, path: string, content: string) {
+    if (!scanResult) return;
+    const updatedFiles = scanResult.generatedFiles.map((f) =>
+      f.path === path ? { ...f, content } : f,
+    );
+    await updateScanResult(scanResult.id, { generatedFiles: updatedFiles });
+    setScanResult({ ...scanResult, generatedFiles: updatedFiles });
+  }
+
   function handleFileReset(path: string) {
     setEditedFiles((prev) => {
       const next = { ...prev };
@@ -546,7 +564,15 @@ export default function DevFolderPage() {
                 onReviewDecision={handleReviewDecision}
               />
             )}
-            {activeSection === "adapters" && <AdaptersTab detectedAdapters={scanResult.detectedAdapters} />}
+            {activeSection === "adapters" && (
+              <AdaptersTab
+                detectedAdapters={scanResult.detectedAdapters}
+                generatedFiles={mergedFiles}
+                projectStack={scanResult.detectedStack}
+                onGenerate={handleAdapterGenerate}
+                onRegenerate={handleAdapterRegenerate}
+              />
+            )}
           </div>
         </>
       )}

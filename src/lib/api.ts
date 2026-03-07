@@ -256,7 +256,7 @@ export async function listScanResults(projectId: string): Promise<ScanResult[]> 
 
 export async function updateScanResult(
   id: string,
-  updates: { generatedFiles: ScanResult["generatedFiles"] },
+  updates: Partial<Pick<ScanResult, "generatedFiles" | "detectedAdapters">>,
 ): Promise<ScanResult> {
   return request<ScanResult>(`/scan-results?id=${encodeURIComponent(id)}`, {
     method: "PUT",

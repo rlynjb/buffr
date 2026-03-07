@@ -39,8 +39,11 @@ export default async function handler(req: Request, _context: Context) {
       const body = await req.json();
       if (body.generatedFiles && Array.isArray(body.generatedFiles)) {
         existing.generatedFiles = body.generatedFiles;
-        existing.updatedAt = new Date().toISOString();
       }
+      if (body.detectedAdapters && Array.isArray(body.detectedAdapters)) {
+        existing.detectedAdapters = body.detectedAdapters;
+      }
+      existing.updatedAt = new Date().toISOString();
       await saveScanResult(existing);
       return json(existing);
     }

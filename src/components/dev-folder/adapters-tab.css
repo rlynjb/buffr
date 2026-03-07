@@ -40,6 +40,23 @@
   @apply flex gap-1.5 shrink-0;
 }
 
-.adapters-tab__footer {
-  @apply text-[11px] text-zinc-600 px-1 mt-4;
+.adapters-tab__desc {
+  @apply text-[11px] text-zinc-600 leading-relaxed mb-3;
+}
+
+.adapters-tab__preview {
+  @apply ml-12 mb-2 px-3 py-2 rounded-lg bg-zinc-900/60 border border-zinc-800/40;
+  animation: fadeIn 0.15s ease-out;
+}
+
+.adapters-tab__preview-header {
+  @apply flex items-center mb-2;
+}
+
+.adapters-tab__preview-path {
+  @apply font-mono text-[11px] text-zinc-400;
+}
+
+.adapters-tab__preview-content {
+  @apply text-[11px] text-zinc-400 leading-relaxed whitespace-pre-wrap wrap-break-word font-mono max-h-64 overflow-y-auto p-2 rounded bg-zinc-950/50;
 }
