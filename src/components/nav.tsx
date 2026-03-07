@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useAuth } from "@/context/auth-context";
 import { ProviderSwitcher } from "./provider-switcher";
 import { IconCmd } from "./icons";
 import "./nav.css";
@@ -13,6 +14,7 @@ const pageLabels: Record<string, string> = {
 
 export function Nav() {
   const pathname = usePathname();
+  const { logout } = useAuth();
 
   const label = pathname.startsWith("/project/")
     ? "Resume Card"
@@ -46,6 +48,9 @@ export function Nav() {
           <span className="nav__cmd-label">Cmd+K</span>
         </button>
         <ProviderSwitcher />
+        <button onClick={logout} className="nav__signout">
+          Sign out
+        </button>
       </div>
     </nav>
   );

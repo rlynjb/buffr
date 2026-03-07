@@ -1,9 +1,7 @@
 import type { Metadata } from "next";
 import { DM_Sans, JetBrains_Mono } from "next/font/google";
-import { ProviderProvider } from "@/context/provider-context";
-import { NotificationProvider } from "@/components/ui/notification";
-import { Nav } from "@/components/nav";
-import { CommandPalette } from "@/components/command-palette";
+import { AuthProvider } from "@/context/auth-context";
+import { AppShell } from "@/components/app-shell";
 import "./globals.css";
 
 const dmSans = DM_Sans({
@@ -32,13 +30,9 @@ export default function RootLayout({
       <body
         className={`${dmSans.variable} ${jetbrainsMono.variable} antialiased bg-background text-foreground font-sans`}
       >
-        <ProviderProvider>
-          <NotificationProvider>
-            <Nav />
-            <main className="main__container">{children}</main>
-            <CommandPalette />
-          </NotificationProvider>
-        </ProviderProvider>
+        <AuthProvider>
+          <AppShell>{children}</AppShell>
+        </AuthProvider>
       </body>
     </html>
   );

@@ -1,0 +1,49 @@
+@reference "../globals.css";
+
+.login {
+  @apply min-h-screen flex items-center justify-center px-4;
+}
+
+.login__card {
+  @apply w-full max-w-sm;
+}
+
+.login__brand {
+  @apply flex flex-col items-center mb-8;
+}
+
+.login__logo {
+  @apply w-10 h-10 rounded-xl bg-gradient-to-br from-purple-500 to-indigo-600 flex items-center justify-center mb-3;
+}
+
+.login__logo-letter {
+  @apply text-sm font-black text-white font-mono;
+}
+
+.login__title {
+  @apply text-lg font-semibold text-zinc-100 font-mono;
+}
+
+.login__subtitle {
+  @apply text-xs text-zinc-500 mt-1;
+}
+
+.login__form {
+  @apply rounded-xl border border-zinc-800/60 bg-zinc-900/30 p-6;
+}
+
+.login__fields {
+  @apply space-y-4;
+}
+
+.login__error {
+  @apply text-xs text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2;
+}
+
+.login__submit {
+  @apply w-full;
+}
+
+.login__footnote {
+  @apply text-[10px] text-zinc-700 text-center mt-4;
+}
