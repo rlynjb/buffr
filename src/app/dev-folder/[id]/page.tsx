@@ -13,7 +13,7 @@ import {
   IconGitHub,
   IconLoader,
 } from "@/components/icons";
-import { getProject, listScanResults, getScanResult, triggerScan, updateProject, pushDevFiles } from "@/lib/api";
+import { getProject, listScanResults, getScanResult, triggerScan, updateProject, pushDevFiles, detectDevFolder } from "@/lib/api";
 import type { Project, ScanResult } from "@/lib/types";
 import { useProvider } from "@/context/provider-context";
 import { OverviewTab } from "@/components/dev-folder/overview-tab";
@@ -68,6 +68,18 @@ export default function DevFolderPage() {
           if (results.length > 0) {
             setScanResult(results[0]);
             setScanPhase(results[0].status === "done" ? "done" : results[0].status as ScanPhase);
+          } else if (proj.githubRepo) {
+            // No scans exist — check if repo already has .dev/ folder
+            try {
+              const imported = await detectDevFolder(proj.id);
+              if (imported) {
+                setScanResult(imported);
+                setScanPhase("done");
+                setProject({ ...proj, devFolder: { status: "generated", lastScan: imported.updatedAt, scanResultId: imported.id, gapScore: null, adapters: imported.detectedAdapters } });
+              }
+            } catch {
+              // Detection failed — user can still scan manually
+            }
           }
         }
       } catch (err) {

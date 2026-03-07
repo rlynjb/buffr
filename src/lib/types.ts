@@ -119,7 +119,7 @@ export interface ScanResult {
   generatedFiles: { path: string; content: string; ownership: string }[];
   gapAnalysis: GapAnalysisEntry[];
   detectedAdapters: string[];
-  analysisSource?: "llm" | "rule-based";
+  analysisSource?: "llm" | "rule-based" | "imported";
   error: string | null;
   createdAt: string;
   updatedAt: string;

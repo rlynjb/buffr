@@ -278,6 +278,16 @@ export async function triggerScan(projectId: string, provider?: string): Promise
   });
 }
 
+// Detect existing .dev/ folder in repo
+export async function detectDevFolder(projectId: string): Promise<ScanResult | null> {
+  const res = await request<ScanResult | { detected: false }>("/detect-dev", {
+    method: "POST",
+    body: JSON.stringify({ projectId }),
+  });
+  if ("detected" in res && res.detected === false) return null;
+  return res as ScanResult;
+}
+
 // Push .dev/ files to GitHub repo
 export async function pushDevFiles(
   scanResultId: string
