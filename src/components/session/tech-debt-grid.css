@@ -20,6 +20,14 @@
   @apply text-[11px] text-zinc-500 uppercase tracking-wider font-semibold;
 }
 
+.tech-debt__desc {
+  @apply text-[11px] text-zinc-600 leading-relaxed mb-3;
+
+  & code {
+    @apply text-zinc-400 bg-zinc-800/60 px-1 py-0.5 rounded text-[10px] font-mono;
+  }
+}
+
 .tech-debt__grid {
   @apply grid grid-cols-2 sm:grid-cols-3 gap-2;
 }

@@ -19,6 +19,11 @@ export function TechDebtGrid({ summary, scannedAt }: TechDebtGridProps) {
           <span className="tech-debt__label">Tech Debt</span>
         </div>
       </div>
+      <p className="tech-debt__desc">
+        Scans source code for JSDoc-style comment annotations
+        (<code>TODO</code>, <code>FIXME</code>, <code>HACK</code>)
+        and checks for missing project infrastructure like tests, CI/CD, and linters.
+      </p>
       <div className="tech-debt__grid">
         {summary.map((d) => (
           <div key={d.type} className="tech-debt__item">
