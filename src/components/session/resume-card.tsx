@@ -220,7 +220,7 @@ export function ResumeCard({ project, onEndSession }: ResumeCardProps) {
                 <IconGlobe size={12} /> Site
               </a>
             )}
-            {currentProject.devFolder && (
+            {currentProject.githubRepo && (
               <Link href={`/dev-folder/${currentProject.id}`} className="resume-card__meta-link resume-card__dev-link">
                 <IconLayers size={12} /> .dev/
               </Link>
@@ -237,7 +237,7 @@ export function ResumeCard({ project, onEndSession }: ResumeCardProps) {
           </div>
         </div>
         <div className="resume-card__header-actions">
-          {currentProject.devFolder && (
+          {currentProject.githubRepo && (
             <Link href={`/dev-folder/${currentProject.id}`}>
               <Button size="sm" variant="secondary"><IconLayers size={14} /> .dev/</Button>
             </Link>
