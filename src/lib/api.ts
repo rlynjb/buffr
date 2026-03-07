@@ -254,6 +254,16 @@ export async function listScanResults(projectId: string): Promise<ScanResult[]> 
   return request<ScanResult[]>(`/scan-results?projectId=${encodeURIComponent(projectId)}`);
 }
 
+export async function updateScanResult(
+  id: string,
+  updates: { generatedFiles: ScanResult["generatedFiles"] },
+): Promise<ScanResult> {
+  return request<ScanResult>(`/scan-results?id=${encodeURIComponent(id)}`, {
+    method: "PUT",
+    body: JSON.stringify(updates),
+  });
+}
+
 // Industry KB
 export async function listStandards(): Promise<IndustryStandard[]> {
   return request<IndustryStandard[]>("/industry-kb");
@@ -271,10 +281,10 @@ export async function seedIndustryKB(force = false): Promise<{ seeded: string[];
 }
 
 // Trigger scan / generate .dev/
-export async function triggerScan(projectId: string, provider?: string): Promise<ScanResult> {
+export async function triggerScan(projectId: string, provider?: string, skipPush?: boolean): Promise<ScanResult> {
   return request<ScanResult>("/generate-dev", {
     method: "POST",
-    body: JSON.stringify({ projectId, provider }),
+    body: JSON.stringify({ projectId, provider, skipPush }),
   });
 }
 

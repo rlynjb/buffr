@@ -192,55 +192,53 @@ export function ResumeCard({ project, onEndSession }: ResumeCardProps) {
       </Link>
 
       <div className="resume-card__header">
-        <div>
-          <div className="resume-card__name-row">
-            <span className="resume-card__name">
-              {currentProject.name}
-            </span>
-            <Badge color={PHASE_COLORS[currentProject.phase]}>
-              {currentProject.phase}
-            </Badge>
-          </div>
-          {currentProject.description && (
-            <div className="resume-card__description">{currentProject.description}</div>
+        <div className="resume-card__name-row">
+          <span className="resume-card__name">
+            {currentProject.name}
+          </span>
+          <Badge color={PHASE_COLORS[currentProject.phase]}>
+            {currentProject.phase}
+          </Badge>
+        </div>
+        {currentProject.description && (
+          <div className="resume-card__description">{currentProject.description}</div>
+        )}
+        <div className="resume-card__meta">
+          {currentProject.stack && <span>{currentProject.stack}</span>}
+          {currentProject.githubRepo && (
+            <a
+              href={`https://github.com/${currentProject.githubRepo}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="resume-card__meta-link"
+            >
+              <IconGitHub size={12} /> {currentProject.githubRepo}
+            </a>
           )}
-          <div className="resume-card__meta">
-            {currentProject.stack && <span>{currentProject.stack}</span>}
-            {currentProject.githubRepo && (
-              <a
-                href={`https://github.com/${currentProject.githubRepo}`}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="resume-card__meta-link"
-              >
-                <IconGitHub size={12} /> {currentProject.githubRepo}
-              </a>
-            )}
-            {currentProject.netlifySiteUrl && (
-              <a
-                href={currentProject.netlifySiteUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="resume-card__meta-link"
-              >
-                <IconGlobe size={12} /> Site
-              </a>
-            )}
-            {currentProject.githubRepo && (
-              <Link href={`/dev-folder/${currentProject.id}`} className="resume-card__meta-link resume-card__dev-link">
-                <IconLayers size={12} /> .dev/
-              </Link>
-            )}
-            {currentProject.githubRepo && (
-              <button
-                onClick={handleSync}
-                disabled={syncing}
-                className="resume-card__sync-btn"
-              >
-                {syncing ? "Syncing..." : "Sync"}
-              </button>
-            )}
-          </div>
+          {currentProject.netlifySiteUrl && (
+            <a
+              href={currentProject.netlifySiteUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="resume-card__meta-link"
+            >
+              <IconGlobe size={12} /> Site
+            </a>
+          )}
+          {currentProject.githubRepo && (
+            <Link href={`/dev-folder/${currentProject.id}`} className="resume-card__meta-link resume-card__dev-link">
+              <IconLayers size={12} /> .dev/
+            </Link>
+          )}
+          {currentProject.githubRepo && (
+            <button
+              onClick={handleSync}
+              disabled={syncing}
+              className="resume-card__sync-btn"
+            >
+              {syncing ? "Syncing..." : "Sync"}
+            </button>
+          )}
         </div>
         <div className="resume-card__header-actions">
           {currentProject.githubRepo && (

@@ -9,7 +9,7 @@
 }
 
 .dev-folder__header {
-  @apply flex items-start justify-between mb-6;
+  @apply mb-6;
 }
 
 .dev-folder__title-row {
@@ -37,7 +37,11 @@
 }
 
 .dev-folder__header-actions {
-  @apply flex gap-2;
+  @apply flex items-center justify-end gap-2 mt-3;
+}
+
+.dev-folder__last-scan {
+  @apply text-[10px] text-zinc-600 mr-1;
 }
 
 /* Scan CTA */
@@ -105,6 +109,19 @@
 
 .dev-folder__scan-progress-phase {
   @apply text-[10px] text-zinc-600 mt-1 block capitalize;
+}
+
+/* Usage description */
+.dev-folder__usage {
+  @apply mb-5 rounded-lg border border-zinc-800/40 bg-zinc-900/30 px-4 py-3;
+}
+
+.dev-folder__usage-text {
+  @apply text-[11px] text-zinc-500 leading-relaxed;
+
+  & strong {
+    @apply text-zinc-400 font-medium font-mono;
+  }
 }
 
 /* Tabs */

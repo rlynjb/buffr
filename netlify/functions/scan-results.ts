@@ -3,6 +3,7 @@ import {
   getScanResult,
   listScanResultsByProject,
   deleteScanResult,
+  saveScanResult,
 } from "./lib/storage/scan-results";
 import { json, errorResponse } from "./lib/responses";
 
@@ -25,6 +26,23 @@ export default async function handler(req: Request, _context: Context) {
         return json(results);
       }
       return errorResponse("id or projectId query param required", 400);
+    }
+
+    if (req.method === "PUT") {
+      if (!id) {
+        return errorResponse("Scan result id required", 400);
+      }
+      const existing = await getScanResult(id);
+      if (!existing) {
+        return errorResponse("Scan result not found", 404);
+      }
+      const body = await req.json();
+      if (body.generatedFiles && Array.isArray(body.generatedFiles)) {
+        existing.generatedFiles = body.generatedFiles;
+        existing.updatedAt = new Date().toISOString();
+      }
+      await saveScanResult(existing);
+      return json(existing);
     }
 
     if (req.method === "DELETE") {

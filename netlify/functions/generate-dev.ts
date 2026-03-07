@@ -839,9 +839,10 @@ export default async function handler(req: Request, _context: Context) {
     }
 
     // ── Generate scan ──
-    const { projectId, provider } = body as {
+    const { projectId, provider, skipPush } = body as {
       projectId: string;
       provider?: string;
+      skipPush?: boolean;
     };
 
     if (!projectId) return errorResponse("projectId is required", 400);
@@ -976,16 +977,18 @@ export default async function handler(req: Request, _context: Context) {
     }
 
     // ── Phase 4: Push .dev/ files to GitHub ──
-    try {
-      await pushFiles(
-        owner,
-        repo,
-        scan.generatedFiles.map((f) => ({ path: f.path, content: f.content })),
-        "chore: generate .dev/ project intelligence folder"
-      );
-    } catch (pushErr) {
-      console.error("Failed to push .dev/ files to repo:", pushErr);
-      // Non-fatal — scan results are still saved locally
+    if (!skipPush) {
+      try {
+        await pushFiles(
+          owner,
+          repo,
+          scan.generatedFiles.map((f) => ({ path: f.path, content: f.content })),
+          "chore: generate .dev/ project intelligence folder"
+        );
+      } catch (pushErr) {
+        console.error("Failed to push .dev/ files to repo:", pushErr);
+        // Non-fatal — scan results are still saved locally
+      }
     }
 
     // Mark done

@@ -15,6 +15,10 @@ const SEED_DATA: Omit<IndustryStandard, "id" | "updatedAt">[] = [
       "Testing",
       "Accessibility",
     ],
+    sources: [
+      { label: "React Documentation", url: "https://react.dev" },
+      { label: "React Testing Library", url: "https://testing-library.com/docs/react-testing-library/intro" },
+    ],
     content: `# React Best Practices
 
 ## Component Structure
@@ -68,6 +72,10 @@ const SEED_DATA: Omit<IndustryStandard, "id" | "updatedAt">[] = [
       "API Routes",
       "Performance",
       "Deployment",
+    ],
+    sources: [
+      { label: "Next.js Documentation", url: "https://nextjs.org/docs" },
+      { label: "Vercel Best Practices", url: "https://vercel.com/docs" },
     ],
     content: `# Next.js Best Practices
 
@@ -123,6 +131,10 @@ const SEED_DATA: Omit<IndustryStandard, "id" | "updatedAt">[] = [
       "Project Config",
       "Common Patterns",
     ],
+    sources: [
+      { label: "TypeScript Handbook", url: "https://www.typescriptlang.org/docs/handbook" },
+      { label: "TypeScript Performance", url: "https://github.com/microsoft/TypeScript/wiki/Performance" },
+    ],
     content: `# TypeScript Best Practices
 
 ## Type Safety
@@ -176,6 +188,9 @@ const SEED_DATA: Omit<IndustryStandard, "id" | "updatedAt">[] = [
       "Dark Mode",
       "Performance",
     ],
+    sources: [
+      { label: "Tailwind CSS Documentation", url: "https://tailwindcss.com/docs" },
+    ],
     content: `# Tailwind CSS Best Practices
 
 ## Configuration
@@ -227,6 +242,10 @@ const SEED_DATA: Omit<IndustryStandard, "id" | "updatedAt">[] = [
       "Security",
       "Performance",
       "Testing",
+    ],
+    sources: [
+      { label: "Node.js Best Practices", url: "https://github.com/goldbergyoni/nodebestpractices" },
+      { label: "Node.js Documentation", url: "https://nodejs.org/docs/latest/api" },
     ],
     content: `# Node.js Best Practices
 

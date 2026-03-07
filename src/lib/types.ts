@@ -147,6 +147,7 @@ export interface IndustryStandard {
   title: string;
   content: string;
   sections: string[];
+  sources: Array<{ label: string; url: string }>;
   updatedAt: string;
 }
 
