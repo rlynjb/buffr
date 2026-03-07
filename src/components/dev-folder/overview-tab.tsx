@@ -1,42 +1,12 @@
 "use client";
 
-import type { ScanResult, TechDebtItem } from "@/lib/types";
+import type { ScanResult } from "@/lib/types";
 import { Badge } from "@/components/ui/badge";
-import { IconFileTree } from "@/components/icons";
 import { timeAgo } from "@/lib/format";
 import "./overview-tab.css";
 
 interface OverviewTabProps {
   scanResult: ScanResult;
-}
-
-type Severity = TechDebtItem["severity"];
-
-const severityRank: Record<Severity, number> = {
-  high: 3,
-  medium: 2,
-  low: 1,
-};
-
-function groupDebtByType(items: TechDebtItem[]) {
-  const groups = new Map<
-    string,
-    { count: number; maxSeverity: Severity }
-  >();
-
-  for (const item of items) {
-    const existing = groups.get(item.type);
-    if (existing) {
-      existing.count++;
-      if (severityRank[item.severity] > severityRank[existing.maxSeverity]) {
-        existing.maxSeverity = item.severity;
-      }
-    } else {
-      groups.set(item.type, { count: 1, maxSeverity: item.severity });
-    }
-  }
-
-  return groups;
 }
 
 export function OverviewTab({ scanResult }: OverviewTabProps) {
@@ -49,8 +19,6 @@ export function OverviewTab({ scanResult }: OverviewTabProps) {
   const gapCount = scanResult.gapAnalysis.filter(
     (e) => e.status === "gap",
   ).length;
-
-  const debtGroups = groupDebtByType(scanResult.techDebtItems);
 
   return (
     <div className="overview-tab">
@@ -83,24 +51,6 @@ export function OverviewTab({ scanResult }: OverviewTabProps) {
               {tech}
             </Badge>
           ))}
-        </div>
-      </div>
-
-      {/* Tech debt inventory */}
-      <div className="overview-tab__card">
-        <div className="overview-tab__heading">Tech Debt Inventory</div>
-        <div className="overview-tab__debt-list">
-          {Array.from(debtGroups.entries()).map(
-            ([type, { count, maxSeverity }]) => (
-              <div key={type} className="overview-tab__debt-item">
-                <span
-                  className={`overview-tab__debt-dot overview-tab__debt-dot--${maxSeverity}`}
-                />
-                <span className="overview-tab__debt-type">{type}</span>
-                <span className="overview-tab__debt-count">{count}</span>
-              </div>
-            ),
-          )}
         </div>
       </div>
 

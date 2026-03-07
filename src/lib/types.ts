@@ -19,6 +19,7 @@ export interface Project {
   dismissedSuggestions?: string[];
   issueCount?: number;
   devFolder?: DevFolder | null;
+  techDebt?: TechDebtScan | null;
   updatedAt: string;
 }
 
@@ -95,6 +96,18 @@ export interface TechDebtItem {
   line?: number;
   severity: "high" | "medium" | "low";
   text: string;
+}
+
+export interface TechDebtSummaryEntry {
+  type: string;
+  count: number;
+  severity: "high" | "medium" | "low";
+}
+
+export interface TechDebtScan {
+  items: TechDebtItem[];
+  summary: TechDebtSummaryEntry[];
+  scannedAt: string;
 }
 
 export interface GapAnalysisEntry {

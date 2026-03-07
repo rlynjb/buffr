@@ -6,7 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { IconBack, IconGitHub, IconGlobe, IconSparkle, IconLayers } from "@/components/icons";
 import { PHASE_COLORS } from "@/lib/constants";
-import type { Project, Session, WorkItem, Prompt } from "@/lib/types";
+import type { Project, Session, WorkItem, Prompt, TechDebtScan } from "@/lib/types";
 import { generateNextActions, type NextAction, type ActionContext } from "@/lib/next-actions";
 import { listSessions, getActionNotes, saveActionNote, listPrompts, executeToolAction, listIntegrations, updateProject } from "@/lib/api";
 import { resolvePrompt } from "@/lib/resolve-prompt";
@@ -16,6 +16,7 @@ import { SessionTab } from "./session-tab";
 import { IssuesTab } from "./issues-tab";
 import { ActionsTab } from "./actions-tab";
 import { PromptsTab } from "./prompts-tab";
+import { TechDebtGrid } from "./tech-debt-grid";
 import "./resume-card.css";
 
 interface ResumeCardProps {
@@ -45,21 +46,26 @@ export function ResumeCard({ project, onEndSession }: ResumeCardProps) {
     const [owner, repo] = currentProject.githubRepo.split("/");
     setSyncing(true);
     try {
-      const res = await executeToolAction("github_analyze_repo", { owner, repo });
-      if (res.ok && res.result) {
-        // TODO: Consider typed API wrappers to avoid type assertions on executeToolAction results
-        const analysis = res.result as {
+      const [analyzeRes, debtRes] = await Promise.all([
+        executeToolAction("github_analyze_repo", { owner, repo }),
+        executeToolAction("github_scan_tech_debt", { owner, repo }),
+      ]);
+      const updates: Partial<Project> = {};
+      if (analyzeRes.ok && analyzeRes.result) {
+        const analysis = analyzeRes.result as {
           detectedStack?: string;
           detectedPhase?: "idea" | "mvp" | "polish" | "deploy";
           description?: string;
         };
-        const updates: Partial<Project> = {};
         if (analysis.detectedStack) updates.stack = analysis.detectedStack;
         if (analysis.detectedPhase) updates.phase = analysis.detectedPhase;
         if (analysis.description) updates.description = analysis.description;
-        const updated = await updateProject(currentProject.id, updates);
-        setCurrentProject(updated);
       }
+      if (debtRes.ok && debtRes.result) {
+        updates.techDebt = debtRes.result as TechDebtScan;
+      }
+      const updated = await updateProject(currentProject.id, updates);
+      setCurrentProject(updated);
     } catch (err) {
       console.error("Sync failed:", err);
     } finally {
@@ -332,6 +338,13 @@ export function ResumeCard({ project, onEndSession }: ResumeCardProps) {
           />
         )}
       </div>
+
+      {currentProject.techDebt && currentProject.techDebt.summary.length > 0 && (
+        <TechDebtGrid
+          summary={currentProject.techDebt.summary}
+          scannedAt={currentProject.techDebt.scannedAt}
+        />
+      )}
     </div>
   );
 }

@@ -3,7 +3,6 @@ import { BaseChatModel } from "@langchain/core/language_models/chat_models";
 import { stripCodeBlock } from "../parse-utils";
 import type {
   GapAnalysisEntry,
-  TechDebtItem,
   DetectedPattern,
 } from "../../../../../src/lib/types";
 
@@ -20,7 +19,6 @@ export interface DevScanInput {
 export interface DevScanOutput {
   detectedStack: string[];
   detectedPatterns: DetectedPattern[];
-  techDebtItems: TechDebtItem[];
   gapAnalysis: GapAnalysisEntry[];
   generatedFiles: { path: string; content: string; ownership: string }[];
   detectedAdapters: string[];
@@ -36,9 +34,6 @@ Return valid JSON with this exact shape:
   "detectedPatterns": [
     { "category": "string", "pattern": "string", "confidence": "high"|"medium"|"low", "evidence": ["string"] }
   ],
-  "techDebtItems": [
-    { "type": "string", "file": "string", "severity": "high"|"medium"|"low", "text": "string" }
-  ],
   "gapAnalysis": [
     { "practice": "string", "industry": "string", "project": "string", "status": "aligned"|"partial"|"gap", "category": "string" }
   ],
@@ -51,14 +46,12 @@ Return valid JSON with this exact shape:
 Guidelines:
 - detectedStack: Extract individual technologies from the project stack (e.g., "Next.js", "TypeScript", "Tailwind CSS")
 - detectedPatterns: Identify 4-8 patterns the project likely uses based on its stack and description. Categories: "architecture", "styling", "state-management", "testing", "deployment", "api-design"
-- techDebtItems: Identify 3-6 potential tech debt risks based on the project phase and stack. Use realistic file paths
 - gapAnalysis: Compare the project against industry best practices. Include 8-14 entries across categories like "testing", "security", "performance", "accessibility", "documentation", "ci-cd", "error-handling", "monitoring". Mix of aligned, partial, and gap statuses
 - generatedFiles: Generate the full .dev/ folder structure. Always include ALL of these files:
 
   **context/** (project-specific context):
   - .dev/context/PROJECT.md (ownership: "reviewable") — project overview, stack, architecture, signals
   - .dev/context/CONVENTIONS.md (ownership: "reviewable") — coding conventions, naming patterns, structure
-  - .dev/context/TECH_DEBT.md (ownership: "reviewable") — tech debt inventory with priorities
   - .dev/context/DECISIONS.md (ownership: "append-only") — architectural decisions detected
 
   **industry/** (industry best practices — system-managed):
@@ -102,9 +95,6 @@ function parseDevScanOutput(raw: string): DevScanOutput {
       : [],
     detectedPatterns: Array.isArray(parsed.detectedPatterns)
       ? parsed.detectedPatterns
-      : [],
-    techDebtItems: Array.isArray(parsed.techDebtItems)
-      ? parsed.techDebtItems
       : [],
     gapAnalysis: Array.isArray(parsed.gapAnalysis)
       ? parsed.gapAnalysis

@@ -485,6 +485,40 @@ function ResumeCard({ project, onNavigate }) {
         {tab === "prompts" && <PromptsTab />}
       </div>
 
+      {/* Tech Debt Inventory */}
+      {project.devFolder && (
+        <div className="mt-5 pt-5 border-t border-zinc-800/50">
+          <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center gap-2">
+              <span className="text-red-400/70">{I.shield}</span>
+              <span className="text-[11px] text-zinc-500 uppercase tracking-wider font-semibold">Tech Debt</span>
+            </div>
+            <button onClick={() => onNavigate("dev-folder", project.id)} className="text-[10px] text-zinc-600 hover:text-emerald-400 transition-colors flex items-center gap-1">{I.layers} View in .dev/</button>
+          </div>
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+            {[
+              { type: "TODO", count: 12, severity: "low" },
+              { type: "FIXME", count: 3, severity: "medium" },
+              { type: "HACK", count: 2, severity: "high" },
+              { type: "Missing types", count: 12, severity: "medium" },
+              { type: "No error boundaries", count: 1, severity: "high" },
+            ].map(d => (
+              <div key={d.type} className="flex items-center gap-2 px-2.5 py-2 rounded-lg bg-zinc-900/40 border border-zinc-800/40">
+                <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${d.severity === "high" ? "bg-red-400" : d.severity === "medium" ? "bg-amber-400" : "bg-zinc-500"}`} />
+                <span className="text-[11px] text-zinc-400 flex-1 truncate">{d.type}</span>
+                <span className="text-[11px] text-zinc-600 font-medium" style={{ fontFamily: mono }}>{d.count}</span>
+              </div>
+            ))}
+          </div>
+          <div className="flex items-center gap-3 mt-2 text-[10px] text-zinc-600 px-1">
+            <span className="flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-red-400" /> High</span>
+            <span className="flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-amber-400" /> Medium</span>
+            <span className="flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-zinc-500" /> Low</span>
+            <span className="ml-auto">from .dev/context/TECH_DEBT.md</span>
+          </div>
+        </div>
+      )}
+
       {/* End Session Modal */}
       {endSession && <EndSessionModal onClose={() => setEndSession(false)} session={session} sources={sources} />}
     </div>
@@ -1287,26 +1321,6 @@ function DevFolderPage({ project, onNavigate }) {
                   {["React Patterns", "Next.js Conventions", "TypeScript Practices", "Tailwind CSS", "Security (OWASP)", "Testing Standards"].map(s => (
                     <div key={s} className="flex items-center gap-2 text-xs text-zinc-400">
                       <span className="text-blue-400">{I.fileTree}</span> {s}
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              {/* Tech debt summary */}
-              <div className="rounded-xl border border-zinc-800/60 bg-zinc-900/30 p-4">
-                <div className="text-[11px] text-zinc-500 uppercase tracking-wider font-semibold mb-3">Tech Debt Inventory</div>
-                <div className="space-y-1.5">
-                  {[
-                    { type: "TODO", count: 12, severity: "low" },
-                    { type: "FIXME", count: 3, severity: "medium" },
-                    { type: "HACK", count: 2, severity: "high" },
-                    { type: "Missing types (any)", count: 12, severity: "medium" },
-                    { type: "No error boundaries", count: 1, severity: "high" },
-                  ].map(d => (
-                    <div key={d.type} className="flex items-center gap-3 text-xs">
-                      <span className={`w-1.5 h-1.5 rounded-full ${d.severity === "high" ? "bg-red-400" : d.severity === "medium" ? "bg-amber-400" : "bg-zinc-500"}`} />
-                      <span className="text-zinc-400 flex-1">{d.type}</span>
-                      <span className="text-zinc-600" style={{ fontFamily: mono }}>{d.count}</span>
                     </div>
                   ))}
                 </div>

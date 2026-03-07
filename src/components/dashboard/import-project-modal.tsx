@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { IconLoader, IconPlus } from "@/components/icons";
 import { PHASE_COLORS } from "@/lib/constants";
-import { executeToolAction, createProject } from "@/lib/api";
+import { executeToolAction, createProject, updateProject } from "@/lib/api";
 import type { Project } from "@/lib/types";
 import "./import-project-modal.css";
 
@@ -90,6 +90,18 @@ export function ImportProjectModal({
         constraints: "",
         goals: "",
       });
+      // Fire tech debt scan in background (non-blocking)
+      if (parsed) {
+        executeToolAction("github_scan_tech_debt", {
+          owner: parsed.owner,
+          repo: parsed.repo,
+        }).then(async (res) => {
+          if (res.ok && res.result) {
+            await updateProject(project.id, { techDebt: res.result as Project["techDebt"] });
+          }
+        }).catch(() => {/* non-fatal */});
+      }
+
       handleClose();
       onCreated(project);
     } catch (err) {

@@ -11,6 +11,7 @@ import {
   getCommits,
   getDiffs,
   getFileContent,
+  scanTechDebt,
 } from "../github";
 
 const INTEGRATION_ID = "github";
@@ -282,6 +283,28 @@ export function registerGitHubTools() {
         throw new Error(`File not found: ${input.path}`);
       }
       return { content, path: input.path };
+    },
+  });
+
+  registerTool({
+    name: "github_scan_tech_debt",
+    description: "Scan repository source code for TODO/FIXME/HACK comments and structural tech debt",
+    integrationId: INTEGRATION_ID,
+    inputSchema: {
+      type: "object",
+      properties: {
+        owner: { type: "string" },
+        repo: { type: "string" },
+        branch: { type: "string", description: "Branch to scan (default: main)" },
+      },
+      required: ["owner", "repo"],
+    },
+    execute: async (input) => {
+      const owner = input.owner as string;
+      const repo = input.repo as string;
+      const info = await getRepoInfo(`${owner}/${repo}`);
+      const branch = (input.branch as string) || info?.defaultBranch || "main";
+      return scanTechDebt(owner, repo, branch);
     },
   });
 }

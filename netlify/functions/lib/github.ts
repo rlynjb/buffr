@@ -149,7 +149,7 @@ export async function getRepoInfo(ownerRepo: string): Promise<{
   }
 }
 
-async function getRepoFiles(
+export async function getRepoFiles(
   owner: string,
   repo: string,
   branch: string
@@ -509,5 +509,153 @@ export async function analyzeRepo(
     hasDeployConfig,
     fileCount,
     detectedPhase,
+  };
+}
+
+/* ── Tech Debt Scanning ── */
+
+import type { TechDebtItem, TechDebtScan, TechDebtSummaryEntry } from "../../../src/lib/types";
+
+const SOURCE_EXTENSIONS = ["ts", "tsx", "js", "jsx", "py", "go", "rs"];
+
+interface SearchCodeResult {
+  path: string;
+  fragments: string[];
+}
+
+async function searchCode(
+  owner: string,
+  repo: string,
+  keyword: string,
+): Promise<SearchCodeResult[]> {
+  const extQuery = SOURCE_EXTENSIONS.map((e) => `extension:${e}`).join("+");
+  const q = encodeURIComponent(keyword) + `+repo:${owner}/${repo}+${extQuery}`;
+  try {
+    const res = await fetch(`${API}/search/code?q=${q}&per_page=100`, {
+      headers: {
+        Authorization: `Bearer ${getToken()}`,
+        Accept: "application/vnd.github.text-match+json",
+      },
+    });
+    if (!res.ok) return [];
+    const data = await res.json();
+    const items = (data.items || []) as Array<{
+      path: string;
+      text_matches?: Array<{ fragment: string }>;
+    }>;
+    return items.map((item) => ({
+      path: item.path,
+      fragments: (item.text_matches || []).map((m) => m.fragment),
+    }));
+  } catch {
+    return [];
+  }
+}
+
+function countMatches(results: SearchCodeResult[], keyword: string): number {
+  let count = 0;
+  for (const r of results) {
+    if (r.fragments.length > 0) {
+      for (const frag of r.fragments) {
+        const regex = new RegExp(`\\b${keyword}\\b`, "gi");
+        const matches = frag.match(regex);
+        count += matches ? matches.length : 0;
+      }
+    } else {
+      count += 1;
+    }
+  }
+  return count;
+}
+
+function buildStructuralDebt(
+  analysis: {
+    frameworks: string[];
+    devTools: string[];
+    hasTests: boolean;
+    hasCI: boolean;
+  },
+  files: string[],
+): TechDebtItem[] {
+  const items: TechDebtItem[] = [];
+
+  if (!analysis.hasTests) {
+    items.push({ type: "Missing tests", file: "package.json", severity: "high", text: "No test framework detected" });
+  }
+  if (!analysis.hasCI) {
+    items.push({ type: "No CI/CD", file: ".github/workflows/", severity: "high", text: "No CI pipeline detected" });
+  }
+  const hasErrorBoundary = files.some((f) => f.includes("error.tsx") || f.includes("error.ts"));
+  if (!hasErrorBoundary && (analysis.frameworks.includes("Next.js") || analysis.frameworks.includes("React"))) {
+    items.push({ type: "No error boundaries", file: "src/app/", severity: "medium", text: "No error.tsx files for route-level error handling" });
+  }
+  const hasLinter = analysis.devTools.some((t) => ["ESLint", "Prettier"].includes(t));
+  if (!hasLinter) {
+    items.push({ type: "No linter", file: "package.json", severity: "medium", text: "No ESLint or Prettier detected" });
+  }
+  const hasEnvExample = files.some((f) => f === ".env.example" || f === ".env.local.example");
+  if (!hasEnvExample && files.some((f) => f === ".gitignore")) {
+    items.push({ type: "No .env docs", file: ".env.example", severity: "low", text: "No .env.example file" });
+  }
+  const hasReadme = files.some((f) => f.toLowerCase() === "readme.md");
+  if (!hasReadme) {
+    items.push({ type: "No README", file: "README.md", severity: "medium", text: "No README.md" });
+  }
+
+  return items;
+}
+
+export async function scanTechDebt(
+  owner: string,
+  repo: string,
+  branch: string,
+): Promise<TechDebtScan> {
+  // Run analysis + search in parallel
+  const [analysis, files, todoResults, fixmeResults, hackResults] = await Promise.all([
+    analyzeRepo(owner, repo, branch),
+    getRepoFiles(owner, repo, branch),
+    searchCode(owner, repo, "TODO"),
+    searchCode(owner, repo, "FIXME"),
+    searchCode(owner, repo, "HACK"),
+  ]);
+
+  const items: TechDebtItem[] = [];
+  const summary: TechDebtSummaryEntry[] = [];
+
+  // Comment-based items
+  const todoCount = countMatches(todoResults, "TODO");
+  const fixmeCount = countMatches(fixmeResults, "FIXME");
+  const hackCount = countMatches(hackResults, "HACK");
+
+  if (todoCount > 0) {
+    summary.push({ type: "TODO", count: todoCount, severity: "low" });
+    for (const r of todoResults) {
+      items.push({ type: "TODO", file: r.path, severity: "low", text: r.fragments[0]?.split("\n")[0] || "TODO comment" });
+    }
+  }
+  if (fixmeCount > 0) {
+    summary.push({ type: "FIXME", count: fixmeCount, severity: "medium" });
+    for (const r of fixmeResults) {
+      items.push({ type: "FIXME", file: r.path, severity: "medium", text: r.fragments[0]?.split("\n")[0] || "FIXME comment" });
+    }
+  }
+  if (hackCount > 0) {
+    summary.push({ type: "HACK", count: hackCount, severity: "high" });
+    for (const r of hackResults) {
+      items.push({ type: "HACK", file: r.path, severity: "high", text: r.fragments[0]?.split("\n")[0] || "HACK comment" });
+    }
+  }
+
+  // Structural items
+  const structural = buildStructuralDebt(analysis, files);
+  for (const s of structural) {
+    items.push(s);
+    summary.push({ type: s.type, count: 1, severity: s.severity });
+  }
+
+  return {
+    items,
+    summary,
+    scannedAt: new Date().toISOString(),
   };
 }

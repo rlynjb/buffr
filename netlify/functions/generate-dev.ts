@@ -18,7 +18,6 @@ import type {
   ScanResult,
   Project,
   GapAnalysisEntry,
-  TechDebtItem,
   DetectedPattern,
   ScanResultFile,
   IndustryStandard,
@@ -58,7 +57,7 @@ function emptyScanResult(
     fileTree: [],
     parsedConfigs: [],
     detectedPatterns: [],
-    techDebtItems: [],
+    techDebtItems: [], // deprecated — tech debt now lives on Project.techDebt
     gitActivity: { recentCommits: 0, activePaths: [], lastCommitDate: now },
     generatedFiles: [],
     gapAnalysis: [],
@@ -147,40 +146,6 @@ function buildPatterns(analysis: RepoAnalysis, files: string[]): DetectedPattern
   }
 
   return patterns;
-}
-
-function buildTechDebt(analysis: RepoAnalysis, files: string[]): TechDebtItem[] {
-  const items: TechDebtItem[] = [];
-
-  if (!analysis.hasTests) {
-    items.push({ type: "Missing tests", file: "package.json", severity: "high", text: "No test framework detected — project lacks automated tests" });
-  }
-
-  if (!analysis.hasCI) {
-    items.push({ type: "No CI/CD", file: ".github/workflows/", severity: "high", text: "No CI pipeline detected — code changes are not automatically validated" });
-  }
-
-  const hasErrorBoundary = files.some((f) => f.includes("error.tsx") || f.includes("error.ts"));
-  if (!hasErrorBoundary && (analysis.frameworks.includes("Next.js") || analysis.frameworks.includes("React"))) {
-    items.push({ type: "No error boundary", file: "src/app/", severity: "medium", text: "No error.tsx files for route-level error handling" });
-  }
-
-  const hasLinter = analysis.devTools.some((t) => ["ESLint", "Prettier"].includes(t));
-  if (!hasLinter) {
-    items.push({ type: "No linter", file: "package.json", severity: "medium", text: "No ESLint or Prettier detected — code style is not enforced" });
-  }
-
-  const hasEnvExample = files.some((f) => f === ".env.example" || f === ".env.local.example");
-  if (!hasEnvExample && files.some((f) => f === ".gitignore")) {
-    items.push({ type: "No .env docs", file: ".env.example", severity: "low", text: "No .env.example file — environment variables are not documented" });
-  }
-
-  const hasReadme = files.some((f) => f.toLowerCase() === "readme.md");
-  if (!hasReadme) {
-    items.push({ type: "No README", file: "README.md", severity: "medium", text: "No README.md — project lacks documentation for new contributors" });
-  }
-
-  return items;
 }
 
 function buildGapAnalysis(analysis: RepoAnalysis, files: string[]): GapAnalysisEntry[] {
@@ -313,7 +278,6 @@ function buildGapAnalysis(analysis: RepoAnalysis, files: string[]): GapAnalysisE
 function buildGeneratedFiles(
   project: Project,
   analysis: RepoAnalysis,
-  techDebt: TechDebtItem[],
   gapAnalysis: GapAnalysisEntry[],
   relevantStandards: IndustryStandard[],
   detectedAdapters: string[],
@@ -366,27 +330,6 @@ function buildGeneratedFiles(
       ...(analysis.frameworks.includes("Next.js")
         ? ["## Next.js", "- Use App Router patterns: layout.tsx, loading.tsx, error.tsx", "- Fetch data in Server Components when possible", "- Use route groups for shared layouts", ""]
         : []),
-    ].join("\n"),
-  });
-
-  files.push({
-    path: ".dev/context/TECH_DEBT.md",
-    ownership: "reviewable",
-    content: [
-      "# Tech Debt Inventory",
-      "",
-      "## High Priority",
-      ...techDebt.filter((d) => d.severity === "high").map((d) => `- [ ] **${d.type}** — ${d.text} (\`${d.file}\`)`),
-      ...(techDebt.filter((d) => d.severity === "high").length === 0 ? ["- None detected"] : []),
-      "",
-      "## Medium Priority",
-      ...techDebt.filter((d) => d.severity === "medium").map((d) => `- [ ] **${d.type}** — ${d.text} (\`${d.file}\`)`),
-      ...(techDebt.filter((d) => d.severity === "medium").length === 0 ? ["- None detected"] : []),
-      "",
-      "## Low Priority",
-      ...techDebt.filter((d) => d.severity === "low").map((d) => `- [ ] **${d.type}** — ${d.text} (\`${d.file}\`)`),
-      ...(techDebt.filter((d) => d.severity === "low").length === 0 ? ["- None detected"] : []),
-      "",
     ].join("\n"),
   });
 
@@ -661,17 +604,14 @@ function buildGeneratedFiles(
     content: [
       "# Cleanup Prompt",
       "",
-      `Clean up the following issues detected in this ${stackStr} project:`,
-      "",
-      "## Detected Issues",
-      ...techDebt.slice(0, 5).map((d) => `- **${d.type}** in \`${d.file}\`: ${d.text}`),
-      ...(techDebt.length === 0 ? ["- No issues detected — run a fresh scan"] : []),
+      `Clean up issues detected in this ${stackStr} project.`,
       "",
       "## Instructions",
-      "1. Fix each issue following the project conventions in `.dev/context/CONVENTIONS.md`",
-      "2. Ensure changes align with standards in `.dev/standards/`",
-      "3. Add or update tests for modified code",
-      "4. Keep changes minimal and focused",
+      "1. Review the gap analysis in `.dev/gap-analysis.md` for areas needing improvement",
+      "2. Fix each issue following the project conventions in `.dev/context/CONVENTIONS.md`",
+      "3. Ensure changes align with standards in `.dev/standards/`",
+      "4. Add or update tests for modified code",
+      "5. Keep changes minimal and focused",
       "",
     ].join("\n"),
   });
@@ -1014,13 +954,11 @@ export default async function handler(req: Request, _context: Context) {
     // Use LLM results if available, otherwise rule-based
     if (result) {
       scan.detectedPatterns = result.detectedPatterns;
-      scan.techDebtItems = result.techDebtItems;
       scan.gapAnalysis = result.gapAnalysis;
       scan.detectedAdapters = result.detectedAdapters;
       scan.analysisSource = "llm";
     } else {
       scan.detectedPatterns = buildPatterns(analysis, repoFiles);
-      scan.techDebtItems = buildTechDebt(analysis, repoFiles);
       scan.gapAnalysis = buildGapAnalysis(analysis, repoFiles);
       scan.detectedAdapters = detectAdapters(repoFiles);
       scan.analysisSource = "rule-based";
@@ -1034,7 +972,7 @@ export default async function handler(req: Request, _context: Context) {
     if (result?.generatedFiles && result.generatedFiles.length > 0) {
       scan.generatedFiles = result.generatedFiles;
     } else {
-      scan.generatedFiles = buildGeneratedFiles(project, analysis, scan.techDebtItems, scan.gapAnalysis, relevant, scan.detectedAdapters);
+      scan.generatedFiles = buildGeneratedFiles(project, analysis, scan.gapAnalysis, relevant, scan.detectedAdapters);
     }
 
     // ── Phase 4: Push .dev/ files to GitHub ──

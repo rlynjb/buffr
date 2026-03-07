@@ -60,40 +60,6 @@
   @apply flex flex-wrap gap-1.5;
 }
 
-/* ── Tech debt inventory ── */
-
-.overview-tab__debt-list {
-  @apply space-y-2;
-}
-
-.overview-tab__debt-item {
-  @apply flex items-center gap-2 text-sm text-zinc-300;
-}
-
-.overview-tab__debt-dot {
-  @apply w-1.5 h-1.5 rounded-full shrink-0;
-}
-
-.overview-tab__debt-dot--high {
-  @apply bg-red-400;
-}
-
-.overview-tab__debt-dot--medium {
-  @apply bg-amber-400;
-}
-
-.overview-tab__debt-dot--low {
-  @apply bg-zinc-500;
-}
-
-.overview-tab__debt-type {
-  @apply flex-1;
-}
-
-.overview-tab__debt-count {
-  @apply font-mono text-zinc-500;
-}
-
 /* ── Footer ── */
 
 .overview-tab__footer {
