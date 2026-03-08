@@ -1,0 +1,1 @@
+Configure Claude to use .dev/ files for enhanced code suggestions and refactoring insights.

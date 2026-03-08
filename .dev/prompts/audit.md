@@ -1,0 +1,1 @@
+Audit the project to ensure compliance with detected stack standards, focusing on security and testing gaps.

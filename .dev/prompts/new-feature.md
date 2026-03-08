@@ -1,0 +1,1 @@
+Scaffold a new feature that integrates with the existing Next.js and Tailwind CSS setup, focusing on server-side data fetching and component modularity.
