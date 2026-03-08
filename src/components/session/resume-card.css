@@ -33,12 +33,9 @@
 }
 
 .resume-card__suggestion-action {
-  @apply px-2.5 py-0.5 rounded bg-amber-500/20 hover:bg-amber-500/30 text-amber-100 text-xs font-medium transition-colors;
+  @apply px-2.5 py-0.5 rounded bg-amber-500/20 hover:bg-amber-500/30 text-amber-100 text-xs font-medium transition-colors cursor-pointer;
 }
 
-.resume-card__suggestion-label {
-  @apply px-2.5 py-0.5 rounded bg-amber-500/20 text-amber-100 text-xs font-medium;
-}
 
 
 .resume-card__intent {

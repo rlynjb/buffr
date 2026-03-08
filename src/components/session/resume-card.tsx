@@ -258,12 +258,12 @@ export function ResumeCard({ project, onEndSession }: ResumeCardProps) {
           </span>
           {s.actionRoute ? (
             <a href={s.actionRoute} className="resume-card__suggestion-action">
-              Do it
+              {s.actionLabel}
             </a>
           ) : (
-            <span className="resume-card__suggestion-label">
+            <button onClick={onEndSession} className="resume-card__suggestion-action">
               {s.actionLabel}
-            </span>
+            </button>
           )}
         </div>
       ))}
