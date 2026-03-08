@@ -5,7 +5,7 @@ export interface NextAction {
   text: string;
   done: boolean;
   skipped: boolean;
-  source?: "session" | "activity" | "issue" | "ai";
+  source?: "session" | "activity" | "github" | "ai";
 }
 
 export interface ActionContext {
@@ -66,10 +66,10 @@ function actionsFromWorkItems(ctx: ActionContext): NextAction[] {
   if (!ctx.workItems || ctx.workItems.length === 0) return [];
   return ctx.workItems.slice(0, 3).map((item) => ({
     id: `issue-${item.id}`,
-    text: `Fix #${item.id}: ${item.title}`,
+    text: item.title,
     done: false,
     skipped: false,
-    source: "issue",
+    source: "github",
   }));
 }
 
