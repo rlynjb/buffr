@@ -1,10 +1,11 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 import { Badge } from "@/components/ui/badge";
 import { IconEye, IconRefresh, IconLink, IconCheck, IconX } from "@/components/icons";
 import { DiffView } from "./diff-view";
 import type { ReviewableChange } from "./review-banner";
+import type { GapAnalysisEntry } from "@/lib/types";
 import "./file-tree-tab.css";
 
 interface FileTreeTabProps {
@@ -18,6 +19,9 @@ interface FileTreeTabProps {
   reviewableChanges?: ReviewableChange[];
   reviewDecisions?: Record<string, "accepted" | "rejected">;
   onReviewDecision?: (path: string, decision: "accepted" | "rejected") => void;
+  gapAnalysis?: GapAnalysisEntry[];
+  highlightedFilePath?: string | null;
+  onHighlightClear?: () => void;
 }
 
 type Ownership = "system" | "reviewable" | "append-only" | "user";
@@ -71,12 +75,52 @@ export function FileTreeTab({
   reviewableChanges,
   reviewDecisions,
   onReviewDecision,
+  gapAnalysis,
+  highlightedFilePath,
+  onHighlightClear,
 }: FileTreeTabProps) {
   const [expandedPath, setExpandedPath] = useState<string | null>(null);
+  const fileRefs = useRef<Record<string, HTMLDivElement | null>>({});
 
   const toggleFile = (path: string) => {
     setExpandedPath((prev) => (prev === path ? null : path));
   };
+
+  // Auto-expand and scroll to highlighted file
+  useEffect(() => {
+    if (highlightedFilePath) {
+      setExpandedPath(highlightedFilePath);
+      requestAnimationFrame(() => {
+        fileRefs.current[highlightedFilePath]?.scrollIntoView({
+          behavior: "smooth",
+          block: "center",
+        });
+      });
+      const timer = setTimeout(() => onHighlightClear?.(), 2000);
+      return () => clearTimeout(timer);
+    }
+  }, [highlightedFilePath, onHighlightClear]);
+
+  // Build reverse map: file path → gap status counts
+  const fileGapStatuses = useMemo(() => {
+    if (!gapAnalysis) return {};
+    const categoryFileMap: Record<string, string[]> = {
+      "security":       [".dev/industry/security.md", ".dev/standards/backend.md"],
+      "testing":        [".dev/industry/testing.md"],
+      "architecture":   [".dev/standards/frontend.md", ".dev/standards/typescript.md"],
+      "error-handling": [".dev/standards/backend.md"],
+    };
+    const result: Record<string, { aligned: number; partial: number; gap: number }> = {};
+    for (const entry of gapAnalysis) {
+      const candidates = categoryFileMap[entry.category];
+      if (!candidates) continue;
+      for (const filePath of candidates) {
+        if (!result[filePath]) result[filePath] = { aligned: 0, partial: 0, gap: 0 };
+        result[filePath][entry.status]++;
+      }
+    }
+    return result;
+  }, [gapAnalysis]);
 
   let lastDirectory = "";
 
@@ -127,14 +171,16 @@ export function FileTreeTab({
           const decision = reviewDecisions?.[file.path];
           const hasPendingReview = !!reviewChange && !decision;
 
+          const gapStatus = fileGapStatuses[file.path];
+
           return (
-            <div key={file.path}>
+            <div key={file.path} ref={(el) => { fileRefs.current[file.path] = el; }}>
               {showDirectoryHeader && directory && (
                 <div className="file-tree-tab__dir-header">{directory}/</div>
               )}
 
               <button
-                className="file-tree-tab__file-row"
+                className={`file-tree-tab__file-row${highlightedFilePath === file.path ? " file-tree-tab__file-row--highlighted" : ""}`}
                 onClick={() => toggleFile(file.path)}
               >
                 <span
@@ -155,6 +201,25 @@ export function FileTreeTab({
                 )}
                 {isEdited && !reviewChange && (
                   <span className="file-tree-tab__edited-badge">Edited</span>
+                )}
+                {gapStatus && (
+                  <span className="file-tree-tab__gap-indicators">
+                    {gapStatus.gap > 0 && (
+                      <span className="file-tree-tab__gap-dot file-tree-tab__gap-dot--gap" title={`${gapStatus.gap} gap(s)`}>
+                        {gapStatus.gap}
+                      </span>
+                    )}
+                    {gapStatus.partial > 0 && (
+                      <span className="file-tree-tab__gap-dot file-tree-tab__gap-dot--partial" title={`${gapStatus.partial} partial`}>
+                        {gapStatus.partial}
+                      </span>
+                    )}
+                    {gapStatus.aligned > 0 && (
+                      <span className="file-tree-tab__gap-dot file-tree-tab__gap-dot--aligned" title={`${gapStatus.aligned} aligned`}>
+                        {gapStatus.aligned}
+                      </span>
+                    )}
+                  </span>
                 )}
                 <span className="file-tree-tab__preview-hint">
                   <IconEye size={12} />

@@ -161,3 +161,37 @@
 .file-tree-tab__review-undo {
   @apply text-[10px] text-zinc-600 hover:text-zinc-400 transition-colors cursor-pointer;
 }
+
+/* ── Highlight (navigated from gap tab) ── */
+
+.file-tree-tab__file-row--highlighted {
+  @apply bg-emerald-500/6;
+  animation: highlightPulse 2s ease-out;
+}
+
+@keyframes highlightPulse {
+  0% { background-color: rgb(16 185 129 / 0.12); }
+  100% { background-color: rgb(16 185 129 / 0.03); }
+}
+
+/* ── Gap status indicators ── */
+
+.file-tree-tab__gap-indicators {
+  @apply flex items-center gap-1 ml-1;
+}
+
+.file-tree-tab__gap-dot {
+  @apply text-[9px] font-medium min-w-3.5 h-3.5 flex items-center justify-center rounded-full leading-none;
+}
+
+.file-tree-tab__gap-dot--gap {
+  @apply bg-red-500/15 text-red-400;
+}
+
+.file-tree-tab__gap-dot--partial {
+  @apply bg-amber-500/15 text-amber-400;
+}
+
+.file-tree-tab__gap-dot--aligned {
+  @apply bg-emerald-500/15 text-emerald-400;
+}

@@ -35,6 +35,18 @@ const SECTIONS: { id: Section; label: string }[] = [
 
 const SCAN_PHASES: ScanPhase[] = ["scanning", "analyzing", "generating"];
 
+const CATEGORY_FILE_MAP: Record<string, string[]> = {
+  "security":       [".dev/industry/security.md", ".dev/standards/backend.md"],
+  "testing":        [".dev/industry/testing.md"],
+  "architecture":   [".dev/standards/frontend.md", ".dev/standards/typescript.md"],
+  "error-handling": [".dev/standards/backend.md"],
+  "ci-cd":          [".dev/gap-analysis.md"],
+  "accessibility":  [".dev/gap-analysis.md"],
+  "deployment":     [".dev/gap-analysis.md"],
+  "monitoring":     [".dev/gap-analysis.md"],
+  "documentation":  [".dev/gap-analysis.md"],
+};
+
 export default function DevFolderPage() {
   const params = useParams();
   const id = params.id as string;
@@ -45,6 +57,7 @@ export default function DevFolderPage() {
   const [scanPhase, setScanPhase] = useState<ScanPhase>("idle");
   const [activeSection, setActiveSection] = useState<Section>("overview");
   const [scanError, setScanError] = useState<string | null>(null);
+  const [highlightedFilePath, setHighlightedFilePath] = useState<string | null>(null);
 
   useEffect(() => {
     async function load() {
@@ -353,6 +366,14 @@ export default function DevFolderPage() {
     setScanResult({ ...scanResult, generatedFiles: updatedFiles });
   }
 
+  function handleGapNavigateToFile(category: string) {
+    const paths = mergedFiles.map((f) => f.path);
+    const candidates = CATEGORY_FILE_MAP[category] || [".dev/gap-analysis.md"];
+    const target = candidates.find((c) => paths.includes(c)) ?? ".dev/gap-analysis.md";
+    setHighlightedFilePath(target);
+    setActiveSection("files");
+  }
+
   function handleFileReset(path: string) {
     setEditedFiles((prev) => {
       const next = { ...prev };
@@ -535,7 +556,10 @@ export default function DevFolderPage() {
             {SECTIONS.map((s) => (
               <button
                 key={s.id}
-                onClick={() => setActiveSection(s.id)}
+                onClick={() => {
+                  setActiveSection(s.id);
+                  if (s.id !== "files") setHighlightedFilePath(null);
+                }}
                 className={`dev-folder__tab ${
                   activeSection === s.id
                     ? "dev-folder__tab--active"
@@ -549,7 +573,12 @@ export default function DevFolderPage() {
 
           <div className="dev-folder__tab-content">
             {activeSection === "overview" && <OverviewTab scanResult={scanResult} />}
-            {activeSection === "gap" && <GapTab gapAnalysis={scanResult.gapAnalysis} />}
+            {activeSection === "gap" && (
+              <GapTab
+                gapAnalysis={scanResult.gapAnalysis}
+                onNavigateToFile={handleGapNavigateToFile}
+              />
+            )}
             {activeSection === "files" && (
               <FileTreeTab
                 generatedFiles={mergedFiles}
@@ -562,6 +591,9 @@ export default function DevFolderPage() {
                 reviewableChanges={reviewableChanges}
                 reviewDecisions={reviewDecisions}
                 onReviewDecision={handleReviewDecision}
+                gapAnalysis={scanResult.gapAnalysis}
+                highlightedFilePath={highlightedFilePath}
+                onHighlightClear={() => setHighlightedFilePath(null)}
               />
             )}
             {activeSection === "adapters" && (

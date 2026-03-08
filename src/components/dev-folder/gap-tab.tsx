@@ -1,10 +1,12 @@
 "use client";
 
+import { IconFileTree } from "@/components/icons";
 import type { GapAnalysisEntry } from "@/lib/types";
 import "./gap-tab.css";
 
 interface GapTabProps {
   gapAnalysis: GapAnalysisEntry[];
+  onNavigateToFile?: (category: string) => void;
 }
 
 const statusLabel: Record<GapAnalysisEntry["status"], string> = {
@@ -19,7 +21,7 @@ const projectClass: Record<GapAnalysisEntry["status"], string> = {
   gap: "gap-tab__project--gap",
 };
 
-export function GapTab({ gapAnalysis }: GapTabProps) {
+export function GapTab({ gapAnalysis, onNavigateToFile }: GapTabProps) {
   return (
     <div className="gap-tab">
       <p className="gap-tab__desc">
@@ -42,6 +44,7 @@ export function GapTab({ gapAnalysis }: GapTabProps) {
             <th>Industry Standard</th>
             <th>Your Project</th>
             <th>Status</th>
+            <th className="gap-tab__header-action"></th>
           </tr>
         </thead>
         <tbody>
@@ -63,6 +66,17 @@ export function GapTab({ gapAnalysis }: GapTabProps) {
                 <span className={`gap-tab__badge gap-tab__badge--${entry.status}`}>
                   {statusLabel[entry.status]}
                 </span>
+              </td>
+              <td className="gap-tab__action-cell">
+                {onNavigateToFile && (
+                  <button
+                    className="gap-tab__view-file"
+                    onClick={() => onNavigateToFile(entry.category)}
+                    title="View related file"
+                  >
+                    <IconFileTree size={11} />
+                  </button>
+                )}
               </td>
             </tr>
           ))}
