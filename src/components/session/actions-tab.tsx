@@ -36,6 +36,14 @@ export function ActionsTab({
   }
 
   return (
+    <div>
+      <p className="actions-tab__desc">
+        <span className="actions-tab__desc-icon" style={{ color: "#c084fc" }}><SourceIcon source="ai" size={11} /></span> AI-suggested
+        <span className="actions-tab__desc-sep">·</span>
+        <span className="actions-tab__desc-icon" style={{ color: "#8b949e" }}><SourceIcon source="github" size={11} /></span> From GitHub
+        <span className="actions-tab__desc-sep">·</span>
+        <span className="actions-tab__desc-icon" style={{ color: "#a78bfa" }}><SourceIcon source="session" size={11} /></span> From last session
+      </p>
     <div className="actions-tab__list">
       {actions.map((action) => (
         <div
@@ -114,6 +122,7 @@ export function ActionsTab({
           )}
         </div>
       ))}
+    </div>
     </div>
   );
 }
