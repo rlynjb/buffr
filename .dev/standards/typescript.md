@@ -1,0 +1,1 @@
+TypeScript usage and conventions for buffr.

@@ -1,0 +1,1 @@
+Scaffolding prompt for new feature development matching repo patterns.

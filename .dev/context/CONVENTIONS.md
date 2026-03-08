@@ -1,0 +1,1 @@
+Coding conventions, naming patterns, and project structure.

@@ -1,0 +1,1 @@
+Backend patterns and practices for buffr.

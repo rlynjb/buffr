@@ -1,0 +1,1 @@
+Styling approach using Tailwind CSS.

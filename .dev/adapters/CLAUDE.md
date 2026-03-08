@@ -1,0 +1,1 @@
+Claude Code config pointing to .dev/ files.

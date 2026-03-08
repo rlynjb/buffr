@@ -1,0 +1,1 @@
+Architectural decisions and design rationale for buffr.

@@ -1,0 +1,1 @@
+Project overview for buffr, including stack and architecture.

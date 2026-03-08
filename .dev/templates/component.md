@@ -1,0 +1,1 @@
+Component template based on existing patterns in buffr.
