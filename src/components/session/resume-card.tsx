@@ -256,27 +256,15 @@ export function ResumeCard({ project, onEndSession }: ResumeCardProps) {
             <span className="resume-card__suggestion-icon">&#128161;</span>
             {s.text}
           </span>
-          <span className="resume-card__suggestion-actions">
-            {s.actionRoute ? (
-              <a href={s.actionRoute} className="resume-card__suggestion-action">
-                Do it
-              </a>
-            ) : (
-              <span className="resume-card__suggestion-label">
-                {s.actionLabel}
-              </span>
-            )}
-            <button
-              onClick={async () => {
-                const dismissed = [...(project.dismissedSuggestions || []), s.id];
-                await updateProject(project.id, { dismissedSuggestions: dismissed }).catch(() => {});
-                setSuggestions((prev) => prev.filter((x) => x.id !== s.id));
-              }}
-              className="resume-card__suggestion-dismiss"
-            >
-              Dismiss
-            </button>
-          </span>
+          {s.actionRoute ? (
+            <a href={s.actionRoute} className="resume-card__suggestion-action">
+              Do it
+            </a>
+          ) : (
+            <span className="resume-card__suggestion-label">
+              {s.actionLabel}
+            </span>
+          )}
         </div>
       ))}
 

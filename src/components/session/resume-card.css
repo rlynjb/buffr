@@ -40,9 +40,6 @@
   @apply px-2.5 py-0.5 rounded bg-amber-500/20 text-amber-100 text-xs font-medium;
 }
 
-.resume-card__suggestion-dismiss {
-  @apply px-2 py-0.5 rounded hover:bg-white/5 text-amber-300/50 text-xs transition-colors cursor-pointer;
-}
 
 .resume-card__intent {
   @apply flex items-center gap-2 mb-3 px-3 py-1.5 rounded-lg bg-purple-500/5 border border-purple-500/15;
@@ -92,9 +89,6 @@
   @apply flex items-center gap-2;
 }
 
-.resume-card__suggestion-actions {
-  @apply flex gap-1.5;
-}
 
 .resume-card__intent-label {
   @apply text-purple-200;

@@ -47,6 +47,37 @@ const ownershipExplanations: Record<Ownership, string> = {
   "append-only": "buffr only adds new entries, never edits or removes",
 };
 
+const fileDescriptions: Record<string, string> = {
+  ".dev/context/PROJECT.md": "Project overview, stack, and architecture",
+  ".dev/context/CONVENTIONS.md": "Coding conventions and style rules",
+  ".dev/context/DECISIONS.md": "Architecture decision records (ADRs)",
+  ".dev/context/TECH_DEBT.md": "Known tech debt items",
+  ".dev/industry/react.md": "React best practices",
+  ".dev/industry/nextjs.md": "Next.js best practices",
+  ".dev/industry/typescript.md": "TypeScript best practices",
+  ".dev/industry/tailwind.md": "Tailwind CSS best practices",
+  ".dev/industry/nodejs.md": "Node.js best practices",
+  ".dev/industry/security.md": "Security standards and patterns",
+  ".dev/industry/testing.md": "Testing standards and patterns",
+  ".dev/standards/frontend.md": "Frontend architecture guidelines",
+  ".dev/standards/backend.md": "Backend and API guidelines",
+  ".dev/standards/css.md": "CSS and styling guidelines",
+  ".dev/standards/typescript.md": "TypeScript project rules",
+  ".dev/gap-analysis.md": "Industry vs project comparison",
+  ".dev/prompts/audit.md": "Prompt template for code audits",
+  ".dev/prompts/cleanup.md": "Prompt template for code cleanup",
+  ".dev/prompts/new-feature.md": "Prompt template for new features",
+  ".dev/templates/component.md": "Scaffold template for components",
+  ".dev/templates/api-endpoint.md": "Scaffold template for API endpoints",
+  ".dev/templates/test.md": "Scaffold template for tests",
+  ".dev/adapters/CLAUDE.md": "Claude Code project config",
+  ".dev/adapters/.cursorrules": "Cursor editor rules",
+  ".dev/adapters/copilot-instructions.md": "GitHub Copilot instructions",
+  ".dev/adapters/.windsurfrules": "Windsurf editor rules",
+  ".dev/adapters/.aider.conf.yml": "Aider context config",
+  ".dev/adapters/.continuerules": "Continue editor rules",
+};
+
 function resolveOwnership(file: { path: string; ownership: string }): Ownership {
   const o = file.ownership as Ownership;
   if (o in ownershipColors) return o;
@@ -189,6 +220,11 @@ export function FileTreeTab({
                 />
                 <span className="file-tree-tab__filename">
                   {getFilename(file.path)}
+                  {fileDescriptions[file.path] && (
+                    <span className="file-tree-tab__file-desc">
+                      {fileDescriptions[file.path]}
+                    </span>
+                  )}
                 </span>
                 {hasPendingReview && (
                   <span className="file-tree-tab__review-badge">Review</span>

@@ -13,7 +13,7 @@ import {
   IconGitHub,
   IconLoader,
 } from "@/components/icons";
-import { getProject, listScanResults, getScanResult, triggerScan, updateProject, pushDevFiles, detectDevFolder, updateScanResult, getStandard, seedIndustryKB } from "@/lib/api";
+import { getProject, listScanResults, getScanResult, triggerScan, updateProject, pushDevFiles, detectDevFolder, updateScanResult, getStandard, seedIndustryKB, installAdapter } from "@/lib/api";
 import type { Project, ScanResult } from "@/lib/types";
 import { useProvider } from "@/context/provider-context";
 import { OverviewTab } from "@/components/dev-folder/overview-tab";
@@ -366,6 +366,38 @@ export default function DevFolderPage() {
     setScanResult({ ...scanResult, generatedFiles: updatedFiles });
   }
 
+  const ADAPTER_ROOT_PATHS: Record<string, string> = {
+    "claude-code": "CLAUDE.md",
+    "cursor": ".cursorrules",
+    "copilot": ".github/copilot-instructions.md",
+    "windsurf": ".windsurfrules",
+    "aider": ".aider.conf.yml",
+    "continue": ".continuerules",
+  };
+
+  // Track manually installed adapters (within this session)
+  const [manuallyInstalled, setManuallyInstalled] = useState<Set<string>>(new Set());
+
+  // Derive installed adapters from repo file tree + manual installs
+  const installedAdapters = useMemo(() => {
+    const installed = new Set(manuallyInstalled);
+    if (scanResult?.fileTree) {
+      const repoPaths = new Set(scanResult.fileTree.map((f) => f.path));
+      for (const [adapterId, rootPath] of Object.entries(ADAPTER_ROOT_PATHS)) {
+        if (repoPaths.has(rootPath)) {
+          installed.add(adapterId);
+        }
+      }
+    }
+    return installed;
+  }, [scanResult, manuallyInstalled]);
+
+  async function handleAdapterInstall(adapterId: string, adapterDevPath: string, rootPath: string) {
+    if (!scanResult) return;
+    await installAdapter(scanResult.id, adapterDevPath, rootPath);
+    setManuallyInstalled((prev) => new Set(prev).add(adapterId));
+  }
+
   function handleGapNavigateToFile(category: string) {
     const paths = mergedFiles.map((f) => f.path);
     const candidates = CATEGORY_FILE_MAP[category] || [".dev/gap-analysis.md"];
@@ -603,6 +635,8 @@ export default function DevFolderPage() {
                 projectStack={scanResult.detectedStack}
                 onGenerate={handleAdapterGenerate}
                 onRegenerate={handleAdapterRegenerate}
+                onInstall={handleAdapterInstall}
+                installedAdapters={installedAdapters}
               />
             )}
           </div>

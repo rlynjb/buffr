@@ -17,7 +17,7 @@ export function ProjectCard({ project, onClick, onDelete }: ProjectCardProps) {
   const updatedAgo = timeAgo(project.updatedAt);
 
   return (
-    <button onClick={onClick} className="project-card">
+    <div onClick={onClick} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") onClick(); }} className="project-card">
       <div className="project-card__body">
         <div className="project-card__name-row">
           <span className="project-card__name">
@@ -60,6 +60,6 @@ export function ProjectCard({ project, onClick, onDelete }: ProjectCardProps) {
         </button>
         <span className="project-card__actions-chevron"><IconChevron size={12} /></span>
       </div>
-    </button>
+    </div>
   );
 }

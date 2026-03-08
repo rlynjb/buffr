@@ -838,6 +838,33 @@ export default async function handler(req: Request, _context: Context) {
       return json({ sha });
     }
 
+    // ── Install adapter symlink to repo root ──
+    if (url.searchParams.has("install-adapter")) {
+      const { scanResultId, adapterPath, rootPath } = body as {
+        scanResultId: string;
+        adapterPath: string; // e.g. ".dev/adapters/CLAUDE.md"
+        rootPath: string;    // e.g. "CLAUDE.md"
+      };
+      if (!scanResultId || !adapterPath || !rootPath) {
+        return errorResponse("scanResultId, adapterPath, and rootPath are required", 400);
+      }
+
+      const scan = await getScanResult(scanResultId);
+      if (!scan) return errorResponse("Scan result not found", 404);
+
+      const repoFullName = scan.repoFullName;
+      if (!repoFullName || !repoFullName.includes("/")) {
+        return errorResponse("No GitHub repo linked", 400);
+      }
+      const [o, r] = repoFullName.split("/");
+
+      const sha = await pushFiles(o, r, [
+        { path: rootPath, content: adapterPath, mode: "120000" },
+      ], `chore: install ${rootPath} symlink to ${adapterPath}`);
+
+      return json({ sha });
+    }
+
     // ── Generate scan ──
     const { projectId, provider, skipPush } = body as {
       projectId: string;

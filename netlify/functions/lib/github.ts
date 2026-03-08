@@ -74,7 +74,7 @@ export async function createRepo(
 export async function pushFiles(
   owner: string,
   repo: string,
-  files: Array<{ path: string; content: string }>,
+  files: Array<{ path: string; content: string; mode?: string }>,
   message: string
 ): Promise<string> {
   // Get the current HEAD commit to use as parent
@@ -84,16 +84,19 @@ export async function pushFiles(
   const baseTreeSha = headCommit.tree as Record<string, unknown>;
 
   // Create blobs for each file
+  // For symlinks (mode 120000), content is the target path (UTF-8, no base64)
   const blobs = await Promise.all(
     files.map(async (file) => {
+      const isSymlink = file.mode === "120000";
       const data = await gh(`/repos/${owner}/${repo}/git/blobs`, {
         method: "POST",
-        body: JSON.stringify({
-          content: Buffer.from(file.content).toString("base64"),
-          encoding: "base64",
-        }),
+        body: JSON.stringify(
+          isSymlink
+            ? { content: file.content, encoding: "utf-8" }
+            : { content: Buffer.from(file.content).toString("base64"), encoding: "base64" },
+        ),
       });
-      return { path: file.path, sha: data.sha as string, mode: "100644", type: "blob" };
+      return { path: file.path, sha: data.sha as string, mode: file.mode || "100644", type: "blob" };
     })
   );
 

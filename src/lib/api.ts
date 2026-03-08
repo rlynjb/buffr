@@ -307,3 +307,15 @@ export async function pushDevFiles(
     body: JSON.stringify({ scanResultId }),
   });
 }
+
+// Install adapter symlink at repo root
+export async function installAdapter(
+  scanResultId: string,
+  adapterPath: string,
+  rootPath: string,
+): Promise<{ sha: string }> {
+  return request<{ sha: string }>("/generate-dev?install-adapter", {
+    method: "POST",
+    body: JSON.stringify({ scanResultId, adapterPath, rootPath }),
+  });
+}

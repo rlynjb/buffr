@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { IconEye, IconRefresh } from "@/components/icons";
+import { IconEye, IconRefresh, IconLink } from "@/components/icons";
 import "./adapters-tab.css";
 
 interface AdaptersTabProps {
@@ -12,15 +12,17 @@ interface AdaptersTabProps {
   projectStack?: string[];
   onGenerate: (adapterId: string, path: string, content: string) => Promise<void>;
   onRegenerate: (adapterId: string, path: string, content: string) => Promise<void>;
+  onInstall?: (adapterId: string, adapterDevPath: string, rootPath: string) => Promise<void>;
+  installedAdapters?: Set<string>;
 }
 
 const ADAPTERS = [
-  { id: "claude-code", name: "Claude Code", file: "CLAUDE.md", devPath: ".dev/adapters/CLAUDE.md", icon: "C", color: "#c084fc", desc: "Points Claude to .dev/ files for project context, conventions, and templates" },
-  { id: "cursor", name: "Cursor", file: ".cursorrules", devPath: ".dev/adapters/.cursorrules", icon: "\u2318", color: "#22d3ee", desc: "Loads .dev/ standards into Cursor's context for inline suggestions" },
-  { id: "copilot", name: "GitHub Copilot", file: "copilot-instructions.md", devPath: ".dev/adapters/copilot-instructions.md", icon: "\u2299", color: "#8b949e", desc: "References .dev/ coding guidelines for Copilot completions" },
-  { id: "windsurf", name: "Windsurf", file: ".windsurfrules", devPath: ".dev/adapters/.windsurfrules", icon: "W", color: "#34d399", desc: "Loads .dev/ context into Windsurf coding sessions" },
-  { id: "aider", name: "Aider", file: ".aider.conf.yml", devPath: ".dev/adapters/.aider.conf.yml", icon: "A", color: "#fbbf24", desc: "Includes .dev/ files in Aider's context window" },
-  { id: "continue", name: "Continue", file: ".continuerules", devPath: ".dev/adapters/.continuerules", icon: "\u2192", color: "#f472b6", desc: "Maps .dev/ standards to Continue's format" },
+  { id: "claude-code", name: "Claude Code", file: "CLAUDE.md", devPath: ".dev/adapters/CLAUDE.md", rootPath: "CLAUDE.md", icon: "C", color: "#c084fc", desc: "Points Claude to .dev/ files for project context, conventions, and templates" },
+  { id: "cursor", name: "Cursor", file: ".cursorrules", devPath: ".dev/adapters/.cursorrules", rootPath: ".cursorrules", icon: "\u2318", color: "#22d3ee", desc: "Loads .dev/ standards into Cursor's context for inline suggestions" },
+  { id: "copilot", name: "GitHub Copilot", file: "copilot-instructions.md", devPath: ".dev/adapters/copilot-instructions.md", rootPath: ".github/copilot-instructions.md", icon: "\u2299", color: "#8b949e", desc: "References .dev/ coding guidelines for Copilot completions" },
+  { id: "windsurf", name: "Windsurf", file: ".windsurfrules", devPath: ".dev/adapters/.windsurfrules", rootPath: ".windsurfrules", icon: "W", color: "#34d399", desc: "Loads .dev/ context into Windsurf coding sessions" },
+  { id: "aider", name: "Aider", file: ".aider.conf.yml", devPath: ".dev/adapters/.aider.conf.yml", rootPath: ".aider.conf.yml", icon: "A", color: "#fbbf24", desc: "Includes .dev/ files in Aider's context window" },
+  { id: "continue", name: "Continue", file: ".continuerules", devPath: ".dev/adapters/.continuerules", rootPath: ".continuerules", icon: "\u2192", color: "#f472b6", desc: "Maps .dev/ standards to Continue's format" },
 ];
 
 const DEV_CONTEXT_REFS = [
@@ -120,9 +122,10 @@ function generateAdapterContent(adapterId: string, stack: string[]): string {
   }
 }
 
-export function AdaptersTab({ detectedAdapters, generatedFiles, projectStack, onGenerate, onRegenerate }: AdaptersTabProps) {
+export function AdaptersTab({ detectedAdapters, generatedFiles, projectStack, onGenerate, onRegenerate, onInstall, installedAdapters }: AdaptersTabProps) {
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [generatingId, setGeneratingId] = useState<string | null>(null);
+  const [installingId, setInstallingId] = useState<string | null>(null);
 
   async function handleGenerate(adapter: typeof ADAPTERS[number]) {
     setGeneratingId(adapter.id);
@@ -144,6 +147,16 @@ export function AdaptersTab({ detectedAdapters, generatedFiles, projectStack, on
     }
   }
 
+  async function handleInstall(adapter: typeof ADAPTERS[number]) {
+    if (!onInstall) return;
+    setInstallingId(adapter.id);
+    try {
+      await onInstall(adapter.id, adapter.devPath, adapter.rootPath);
+    } finally {
+      setInstallingId(null);
+    }
+  }
+
   return (
     <div className="adapters-tab">
       <p className="adapters-tab__desc">
@@ -155,6 +168,8 @@ export function AdaptersTab({ detectedAdapters, generatedFiles, projectStack, on
           const existingFile = generatedFiles.find((f) => f.path === adapter.devPath);
           const isExpanded = expandedId === adapter.id;
           const isGenerating = generatingId === adapter.id;
+          const isInstalling = installingId === adapter.id;
+          const isInstalled = installedAdapters?.has(adapter.id) ?? false;
 
           return (
             <div key={adapter.id}>
@@ -180,6 +195,11 @@ export function AdaptersTab({ detectedAdapters, generatedFiles, projectStack, on
                         detected
                       </Badge>
                     )}
+                    {isInstalled && (
+                      <Badge color="#60a5fa" small>
+                        installed
+                      </Badge>
+                    )}
                     <span className="adapters-tab__file">{adapter.file}</span>
                   </div>
                   <div className="adapters-tab__desc">{adapter.desc}</div>
@@ -196,6 +216,17 @@ export function AdaptersTab({ detectedAdapters, generatedFiles, projectStack, on
                         >
                           <IconEye size={13} />
                           {isExpanded ? "Hide" : "Preview"}
+                        </Button>
+                      )}
+                      {onInstall && existingFile && !isInstalled && (
+                        <Button
+                          variant="secondary"
+                          size="sm"
+                          onClick={() => handleInstall(adapter)}
+                          disabled={isInstalling}
+                        >
+                          <IconLink size={13} />
+                          {isInstalling ? "Installing..." : "Install"}
                         </Button>
                       )}
                       <Button
@@ -225,6 +256,11 @@ export function AdaptersTab({ detectedAdapters, generatedFiles, projectStack, on
                 <div className="adapters-tab__preview">
                   <div className="adapters-tab__preview-header">
                     <span className="adapters-tab__preview-path">{adapter.devPath}</span>
+                    {isInstalled && (
+                      <span className="adapters-tab__preview-symlink">
+                        <IconLink size={10} /> symlinked to {adapter.rootPath}
+                      </span>
+                    )}
                   </div>
                   <pre className="adapters-tab__preview-content">
                     {existingFile.content}

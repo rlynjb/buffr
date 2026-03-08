@@ -48,6 +48,10 @@
   @apply text-xs text-zinc-300 flex-1 font-mono;
 }
 
+.file-tree-tab__file-desc {
+  @apply text-[10px] text-zinc-600 font-sans ml-2;
+}
+
 .file-tree-tab__preview-hint {
   @apply flex items-center gap-1 text-[10px] text-zinc-600 opacity-0 transition-opacity;
 }

@@ -50,7 +50,7 @@
 }
 
 .adapters-tab__preview-header {
-  @apply flex items-center mb-2;
+  @apply flex items-center justify-between mb-2;
 }
 
 .adapters-tab__preview-path {
@@ -59,4 +59,8 @@
 
 .adapters-tab__preview-content {
   @apply text-[11px] text-zinc-400 leading-relaxed whitespace-pre-wrap wrap-break-word font-mono max-h-64 overflow-y-auto p-2 rounded bg-zinc-950/50;
+}
+
+.adapters-tab__preview-symlink {
+  @apply flex items-center gap-1 text-[10px] text-blue-400/70 font-mono;
 }
