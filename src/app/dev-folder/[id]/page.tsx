@@ -15,6 +15,7 @@ import {
 } from "@/components/icons";
 import { getProject, listScanResults, getScanResult, triggerScan, updateProject, pushDevFiles, detectDevFolder, updateScanResult, getStandard, seedIndustryKB, installAdapter } from "@/lib/api";
 import type { Project, ScanResult } from "@/lib/types";
+import { timeAgo } from "@/lib/format";
 import { useProvider } from "@/context/provider-context";
 import { OverviewTab } from "@/components/dev-folder/overview-tab";
 import { GapTab } from "@/components/dev-folder/gap-tab";
@@ -480,11 +481,9 @@ export default function DevFolderPage() {
         </p>
         {scanPhase === "done" && (
           <div className="dev-folder__header-actions">
-            {scanResult && (
-              <span className="dev-folder__last-scan">
-                Scanned {new Date(scanResult.updatedAt).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}
-              </span>
-            )}
+            <span className="dev-folder__header-meta">
+              {scanResult && <>Last scanned: {timeAgo(scanResult.updatedAt)} · {scanResult.generatedFiles.length} files{scanResult.analysisSource && <> · Analysis: {scanResult.analysisSource === "llm" ? "LLM" : "rule-based"}</>}</>}
+            </span>
             <Button size="sm" variant="secondary" onClick={handleScan}>
               <IconRefresh size={14} /> Re-scan
             </Button>

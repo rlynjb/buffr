@@ -2,7 +2,6 @@
 
 import type { ScanResult } from "@/lib/types";
 import { Badge } from "@/components/ui/badge";
-import { timeAgo } from "@/lib/format";
 import "./overview-tab.css";
 
 interface OverviewTabProps {
@@ -66,16 +65,6 @@ export function OverviewTab({ scanResult }: OverviewTabProps) {
         </div>
       </div>
 
-      {/* Footer */}
-      <div className="overview-tab__footer">
-        <span>Last scanned: {timeAgo(scanResult.updatedAt)}</span>
-        <span>
-          {scanResult.generatedFiles.length} files generated
-          {scanResult.analysisSource && (
-            <> · Analysis: {scanResult.analysisSource === "llm" ? "LLM" : "rule-based"}</>
-          )}
-        </span>
-      </div>
     </div>
   );
 }

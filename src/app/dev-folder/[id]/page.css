@@ -40,8 +40,8 @@
   @apply flex items-center justify-end gap-2 mt-3;
 }
 
-.dev-folder__last-scan {
-  @apply text-[10px] text-zinc-600 mr-1;
+.dev-folder__header-meta {
+  @apply text-[11px] text-zinc-600 mr-auto;
 }
 
 /* Scan CTA */
@@ -72,7 +72,7 @@
 
 /* Scan progress */
 .dev-folder__scan-progress {
-  @apply rounded-xl border border-emerald-500/20 bg-emerald-500/[0.03] p-6 mb-6;
+  @apply rounded-xl border border-emerald-500/20 bg-emerald-500/3 p-6 mb-6;
 }
 
 .dev-folder__scan-progress-header {

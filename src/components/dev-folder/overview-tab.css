@@ -70,8 +70,3 @@
   @apply flex flex-wrap gap-1.5;
 }
 
-/* ── Footer ── */
-
-.overview-tab__footer {
-  @apply flex justify-between text-[11px] text-zinc-600;
-}
