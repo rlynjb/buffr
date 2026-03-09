@@ -10,10 +10,10 @@ import type { Project, Session, WorkItem, Prompt, TechDebtScan } from "@/lib/typ
 import { generateNextActions, type NextAction, type ActionContext } from "@/lib/next-actions";
 import { listSessions, getActionNotes, saveActionNote, listPrompts, executeToolAction, listIntegrations, updateProject } from "@/lib/api";
 import { resolvePrompt } from "@/lib/resolve-prompt";
+import { timeAgo } from "@/lib/format";
 import { getToolForCapability } from "@/lib/data-sources";
 import { generateSuggestions, type ProjectSuggestion } from "@/lib/suggestions";
 import { SessionTab } from "./session-tab";
-import { IssuesTab } from "./issues-tab";
 import { ActionsTab } from "./actions-tab";
 import { PromptsTab } from "./prompts-tab";
 import { TechDebtGrid } from "./tech-debt-grid";
@@ -24,7 +24,7 @@ interface ResumeCardProps {
   onEndSession: () => void;
 }
 
-type Tab = "session" | "items" | "actions" | "prompts";
+type Tab = "session" | "actions" | "prompts";
 
 export function ResumeCard({ project, onEndSession }: ResumeCardProps) {
   const [lastSession, setLastSession] = useState<Session | null>(null);
@@ -50,7 +50,7 @@ export function ResumeCard({ project, onEndSession }: ResumeCardProps) {
         executeToolAction("github_analyze_repo", { owner, repo }),
         executeToolAction("github_scan_tech_debt", { owner, repo }),
       ]);
-      const updates: Partial<Project> = {};
+      const updates: Partial<Project> = { lastSyncedAt: new Date().toISOString() };
       if (analyzeRes.ok && analyzeRes.result) {
         const analysis = analyzeRes.result as {
           detectedStack?: string;
@@ -116,7 +116,7 @@ export function ResumeCard({ project, onEndSession }: ResumeCardProps) {
         setNotes(savedNotes);
         setPrompts(fetchedPrompts);
 
-        const ctx: ActionContext = { project, lastSession: last, workItems: items };
+        const ctx: ActionContext = { project, lastSession: last };
         setActions(generateNextActions(ctx));
 
         listIntegrations()
@@ -171,7 +171,6 @@ export function ResumeCard({ project, onEndSession }: ResumeCardProps) {
 
   const tabs = [
     { id: "session" as Tab, label: "Last Session" },
-    { id: "items" as Tab, label: "Open Items" },
     { id: "actions" as Tab, label: "Next Actions" },
     { id: "prompts" as Tab, label: "Prompts" },
   ];
@@ -226,18 +225,18 @@ export function ResumeCard({ project, onEndSession }: ResumeCardProps) {
             </a>
           )}
           {currentProject.githubRepo && (
-            <Link href={`/dev-folder/${currentProject.id}`} className="resume-card__meta-link resume-card__dev-link">
-              <IconLayers size={12} /> .dev/
-            </Link>
-          )}
-          {currentProject.githubRepo && (
-            <button
-              onClick={handleSync}
-              disabled={syncing}
-              className="resume-card__sync-btn"
-            >
-              {syncing ? "Syncing..." : "Sync"}
-            </button>
+            <>
+              {currentProject.lastSyncedAt && (
+                <span className="resume-card__last-sync">Last sync {timeAgo(currentProject.lastSyncedAt)}</span>
+              )}
+              <button
+                onClick={handleSync}
+                disabled={syncing}
+                className="resume-card__sync-btn"
+              >
+                {syncing ? "Syncing..." : "Sync"}
+              </button>
+            </>
           )}
         </div>
         <div className="resume-card__header-actions">
@@ -295,14 +294,6 @@ export function ResumeCard({ project, onEndSession }: ResumeCardProps) {
 
       <div className="resume-card__tab-content">
         {activeTab === "session" && <SessionTab lastSession={lastSession} />}
-        {activeTab === "items" && (
-          <IssuesTab
-            items={workItems}
-            hasDataSource={(project.dataSources || []).length > 0 || !!project.githubRepo}
-            project={project}
-
-          />
-        )}
         {activeTab === "actions" && (
           <ActionsTab
             actions={actions}
@@ -312,6 +303,8 @@ export function ResumeCard({ project, onEndSession }: ResumeCardProps) {
             onSkip={handleActionSkip}
             onNoteChange={(id, value) => setNotes((prev) => ({ ...prev, [id]: value }))}
             onNoteSave={handleNoteSave}
+            workItems={workItems}
+            project={project}
           />
         )}
         {activeTab === "prompts" && (

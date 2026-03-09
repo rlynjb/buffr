@@ -5,13 +5,12 @@ export interface NextAction {
   text: string;
   done: boolean;
   skipped: boolean;
-  source?: "session" | "activity" | "github" | "ai";
+  source?: "session" | "activity" | "ai";
 }
 
 export interface ActionContext {
   project: Project;
   lastSession: Session | null;
-  workItems?: WorkItem[];
 }
 
 // --- Action source functions (priority order) ---
@@ -62,17 +61,6 @@ function actionsFromActivity(ctx: ActionContext): NextAction[] {
   return [];
 }
 
-function actionsFromWorkItems(ctx: ActionContext): NextAction[] {
-  if (!ctx.workItems || ctx.workItems.length === 0) return [];
-  return ctx.workItems.slice(0, 3).map((item) => ({
-    id: `issue-${item.id}`,
-    text: item.title,
-    done: false,
-    skipped: false,
-    source: "github",
-  }));
-}
-
 // --- Main function ---
 
 export function generateNextActions(context: ActionContext): NextAction[] {
@@ -80,7 +68,6 @@ export function generateNextActions(context: ActionContext): NextAction[] {
     ...actionsFromAI(context),
     ...actionsFromSession(context),
     ...actionsFromActivity(context),
-    ...actionsFromWorkItems(context),
   ];
 
   // Deduplicate by id AND by text content, limit to 3

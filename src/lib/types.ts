@@ -20,6 +20,7 @@ export interface Project {
   issueCount?: number;
   devFolder?: DevFolder | null;
   techDebt?: TechDebtScan | null;
+  lastSyncedAt?: string | null;
   updatedAt: string;
 }
 

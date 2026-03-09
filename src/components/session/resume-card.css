@@ -24,6 +24,10 @@
   @apply flex items-center gap-1 hover:text-zinc-300 transition-colors;
 }
 
+.resume-card__last-sync {
+  @apply text-zinc-600;
+}
+
 .resume-card__sync-btn {
   @apply hover:text-zinc-300 transition-colors disabled:opacity-50 cursor-pointer;
 }
@@ -97,10 +101,6 @@
 
 .resume-card__suggestion-icon {
   @apply text-amber-400;
-}
-
-.resume-card__dev-link {
-  @apply text-emerald-500/70 hover:text-emerald-400;
 }
 
 .resume-card__header-actions {
