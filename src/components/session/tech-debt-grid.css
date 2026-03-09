@@ -1,7 +1,7 @@
 @reference "../../app/globals.css";
 
 .tech-debt {
-  @apply mt-5 pt-5 border-t border-zinc-800/50;
+  @apply mt-5 p-4 rounded-xl border border-zinc-800/60 bg-zinc-900/20;
 }
 
 .tech-debt__header {

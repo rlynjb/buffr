@@ -37,7 +37,7 @@ export function registerGitHubTools() {
 
   registerTool({
     name: "github_list_issues",
-    description: "List open issues for a repository (excludes pull requests)",
+    description: "List issues for a repository (excludes pull requests)",
     integrationId: INTEGRATION_ID,
     inputSchema: {
       type: "object",
@@ -45,20 +45,23 @@ export function registerGitHubTools() {
         owner: { type: "string" },
         repo: { type: "string" },
         limit: { type: "number", description: "Max issues to return (default 10)" },
+        state: { type: "string", enum: ["open", "closed", "all"], description: "Issue state filter (default: open)" },
       },
       required: ["owner", "repo"],
     },
     execute: async (input) => {
+      const state = (input.state as "open" | "closed" | "all") || "open";
       const raw = await getIssues(
         input.owner as string,
         input.repo as string,
         (input.limit as number) || 10,
+        state,
       );
       return {
         items: raw.map((issue) => ({
           id: String(issue.number),
           title: issue.title,
-          status: "open",
+          status: state === "open" ? "open" : "closed",
           url: issue.url,
           source: "github",
           labels: issue.labels,

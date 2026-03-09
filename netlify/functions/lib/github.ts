@@ -190,7 +190,8 @@ export async function getFileContent(
 export async function getIssues(
   owner: string,
   repo: string,
-  limit: number = 10
+  limit: number = 10,
+  state: "open" | "closed" | "all" = "open"
 ): Promise<Array<{
   number: number;
   title: string;
@@ -200,7 +201,7 @@ export async function getIssues(
 }>> {
   try {
     const items = await ghList(
-      `/repos/${owner}/${repo}/issues?state=open&per_page=${limit}&sort=updated&direction=desc`
+      `/repos/${owner}/${repo}/issues?state=${state}&per_page=${limit}&sort=updated&direction=desc`
     );
     return items
       .filter((item) => !item.pull_request)

@@ -4,7 +4,7 @@ import { useState, useEffect, useMemo } from "react";
 import Link from "next/link";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { IconBack, IconGitHub, IconGlobe, IconSparkle, IconLayers } from "@/components/icons";
+import { IconBack, IconGitHub, IconGlobe, IconSparkle, IconLayers, IconLink, SourceIcon, sourceColor } from "@/components/icons";
 import { PHASE_COLORS } from "@/lib/constants";
 import type { Project, Session, WorkItem, Prompt, TechDebtScan } from "@/lib/types";
 import { generateNextActions, type NextAction, type ActionContext } from "@/lib/next-actions";
@@ -303,8 +303,6 @@ export function ResumeCard({ project, onEndSession }: ResumeCardProps) {
             onSkip={handleActionSkip}
             onNoteChange={(id, value) => setNotes((prev) => ({ ...prev, [id]: value }))}
             onNoteSave={handleNoteSave}
-            workItems={workItems}
-            project={project}
           />
         )}
         {activeTab === "prompts" && (
@@ -317,6 +315,35 @@ export function ResumeCard({ project, onEndSession }: ResumeCardProps) {
           />
         )}
       </div>
+
+      {workItems.length > 0 && (
+        <div className="resume-card__issues">
+          <h3 className="resume-card__issues-heading">Open Issues</h3>
+          <div className="resume-card__issues-list">
+            {workItems.slice(0, 15).map((item) => (
+              <a
+                key={`${item.source}-${item.id}`}
+                href={item.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="resume-card__issue"
+              >
+                <span style={{ color: sourceColor(item.source) }}>
+                  <SourceIcon source={item.source} size={14} />
+                </span>
+                <span className="resume-card__issue-title">{item.title}</span>
+                <span className="resume-card__issue-id">{item.id}</span>
+                {item.labels?.slice(0, 3).map((l) => (
+                  <Badge key={l} color="#666" small>{l}</Badge>
+                ))}
+                <span className="resume-card__issue-link">
+                  <IconLink size={12} />
+                </span>
+              </a>
+            ))}
+          </div>
+        </div>
+      )}
 
       {currentProject.techDebt && currentProject.techDebt.summary.length > 0 && (
         <TechDebtGrid

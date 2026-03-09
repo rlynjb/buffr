@@ -94,6 +94,7 @@ export function EndSessionModal({
                 params.owner = owner;
                 params.repo = repo;
                 params.limit = 5;
+                params.state = "closed";
               }
               const res = await executeToolAction(activityTool, params);
               if (res.ok && res.result) {
@@ -321,7 +322,7 @@ export function EndSessionModal({
               id="end-session-next-step"
               value={nextStep}
               onChange={(e) => setNextStep(e.target.value)}
-              rows={2}
+              rows={3}
               className="end-session__textarea"
               placeholder="What's next?"
             />
