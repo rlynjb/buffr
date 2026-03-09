@@ -32,6 +32,22 @@
   @apply flex items-center gap-3 text-[12px] text-zinc-500;
 }
 
+.project-card__actions-list {
+  @apply mt-2;
+}
+
+.project-card__actions-title {
+  @apply text-[10px] text-zinc-600 uppercase tracking-wider;
+}
+
+.project-card__actions-items {
+  @apply mt-0.5 space-y-0.5 list-none p-0 m-0;
+}
+
+.project-card__action-item {
+  @apply text-[11px] text-zinc-500 truncate before:content-['·'] before:mr-1.5 before:text-zinc-700;
+}
+
 .project-card__actions {
   @apply flex items-center gap-2 opacity-0 transition-opacity;
 }

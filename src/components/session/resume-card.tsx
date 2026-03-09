@@ -8,7 +8,7 @@ import { IconBack, IconGitHub, IconGlobe, IconSparkle, IconLayers, IconLink, Sou
 import { PHASE_COLORS } from "@/lib/constants";
 import type { Project, Session, WorkItem, Prompt, TechDebtScan } from "@/lib/types";
 import { generateNextActions, type NextAction, type ActionContext } from "@/lib/next-actions";
-import { listSessions, getActionNotes, saveActionNote, listPrompts, executeToolAction, listIntegrations, updateProject } from "@/lib/api";
+import { listSessions, getActionNotes, saveActionNote, listPrompts, executeToolAction, listIntegrations, updateProject, listManualActions, addManualAction, updateManualAction, deleteManualAction } from "@/lib/api";
 import { resolvePrompt } from "@/lib/resolve-prompt";
 import { timeAgo } from "@/lib/format";
 import { getToolForCapability } from "@/lib/data-sources";
@@ -103,11 +103,12 @@ export function ResumeCard({ project, onEndSession }: ResumeCardProps) {
 
     async function load() {
       try {
-        const [sessions, items, savedNotes, fetchedPrompts] = await Promise.all([
+        const [sessions, items, savedNotes, fetchedPrompts, manualItems] = await Promise.all([
           listSessions(project.id),
           fetchWorkItems(),
           getActionNotes(project.id).catch(() => ({} as Record<string, string>)),
           listPrompts(project.id).catch(() => [] as Prompt[]),
+          listManualActions(project.id).catch(() => []),
         ]);
 
         const last = sessions.length > 0 ? sessions[0] : null;
@@ -117,7 +118,15 @@ export function ResumeCard({ project, onEndSession }: ResumeCardProps) {
         setPrompts(fetchedPrompts);
 
         const ctx: ActionContext = { project, lastSession: last };
-        setActions(generateNextActions(ctx));
+        const generated = generateNextActions(ctx);
+        const manual: NextAction[] = manualItems.map((m) => ({
+          id: m.id,
+          text: m.text,
+          done: m.done,
+          skipped: false,
+          source: "manual" as const,
+        }));
+        setActions([...generated, ...manual]);
 
         listIntegrations()
           .then((integrations) => {
@@ -136,10 +145,36 @@ export function ResumeCard({ project, onEndSession }: ResumeCardProps) {
 
   function handleActionDone(id: string) {
     setActions((prev) => prev.map((a) => (a.id === id ? { ...a, done: true } : a)));
+    // Persist done state for manual actions
+    const action = actions.find((a) => a.id === id);
+    if (action?.source === "manual") {
+      updateManualAction(project.id, id, { done: true }).catch(() => {});
+    }
   }
 
   function handleActionSkip(id: string) {
     setActions((prev) => prev.map((a) => (a.id === id ? { ...a, skipped: true } : a)));
+  }
+
+  async function handleAddManual(text: string) {
+    const id = `manual-${Date.now()}`;
+    const newAction: NextAction = { id, text, done: false, skipped: false, source: "manual" };
+    setActions((prev) => [...prev, newAction]);
+    try {
+      await addManualAction(project.id, id, text);
+    } catch (err) {
+      console.error("Failed to save manual action:", err);
+      setActions((prev) => prev.filter((a) => a.id !== id));
+    }
+  }
+
+  async function handleDeleteManual(id: string) {
+    setActions((prev) => prev.filter((a) => a.id !== id));
+    try {
+      await deleteManualAction(project.id, id);
+    } catch (err) {
+      console.error("Failed to delete manual action:", err);
+    }
   }
 
   async function handleCopyPrompt(prompt: Prompt) {
@@ -303,6 +338,8 @@ export function ResumeCard({ project, onEndSession }: ResumeCardProps) {
             onSkip={handleActionSkip}
             onNoteChange={(id, value) => setNotes((prev) => ({ ...prev, [id]: value }))}
             onNoteSave={handleNoteSave}
+            onAddManual={handleAddManual}
+            onDeleteManual={handleDeleteManual}
           />
         )}
         {activeTab === "prompts" && (

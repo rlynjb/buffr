@@ -256,6 +256,7 @@ export function SourceIcon({ source, size = 14, className }: { source: string; s
     case "notion": return <span style={style}><IconNotion size={size} className={className} /></span>;
     case "ai": return <span style={style}><IconSparkle size={size} className={className} /></span>;
     case "session": return <span style={style}><IconBack size={size} className={className} /></span>;
+    case "manual": return <span style={style}><IconCheck size={size} className={className} /></span>;
     default: return null;
   }
 }

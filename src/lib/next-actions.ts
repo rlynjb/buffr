@@ -5,7 +5,7 @@ export interface NextAction {
   text: string;
   done: boolean;
   skipped: boolean;
-  source?: "session" | "activity" | "ai";
+  source?: "session" | "activity" | "ai" | "manual";
 }
 
 export interface ActionContext {

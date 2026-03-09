@@ -92,3 +92,15 @@
   @apply flex gap-2;
 }
 
+.actions-tab__add {
+  @apply mt-3 flex gap-2;
+}
+
+.actions-tab__add-input {
+  @apply flex-1 px-3 py-1.5 rounded-lg bg-zinc-900/80 border border-zinc-800/50 text-sm text-zinc-300 placeholder:text-zinc-600 focus:outline-none focus:border-purple-500/40 transition-colors;
+}
+
+.actions-tab__add-btn {
+  @apply px-2.5 py-1.5 rounded-lg border border-zinc-800/50 text-zinc-500 hover:text-zinc-300 hover:bg-white/5 transition-colors cursor-pointer disabled:opacity-30 disabled:cursor-default;
+}
+

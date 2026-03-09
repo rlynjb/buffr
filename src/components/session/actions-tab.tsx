@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { SourceIcon, sourceColor, IconSparkle } from "@/components/icons";
+import { SourceIcon, sourceColor, IconSparkle, IconPlus, IconTrash } from "@/components/icons";
 import type { NextAction } from "@/lib/next-actions";
 import "./actions-tab.css";
 
@@ -13,6 +13,8 @@ interface ActionsTabProps {
   onSkip: (id: string) => void;
   onNoteChange: (id: string, value: string) => void;
   onNoteSave: (id: string) => void;
+  onAddManual?: (text: string) => void;
+  onDeleteManual?: (id: string) => void;
 }
 
 const DEFAULT_NOTE = "Impact: Why this matters for the project.\nOutcome: What \"done\" looks like.";
@@ -25,22 +27,29 @@ export function ActionsTab({
   onSkip,
   onNoteChange,
   onNoteSave,
+  onAddManual,
+  onDeleteManual,
 }: ActionsTabProps) {
   const [noteOpen, setNoteOpen] = useState<string | null>(null);
+  const [newItem, setNewItem] = useState("");
 
-  if (actions.length === 0) {
-    return (
-      <div className="actions-tab__empty">No actions suggested yet.</div>
-    );
+  function handleAdd() {
+    const text = newItem.trim();
+    if (!text || !onAddManual) return;
+    onAddManual(text);
+    setNewItem("");
   }
 
   return (
     <div>
-      <p className="actions-tab__desc">
-        <span className="actions-tab__desc-icon" style={{ color: "#c084fc" }}><SourceIcon source="ai" size={11} /></span> AI-suggested
-        <span className="actions-tab__desc-sep">·</span>
-        <span className="actions-tab__desc-icon" style={{ color: "#a78bfa" }}><SourceIcon source="session" size={11} /></span> From last session
-      </p>
+      {actions.length > 0 && (
+        <p className="actions-tab__desc">
+          <span className="actions-tab__desc-icon" style={{ color: "#c084fc" }}><SourceIcon source="ai" size={11} /></span> AI-suggested
+          <span className="actions-tab__desc-sep">·</span>
+          <span className="actions-tab__desc-icon" style={{ color: "#a78bfa" }}><SourceIcon source="session" size={11} /></span> From last session
+        </p>
+      )}
+
       <div className="actions-tab__list">
         {actions.map((action) => (
           <div
@@ -66,18 +75,26 @@ export function ActionsTab({
               </span>
               {!action.done && !action.skipped && (
                 <div className="actions-tab__action-buttons">
-                  <button
-                    onClick={() => setNoteOpen(noteOpen === action.id ? null : action.id)}
-                    className="actions-tab__action-btn--note"
-                  >
-                    Note
-                  </button>
+                  {action.source !== "manual" && (
+                    <button
+                      onClick={() => setNoteOpen(noteOpen === action.id ? null : action.id)}
+                      className="actions-tab__action-btn--note"
+                    >
+                      Note
+                    </button>
+                  )}
                   <button onClick={() => onDone(action.id)} className="actions-tab__action-btn--done">
                     Done
                   </button>
-                  <button onClick={() => onSkip(action.id)} className="actions-tab__action-btn--skip">
-                    Skip
-                  </button>
+                  {action.source === "manual" && onDeleteManual ? (
+                    <button onClick={() => onDeleteManual(action.id)} className="actions-tab__action-btn--skip">
+                      <IconTrash size={10} />
+                    </button>
+                  ) : (
+                    <button onClick={() => onSkip(action.id)} className="actions-tab__action-btn--skip">
+                      Skip
+                    </button>
+                  )}
                 </div>
               )}
             </div>
@@ -115,6 +132,26 @@ export function ActionsTab({
           </div>
         ))}
       </div>
+
+      {onAddManual && (
+        <div className="actions-tab__add">
+          <input
+            type="text"
+            value={newItem}
+            onChange={(e) => setNewItem(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && handleAdd()}
+            placeholder="Add a task..."
+            className="actions-tab__add-input"
+          />
+          <button
+            onClick={handleAdd}
+            disabled={!newItem.trim()}
+            className="actions-tab__add-btn"
+          >
+            <IconPlus size={12} />
+          </button>
+        </div>
+      )}
     </div>
   );
 }

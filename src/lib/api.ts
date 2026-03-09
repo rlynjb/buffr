@@ -116,6 +116,51 @@ export async function saveActionNote(
   });
 }
 
+// Manual Actions
+export interface ManualActionData {
+  id: string;
+  text: string;
+  done: boolean;
+}
+
+export async function listManualActions(
+  projectId: string
+): Promise<ManualActionData[]> {
+  return request<ManualActionData[]>(`/manual-actions?projectId=${encodeURIComponent(projectId)}`);
+}
+
+export async function addManualAction(
+  projectId: string,
+  id: string,
+  text: string
+): Promise<ManualActionData[]> {
+  return request<ManualActionData[]>(`/manual-actions?projectId=${encodeURIComponent(projectId)}`, {
+    method: "POST",
+    body: JSON.stringify({ id, text }),
+  });
+}
+
+export async function updateManualAction(
+  projectId: string,
+  id: string,
+  updates: { done?: boolean; text?: string }
+): Promise<ManualActionData[]> {
+  return request<ManualActionData[]>(`/manual-actions?projectId=${encodeURIComponent(projectId)}`, {
+    method: "PUT",
+    body: JSON.stringify({ id, ...updates }),
+  });
+}
+
+export async function deleteManualAction(
+  projectId: string,
+  actionId: string
+): Promise<ManualActionData[]> {
+  return request<ManualActionData[]>(
+    `/manual-actions?projectId=${encodeURIComponent(projectId)}&actionId=${encodeURIComponent(actionId)}`,
+    { method: "DELETE" }
+  );
+}
+
 // Prompts
 export async function listPrompts(scope?: string): Promise<Prompt[]> {
   const q = scope ? `?scope=${encodeURIComponent(scope)}` : "";

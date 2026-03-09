@@ -11,4 +11,5 @@ export const SOURCE_COLORS: Record<string, string> = {
   notion: "#ffffffcc",
   ai: "#c084fc",
   session: "#a78bfa",
+  manual: "#71717a",
 };
