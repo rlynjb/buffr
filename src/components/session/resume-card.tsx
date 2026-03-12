@@ -14,6 +14,7 @@ import { resolvePrompt } from "@/lib/resolve-prompt";
 import { timeAgo } from "@/lib/format";
 import { getToolForCapability } from "@/lib/data-sources";
 import { generateSuggestions, type ProjectSuggestion } from "@/lib/suggestions";
+import { useProvider } from "@/context/provider-context";
 import { SessionTab } from "./session-tab";
 import { ActionsTab } from "./actions-tab";
 import { PromptsTab } from "./prompts-tab";
@@ -29,6 +30,7 @@ type Tab = "session" | "actions" | "prompts";
 
 export function ResumeCard({ project, onEndSession }: ResumeCardProps) {
   const router = useRouter();
+  const { selected: selectedProvider } = useProvider();
   const [lastSession, setLastSession] = useState<Session | null>(null);
   const [workItems, setWorkItems] = useState<WorkItem[]>([]);
   const [dataSources] = useState<string[]>(project.dataSources || (project.githubRepo ? ["github"] : []));
@@ -177,7 +179,7 @@ export function ResumeCard({ project, onEndSession }: ResumeCardProps) {
 
   async function handleParaphrase(text: string): Promise<string | null> {
     try {
-      const result = await paraphraseText(text);
+      const result = await paraphraseText(text, selectedProvider);
       return result.text || null;
     } catch (err) {
       console.error("Paraphrase failed:", err);
