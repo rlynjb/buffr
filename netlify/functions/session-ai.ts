@@ -5,6 +5,7 @@ import { getLLM } from "./lib/ai/provider";
 import { createSummarizeChain } from "./lib/ai/chains/session-summarizer";
 import { createIntentChain } from "./lib/ai/chains/intent-detector";
 import { createSuggestChain } from "./lib/ai/chains/next-step-suggester";
+import { createParaphraseChain } from "./lib/ai/chains/paraphraser";
 import { json, errorResponse, classifyError } from "./lib/responses";
 
 export default async function handler(req: Request, _context: Context) {
@@ -52,7 +53,16 @@ export default async function handler(req: Request, _context: Context) {
       return json(result);
     }
 
-    return errorResponse("Unknown action. Use ?summarize, ?intent, or ?suggest", 400);
+    if (url.searchParams.has("paraphrase")) {
+      if (!body.text) {
+        return errorResponse("text is required", 400);
+      }
+      const chain = createParaphraseChain(llm);
+      const result = await chain.invoke({ text: body.text });
+      return json(result);
+    }
+
+    return errorResponse("Unknown action. Use ?summarize, ?intent, ?suggest, or ?paraphrase", 400);
   } catch (err) {
     console.error("session-ai function error:", err);
     const { message, status } = classifyError(err, "Session AI failed");

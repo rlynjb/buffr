@@ -68,12 +68,20 @@
   @apply text-[10px] text-purple-400 hover:text-purple-300 transition-colors disabled:opacity-50 cursor-pointer;
 }
 
+.actions-tab__purpose {
+  @apply text-[11px] text-zinc-600 mb-2;
+}
+
 .actions-tab__desc {
   @apply text-[11px] text-zinc-600 mb-3 flex items-center gap-1.5;
 }
 
 .actions-tab__desc-icon {
   @apply inline-flex items-center;
+}
+
+.actions-tab__desc-label {
+  @apply text-zinc-500 mr-1;
 }
 
 .actions-tab__desc-sep {
@@ -97,10 +105,18 @@
 }
 
 .actions-tab__add-input {
-  @apply flex-1 px-3 py-1.5 rounded-lg bg-zinc-900/80 border border-zinc-800/50 text-sm text-zinc-300 placeholder:text-zinc-600 focus:outline-none focus:border-purple-500/40 transition-colors;
+  @apply flex-1 px-3 py-1.5 rounded-lg bg-zinc-900/80 border border-zinc-800/50 text-sm text-zinc-300 placeholder:text-zinc-600 focus:outline-none focus:border-purple-500/40 transition-colors resize-none leading-relaxed;
+}
+
+.actions-tab__add-actions {
+  @apply flex flex-col gap-1;
 }
 
 .actions-tab__add-btn {
   @apply px-2.5 py-1.5 rounded-lg border border-zinc-800/50 text-zinc-500 hover:text-zinc-300 hover:bg-white/5 transition-colors cursor-pointer disabled:opacity-30 disabled:cursor-default;
+}
+
+.actions-tab__add-paraphrase {
+  @apply px-2.5 py-1.5 rounded-lg border border-purple-500/20 text-[11px] text-purple-400 hover:text-purple-300 hover:bg-purple-500/10 transition-colors cursor-pointer disabled:opacity-50 flex items-center gap-1 whitespace-nowrap;
 }
 

@@ -4,6 +4,23 @@
   @apply flex items-center gap-1.5 text-sm text-zinc-500 hover:text-zinc-300 mb-4 transition-colors;
 }
 
+.resume-card__project-nav {
+  @apply flex gap-1 mb-4 overflow-x-auto;
+  scrollbar-width: none;
+}
+
+.resume-card__project-nav::-webkit-scrollbar {
+  display: none;
+}
+
+.resume-card__project-nav-item {
+  @apply px-3 py-1.5 rounded-lg text-lg font-semibold font-mono text-zinc-500 hover:text-zinc-300 hover:bg-white/5 transition-colors cursor-pointer whitespace-nowrap;
+}
+
+.resume-card__project-nav-item--active {
+  @apply text-zinc-100 bg-zinc-800/60;
+}
+
 .resume-card__header {
   @apply mb-4;
 }

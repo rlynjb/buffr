@@ -24,6 +24,7 @@
         "npm:@types/react@19",
         "npm:eslint-config-next@16.1.6",
         "npm:eslint@9",
+        "npm:jose@^4.15.9",
         "npm:next@16.1.6",
         "npm:react-dom@19.2.3",
         "npm:react@19.2.3",

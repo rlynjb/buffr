@@ -5,7 +5,7 @@ export interface NextAction {
   text: string;
   done: boolean;
   skipped: boolean;
-  source?: "session" | "activity" | "ai" | "manual";
+  source?: "activity" | "ai" | "manual";
 }
 
 export interface ActionContext {
@@ -24,19 +24,6 @@ function actionsFromAI(ctx: ActionContext): NextAction[] {
       done: false,
       skipped: false,
       source: "ai",
-    },
-  ];
-}
-
-function actionsFromSession(ctx: ActionContext): NextAction[] {
-  if (!ctx.lastSession?.nextStep) return [];
-  return [
-    {
-      id: `session-${ctx.lastSession.id}`,
-      text: ctx.lastSession.nextStep,
-      done: false,
-      skipped: false,
-      source: "session",
     },
   ];
 }
@@ -66,7 +53,6 @@ function actionsFromActivity(ctx: ActionContext): NextAction[] {
 export function generateNextActions(context: ActionContext): NextAction[] {
   const all: NextAction[] = [
     ...actionsFromAI(context),
-    ...actionsFromSession(context),
     ...actionsFromActivity(context),
   ];
 

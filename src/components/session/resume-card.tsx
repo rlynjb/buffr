@@ -2,13 +2,14 @@
 
 import { useState, useEffect, useMemo } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { IconBack, IconGitHub, IconGlobe, IconSparkle, IconLayers, IconLink, SourceIcon, sourceColor } from "@/components/icons";
 import { PHASE_COLORS } from "@/lib/constants";
 import type { Project, Session, WorkItem, Prompt, TechDebtScan } from "@/lib/types";
 import { generateNextActions, type NextAction, type ActionContext } from "@/lib/next-actions";
-import { listSessions, getActionNotes, saveActionNote, listPrompts, executeToolAction, listIntegrations, updateProject, listManualActions, addManualAction, updateManualAction, deleteManualAction } from "@/lib/api";
+import { listProjects, listSessions, getActionNotes, saveActionNote, listPrompts, executeToolAction, listIntegrations, updateProject, listManualActions, addManualAction, updateManualAction, deleteManualAction, paraphraseText } from "@/lib/api";
 import { resolvePrompt } from "@/lib/resolve-prompt";
 import { timeAgo } from "@/lib/format";
 import { getToolForCapability } from "@/lib/data-sources";
@@ -27,6 +28,7 @@ interface ResumeCardProps {
 type Tab = "session" | "actions" | "prompts";
 
 export function ResumeCard({ project, onEndSession }: ResumeCardProps) {
+  const router = useRouter();
   const [lastSession, setLastSession] = useState<Session | null>(null);
   const [workItems, setWorkItems] = useState<WorkItem[]>([]);
   const [dataSources] = useState<string[]>(project.dataSources || (project.githubRepo ? ["github"] : []));
@@ -40,6 +42,7 @@ export function ResumeCard({ project, onEndSession }: ResumeCardProps) {
   const [suggestions, setSuggestions] = useState<ProjectSuggestion[]>([]);
   const [syncing, setSyncing] = useState(false);
   const [currentProject, setCurrentProject] = useState(project);
+  const [allProjects, setAllProjects] = useState<Project[]>([]);
 
   async function handleSync() {
     if (!currentProject.githubRepo || syncing) return;
@@ -134,6 +137,10 @@ export function ResumeCard({ project, onEndSession }: ResumeCardProps) {
             setSuggestions(generateSuggestions(project, last, connected));
           })
           .catch(() => setSuggestions([]));
+
+        listProjects()
+          .then((p) => setAllProjects(p))
+          .catch(() => {});
       } catch {
         setActions(generateNextActions({ project, lastSession: null }));
       } finally {
@@ -165,6 +172,16 @@ export function ResumeCard({ project, onEndSession }: ResumeCardProps) {
     } catch (err) {
       console.error("Failed to save manual action:", err);
       setActions((prev) => prev.filter((a) => a.id !== id));
+    }
+  }
+
+  async function handleParaphrase(text: string): Promise<string | null> {
+    try {
+      const result = await paraphraseText(text);
+      return result.text || null;
+    } catch (err) {
+      console.error("Paraphrase failed:", err);
+      return null;
     }
   }
 
@@ -225,11 +242,24 @@ export function ResumeCard({ project, onEndSession }: ResumeCardProps) {
         <IconBack size={14} /> Dashboard
       </Link>
 
+      {allProjects.length > 1 && (
+        <nav className="resume-card__project-nav">
+          {allProjects.map((p) => (
+            <button
+              key={p.id}
+              onClick={() => router.push(`/project/${p.id}`)}
+              className={`resume-card__project-nav-item ${
+                p.id === project.id ? "resume-card__project-nav-item--active" : ""
+              }`}
+            >
+              {p.name}
+            </button>
+          ))}
+        </nav>
+      )}
+
       <div className="resume-card__header">
         <div className="resume-card__name-row">
-          <span className="resume-card__name">
-            {currentProject.name}
-          </span>
           <Badge color={PHASE_COLORS[currentProject.phase]}>
             {currentProject.phase}
           </Badge>
@@ -340,6 +370,7 @@ export function ResumeCard({ project, onEndSession }: ResumeCardProps) {
             onNoteSave={handleNoteSave}
             onAddManual={handleAddManual}
             onDeleteManual={handleDeleteManual}
+            onParaphrase={handleParaphrase}
           />
         )}
         {activeTab === "prompts" && (

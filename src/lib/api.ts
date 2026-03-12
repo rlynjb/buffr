@@ -278,6 +278,16 @@ export async function suggestNextStep(
   });
 }
 
+export async function paraphraseText(
+  text: string,
+  provider?: string,
+): Promise<{ text: string }> {
+  return request("/session-ai?paraphrase", {
+    method: "POST",
+    body: JSON.stringify({ text, provider }),
+  });
+}
+
 // Run Prompt
 export async function runPrompt(
   promptId: string,

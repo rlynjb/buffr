@@ -15,6 +15,7 @@ interface ActionsTabProps {
   onNoteSave: (id: string) => void;
   onAddManual?: (text: string) => void;
   onDeleteManual?: (id: string) => void;
+  onParaphrase?: (text: string) => Promise<string | null>;
 }
 
 const DEFAULT_NOTE = "Impact: Why this matters for the project.\nOutcome: What \"done\" looks like.";
@@ -29,9 +30,11 @@ export function ActionsTab({
   onNoteSave,
   onAddManual,
   onDeleteManual,
+  onParaphrase,
 }: ActionsTabProps) {
   const [noteOpen, setNoteOpen] = useState<string | null>(null);
   const [newItem, setNewItem] = useState("");
+  const [paraphrasing, setParaphrasing] = useState(false);
 
   function handleAdd() {
     const text = newItem.trim();
@@ -40,13 +43,28 @@ export function ActionsTab({
     setNewItem("");
   }
 
+  async function handleParaphrase() {
+    if (!onParaphrase || !newItem.trim()) return;
+    setParaphrasing(true);
+    try {
+      const result = await onParaphrase(newItem.trim());
+      if (result) setNewItem(result);
+    } finally {
+      setParaphrasing(false);
+    }
+  }
+
   return (
     <div>
+      <p className="actions-tab__purpose">
+        Track what to work on next. Items carry over between sessions and feed into End Session summaries.
+      </p>
       {actions.length > 0 && (
         <p className="actions-tab__desc">
+          <span className="actions-tab__desc-label">Sources:</span>
           <span className="actions-tab__desc-icon" style={{ color: "#c084fc" }}><SourceIcon source="ai" size={11} /></span> AI-suggested
           <span className="actions-tab__desc-sep">·</span>
-          <span className="actions-tab__desc-icon" style={{ color: "#a78bfa" }}><SourceIcon source="session" size={11} /></span> From last session
+          <span className="actions-tab__desc-icon" style={{ color: "#71717a" }}><SourceIcon source="manual" size={11} /></span> Manual
         </p>
       )}
 
@@ -75,7 +93,7 @@ export function ActionsTab({
               </span>
               {!action.done && !action.skipped && (
                 <div className="actions-tab__action-buttons">
-                  {action.source !== "manual" && (
+                  {action.source !== "manual" && action.source !== "ai" && (
                     <button
                       onClick={() => setNoteOpen(noteOpen === action.id ? null : action.id)}
                       className="actions-tab__action-btn--note"
@@ -135,21 +153,32 @@ export function ActionsTab({
 
       {onAddManual && (
         <div className="actions-tab__add">
-          <input
-            type="text"
+          <textarea
+            rows={3}
             value={newItem}
             onChange={(e) => setNewItem(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && handleAdd()}
+            onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleAdd(); } }}
             placeholder="Add a task..."
             className="actions-tab__add-input"
           />
-          <button
-            onClick={handleAdd}
-            disabled={!newItem.trim()}
-            className="actions-tab__add-btn"
-          >
-            <IconPlus size={12} />
-          </button>
+          <div className="actions-tab__add-actions">
+            {onParaphrase && (
+              <button
+                onClick={handleParaphrase}
+                disabled={paraphrasing || !newItem.trim()}
+                className="actions-tab__add-paraphrase"
+              >
+                <IconSparkle size={10} /> {paraphrasing ? "..." : "Rewrite"}
+              </button>
+            )}
+            <button
+              onClick={handleAdd}
+              disabled={!newItem.trim()}
+              className="actions-tab__add-btn"
+            >
+              <IconPlus size={12} />
+            </button>
+          </div>
         </div>
       )}
     </div>

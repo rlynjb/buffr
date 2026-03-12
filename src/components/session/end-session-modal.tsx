@@ -6,7 +6,7 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { IconLoader, IconSparkle, SourceIcon, sourceColor } from "@/components/icons";
-import { createSession, updateProject, summarizeSession, suggestNextStep, detectIntent, executeToolAction } from "@/lib/api";
+import { createSession, updateProject, summarizeSession, suggestNextStep, detectIntent, executeToolAction, listManualActions, deleteManualAction } from "@/lib/api";
 import { getToolForCapability } from "@/lib/data-sources";
 import { useProvider } from "@/context/provider-context";
 import type { Project } from "@/lib/types";
@@ -46,7 +46,7 @@ export function EndSessionModal({
     setBlockers("");
     setAiLabel("");
 
-    if (!hasLLM || sources.length === 0) {
+    if (!hasLLM) {
       setPhase("ready");
       return;
     }
@@ -114,6 +114,18 @@ export function EndSessionModal({
         });
 
         await Promise.all(fetches);
+
+        // Include completed manual actions
+        try {
+          const manualItems = await listManualActions(project.id);
+          for (const item of manualItems) {
+            if (item.done) {
+              activityItems.push({ title: item.text, source: "manual" });
+            }
+          }
+        } catch {
+          // Manual actions fetch is optional
+        }
       } catch {
         // Fetch phase failed
       }
@@ -232,6 +244,18 @@ export function EndSessionModal({
 
       await updateProject(project.id, { lastSessionId: session.id });
 
+      // Clear done manual actions
+      try {
+        const manualItems = await listManualActions(project.id);
+        await Promise.all(
+          manualItems
+            .filter((item) => item.done)
+            .map((item) => deleteManualAction(project.id, item.id))
+        );
+      } catch {
+        // Cleanup is best-effort
+      }
+
       onSaved();
       onClose();
     } catch (err) {
@@ -249,7 +273,7 @@ export function EndSessionModal({
           <div className="end-session__loading-text">
             <IconLoader size={14} />
             {phase === "fetching"
-              ? `Fetching activity from ${sources.length} source${sources.length !== 1 ? "s" : ""}...`
+              ? `Fetching activity from ${sources.length + 1} source${sources.length + 1 !== 1 ? "s" : ""}...`
               : "Summarizing with AI..."}
           </div>
           <div className="end-session__loading-sources">
@@ -258,6 +282,9 @@ export function EndSessionModal({
                 <SourceIcon source={s} size={10} /> {s}
               </Badge>
             ))}
+            <Badge color={sourceColor("manual")}>
+              <SourceIcon source="manual" size={10} /> tasks
+            </Badge>
           </div>
         </div>
       )}

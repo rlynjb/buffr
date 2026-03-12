@@ -38,28 +38,15 @@ function makeSession(overrides: Partial<Session> = {}): Session {
 }
 
 describe("generateNextActions", () => {
-  it("returns session action when lastSession has nextStep", () => {
+  it("returns AI-suggested action when lastSession has suggestedNextStep", () => {
     const ctx: ActionContext = {
       project: makeProject(),
-      lastSession: makeSession({ nextStep: "Add logout" }),
+      lastSession: makeSession({ suggestedNextStep: "Write tests for auth" }),
     };
     const actions = generateNextActions(ctx);
     expect(actions.length).toBeGreaterThan(0);
-    expect(actions[0].text).toBe("Add logout");
-    expect(actions[0].source).toBe("session");
-  });
-
-  it("returns AI action at top priority", () => {
-    const ctx: ActionContext = {
-      project: makeProject(),
-      lastSession: makeSession({
-        suggestedNextStep: "Write tests for auth",
-        nextStep: "Add logout",
-      }),
-    };
-    const actions = generateNextActions(ctx);
-    expect(actions[0].source).toBe("ai");
     expect(actions[0].text).toBe("Write tests for auth");
+    expect(actions[0].source).toBe("ai");
   });
 
   it("returns activity action when idle > 7 days", () => {
@@ -72,32 +59,10 @@ describe("generateNextActions", () => {
     expect(actions.some((a) => a.source === "activity")).toBe(true);
   });
 
-  it("returns work item actions", () => {
-    const items: WorkItem[] = [
-      { id: "1", title: "Bug fix", status: "open", url: "", source: "github" },
-      { id: "2", title: "Feature", status: "open", url: "", source: "notion" },
-    ];
-    const ctx: ActionContext = {
-      project: makeProject(),
-      lastSession: null,
-      workItems: items,
-    };
-    const actions = generateNextActions(ctx);
-    expect(actions.some((a) => a.source === "issue")).toBe(true);
-  });
-
   it("limits to 3 actions", () => {
-    const items: WorkItem[] = Array.from({ length: 10 }, (_, i) => ({
-      id: String(i),
-      title: `Item ${i}`,
-      status: "open",
-      url: "",
-      source: "github",
-    }));
     const ctx: ActionContext = {
       project: makeProject(),
-      lastSession: makeSession(),
-      workItems: items,
+      lastSession: makeSession({ suggestedNextStep: "Task 1" }),
     };
     const actions = generateNextActions(ctx);
     expect(actions.length).toBeLessThanOrEqual(3);
