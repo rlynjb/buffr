@@ -93,14 +93,14 @@ export function EndSessionModal({
                 const [owner, repo] = project.githubRepo.split("/");
                 params.owner = owner;
                 params.repo = repo;
-                params.limit = 5;
+                params.limit = 25;
                 params.state = "closed";
               }
               const res = await executeToolAction(activityTool, params);
               if (res.ok && res.result) {
                 const data = res.result as { items?: Array<{ title?: string; id?: string }> };
                 if (data.items) {
-                  for (const item of data.items.slice(0, 5)) {
+                  for (const item of data.items) {
                     if (item.title) {
                       activityItems.push({ title: item.title, source });
                     }
@@ -324,7 +324,7 @@ export function EndSessionModal({
               id="end-session-what-changed"
               value={whatChanged}
               onChange={(e) => setWhatChanged(e.target.value)}
-              rows={4}
+              rows={7}
               className="end-session__textarea"
               placeholder="What did you change? (one per line)"
             />
