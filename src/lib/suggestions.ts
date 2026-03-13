@@ -22,7 +22,7 @@ export function generateSuggestions(
       id: "connect-source",
       text: `Enable a data source (${connectedIntegrations.join(", ")}) to pull in issues and tasks.`,
       actionLabel: "Go to Tools",
-      actionRoute: "/tools",
+      actionRoute: "#tools-tab",
     });
   }
 
@@ -65,7 +65,7 @@ export function generateSuggestions(
       id: "add-prompts",
       text: "Add prompts to your library to speed up your AI workflow.",
       actionLabel: "Prompt Library",
-      actionRoute: "/prompts",
+      actionRoute: "#prompts-tab",
     });
   }
 

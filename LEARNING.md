@@ -366,12 +366,11 @@ const tools = new Map<string, Tool>();
 export function registerTool(tool: Tool) { tools.set(tool.name, tool); }
 ```
 
-Each integration (GitHub, Notion, Jira) registers its tools at startup:
+Each integration (GitHub, Notion) registers its tools at startup:
 - `github_list_issues` — fetch open issues
 - `github_analyze_repo` — analyze repository metadata
 - `github_scan_tech_debt` — scan for tech debt indicators
 - `notion_list_pages` — list Notion pages
-- `jira_list_issues` — list Jira tickets
 
 ### Two Types of Tool Use
 

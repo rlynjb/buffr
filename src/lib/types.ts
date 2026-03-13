@@ -172,7 +172,7 @@ export interface WorkItem {
   title: string;
   status: string;
   url: string;
-  source: string; // "github" | "notion" | "jira"
+  source: string; // "github" | "notion"
   labels?: string[];
   timestamp?: string;
 }
@@ -205,7 +205,7 @@ export interface ToolDefinition {
 }
 
 export interface ToolIntegration {
-  id: string; // "github" | "notion" | "jira"
+  id: string; // "github" | "notion"
   name: string;
   description: string;
   status: "connected" | "error" | "not_configured";

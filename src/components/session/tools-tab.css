@@ -1,165 +1,157 @@
-@reference "../globals.css";
+@reference "../../app/globals.css";
 
-.tools-page__back {
-  @apply flex items-center gap-1.5 text-sm text-zinc-500 hover:text-zinc-300 mb-6 transition-colors;
-}
-
-.tools-page__title {
-  @apply text-lg font-semibold text-zinc-100 mb-6;
-}
-
-.tools-page__section-label {
+.tools-tab__section-label {
   @apply text-[11px] text-zinc-500 uppercase tracking-wider font-semibold;
 }
 
-.tools-page__defaults {
+.tools-tab__defaults {
   @apply mb-6 p-4 rounded-xl border border-zinc-800/60 bg-zinc-900/30;
 }
 
-.tools-page__defaults-label {
+.tools-tab__defaults-label {
   @apply text-[11px] text-zinc-500 uppercase tracking-wider font-semibold mb-2;
 }
 
-.tools-page__defaults-row {
+.tools-tab__defaults-row {
   @apply flex gap-3;
 }
 
-.tools-page__defaults-option {
+.tools-tab__defaults-option {
   @apply flex items-center gap-2 cursor-pointer;
 }
 
-.tools-page__defaults-checkbox {
+.tools-tab__defaults-checkbox {
   @apply accent-purple-500 w-3.5 h-3.5;
 }
 
-.tools-page__defaults-source {
+.tools-tab__defaults-source {
   @apply flex items-center gap-1 text-sm capitalize;
 }
 
-.tools-page__defaults-note {
+.tools-tab__defaults-note {
   @apply text-[10px] text-zinc-600;
 }
 
-.tools-page__skeleton {
+.tools-tab__skeleton {
   @apply h-16 rounded-xl border border-zinc-800/60 bg-zinc-900/30 animate-pulse;
 }
 
-.tools-page__integration {
+.tools-tab__integration {
   @apply flex items-center gap-4 px-4 py-3.5 rounded-xl border border-zinc-800/60 bg-zinc-900/30 hover:border-zinc-700/60 transition-colors;
 }
 
-.tools-page__integration-icon {
+.tools-tab__integration-icon {
   @apply w-9 h-9 rounded-lg bg-zinc-800 flex items-center justify-center;
 }
 
-.tools-page__integration-body {
+.tools-tab__integration-body {
   @apply flex-1;
 }
 
-.tools-page__integration-header {
+.tools-tab__integration-header {
   @apply flex items-center gap-2;
 }
 
-.tools-page__integration-name {
+.tools-tab__integration-name {
   @apply text-sm font-medium text-zinc-200;
 }
 
-.tools-page__integration-tool-count {
+.tools-tab__integration-tool-count {
   @apply text-[10px] text-zinc-600;
 }
 
-.tools-page__integration-desc {
+.tools-tab__integration-desc {
   @apply text-xs text-zinc-500;
 }
 
-.tools-page__integration-actions {
+.tools-tab__integration-actions {
   @apply flex gap-2;
 }
 
-.tools-page__integration-remove {
+.tools-tab__integration-remove {
   @apply text-xs text-red-400/60 hover:text-red-400 transition-colors cursor-pointer;
 }
 
-.tools-page__registry-header {
+.tools-tab__registry-header {
   @apply flex items-center justify-between mb-3;
 }
 
-.tools-page__registry-search {
+.tools-tab__registry-search {
   @apply relative;
 }
 
-.tools-page__registry-search-icon {
+.tools-tab__registry-search-icon {
   @apply absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-600;
 }
 
-.tools-page__registry-search-input {
+.tools-tab__registry-search-input {
   @apply pl-8 pr-3 py-1.5 rounded-lg bg-zinc-900/80 border border-zinc-700/50 text-xs text-zinc-300 placeholder:text-zinc-600 focus:outline-none focus:border-purple-500/40 w-48 transition-colors;
 }
 
-.tools-page__registry-filter {
+.tools-tab__registry-filter {
   @apply flex rounded-lg border border-zinc-700/50 overflow-hidden;
 }
 
-.tools-page__registry-filter-btn {
+.tools-tab__registry-filter-btn {
   @apply px-2.5 py-1.5 text-[11px] font-medium transition-colors cursor-pointer;
 }
 
-.tools-page__registry-filter-btn--active {
+.tools-tab__registry-filter-btn--active {
   @apply bg-zinc-700/50 text-zinc-200;
 }
 
-.tools-page__registry-filter-btn--inactive {
+.tools-tab__registry-filter-btn--inactive {
   @apply text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50;
 }
 
-.tools-page__registry {
+.tools-tab__registry {
   @apply rounded-xl border border-zinc-800/60 overflow-hidden;
 }
 
-.tools-page__registry-head {
+.tools-tab__registry-head {
   @apply grid grid-cols-[1fr_auto_auto] gap-x-4 px-4 py-2 bg-zinc-900/50 border-b border-zinc-800/40 text-[10px] text-zinc-600 uppercase tracking-wider font-semibold;
 }
 
-.tools-page__registry-row {
+.tools-tab__registry-row {
   @apply grid grid-cols-[1fr_auto_auto] gap-x-4 items-center px-4 py-2.5 hover:bg-white/[0.015] transition-colors;
 }
 
-.tools-page__registry-tool-name {
+.tools-tab__registry-tool-name {
   @apply text-sm text-zinc-200 font-mono;
 }
 
-.tools-page__registry-tool-desc {
+.tools-tab__registry-tool-desc {
   @apply text-xs text-zinc-500 ml-2;
 }
 
-.tools-page__registry-tool-params {
+.tools-tab__registry-tool-params {
   @apply text-[11px] text-zinc-600 font-mono;
 }
 
-.tools-page__registry-empty {
+.tools-tab__registry-empty {
   @apply px-4 py-6 text-center text-xs text-zinc-600;
 }
 
-.tools-page__section-label--mb {
+.tools-tab__section-label--mb {
   @apply mb-3;
 }
 
-.tools-page__skeleton-list {
+.tools-tab__skeleton-list {
   @apply space-y-3 mb-8;
 }
 
-.tools-page__integration-grid {
+.tools-tab__integration-grid {
   @apply grid gap-3 mb-8;
 }
 
-.tools-page__registry-controls {
+.tools-tab__registry-controls {
   @apply flex items-center gap-2;
 }
 
-.tools-page__registry-filter-source {
+.tools-tab__registry-filter-source {
   @apply flex items-center gap-1 capitalize;
 }
 
-.tools-page__registry-body {
+.tools-tab__registry-body {
   @apply divide-y divide-zinc-800/30;
 }

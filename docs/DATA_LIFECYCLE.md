@@ -50,7 +50,7 @@ No database. All state lives in Netlify Blobs key-value stores.
 | `industry-kb-meta` | `{technology}` | KB metadata (version, seed date) |
 | `settings` | `{key}` | App settings (e.g., default-data-sources) |
 | `action-notes` | `{projectId}` | Per-project action notes |
-| `tool-config` | `{integrationId}` | GitHub/Notion/Jira integration configs |
+| `tool-config` | `{integrationId}` | GitHub/Notion integration configs |
 
 **Storage pattern:** All stores use `getStore(STORE_NAME)` from `@netlify/blobs`.
 
@@ -103,7 +103,6 @@ s.delete(key)                 → remove
 | Integration | Env Vars | Status Logic |
 |-------------|----------|--------------|
 | Notion | `NOTION_TOKEN`, `NOTION_DATABASE_ID` | env set → connected, else check `tool-config` store |
-| Jira | `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, `JIRA_PROJECT_KEY` | same |
 | GitHub | `GITHUB_TOKEN` | same |
 
 ---
@@ -166,7 +165,7 @@ POST /run-prompt ──────────► Load prompt from Blobs
                               ├─► Resolve tools
                               ├─► LLM: prompt chain    ──────► LLM provider
                               │   (may call GitHub/     ──────► github.com
-                              │    Notion/Jira tools)   ──────► notion.so / jira
+                              │    Notion tools)        ──────► notion.so
   ◄──────── Result JSON
 ```
 
@@ -184,10 +183,6 @@ POST /run-prompt ──────────► Load prompt from Blobs
 | `DEFAULT_LLM_PROVIDER` | No (default: anthropic) | Which LLM to use by default |
 | `NOTION_TOKEN` | Optional | Notion integration |
 | `NOTION_DATABASE_ID` | Optional | Notion database for tasks |
-| `JIRA_BASE_URL` | Optional | Jira instance |
-| `JIRA_EMAIL` | Optional | Jira auth |
-| `JIRA_API_TOKEN` | Optional | Jira auth |
-| `JIRA_PROJECT_KEY` | Optional | Default Jira project |
 
 ---
 

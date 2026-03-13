@@ -1,16 +1,15 @@
 "use client";
 
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { IconBack, IconGitHub, IconGlobe, IconSparkle, IconLayers, IconLink, SourceIcon, sourceColor } from "@/components/icons";
 import { PHASE_COLORS } from "@/lib/constants";
-import type { Project, Session, WorkItem, Prompt, TechDebtScan } from "@/lib/types";
+import type { Project, Session, WorkItem, TechDebtScan } from "@/lib/types";
 import { generateNextActions, type NextAction, type ActionContext } from "@/lib/next-actions";
-import { listProjects, listSessions, getActionNotes, saveActionNote, listPrompts, executeToolAction, listIntegrations, updateProject, listManualActions, addManualAction, updateManualAction, deleteManualAction, paraphraseText } from "@/lib/api";
-import { resolvePrompt } from "@/lib/resolve-prompt";
+import { listProjects, listSessions, getActionNotes, saveActionNote, executeToolAction, listIntegrations, updateProject, listManualActions, addManualAction, updateManualAction, deleteManualAction, paraphraseText } from "@/lib/api";
 import { timeAgo } from "@/lib/format";
 import { getToolForCapability } from "@/lib/data-sources";
 import { generateSuggestions, type ProjectSuggestion } from "@/lib/suggestions";
@@ -19,6 +18,7 @@ import { SessionTab } from "./session-tab";
 import { ActionsTab } from "./actions-tab";
 import { PromptsTab } from "./prompts-tab";
 import { TechDebtGrid } from "./tech-debt-grid";
+import { ToolsTab } from "./tools-tab";
 import "./resume-card.css";
 
 interface ResumeCardProps {
@@ -26,7 +26,7 @@ interface ResumeCardProps {
   onEndSession: () => void;
 }
 
-type Tab = "session" | "actions" | "prompts";
+type Tab = "session" | "actions" | "prompts" | "issues" | "tech-debt" | "tools";
 
 export function ResumeCard({ project, onEndSession }: ResumeCardProps) {
   const router = useRouter();
@@ -36,15 +36,24 @@ export function ResumeCard({ project, onEndSession }: ResumeCardProps) {
   const [dataSources] = useState<string[]>(project.dataSources || (project.githubRepo ? ["github"] : []));
   const [actions, setActions] = useState<NextAction[]>([]);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<Tab>("session");
+  const [activeTab, setActiveTab] = useState<Tab>("actions");
   const [notes, setNotes] = useState<Record<string, string>>({});
   const [savingNote, setSavingNote] = useState<string | null>(null);
-  const [prompts, setPrompts] = useState<Prompt[]>([]);
-  const [copiedPrompt, setCopiedPrompt] = useState<string | null>(null);
   const [suggestions, setSuggestions] = useState<ProjectSuggestion[]>([]);
   const [syncing, setSyncing] = useState(false);
   const [currentProject, setCurrentProject] = useState(project);
   const [allProjects, setAllProjects] = useState<Project[]>([]);
+
+  async function handleDismissSuggestion(id: string) {
+    setSuggestions((prev) => prev.filter((s) => s.id !== id));
+    const dismissed = [...(currentProject.dismissedSuggestions || []), id];
+    try {
+      await updateProject(currentProject.id, { dismissedSuggestions: dismissed });
+      setCurrentProject((p) => ({ ...p, dismissedSuggestions: dismissed }));
+    } catch (err) {
+      console.error("Failed to dismiss suggestion:", err);
+    }
+  }
 
   async function handleSync() {
     if (!currentProject.githubRepo || syncing) return;
@@ -108,11 +117,10 @@ export function ResumeCard({ project, onEndSession }: ResumeCardProps) {
 
     async function load() {
       try {
-        const [sessions, items, savedNotes, fetchedPrompts, manualItems] = await Promise.all([
+        const [sessions, items, savedNotes, manualItems] = await Promise.all([
           listSessions(project.id),
           fetchWorkItems(),
           getActionNotes(project.id).catch(() => ({} as Record<string, string>)),
-          listPrompts(project.id).catch(() => [] as Prompt[]),
           listManualActions(project.id).catch(() => []),
         ]);
 
@@ -120,7 +128,6 @@ export function ResumeCard({ project, onEndSession }: ResumeCardProps) {
         setLastSession(last);
         setWorkItems(items);
         setNotes(savedNotes);
-        setPrompts(fetchedPrompts);
 
         const ctx: ActionContext = { project, lastSession: last };
         const generated = generateNextActions(ctx);
@@ -131,7 +138,7 @@ export function ResumeCard({ project, onEndSession }: ResumeCardProps) {
           skipped: false,
           source: "manual" as const,
         }));
-        setActions([...generated, ...manual]);
+        setActions([...manual.reverse(), ...generated]);
 
         listIntegrations()
           .then((integrations) => {
@@ -168,7 +175,7 @@ export function ResumeCard({ project, onEndSession }: ResumeCardProps) {
   async function handleAddManual(text: string) {
     const id = `manual-${Date.now()}`;
     const newAction: NextAction = { id, text, done: false, skipped: false, source: "manual" };
-    setActions((prev) => [...prev, newAction]);
+    setActions((prev) => [newAction, ...prev]);
     try {
       await addManualAction(project.id, id, text);
     } catch (err) {
@@ -187,6 +194,15 @@ export function ResumeCard({ project, onEndSession }: ResumeCardProps) {
     }
   }
 
+  async function handleEditManual(id: string, text: string) {
+    setActions((prev) => prev.map((a) => (a.id === id ? { ...a, text } : a)));
+    try {
+      await updateManualAction(project.id, id, { text });
+    } catch (err) {
+      console.error("Failed to edit manual action:", err);
+    }
+  }
+
   async function handleDeleteManual(id: string) {
     setActions((prev) => prev.filter((a) => a.id !== id));
     try {
@@ -194,13 +210,6 @@ export function ResumeCard({ project, onEndSession }: ResumeCardProps) {
     } catch (err) {
       console.error("Failed to delete manual action:", err);
     }
-  }
-
-  async function handleCopyPrompt(prompt: Prompt) {
-    const resolved = resolvePrompt(prompt.body, { project, lastSession, issues: workItems });
-    await navigator.clipboard.writeText(resolved);
-    setCopiedPrompt(prompt.id);
-    setTimeout(() => setCopiedPrompt(null), 1500);
   }
 
   async function handleNoteSave(actionId: string) {
@@ -215,18 +224,13 @@ export function ResumeCard({ project, onEndSession }: ResumeCardProps) {
     }
   }
 
-  const resolvedBodies = useMemo(() => {
-    const bodies: Record<string, string> = {};
-    for (const prompt of prompts) {
-      bodies[prompt.id] = resolvePrompt(prompt.body, { project, lastSession, issues: workItems });
-    }
-    return bodies;
-  }, [prompts, project, lastSession, workItems]);
-
   const tabs = [
-    { id: "session" as Tab, label: "Last Session" },
     { id: "actions" as Tab, label: "Next Actions" },
+    { id: "session" as Tab, label: "Last Session" },
+    ...(workItems.length > 0 ? [{ id: "issues" as Tab, label: "Open Issues" }] : []),
+    ...(currentProject.techDebt?.summary?.length ? [{ id: "tech-debt" as Tab, label: "Tech Debt" }] : []),
     { id: "prompts" as Tab, label: "Prompts" },
+    { id: "tools" as Tab, label: "Tools" },
   ];
 
   if (loading) {
@@ -322,15 +326,24 @@ export function ResumeCard({ project, onEndSession }: ResumeCardProps) {
             <span className="resume-card__suggestion-icon">&#128161;</span>
             {s.text}
           </span>
-          {s.actionRoute ? (
-            <a href={s.actionRoute} className="resume-card__suggestion-action">
-              {s.actionLabel}
-            </a>
-          ) : (
-            <button onClick={onEndSession} className="resume-card__suggestion-action">
-              {s.actionLabel}
+          <div className="resume-card__suggestion-buttons">
+            {s.actionRoute === "#tools-tab" || s.actionRoute === "#prompts-tab" ? (
+              <button onClick={() => setActiveTab(s.actionRoute === "#tools-tab" ? "tools" : "prompts")} className="resume-card__suggestion-action">
+                {s.actionLabel}
+              </button>
+            ) : s.actionRoute ? (
+              <a href={s.actionRoute} className="resume-card__suggestion-action">
+                {s.actionLabel}
+              </a>
+            ) : (
+              <button onClick={onEndSession} className="resume-card__suggestion-action">
+                {s.actionLabel}
+              </button>
+            )}
+            <button onClick={() => handleDismissSuggestion(s.id)} className="resume-card__suggestion-dismiss">
+              Dismiss
             </button>
-          )}
+          </div>
         </div>
       ))}
 
@@ -360,7 +373,6 @@ export function ResumeCard({ project, onEndSession }: ResumeCardProps) {
       </div>
 
       <div className="resume-card__tab-content">
-        {activeTab === "session" && <SessionTab lastSession={lastSession} />}
         {activeTab === "actions" && (
           <ActionsTab
             actions={actions}
@@ -372,23 +384,12 @@ export function ResumeCard({ project, onEndSession }: ResumeCardProps) {
             onNoteSave={handleNoteSave}
             onAddManual={handleAddManual}
             onDeleteManual={handleDeleteManual}
+            onEditManual={handleEditManual}
             onParaphrase={handleParaphrase}
           />
         )}
-        {activeTab === "prompts" && (
-          <PromptsTab
-            prompts={prompts}
-            resolvedBodies={resolvedBodies}
-            copiedId={copiedPrompt}
-            projectId={project.id}
-            onCopy={handleCopyPrompt}
-          />
-        )}
-      </div>
-
-      {workItems.length > 0 && (
-        <div className="resume-card__issues">
-          <h3 className="resume-card__issues-heading">Open Issues</h3>
+        {activeTab === "session" && <SessionTab lastSession={lastSession} />}
+        {activeTab === "issues" && (
           <div className="resume-card__issues-list">
             {workItems.slice(0, 15).map((item) => (
               <a
@@ -412,15 +413,22 @@ export function ResumeCard({ project, onEndSession }: ResumeCardProps) {
               </a>
             ))}
           </div>
-        </div>
-      )}
-
-      {currentProject.techDebt && currentProject.techDebt.summary.length > 0 && (
-        <TechDebtGrid
-          summary={currentProject.techDebt.summary}
-          scannedAt={currentProject.techDebt.scannedAt}
-        />
-      )}
+        )}
+        {activeTab === "tech-debt" && currentProject.techDebt && (
+          <TechDebtGrid
+            summary={currentProject.techDebt.summary}
+            scannedAt={currentProject.techDebt.scannedAt}
+          />
+        )}
+        {activeTab === "prompts" && (
+          <PromptsTab
+            project={project}
+            lastSession={lastSession}
+            workItems={workItems}
+          />
+        )}
+        {activeTab === "tools" && <ToolsTab />}
+      </div>
     </div>
   );
 }

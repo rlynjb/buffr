@@ -46,14 +46,12 @@ graph TB
         subgraph Tools["Tool Registry"]
             GH["GitHub<br/>13 tools"]
             NO["Notion<br/>4 tools"]
-            JI["Jira<br/>5 tools"]
         end
     end
 
     subgraph External["External Services"]
         GHAPI["GitHub API"]
         NOAPI["Notion API"]
-        JIAPI["Jira API"]
     end
 
     UI --> API
@@ -64,7 +62,6 @@ graph TB
     EP --> Tools
     GH --> GHAPI
     NO --> NOAPI
-    JI --> JIAPI
     ProvCtx -.->|"selected"| API
 ```
 
@@ -520,7 +517,7 @@ This works fine for < 100 items per store. At scale, you'd need a database.
 
 ## Part 5: Tool & Integration System
 
-**Goal**: Understand how external services (GitHub, Notion, Jira) plug in.
+**Goal**: Understand how external services (GitHub, Notion) plug in.
 
 ### Registry Architecture
 
@@ -530,7 +527,6 @@ flowchart TB
         RA["registerAllTools()"]
         RA --> RG["registerGitHubTools()<br/><i>13 tools</i>"]
         RA --> RN["registerNotionTools()<br/><i>4 tools</i>"]
-        RA --> RJ["registerJiraTools()<br/><i>5 tools</i>"]
     end
 
     subgraph Registry["Global Tool Map"]
@@ -538,8 +534,7 @@ flowchart TB
         T2["github_list_commits"]
         T3["github_push_files"]
         T4["notion_list_tasks"]
-        T5["jira_list_issues"]
-        T6["...17 more"]
+        T5["...more"]
     end
 
     subgraph Runtime["Request Time"]
@@ -552,7 +547,6 @@ flowchart TB
     RG --> T2
     RG --> T3
     RN --> T4
-    RJ --> T5
 
     REQ --> EXEC
     EXEC -->|"lookup by name"| T1
@@ -877,7 +871,7 @@ sequenceDiagram
 | All storage modules | `netlify/functions/lib/storage/` |
 | Tool registry | `netlify/functions/lib/tools/registry.ts` |
 | Tool registration | `netlify/functions/lib/tools/register-all.ts` |
-| GitHub/Notion/Jira clients | `netlify/functions/lib/{github,notion,jira}.ts` |
+| GitHub/Notion clients | `netlify/functions/lib/{github,notion}.ts` |
 | API client | `src/lib/api.ts` |
 | Provider context | `src/context/provider-context.tsx` |
 | Response helpers | `netlify/functions/lib/responses.ts` |

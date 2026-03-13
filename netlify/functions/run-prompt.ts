@@ -90,7 +90,6 @@ export default async function handler(req: Request, _context: Context) {
     const toolNames = [
       ...listToolsByIntegration("github"),
       ...listToolsByIntegration("notion"),
-      ...listToolsByIntegration("jira"),
     ].map((t) => t.name);
 
     const result = await chain.invoke({

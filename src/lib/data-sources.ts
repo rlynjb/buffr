@@ -21,12 +21,6 @@ const DATA_SOURCE_TOOLS: Record<string, Record<string, string>> = {
     create_item: "notion_create_task",
     close_item: "notion_update_task",
   },
-  jira: {
-    list_open_items: "jira_list_issues",
-    list_recent_activity: "jira_list_resolved",
-    create_item: "jira_create_issue",
-    close_item: "jira_transition_issue",
-  },
 };
 
 export function getToolForCapability(

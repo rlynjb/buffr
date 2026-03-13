@@ -33,16 +33,6 @@ const BUILTIN_INTEGRATIONS: Record<
       { key: "databaseId", label: "Notion Database ID", secret: false },
     ],
   },
-  jira: {
-    name: "Jira",
-    description: "Issue tracking and project management via Jira",
-    configFields: [
-      { key: "baseUrl", label: "Jira Base URL (e.g. https://yoursite.atlassian.net)", secret: false },
-      { key: "email", label: "Jira Account Email", secret: false },
-      { key: "apiToken", label: "Jira API Token", secret: true },
-      { key: "projectKey", label: "Default Project Key (e.g. PROJ)", secret: false },
-    ],
-  },
 };
 
 // GET — list all integrations with status + tools
@@ -75,10 +65,6 @@ async function handleList(): Promise<Response> {
       if (id === "notion" && !config?.enabled && process.env.NOTION_TOKEN) {
         status = "connected";
       }
-      if (id === "jira" && !config?.enabled && process.env.JIRA_BASE_URL && process.env.JIRA_API_TOKEN) {
-        status = "connected";
-      }
-
       return {
         id,
         name: meta.name,

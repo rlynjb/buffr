@@ -7,10 +7,7 @@ import { ProviderSwitcher } from "./provider-switcher";
 import { IconCmd } from "./icons";
 import "./nav.css";
 
-const pageLabels: Record<string, string> = {
-  "/prompts": "Prompt Library",
-  "/tools": "Tools",
-};
+const pageLabels: Record<string, string> = {};
 
 export function Nav() {
   const pathname = usePathname();

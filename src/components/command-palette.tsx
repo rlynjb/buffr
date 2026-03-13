@@ -9,8 +9,6 @@ import {
   IconSearch,
   IconFolder,
   IconBack,
-  IconPrompt,
-  IconTool,
   IconSparkle,
   IconCheck,
 } from "@/components/icons";
@@ -72,28 +70,6 @@ export function CommandPalette() {
       action: () => {
         setOpen(false);
         router.push("/");
-      },
-    },
-    {
-      id: "tools",
-      label: "Tools & Integrations",
-      description: "Manage connected services",
-      kind: "action",
-      icon: <IconTool size={14} />,
-      action: () => {
-        setOpen(false);
-        router.push("/tools");
-      },
-    },
-    {
-      id: "prompts-lib",
-      label: "Prompt Library",
-      description: "Manage and create prompts",
-      kind: "action",
-      icon: <IconPrompt size={14} />,
-      action: () => {
-        setOpen(false);
-        router.push("/prompts");
       },
     },
     ...[...prompts]

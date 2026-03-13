@@ -6,9 +6,9 @@ import { Button } from "@/components/ui/button";
 import { ProjectCard } from "@/components/dashboard/project-card";
 import { ImportProjectModal } from "@/components/dashboard/import-project-modal";
 import { Modal } from "@/components/ui/modal";
-import { IconFolder, IconPrompt, IconTool } from "@/components/icons";
+import { IconFolder } from "@/components/icons";
 import type { Project } from "@/lib/types";
-import { listProjects, listPrompts, listIntegrations, deleteProject } from "@/lib/api";
+import { listProjects, deleteProject } from "@/lib/api";
 import "./page.css";
 
 export default function Dashboard() {
@@ -17,8 +17,7 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(true);
   const [importOpen, setImportOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<Project | null>(null);
-  const [promptCount, setPromptCount] = useState(0);
-  const [toolCount, setToolCount] = useState(0);
+
 
   useEffect(() => {
     async function load() {
@@ -32,8 +31,6 @@ export default function Dashboard() {
       }
     }
     load();
-    listPrompts().then((p) => setPromptCount(p.length)).catch(() => {});
-    listIntegrations().then((i) => setToolCount(i.reduce((n, x) => n + x.tools.length, 0))).catch(() => {});
 
     // Listen for command palette "Load Existing" action
     function onOpenImport() { setImportOpen(true); }
@@ -67,24 +64,6 @@ export default function Dashboard() {
         </Button>
       </div>
 
-      <div className="dashboard__quick-nav">
-        <button
-          onClick={() => router.push("/prompts")}
-          className="dashboard__quick-nav-btn"
-        >
-          <IconPrompt size={14} />
-          <span>Prompt Library</span>
-          <span className="dashboard__quick-nav-count">{promptCount}</span>
-        </button>
-        <button
-          onClick={() => router.push("/tools")}
-          className="dashboard__quick-nav-btn"
-        >
-          <IconTool size={14} />
-          <span>Tools</span>
-          <span className="dashboard__quick-nav-count">{toolCount}</span>
-        </button>
-      </div>
 
       {loading ? (
         <div className="dashboard__list">

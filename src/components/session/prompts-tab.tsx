@@ -1,21 +1,30 @@
 "use client";
 
-import { useState, useEffect } from "react";
-import Link from "next/link";
+import { useState, useEffect, useMemo } from "react";
 import { Badge } from "@/components/ui/badge";
-import { IconChevron, IconCopy, IconPlay, IconLoader, IconSparkle, IconCheck, IconLayers } from "@/components/icons";
-import type { Prompt, PromptResponse } from "@/lib/types";
-import { runPrompt, executeToolAction } from "@/lib/api";
+import { Button } from "@/components/ui/button";
+import { Modal } from "@/components/ui/modal";
+import { Input } from "@/components/ui/input";
+import { TextArea } from "@/components/ui/textarea";
+import {
+  IconSearch, IconPlus, IconPrompt, IconEdit, IconCopy, IconTrash,
+  IconChevron, IconPlay, IconLoader, IconSparkle, IconCheck, IconLayers,
+  sourceColor,
+} from "@/components/icons";
+import type { Prompt, PromptResponse, ToolIntegration, Project, Session, WorkItem } from "@/lib/types";
+import {
+  listPrompts, createPrompt, updatePrompt, deletePrompt,
+  listIntegrations, runPrompt, executeToolAction,
+} from "@/lib/api";
+import { resolvePrompt } from "@/lib/resolve-prompt";
 import { useProvider } from "@/context/provider-context";
 import { isReferencePrompt, renderPromptTokens } from "@/lib/prompt-utils";
 import "./prompts-tab.css";
 
 interface PromptsTabProps {
-  prompts: Prompt[];
-  resolvedBodies: Record<string, string>;
-  copiedId: string | null;
-  projectId?: string;
-  onCopy: (prompt: Prompt) => void;
+  project: Project;
+  lastSession: Session | null;
+  workItems: WorkItem[];
 }
 
 const CATEGORIES = [
@@ -186,40 +195,110 @@ function PromptResponseView({
   );
 }
 
-export function PromptsTab({
-  prompts,
-  resolvedBodies,
-  copiedId,
-  projectId,
-  onCopy,
-}: PromptsTabProps) {
+export function PromptsTab({ project, lastSession, workItems }: PromptsTabProps) {
+  const { providers, selected } = useProvider();
+  const hasLLM = providers.length > 0;
+
+  // Data
+  const [prompts, setPrompts] = useState<Prompt[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [integrations, setIntegrations] = useState<ToolIntegration[]>([]);
+
+  // Search + filter
+  const [query, setQuery] = useState("");
+  const [activeCategory, setActiveCategory] = useState<Category>("all");
+
+  // CRUD modal
+  const [modalOpen, setModalOpen] = useState(false);
+  const [editing, setEditing] = useState<Prompt | null>(null);
+  const [title, setTitle] = useState("");
+  const [body, setBody] = useState("");
+  const [tags, setTags] = useState("");
+  const [scope, setScope] = useState<"global" | "project">("global");
+
+  // Run + response
   const [runningId, setRunningId] = useState<string | null>(null);
   const [responses, setResponses] = useState<Record<string, PromptResponse>>({});
   const [expandedId, setExpandedId] = useState<string | null>(null);
-  const [activeCategory, setActiveCategory] = useState<Category>("all");
-  const { providers, selected } = useProvider();
+  const [copiedId, setCopiedId] = useState<string | null>(null);
 
-  const hasLLM = providers.length > 0;
+  useEffect(() => {
+    load();
+    listIntegrations().then(setIntegrations).catch(() => setIntegrations([]));
+  }, []);
 
-  const categoryCounts: Record<Category, number> = { all: prompts.length, setup: 0, dev: 0, session: 0, quality: 0, reference: 0, "from-dev": 0 };
-  for (const p of prompts) {
-    const cat = getPromptCategory(p);
-    categoryCounts[cat]++;
-    if (p.source === "dev") categoryCounts["from-dev"]++;
+  async function load() {
+    try {
+      const data = await listPrompts(project.id);
+      setPrompts(data);
+    } catch (err) {
+      console.error("Failed to load prompts:", err);
+    } finally {
+      setLoading(false);
+    }
   }
 
-  const filtered = activeCategory === "all"
-    ? prompts
-    : activeCategory === "from-dev"
-      ? prompts.filter((p) => p.source === "dev")
-      : prompts.filter((p) => getPromptCategory(p) === activeCategory);
+  const resolvedBodies = useMemo(() => {
+    const bodies: Record<string, string> = {};
+    for (const prompt of prompts) {
+      bodies[prompt.id] = resolvePrompt(prompt.body, { project, lastSession, issues: workItems });
+    }
+    return bodies;
+  }, [prompts, project, lastSession, workItems]);
+
+  // CRUD handlers
+  function openNew() {
+    setEditing(null);
+    setTitle("");
+    setBody("");
+    setTags("");
+    setScope("global");
+    setModalOpen(true);
+  }
+
+  function openEdit(prompt: Prompt) {
+    setEditing(prompt);
+    setTitle(prompt.title);
+    setBody(prompt.body);
+    setTags(prompt.tags.join(", "));
+    setScope(prompt.scope === "global" ? "global" : "project");
+    setModalOpen(true);
+  }
+
+  async function handleSave() {
+    const parsedTags = tags
+      .split(",")
+      .map((t) => t.trim().toLowerCase())
+      .filter(Boolean);
+
+    if (editing) {
+      const updated = await updatePrompt(editing.id, { title, body, tags: parsedTags, scope });
+      setPrompts((prev) => prev.map((p) => (p.id === updated.id ? updated : p)));
+    } else {
+      const created = await createPrompt({ title, body, tags: parsedTags, scope });
+      setPrompts((prev) => [created, ...prev]);
+    }
+    setModalOpen(false);
+  }
+
+  async function handleDelete(id: string) {
+    await deletePrompt(id);
+    setPrompts((prev) => prev.filter((p) => p.id !== id));
+  }
+
+  async function handleCopy(prompt: Prompt) {
+    const resolved = resolvePrompt(prompt.body, { project, lastSession, issues: workItems });
+    await navigator.clipboard.writeText(resolved);
+    setCopiedId(prompt.id);
+    setTimeout(() => setCopiedId(null), 1500);
+  }
 
   async function handleRun(prompt: Prompt, e: React.MouseEvent) {
     e.stopPropagation();
     setExpandedId(prompt.id);
     setRunningId(prompt.id);
     try {
-      const result = await runPrompt(prompt.id, projectId, selected);
+      const result = await runPrompt(prompt.id, project.id, selected);
       setResponses((prev) => ({ ...prev, [prompt.id]: result }));
     } catch (err) {
       console.error("Run prompt failed:", err);
@@ -248,18 +327,54 @@ export function PromptsTab({
     await navigator.clipboard.writeText(context);
   }
 
-  if (prompts.length === 0) {
-    return (
-      <div className="prompts-tab__empty">
-        No prompts yet. Add prompts from the{" "}
-        <Link href="/prompts" className="prompts-tab__empty-link">Prompt Library</Link>{" "}
-        to see them here with project context auto-filled.
-      </div>
-    );
+  // Filtering
+  const categoryCounts: Record<Category, number> = { all: prompts.length, setup: 0, dev: 0, session: 0, quality: 0, reference: 0, "from-dev": 0 };
+  for (const p of prompts) {
+    const cat = getPromptCategory(p);
+    categoryCounts[cat]++;
+    if (p.source === "dev") categoryCounts["from-dev"]++;
   }
+
+  const filtered = prompts
+    .filter((p) => {
+      const matchesQuery = !query ||
+        p.title.toLowerCase().includes(query.toLowerCase()) ||
+        p.body.toLowerCase().includes(query.toLowerCase()) ||
+        p.tags.some((t) => t.toLowerCase().includes(query.toLowerCase()));
+      const matchesCategory = activeCategory === "all"
+        ? true
+        : activeCategory === "from-dev"
+          ? p.source === "dev"
+          : getPromptCategory(p) === activeCategory;
+      return matchesQuery && matchesCategory;
+    })
+    .sort((a, b) => (b.usageCount || 0) - (a.usageCount || 0));
+
+  const allTools = integrations.flatMap((i) =>
+    i.tools.map((t) => ({ name: t.name, integration: i.id }))
+  );
 
   return (
     <div>
+      {/* Header with search + new button */}
+      <div className="prompts-tab__header">
+        <div className="prompts-tab__search">
+          <span className="prompts-tab__search-icon">
+            <IconSearch size={14} />
+          </span>
+          <input
+            type="text"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search prompts..."
+            className="prompts-tab__search-input"
+          />
+        </div>
+        <Button size="sm" onClick={openNew}>
+          <IconPlus size={14} /> New
+        </Button>
+      </div>
+
       {/* Category filter */}
       <div className="prompts-tab__category-filter">
         {CATEGORIES.map((cat) => (
@@ -280,132 +395,256 @@ export function PromptsTab({
         </span>
       </div>
 
-      {/* Accordion list */}
-      <div className="prompts-tab__list">
-        {filtered.map((prompt) => {
-          const isExpanded = expandedId === prompt.id;
-          const response = responses[prompt.id];
-          const isRunning = runningId === prompt.id;
-          const isReference = isReferencePrompt(prompt.body);
-          const hasTools = hasToolTokens(prompt.body);
-          const isRunnable = hasAnyTokens(prompt.body);
+      {/* Prompt list */}
+      {loading ? (
+        <div className="prompts-tab__list">
+          {[1, 2, 3].map((i) => (
+            <div key={i} className="prompts-tab__skeleton" />
+          ))}
+        </div>
+      ) : filtered.length === 0 ? (
+        <div className="prompts-tab__empty">
+          {prompts.length === 0
+            ? "No prompts yet. Add your first prompt to get started."
+            : "No prompts match your search."}
+        </div>
+      ) : (
+        <div className="prompts-tab__list">
+          {filtered.map((prompt) => {
+            const isExpanded = expandedId === prompt.id;
+            const response = responses[prompt.id];
+            const isRunning = runningId === prompt.id;
+            const isReference = isReferencePrompt(prompt.body);
+            const hasTools = hasToolTokens(prompt.body);
+            const isRunnable = hasAnyTokens(prompt.body);
 
-          return (
-            <div
-              key={prompt.id}
-              className={`prompts-tab__prompt ${
-                isExpanded ? "prompts-tab__prompt--expanded" : "prompts-tab__prompt--collapsed"
-              }`}
-            >
-              {/* Header */}
+            return (
               <div
-                role="button"
-                tabIndex={0}
-                onClick={() => setExpandedId(isExpanded ? null : prompt.id)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" || e.key === " ") {
-                    e.preventDefault();
-                    setExpandedId(isExpanded ? null : prompt.id);
-                  }
-                }}
-                className="prompts-tab__prompt-header"
-                aria-expanded={isExpanded}
+                key={prompt.id}
+                className={`prompts-tab__prompt ${
+                  isExpanded ? "prompts-tab__prompt--expanded" : "prompts-tab__prompt--collapsed"
+                }`}
               >
-                <div className="prompts-tab__prompt-info">
-                  <span
-                    className={`prompts-tab__prompt-chevron ${
-                      isExpanded ? "prompts-tab__prompt-chevron--open" : "prompts-tab__prompt-chevron--closed"
-                    }`}
-                  >
-                    <IconChevron size={12} />
-                  </span>
-                  <span className="prompts-tab__prompt-title">{prompt.title}</span>
-                  {prompt.source === "dev" && (
-                    <Badge color="#34d399" small><IconLayers size={10} /> .dev/</Badge>
-                  )}
-                  {prompt.tags.slice(0, 2).map((t) => (
-                    <Badge key={t} color="#555" small>{t}</Badge>
-                  ))}
-                  <span className="prompts-tab__prompt-usage">{prompt.usageCount || 0}×</span>
-                  {prompt.scope === "project" && <Badge color="#60a5fa" small>project</Badge>}
-                </div>
-                <div className="prompts-tab__prompt-actions">
-                  <button
-                    onClick={(e) => { e.stopPropagation(); onCopy(prompt); }}
-                    className="prompts-tab__prompt-btn--copy"
-                  >
-                    <IconCopy size={12} /> {copiedId === prompt.id ? "Copied!" : "Copy"}
-                  </button>
-                  {isRunnable && hasLLM && (
-                    <button
-                      onClick={(e) => handleRun(prompt, e)}
-                      disabled={isRunning}
-                      className="prompts-tab__prompt-btn--run"
+                {/* Header */}
+                <div
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => setExpandedId(isExpanded ? null : prompt.id)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      setExpandedId(isExpanded ? null : prompt.id);
+                    }
+                  }}
+                  className="prompts-tab__prompt-header"
+                  aria-expanded={isExpanded}
+                >
+                  <div className="prompts-tab__prompt-info">
+                    <span
+                      className={`prompts-tab__prompt-chevron ${
+                        isExpanded ? "prompts-tab__prompt-chevron--open" : "prompts-tab__prompt-chevron--closed"
+                      }`}
                     >
-                      {isRunning ? <IconLoader size={12} /> : <IconPlay size={12} />}
-                      {isRunning ? "Running..." : "Run"}
-                    </button>
-                  )}
-                </div>
-              </div>
-
-              {/* Expanded content */}
-              {isExpanded && (
-                <div className="prompts-tab__prompt-expanded">
-                  {/* Body preview */}
-                  <div className="prompts-tab__body-preview">
-                    <div className="prompts-tab__body-header-row">
-                      <div className="prompts-tab__body-header">
-                        {isReference
-                          ? "Reference Prompt"
-                          : hasTools
-                            ? "Template — resolves tools + variables"
-                            : "Template — resolves variables"}
-                      </div>
-                      {prompt.source === "dev" && prompt.devFilename && (
-                        <span className="prompts-tab__dev-sync-badge">
-                          <IconLayers size={10} /> synced with .dev/prompts/{prompt.devFilename}
-                        </span>
-                      )}
-                      {isReference && (
-                        <span className="prompts-tab__body-ref-badge">Copy-paste ready</span>
-                      )}
-                    </div>
-                    <div className="prompts-tab__body-text">
-                      {renderPromptTokens(resolvedBodies[prompt.id] || prompt.body, "prompts-tab__token--tool", "prompts-tab__token--variable")}
-                    </div>
+                      <IconChevron size={12} />
+                    </span>
+                    <span className={isReference ? "prompts-tab__prompt-icon--ref" : "prompts-tab__prompt-icon--dynamic"}>
+                      <IconPrompt size={14} />
+                    </span>
+                    <span className="prompts-tab__prompt-title">{prompt.title}</span>
+                    {prompt.source === "dev" && (
+                      <Badge color="#34d399" small><IconLayers size={10} /> .dev/</Badge>
+                    )}
+                    {isReference && <Badge color="#71717a" small>reference</Badge>}
+                    {prompt.tags.slice(0, 2).map((t) => (
+                      <Badge key={t} color="#555" small>{t}</Badge>
+                    ))}
+                    <span className="prompts-tab__prompt-usage">{prompt.usageCount || 0}×</span>
+                    {prompt.scope === "project" && <Badge color="#60a5fa" small>project</Badge>}
                   </div>
-
-                  {isReference && (
-                    <div className="prompts-tab__ref-actions">
+                  <div className="prompts-tab__prompt-actions">
+                    <button
+                      onClick={(e) => { e.stopPropagation(); openEdit(prompt); }}
+                      className="prompts-tab__prompt-btn--edit"
+                      title="Edit"
+                    >
+                      <IconEdit size={12} />
+                    </button>
+                    <button
+                      onClick={(e) => { e.stopPropagation(); handleCopy(prompt); }}
+                      className="prompts-tab__prompt-btn--copy"
+                    >
+                      <IconCopy size={12} /> {copiedId === prompt.id ? "Copied!" : "Copy"}
+                    </button>
+                    {isRunnable && hasLLM && (
                       <button
-                        onClick={(e) => { e.stopPropagation(); onCopy(prompt); }}
-                        className="prompts-tab__ref-copy-btn"
+                        onClick={(e) => handleRun(prompt, e)}
+                        disabled={isRunning}
+                        className="prompts-tab__prompt-btn--run"
                       >
-                        <IconCopy size={14} /> {copiedId === prompt.id ? "Copied!" : "Copy to Clipboard"}
+                        {isRunning ? <IconLoader size={12} /> : <IconPlay size={12} />}
+                        {isRunning ? "Running..." : "Run"}
                       </button>
-                    </div>
-                  )}
-
-                  {isRunnable && isRunning && (
-                    <div className="prompts-tab__running">
-                      <IconLoader size={14} /> Resolving tools and calling AI...
-                    </div>
-                  )}
-
-                  {isRunnable && response && !isRunning && (
-                    <PromptResponseView
-                      response={response}
-                      promptId={prompt.id}
-                      onCopyForClaudeCode={() => handleCopyForClaudeCode(prompt, response)}
-                    />
-                  )}
+                    )}
+                    <button
+                      onClick={(e) => { e.stopPropagation(); handleDelete(prompt.id); }}
+                      className="prompts-tab__prompt-btn--delete"
+                      title="Delete"
+                    >
+                      <IconTrash size={12} />
+                    </button>
+                  </div>
                 </div>
-              )}
+
+                {/* Expanded content */}
+                {isExpanded && (
+                  <div className="prompts-tab__prompt-expanded">
+                    <div className="prompts-tab__body-preview">
+                      <div className="prompts-tab__body-header-row">
+                        <div className="prompts-tab__body-header">
+                          {isReference
+                            ? "Reference Prompt"
+                            : hasTools
+                              ? "Template — resolves tools + variables"
+                              : "Template — resolves variables"}
+                        </div>
+                        {prompt.source === "dev" && prompt.devFilename && (
+                          <span className="prompts-tab__dev-sync-badge">
+                            <IconLayers size={10} /> synced with .dev/prompts/{prompt.devFilename}
+                          </span>
+                        )}
+                        {isReference && (
+                          <span className="prompts-tab__body-ref-badge">Copy-paste ready</span>
+                        )}
+                      </div>
+                      <div className="prompts-tab__body-text">
+                        {renderPromptTokens(resolvedBodies[prompt.id] || prompt.body, "prompts-tab__token--tool", "prompts-tab__token--variable")}
+                      </div>
+                    </div>
+
+                    {isReference && (
+                      <div className="prompts-tab__ref-actions">
+                        <button
+                          onClick={(e) => { e.stopPropagation(); handleCopy(prompt); }}
+                          className="prompts-tab__ref-copy-btn"
+                        >
+                          <IconCopy size={14} /> {copiedId === prompt.id ? "Copied!" : "Copy to Clipboard"}
+                        </button>
+                      </div>
+                    )}
+
+                    {isRunnable && isRunning && (
+                      <div className="prompts-tab__running">
+                        <IconLoader size={14} /> Resolving tools and calling AI...
+                      </div>
+                    )}
+
+                    {isRunnable && response && !isRunning && (
+                      <PromptResponseView
+                        response={response}
+                        promptId={prompt.id}
+                        onCopyForClaudeCode={() => handleCopyForClaudeCode(prompt, response)}
+                      />
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Available Tools Reference */}
+      {allTools.length > 0 && (
+        <div className="prompts-tab__tools-ref">
+          <div className="prompts-tab__tools-ref-label">
+            Available Tools
+          </div>
+          <p className="prompts-tab__tools-ref-desc">
+            Use <code className="prompts-tab__token--tool">{"{{tool:name}}"}</code> in your prompt body to inject tool output.
+          </p>
+          <div className="prompts-tab__tools-ref-list">
+            {allTools.map((t) => (
+              <span
+                key={t.name}
+                className="prompts-tab__tools-ref-item"
+                style={{ color: sourceColor(t.integration) }}
+              >
+                {t.name}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* New/Edit Modal */}
+      <Modal
+        open={modalOpen}
+        onClose={() => setModalOpen(false)}
+        title={editing ? "Edit Prompt" : "New Prompt"}
+      >
+        <div className="prompts-tab__modal-form">
+          <Input
+            label="Title"
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            placeholder="Debug React render loop"
+          />
+          <div>
+            <TextArea
+              label="Prompt Body"
+              value={body}
+              onChange={(e) => setBody(e.target.value)}
+              placeholder={"You are debugging a {{project.stack}} app...\n\nOpen items:\n{{tool:github_list_issues}}"}
+              rows={6}
+              mono
+            />
+            <p className="prompts-tab__modal-hint">
+              Variables: {"{{project.name}}"}, {"{{project.stack}}"}, {"{{lastSession.goal}}"}. Tools: {"{{tool:name}}"}.
+            </p>
+          </div>
+          <Input
+            label="Tags (comma-separated)"
+            value={tags}
+            onChange={(e) => setTags(e.target.value)}
+            placeholder="debug, react, performance"
+          />
+          <div>
+            <label className="prompts-tab__scope-label">
+              Scope
+            </label>
+            <div className="prompts-tab__scope-toggle">
+              <button
+                onClick={() => setScope("global")}
+                className={`prompts-tab__scope-btn ${
+                  scope === "global"
+                    ? "prompts-tab__scope-btn--active"
+                    : "prompts-tab__scope-btn--inactive"
+                }`}
+              >
+                Global
+              </button>
+              <button
+                onClick={() => setScope("project")}
+                className={`prompts-tab__scope-btn ${
+                  scope === "project"
+                    ? "prompts-tab__scope-btn--active"
+                    : "prompts-tab__scope-btn--inactive"
+                }`}
+              >
+                Project
+              </button>
             </div>
-          );
-        })}
-      </div>
+          </div>
+          <div className="prompts-tab__modal-footer">
+            <Button variant="ghost" onClick={() => setModalOpen(false)}>
+              Cancel
+            </Button>
+            <Button onClick={handleSave} disabled={!title.trim() || !body.trim()}>
+              {editing ? "Update" : "Save Prompt"}
+            </Button>
+          </div>
+        </div>
+      </Modal>
     </div>
   );
 }

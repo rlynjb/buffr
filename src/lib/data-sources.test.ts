@@ -11,10 +11,6 @@ describe("getToolForCapability", () => {
     expect(getToolForCapability("notion", "create_item")).toBe("notion_create_task");
   });
 
-  it("returns the correct tool for jira close_item", () => {
-    expect(getToolForCapability("jira", "close_item")).toBe("jira_transition_issue");
-  });
-
   it("returns null for unknown integration", () => {
     expect(getToolForCapability("slack", "list_open_items")).toBeNull();
   });
@@ -29,8 +25,7 @@ describe("getIntegrationsWithCapability", () => {
     const result = getIntegrationsWithCapability("list_open_items");
     expect(result).toContain("github");
     expect(result).toContain("notion");
-    expect(result).toContain("jira");
-    expect(result).toHaveLength(3);
+    expect(result).toHaveLength(2);
   });
 
   it("returns only github for list_commits", () => {

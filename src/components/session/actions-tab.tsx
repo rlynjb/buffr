@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useRef, useEffect } from "react";
 import { SourceIcon, sourceColor, IconSparkle, IconPlus, IconTrash } from "@/components/icons";
 import type { NextAction } from "@/lib/next-actions";
 import "./actions-tab.css";
@@ -15,6 +15,7 @@ interface ActionsTabProps {
   onNoteSave: (id: string) => void;
   onAddManual?: (text: string) => void;
   onDeleteManual?: (id: string) => void;
+  onEditManual?: (id: string, text: string) => void;
   onParaphrase?: (text: string) => Promise<string | null>;
 }
 
@@ -30,11 +31,34 @@ export function ActionsTab({
   onNoteSave,
   onAddManual,
   onDeleteManual,
+  onEditManual,
   onParaphrase,
 }: ActionsTabProps) {
   const [noteOpen, setNoteOpen] = useState<string | null>(null);
   const [newItem, setNewItem] = useState("");
   const [paraphrasing, setParaphrasing] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editText, setEditText] = useState("");
+  const editRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (editingId && editRef.current) editRef.current.focus();
+  }, [editingId]);
+
+  function startEditing(action: NextAction) {
+    if (action.source !== "manual" || !onEditManual) return;
+    setEditingId(action.id);
+    setEditText(action.text);
+  }
+
+  function commitEdit() {
+    if (!editingId || !onEditManual) return;
+    const trimmed = editText.trim();
+    if (trimmed && trimmed !== actions.find((a) => a.id === editingId)?.text) {
+      onEditManual(editingId, trimmed);
+    }
+    setEditingId(null);
+  }
 
   function handleAdd() {
     const text = newItem.trim();
@@ -56,6 +80,39 @@ export function ActionsTab({
 
   return (
     <div>
+      {onAddManual && (
+        <div className="actions-tab__add">
+          <textarea
+            rows={3}
+            value={newItem}
+            onChange={(e) => setNewItem(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleAdd(); } }}
+            placeholder="Add a task..."
+            className="actions-tab__add-input"
+          />
+          <div className="actions-tab__add-actions">
+            {onParaphrase && (
+              <button
+                onClick={handleParaphrase}
+                disabled={paraphrasing || !newItem.trim()}
+                className="actions-tab__add-paraphrase"
+              >
+                <IconSparkle size={10} /> {paraphrasing ? "..." : "Rewrite"}
+              </button>
+            )}
+            <button
+              onClick={handleAdd}
+              disabled={!newItem.trim()}
+              className="actions-tab__add-btn"
+            >
+              <IconPlus size={12} />
+            </button>
+          </div>
+        </div>
+      )}
+
+      <hr className="actions-tab__divider" />
+
       <p className="actions-tab__purpose">
         Track what to work on next. Items carry over between sessions and feed into End Session summaries.
       </p>
@@ -84,13 +141,28 @@ export function ActionsTab({
               <span style={{ color: sourceColor(action.source || "ai") }}>
                 <SourceIcon source={action.source || "ai"} size={14} />
               </span>
-              <span
-                className={`actions-tab__action-text ${
-                  action.done ? "actions-tab__action-text--done" : ""
-                }`}
-              >
-                {action.text}
-              </span>
+              {editingId === action.id ? (
+                <input
+                  ref={editRef}
+                  value={editText}
+                  onChange={(e) => setEditText(e.target.value)}
+                  onBlur={commitEdit}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") { e.preventDefault(); commitEdit(); }
+                    if (e.key === "Escape") setEditingId(null);
+                  }}
+                  className="actions-tab__action-edit"
+                />
+              ) : (
+                <span
+                  className={`actions-tab__action-text ${
+                    action.done ? "actions-tab__action-text--done" : ""
+                  } ${action.source === "manual" && onEditManual ? "actions-tab__action-text--editable" : ""}`}
+                  onClick={() => !action.done && !action.skipped && startEditing(action)}
+                >
+                  {action.text}
+                </span>
+              )}
               {!action.done && !action.skipped && (
                 <div className="actions-tab__action-buttons">
                   {action.source !== "manual" && action.source !== "ai" && (
@@ -150,37 +222,6 @@ export function ActionsTab({
           </div>
         ))}
       </div>
-
-      {onAddManual && (
-        <div className="actions-tab__add">
-          <textarea
-            rows={3}
-            value={newItem}
-            onChange={(e) => setNewItem(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleAdd(); } }}
-            placeholder="Add a task..."
-            className="actions-tab__add-input"
-          />
-          <div className="actions-tab__add-actions">
-            {onParaphrase && (
-              <button
-                onClick={handleParaphrase}
-                disabled={paraphrasing || !newItem.trim()}
-                className="actions-tab__add-paraphrase"
-              >
-                <IconSparkle size={10} /> {paraphrasing ? "..." : "Rewrite"}
-              </button>
-            )}
-            <button
-              onClick={handleAdd}
-              disabled={!newItem.trim()}
-              className="actions-tab__add-btn"
-            >
-              <IconPlus size={12} />
-            </button>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

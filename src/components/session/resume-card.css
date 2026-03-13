@@ -18,7 +18,7 @@
 }
 
 .resume-card__project-nav-item--active {
-  @apply text-zinc-100 bg-zinc-800/60;
+  @apply text-zinc-100 bg-zinc-800/60 border-b-2 border-purple-500;
 }
 
 .resume-card__header {
@@ -53,8 +53,16 @@
   @apply flex items-center justify-between px-3 py-2 mb-2 rounded-lg border border-amber-500/20 bg-amber-500/5 text-amber-200 text-[13px];
 }
 
+.resume-card__suggestion-buttons {
+  @apply flex items-center gap-1.5;
+}
+
 .resume-card__suggestion-action {
   @apply px-2.5 py-0.5 rounded bg-amber-500/20 hover:bg-amber-500/30 text-amber-100 text-xs font-medium transition-colors cursor-pointer;
+}
+
+.resume-card__suggestion-dismiss {
+  @apply px-2 py-0.5 rounded text-xs text-amber-300/50 hover:text-amber-200 hover:bg-amber-500/10 transition-colors cursor-pointer;
 }
 
 
@@ -97,6 +105,8 @@
 
 .resume-card__tab-content {
   animation: fadeIn 0.15s ease-out;
+  padding-top: 1em;
+  padding-bottom: 1em;
 }
 
 .resume-card__name-row {

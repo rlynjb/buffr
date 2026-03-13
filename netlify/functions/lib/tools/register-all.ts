@@ -1,6 +1,5 @@
 import { registerGitHubTools } from "./github";
 import { registerNotionTools } from "./notion";
-import { registerJiraTools } from "./jira";
 
 let registered = false;
 
@@ -9,6 +8,5 @@ export function registerAllTools() {
   if (registered) return;
   registerGitHubTools();
   registerNotionTools();
-  registerJiraTools();
   registered = true;
 }

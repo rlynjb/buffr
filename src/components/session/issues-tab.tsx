@@ -24,7 +24,7 @@ export function IssuesTab({ items, hasDataSource, project }: IssuesTabProps) {
       {/* Filter row */}
       <div className="issues-tab__filter-row">
         <span className="issues-tab__filter-label">Filter</span>
-        {["github", "jira", "notion"].map((s) => (
+        {["github", "notion"].map((s) => (
           <label key={s} className="issues-tab__filter-source">
             <input
               type="checkbox"
@@ -57,7 +57,7 @@ export function IssuesTab({ items, hasDataSource, project }: IssuesTabProps) {
         <div className="issues-tab__empty">
           {hasDataSource
             ? "No open items from enabled sources."
-            : "Connect a data source like GitHub, Notion, or Jira to pull in issues and tasks."}
+            : "Connect a data source like GitHub or Notion to pull in issues and tasks."}
         </div>
       ) : (
         <div className="issues-tab__list">

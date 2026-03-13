@@ -19,7 +19,7 @@ The secondary function is session tracking: developers record what they worked o
 | Backend | Netlify Functions (serverless Node.js) |
 | Storage | Netlify Blobs (key-value store) |
 | AI/LLM | LangChain.js (Anthropic, OpenAI, Google, Ollama) |
-| Integrations | GitHub API, Notion API, Jira API |
+| Integrations | GitHub API, Notion API |
 | Auth | JWT (jose), HTTP Basic login |
 | Deployment | Netlify (CDN + Functions + Blobs) |
 
@@ -65,8 +65,7 @@ buffr/
 │   │   ├── storage/            # Netlify Blobs persistence layer
 │   │   ├── tools/              # Integration tool registry
 │   │   ├── github.ts           # GitHub API client
-│   │   ├── notion.ts           # Notion API client
-│   │   └── jira.ts             # Jira API client
+│   │   └── notion.ts           # Notion API client
 │   ├── generate-dev.ts         # .dev/ folder generation endpoint
 │   ├── session-ai.ts           # Session AI (summarize, intent, suggest)
 │   ├── run-prompt.ts           # Prompt execution with variable resolution
@@ -114,7 +113,6 @@ graph TB
         subgraph Integrations ["External Integrations"]
             GitHub["GitHub API"]
             Notion["Notion API"]
-            Jira["Jira API"]
         end
     end
 
@@ -214,7 +212,7 @@ interface Project {
   phase: "idea" | "mvp" | "polish" | "deploy";
   githubRepo?: string;           // "owner/repo"
   netlifySiteUrl?: string;
-  dataSources?: string[];         // ["github", "notion", "jira"]
+  dataSources?: string[];         // ["github", "notion"]
   devFolder?: {
     status: "generated";
     lastScan: string;
@@ -327,7 +325,6 @@ DEFAULT_LLM_PROVIDER=anthropic
 # Integrations
 GITHUB_TOKEN=ghp_...
 NOTION_TOKEN=ntn_...
-JIRA_BASE_URL=https://yoursite.atlassian.net
 
 # Auth
 AUTH_USERNAME=...

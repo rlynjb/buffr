@@ -13,14 +13,6 @@ export function IconGitHub({ className, size = 14 }: IconProps) {
   );
 }
 
-export function IconJira({ className, size = 14 }: IconProps) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" className={className}>
-      <path d="M11.53 2c0 2.4 1.97 4.35 4.35 4.35h1.78v1.7c0 2.4 1.94 4.34 4.34 4.35V2.84a.84.84 0 00-.84-.84H11.53zM6.77 6.8a4.362 4.362 0 004.34 4.34h1.78v1.72a4.362 4.362 0 004.34 4.34V7.63a.84.84 0 00-.83-.83H6.77zM2 11.6c0 2.4 1.95 4.34 4.34 4.34h1.78v1.72c0 2.4 1.95 4.34 4.35 4.34v-9.57a.84.84 0 00-.84-.83H2z" />
-    </svg>
-  );
-}
-
 export function IconNotion({ className, size = 14 }: IconProps) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" className={className}>
@@ -252,7 +244,6 @@ export function SourceIcon({ source, size = 14, className }: { source: string; s
   const style = { color };
   switch (source) {
     case "github": return <span style={style}><IconGitHub size={size} className={className} /></span>;
-    case "jira": return <span style={style}><IconJira size={size} className={className} /></span>;
     case "notion": return <span style={style}><IconNotion size={size} className={className} /></span>;
     case "ai": return <span style={style}><IconSparkle size={size} className={className} /></span>;
     case "manual": return <span style={style}><IconCheck size={size} className={className} /></span>;
