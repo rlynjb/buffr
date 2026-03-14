@@ -1,77 +1,198 @@
-# Learning Guide: Buffr AI & Backend System Design
+# AI & Backend Learning Guide for Frontend Developers
 
-A hands-on walkthrough of how Buffr's AI and backend systems work — from request to response.
+A practical guide for frontend developers building AI-powered products. Uses the buffr codebase as a hands-on lab — every concept maps to real code you can read and modify.
 
----
-
-## Prerequisites
-
-Before reading, familiarize yourself with:
-- [LangChain.js Concepts](https://js.langchain.com/docs/concepts/) — Runnables, chat models, messages
-- Netlify Functions — serverless handlers that receive `Request` and return `Response`
-- Netlify Blobs — key-value storage with `getStore`, `setJSON`, `get`, `list`
+**Goal**: Go from "I build UIs" to "I ship AI products end-to-end."
 
 ---
 
-## System Overview
+## Table of Contents
 
-```mermaid
-graph TB
-    subgraph Frontend["Frontend · Next.js App Router"]
-        UI["React Components"]
-        ProvCtx["Provider Context<br/><i>selected: openai</i>"]
-        API["api.ts<br/><i>HTTP client</i>"]
-    end
+1. [The AI Product Landscape](#part-1-the-ai-product-landscape)
+2. [Backend Fundamentals](#part-2-backend-fundamentals)
+3. [The Provider System](#part-3-the-provider-system)
+4. [Chain Architecture](#part-4-chain-architecture)
+5. [Serverless API Design](#part-5-serverless-api-design)
+6. [Storage & Data Persistence](#part-6-storage--data-persistence)
+7. [Tool & Integration Systems](#part-7-tool--integration-systems)
+8. [Frontend ↔ Backend Communication](#part-8-frontend--backend-communication)
+9. [ML & Computer Vision (MediaPipe)](#part-9-ml--computer-vision-mediapipe)
+10. [AI Product Engineer Roadmap](#part-10-ai-product-engineer-roadmap)
+11. [Quick Reference](#quick-reference)
 
-    subgraph Backend["Backend · Netlify Functions"]
-        EP["Endpoints<br/>session-ai · projects · sessions<br/>tools · prompts · generate-dev"]
+---
 
-        subgraph AI["AI Layer · LangChain.js"]
-            Factory["getLLM(provider)"]
-            Chains["Chains"]
-            Factory -->|"anthropic"| Claude["Claude<br/>Sonnet 4"]
-            Factory -->|"openai"| GPT["GPT-4o"]
-            Factory -->|"google"| Gemini["Gemini 1.5"]
-            Factory -->|"ollama"| Ollama["Llama 3"]
-        end
+## Part 1: The AI Product Landscape
 
-        subgraph Storage["Storage · Netlify Blobs"]
-            Projects[("projects")]
-            Sessions[("sessions")]
-            Scans[("scan-results")]
-            Prompts[("prompts")]
-            Manual[("manual-actions")]
-        end
+Before diving into code, understand the three categories of AI products and where you're building:
 
-        subgraph Tools["Tool Registry"]
-            GH["GitHub<br/>13 tools"]
-            NO["Notion<br/>4 tools"]
-        end
-    end
-
-    subgraph External["External Services"]
-        GHAPI["GitHub API"]
-        NOAPI["Notion API"]
-    end
-
-    UI --> API
-    API -->|"POST /session-ai?summarize<br/>{ provider: 'openai' }"| EP
-    EP --> Chains
-    Chains --> Factory
-    EP --> Storage
-    EP --> Tools
-    GH --> GHAPI
-    NO --> NOAPI
-    ProvCtx -.->|"selected"| API
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     AI PRODUCT SPECTRUM                         │
+├───────────────────┬────────────────────┬────────────────────────┤
+│   LLM Products    │  ML Products       │  Hybrid Products       │
+│   (Language)      │  (Perception)      │  (Both)                │
+├───────────────────┼────────────────────┼────────────────────────┤
+│ Chatbots          │ Image classifiers  │ Video captioning       │
+│ Code assistants   │ Object detection   │ Multimodal search      │
+│ Content gen       │ Pose estimation    │ Document understanding │
+│ Summarizers       │ Speech-to-text     │ AR assistants          │
+│ ★ buffr ★         │ Recommendation     │                        │
+├───────────────────┼────────────────────┼────────────────────────┤
+│ Key abstraction:  │ Key abstraction:   │ Combines both.         │
+│ Prompt → LLM      │ Input → Model      │ Pipeline orchestration │
+│ → Structured Out  │ → Prediction       │ is the hard part.      │
+├───────────────────┼────────────────────┼────────────────────────┤
+│ Tools:            │ Tools:             │                        │
+│ LangChain         │ MediaPipe          │                        │
+│ LlamaIndex        │ TensorFlow.js      │                        │
+│ Vercel AI SDK     │ ONNX Runtime       │                        │
+│ OpenAI SDK        │ Hugging Face       │                        │
+└───────────────────┴────────────────────┴────────────────────────┘
 ```
 
+**buffr is an LLM product.** It sends structured prompts to language models and parses their responses. No neural networks are trained. No images are classified. Understanding this distinction is critical — most AI product engineering today is LLM orchestration, not ML training.
+
+### Language-Agnostic Concepts You Need
+
+These concepts apply regardless of whether you use Python, TypeScript, Go, or Rust:
+
+| Concept | What It Is | Where in buffr |
+|---------|-----------|----------------|
+| **Prompt Engineering** | Crafting instructions for LLMs to get reliable output | `lib/ai/prompts/session-prompts.ts` |
+| **Chain / Pipeline** | Sequence of transformations: input → process → output | `lib/ai/chains/*.ts` |
+| **Provider Abstraction** | Single interface over multiple LLM vendors | `lib/ai/provider.ts` |
+| **Tool Use / Function Calling** | LLM suggests actions; your code executes them | `lib/tools/registry.ts` |
+| **Structured Output** | Forcing LLMs to return parseable JSON, not free text | Every chain's parse step |
+| **Context Window** | Token limit for prompt + response combined | Why prompts are kept concise |
+| **Temperature** | Randomness dial: 0 = deterministic, 1 = creative | `getLLM()` sets 0.7 |
+| **RAG** | Retrieval-Augmented Generation — feed real data into prompts | `{{tool:...}}` token resolution |
+| **Embedding** | Convert text to vectors for similarity search | Not in buffr (future) |
+| **Fine-tuning** | Train a model on your specific data | Not in buffr (uses prompting) |
+
 ---
 
-## Part 1: The Provider System
+## Part 2: Backend Fundamentals
 
-**Goal**: Understand how Buffr supports multiple LLM providers behind a single interface.
+As a frontend developer, these are the backend concepts you need to internalize:
 
-### Architecture
+### Mental Model: Client-Server
+
+```
+┌──────────────┐         HTTP          ┌──────────────┐
+│   Browser     │  ──────────────────► │   Server      │
+│   (React)     │  POST /session-ai    │   (Node.js)   │
+│               │  { provider, items } │               │
+│               │ ◄────────────────── │               │
+│               │  { goal, bullets }   │               │
+└──────────────┘                       └──────────────┘
+     You own                              You also
+     this side                            own this side
+```
+
+### Serverless vs Traditional Servers
+
+```
+TRADITIONAL SERVER                    SERVERLESS (buffr uses this)
+┌──────────────────┐                  ┌──────────────────┐
+│ Always running   │                  │ Starts on demand │
+│ You manage:      │                  │ Platform manages:│
+│  - OS updates    │                  │  - Scaling       │
+│  - Memory        │                  │  - OS/runtime    │
+│  - Port binding  │                  │  - Concurrency   │
+│  - Process mgmt  │                  │                  │
+│ Cost: fixed/mo   │                  │ Cost: per request│
+│                  │                  │                  │
+│ Express, Fastify │                  │ Netlify Functions│
+│ Django, Rails    │                  │ AWS Lambda       │
+│ Go net/http      │                  │ Cloudflare Wrkrs │
+└──────────────────┘                  └──────────────────┘
+```
+
+**Key serverless constraint:** No persistent in-memory state. Each function invocation is isolated. That's why buffr uses Netlify Blobs (external storage) instead of in-memory variables.
+
+### The Request-Response Cycle
+
+Every backend interaction follows this pattern, regardless of language:
+
+```
+1. REQUEST arrives     →  HTTP method + path + headers + body
+2. ROUTE to handler    →  Match method + path to a function
+3. VALIDATE input      →  Check required fields, types
+4. PROCESS             →  Business logic, DB queries, AI calls
+5. RESPOND             →  Status code + JSON body
+```
+
+**In buffr** (`netlify/functions/session-ai.ts`):
+
+```
+1. POST /session-ai?summarize    →  Request arrives
+2. if (url.has("summarize"))     →  Route by query param
+3. if (!body.activityItems)      →  Validate input
+4. chain.invoke(items, llm)      →  Process with AI
+5. return json({ goal, bullets}) →  Respond with JSON
+```
+
+### HTTP Methods — The Universal API Language
+
+```
+GET       Read data            "Give me the projects list"
+POST      Create / Execute     "Create a session" or "Run this AI chain"
+PUT       Update               "Update this project's phase"
+DELETE    Remove               "Delete this project"
+```
+
+buffr uses **query parameters** to sub-route within a single endpoint:
+
+```
+POST /session-ai?summarize    →  Summarize activity
+POST /session-ai?intent       →  Detect intent
+POST /session-ai?suggest      →  Suggest next step
+POST /session-ai?paraphrase   →  Rewrite text
+```
+
+**Why?** All four share the same provider resolution and error handling. One file, less duplication.
+
+---
+
+## Part 3: The Provider System
+
+**Concept**: Abstract away the specific AI vendor so your app works with any LLM.
+
+This is the single most important pattern in AI product engineering. If you hardcode `openai.chat.completions.create()`, you're locked in. If you abstract it, you can swap providers without touching business logic.
+
+### How It Works (Language-Agnostic)
+
+```
+┌─────────────┐     ┌──────────────┐     ┌─────────────┐
+│ Your Code   │────►│ Abstraction  │────►│ Provider    │
+│             │     │ Layer        │     │             │
+│ "summarize  │     │ getLLM()     │     │ Claude API  │
+│  these items│     │              │     │ OpenAI API  │
+│  for me"    │     │ Returns a    │     │ Gemini API  │
+│             │     │ standard     │     │ Ollama      │
+│             │     │ interface    │     │             │
+└─────────────┘     └──────────────┘     └─────────────┘
+```
+
+### Provider Factory in buffr
+
+```mermaid
+flowchart TD
+    A["getLLM(provider)"] --> B{provider?}
+    B -->|"anthropic"| C["ANTHROPIC_API_KEY?"]
+    B -->|"openai"| D["OPENAI_API_KEY?"]
+    B -->|"google"| E["GOOGLE_API_KEY?"]
+    B -->|"ollama"| F["OLLAMA_BASE_URL?"]
+    B -->|unknown| G["throw Error"]
+
+    C -->|exists| C1["ChatAnthropic<br/>claude-sonnet-4"]
+    D -->|exists| D1["ChatOpenAI<br/>gpt-4o"]
+    E -->|exists| E1["ChatGoogleGenerativeAI<br/>gemini-1.5-pro"]
+    F -->|exists| F1["ChatOllama<br/>llama3"]
+```
+
+### Frontend → Backend Provider Threading
 
 ```mermaid
 sequenceDiagram
@@ -96,206 +217,184 @@ sequenceDiagram
     BE-->>API: { goal, bullets }
 ```
 
-### Provider Factory Decision Tree
+### Read These Files
 
-```mermaid
-flowchart TD
-    A["getLLM(provider)"] --> B{provider?}
-    B -->|"anthropic"| C["Check ANTHROPIC_API_KEY"]
-    B -->|"openai"| D["Check OPENAI_API_KEY"]
-    B -->|"google"| E["Check GOOGLE_API_KEY"]
-    B -->|"ollama"| F["Check OLLAMA_BASE_URL"]
-    B -->|unknown| G["throw Error"]
+1. **`netlify/functions/lib/ai/provider.ts`** — The factory. Note `require()` over `import` — prevents loading unused SDKs at build time.
+2. **`src/context/provider-context.tsx`** — React Context that persists selection to localStorage.
+3. **`src/components/provider-switcher.tsx`** — The UI control.
 
-    C -->|exists| C1["require(@langchain/anthropic)<br/>ChatAnthropic<br/>model: claude-sonnet-4"]
-    C -->|missing| C2["throw 'ANTHROPIC_API_KEY<br/>not configured'"]
+### Industry Equivalents
 
-    D -->|exists| D1["require(@langchain/openai)<br/>ChatOpenAI<br/>model: gpt-4o"]
-    D -->|missing| D2["throw 'OPENAI_API_KEY<br/>not configured'"]
+| Language | Provider Abstraction |
+|----------|---------------------|
+| TypeScript | LangChain.js `BaseChatModel` (buffr uses this) |
+| TypeScript | Vercel AI SDK `generateText()` |
+| Python | LangChain `BaseLLM` |
+| Python | LiteLLM `completion()` |
+| Go | go-openai + interface pattern |
+| Rust | llm crate |
 
-    E -->|exists| E1["require(@langchain/google-genai)<br/>ChatGoogleGenerativeAI<br/>model: gemini-1.5-pro"]
-    E -->|missing| E2["throw 'GOOGLE_API_KEY<br/>not configured'"]
+### Exercise
 
-    F -->|exists| F1["require(@langchain/ollama)<br/>ChatOllama<br/>model: llama3"]
-    F -->|missing| F2["throw 'OLLAMA_BASE_URL<br/>not configured'"]
-```
-
-### Read these files in order:
-
-1. **`netlify/functions/lib/ai/provider.ts`** — The core factory
-
-   `getLLM(provider)` returns a LangChain `BaseChatModel`. Every AI feature calls this one function.
-
-   Key observations:
-   - Uses `require()` instead of `import` — why? Netlify bundles all code at build time. Dynamic require prevents loading unused SDKs (e.g., don't load `@langchain/anthropic` when using OpenAI).
-   - Temperature is 0.7 everywhere — this is a balance between creativity (higher) and consistency (lower).
-   - `getAvailableProviders()` checks env vars to determine what's available at runtime.
-
-2. **`netlify/functions/providers.ts`** — The endpoint
-
-   Simple GET endpoint that calls `getAvailableProviders()` and `getDefaultProvider()`. The frontend calls this on app load.
-
-3. **`src/context/provider-context.tsx`** — Frontend state
-
-   React Context that manages which provider is selected. Persists to localStorage so it survives page refreshes. Every component that calls an AI endpoint reads `selected` from this context.
-
-4. **`src/components/provider-switcher.tsx`** — The UI control
-
-### Exercise: Trace a provider switch
-
-Follow what happens when a user changes from "Claude" to "GPT" in the UI:
-1. `ProviderSwitcher` → `setSelected("openai")`
-2. Context updates → localStorage stores `"openai"`
-3. Next AI call → `body: { ..., provider: "openai" }` sent to backend
-4. Backend → `getLLM("openai")` → `ChatOpenAI` instance
-5. Chain runs with GPT-4o instead of Claude
+Trace a provider switch: change from Claude to GPT in the UI and follow the data through Context → localStorage → API call → backend factory → LLM invocation.
 
 ---
 
-## Part 2: Chain Architecture
+## Part 4: Chain Architecture
 
-**Goal**: Understand how LangChain chains transform data through AI.
+**Concept**: A chain is a sequence of transformations that turns raw input into structured output through an LLM.
 
-### The Chain Pipeline
+This is the core pattern of LLM products. Every AI feature is a chain:
 
-```mermaid
-flowchart LR
-    A["Typed Input<br/><i>{ text, goal, ... }</i>"] --> B["Build Messages<br/><i>SystemMessage<br/>+ HumanMessage</i>"]
-    B --> C["llm.invoke()"]
-    C --> D["Raw String<br/><i>response.content</i>"]
-    D --> E["Parse Output<br/><i>stripCodeBlock()<br/>JSON.parse()</i>"]
-    E --> F["Typed Output<br/><i>{ intent, bullets, ... }</i>"]
-
-    style A fill:#1e1b4b,stroke:#7c3aed,color:#e9d5ff
-    style C fill:#14532d,stroke:#22c55e,color:#bbf7d0
-    style F fill:#1e1b4b,stroke:#7c3aed,color:#e9d5ff
+```
+┌────────────┐    ┌───────────────┐    ┌──────────┐    ┌─────────────┐    ┌────────────┐
+│ Typed Input│───►│ Build Messages│───►│ LLM Call │───►│ Parse Output│───►│Typed Output│
+│ { items[] }│    │ System + Human│    │ invoke() │    │ JSON.parse()│    │ { goal,    │
+│            │    │ messages      │    │          │    │ stripCode() │    │   bullets }│
+└────────────┘    └───────────────┘    └──────────┘    └─────────────┘    └────────────┘
 ```
 
 ### Chain Complexity Ladder
 
-```mermaid
-graph LR
-    subgraph L1["Level 1 · Simple"]
-        P["Paraphraser<br/>text → text"]
-    end
-    subgraph L2["Level 2 · JSON Output"]
-        I["Intent Detector<br/>3 fields → { intent }"]
-    end
-    subgraph L3["Level 3 · Array I/O"]
-        S["Summarizer<br/>items[] → { goal, bullets[] }"]
-    end
-    subgraph L4["Level 4 · Optional Context"]
-        N["Next Step Suggester<br/>5 optional fields → step"]
-    end
-    subgraph L5["Level 5 · Flexible Schema"]
-        PR["Prompt Runner<br/>any → text + actions? + artifact?"]
-    end
-    subgraph L6["Level 6 · Full Generation"]
-        D["Dev Scanner<br/>project → stack[] + patterns[]<br/>+ gaps[] + files[]"]
-    end
+buffr's chains increase in complexity. Read them in this order:
 
-    L1 --> L2 --> L3 --> L4 --> L5 --> L6
+```
+Level 1: Paraphraser         text → text              (simplest)
+Level 2: Intent Detector     3 fields → { intent }    (JSON output)
+Level 3: Session Summarizer  items[] → { goal, [] }   (array I/O)
+Level 4: Next Step Suggester 5 fields → step          (optional context)
+Level 5: Prompt Runner       any → text + actions?     (flexible schema)
+Level 6: Dev Scanner         project → full analysis   (most complex)
 ```
 
-### Read in order (simplest to most complex):
-
-#### Chain 1: Paraphraser (simplest)
+### Level 1: Paraphraser (Start Here)
 
 **File**: `netlify/functions/lib/ai/chains/paraphraser.ts`
 
-This is the simplest chain — no structured output, no prompt builder. Read it to understand the skeleton:
+The skeleton of every chain:
 
 ```
-{ text: string } → SystemMessage + HumanMessage → LLM → { text: string }
+Input: { text: string }
+  ↓
+Messages: [
+  SystemMessage("You rewrite task descriptions..."),
+  HumanMessage(text)
+]
+  ↓
+LLM.invoke(messages)
+  ↓
+Output: { text: response.content }
 ```
 
-Note how it handles the LLM response: `response.content` could be a string or an array (multi-modal responses). The chain normalizes this.
+No JSON parsing needed. Read this to understand the bare minimum.
 
-#### Chain 2: Intent Detector
-
-**File**: `netlify/functions/lib/ai/chains/intent-detector.ts`
-
-Adds **structured JSON output parsing**:
-
-```
-{ goal, whatChanged, phase } → prompt → LLM → JSON parse → { intent: string }
-```
-
-Look at:
-- `buildIntentPrompt()` in `prompts/session-prompts.ts` — how context is formatted
-- The system prompt asks for JSON: `Return valid JSON: { "intent": "..." }`
-- `parseIntentOutput()` uses `stripCodeBlock()` to handle LLMs that wrap JSON in markdown fences
-
-#### Chain 3: Session Summarizer
+### Level 3: Session Summarizer (Key Pattern)
 
 **File**: `netlify/functions/lib/ai/chains/session-summarizer.ts`
 
-Same pattern but with **array input** and **multi-field output**:
+Introduces **structured output parsing**:
 
 ```
-{ activityItems[] } → format as bullet list → LLM → { goal, bullets[] }
+Input: { activityItems: [{ title, source, timestamp }] }
+  ↓
+Format as bullet list:
+  "- [github] Fixed login bug"
+  "- [tasks] Updated docs"
+  ↓
+LLM returns JSON string:
+  '{ "goal": "...", "bullets": ["...", "..."] }'
+  ↓
+stripCodeBlock() removes markdown fences (```json ... ```)
+  ↓
+JSON.parse() → typed output
 ```
 
-The prompt in `session-prompts.ts` shows how to format lists:
-```
-- [github] Fixed login bug
-- [tasks] Updated docs
-- [github] Closed issue #42
-```
+**Why `stripCodeBlock()`?** LLMs frequently wrap JSON in markdown code fences even when told not to. This is a universal problem — every AI product needs output sanitization.
 
-#### Chain 4: Next Step Suggester
-
-**File**: `netlify/functions/lib/ai/chains/next-step-suggester.ts`
-
-Adds **optional context fields**:
-
-```
-{ goal, whatChanged, currentNextStep?, projectContext?, openItems? }
-```
-
-The prompt builder conditionally appends sections. This is how you enrich AI context without bloating every request.
-
-#### Chain 5: Prompt Runner (most complex)
+### Level 5: Prompt Runner (Advanced)
 
 **File**: `netlify/functions/lib/ai/chains/prompt-chain.ts`
 
-This chain handles **arbitrary user prompts** with optional tool awareness. The output schema is flexible:
+Handles arbitrary user prompts with tool awareness:
 
 ```typescript
-{
+Output: {
   text: string,              // Always present
-  suggestedActions?: Array,  // Optional tool calls
-  artifact?: boolean         // Flag for long-form output
+  suggestedActions?: Array,  // Optional tool calls the LLM recommends
+  artifact?: boolean         // Flag for long-form generated content
 }
 ```
 
-Note the graceful fallback: if the LLM doesn't return JSON, the raw text becomes the `text` field.
+Graceful fallback: if LLM doesn't return valid JSON, the raw text becomes the `text` field. Never crash on bad LLM output.
 
-#### Chain 6: Dev Scanner (largest)
+### Level 6: Dev Scanner (Full System)
 
 **File**: `netlify/functions/lib/ai/chains/dev-scanner.ts`
 
-The most complex chain. Generates an entire `.dev/` folder structure:
+The most complex chain — generates an entire `.dev/` folder:
 
 ```
-project metadata + industry standards → LLM → stack[], patterns[], gaps[], files[]
+project metadata + industry standards
+  ↓
+LLM analyzes against best practices
+  ↓
+{
+  detectedStack: ["Next.js", "TypeScript", ...],
+  detectedPatterns: [{ name, category, confidence }],
+  gapAnalysis: [{ practice, status: "aligned"|"partial"|"gap" }],
+  generatedFiles: [{ path, content, ownership }]
+}
 ```
 
-### Exercise: Build a new chain
+### Key Concept: Prompt Engineering Patterns
+
+These patterns work across all languages and frameworks:
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                  PROMPT STRUCTURE                        │
+├─────────────────────────────────────────────────────────┤
+│                                                         │
+│  SYSTEM MESSAGE (sets behavior)                         │
+│  ┌─────────────────────────────────────────────────┐   │
+│  │ You are a senior software architect.             │   │
+│  │ You analyze codebases against industry standards.│   │
+│  │ Return valid JSON matching this schema: {...}    │   │
+│  └─────────────────────────────────────────────────┘   │
+│                                                         │
+│  HUMAN MESSAGE (provides data)                          │
+│  ┌─────────────────────────────────────────────────┐   │
+│  │ Project: buffr                                   │   │
+│  │ Stack: Next.js, TypeScript, Tailwind             │   │
+│  │ Recent activity:                                 │   │
+│  │ - Fixed login bug                                │   │
+│  │ - Updated docs                                   │   │
+│  └─────────────────────────────────────────────────┘   │
+│                                                         │
+│  RULES FOR RELIABLE OUTPUT:                             │
+│  1. Always specify output format in system message      │
+│  2. Give examples of expected output                    │
+│  3. Use constraints: "Return ONLY JSON, no markdown"    │
+│  4. Handle failures gracefully (stripCodeBlock, etc.)   │
+│                                                         │
+└─────────────────────────────────────────────────────────┘
+```
+
+### Exercise
 
 Create a hypothetical "code review" chain:
-1. Define input: `{ code: string, language: string }`
-2. Define output: `{ issues: Array<{ line: number, severity: string, message: string }> }`
-3. Write a system prompt
-4. Implement using the `RunnableSequence.from([...])` pattern
+1. Input: `{ code: string, language: string }`
+2. Output: `{ issues: [{ line, severity, message }] }`
+3. Write a system prompt that ensures consistent JSON output
+4. Add `stripCodeBlock()` + `JSON.parse()` with a fallback
 
 ---
 
-## Part 3: Serverless API Design
-
-**Goal**: Understand how endpoints are structured and how they route requests.
+## Part 5: Serverless API Design
 
 ### Endpoint Routing Model
+
+buffr uses a flat routing strategy — one file per resource, query params for sub-operations:
 
 ```mermaid
 flowchart TD
@@ -313,141 +412,117 @@ flowchart TD
     QP -->|"?summarize"| CHAIN_S["Summarizer Chain"]
     QP -->|"?intent"| CHAIN_I["Intent Chain"]
     QP -->|"?suggest"| CHAIN_N["Suggest Chain"]
-    QP -->|"?paraphrase"| CHAIN_P["Paraphrase Chain"]
     QP -->|"?execute"| EXEC["Execute Tool"]
 
     QU -->|"?id=xxx"| UPDATE["Update"]
-    QU -->|"?integrationId"| CONFIG["Save Config"]
-
     QD -->|yes| DELETE["Delete"]
-    QD -->|no| ERR["400 Error"]
-
-    style CHAIN_S fill:#14532d,stroke:#22c55e,color:#bbf7d0
-    style CHAIN_I fill:#14532d,stroke:#22c55e,color:#bbf7d0
-    style CHAIN_N fill:#14532d,stroke:#22c55e,color:#bbf7d0
-    style CHAIN_P fill:#14532d,stroke:#22c55e,color:#bbf7d0
 ```
 
 ### The Handler Pattern
 
-**File**: `netlify/functions/session-ai.ts`
-
-This is the best file to study because it shows Buffr's routing strategy:
+Every serverless function follows this structure:
 
 ```typescript
-export default async function handler(req: Request, _context: Context) {
-  // 1. Method guard
+// Language-agnostic pattern:
+// 1. Guard on method
+// 2. Parse input
+// 3. Route by params
+// 4. Execute logic
+// 5. Return response
+
+export default async function handler(req: Request) {
   if (req.method !== "POST") return errorResponse("Method not allowed", 405);
 
-  // 2. Parse body + resolve provider
   const body = await req.json();
   const llm = getLLM(body.provider || "anthropic");
 
-  // 3. Route by query parameter
   if (url.searchParams.has("summarize")) { /* chain A */ }
   if (url.searchParams.has("intent"))    { /* chain B */ }
-  if (url.searchParams.has("suggest"))   { /* chain C */ }
-  if (url.searchParams.has("paraphrase")){ /* chain D */ }
 
-  // 4. Fallback
   return errorResponse("Unknown action", 400);
 }
 ```
 
-**Why query params instead of separate files?** All four operations share:
-- The same LLM provider resolution
-- The same error handling
-- The same auth context (when added)
-
-Grouping them avoids duplicating boilerplate across four separate files.
-
-### CRUD Pattern
-
-**File**: `netlify/functions/projects.ts`
-
-Standard REST CRUD with method + query param routing:
-
-```
-GET  /projects              → list all
-GET  /projects?id=xxx       → get one
-POST /projects              → create
-PUT  /projects?id=xxx       → update
-DELETE /projects?id=xxx     → delete
-```
-
-### Error Classification
+### Error Handling Strategy
 
 ```mermaid
 flowchart LR
     ERR["catch(err)"] --> CL["classifyError(err)"]
-    CL --> M{error message<br/>contains?}
+    CL --> M{error message?}
 
-    M -->|"credit balance"| S402["402<br/>Payment Required"]
-    M -->|"api key"| S401["401<br/>Unauthorized"]
-    M -->|"rate limit"| S429["429<br/>Too Many Requests"]
-    M -->|"name conflict"| S422["422<br/>Unprocessable"]
-    M -->|"config missing"| S400["400<br/>Bad Request"]
-    M -->|other| S500["500<br/>Internal Error"]
-
-    S402 --> R["errorResponse(msg, status)"]
-    S401 --> R
-    S429 --> R
-    S422 --> R
-    S400 --> R
-    S500 --> R
+    M -->|"credit balance"| S402["402 Payment Required"]
+    M -->|"api key"| S401["401 Unauthorized"]
+    M -->|"rate limit"| S429["429 Too Many Requests"]
+    M -->|other| S500["500 Internal Error"]
 ```
 
 **File**: `netlify/functions/lib/responses.ts`
 
-Three helpers used everywhere:
+The `classifyError()` function maps LLM-specific errors to standard HTTP status codes. This is essential — LLM APIs throw cryptic errors that you need to translate into something the frontend can handle.
 
-```typescript
-json(data, 200)              // Success response
-errorResponse("msg", 400)    // Error response
-classifyError(err)           // Map LLM errors → HTTP status codes
-```
+### Industry Alternatives
+
+| Pattern | buffr | Alternative |
+|---------|-------|-------------|
+| Routing | Query params in one file | Separate files per operation |
+| Runtime | Netlify Functions | AWS Lambda, Cloudflare Workers, Vercel |
+| Framework | Raw Request/Response | Express, Hono, tRPC |
+| Validation | Manual `if (!field)` | Zod, Yup, Joi |
 
 ---
 
-## Part 4: Storage Layer
+## Part 6: Storage & Data Persistence
 
-**Goal**: Understand how data persists with Netlify Blobs.
+### Key-Value vs Relational
+
+```
+KEY-VALUE (buffr uses this)          RELATIONAL (traditional)
+┌──────────────────────┐             ┌──────────────────────┐
+│ key → value          │             │ Tables with rows     │
+│ "proj-1" → { json }  │             │ SELECT * FROM        │
+│ "proj-2" → { json }  │             │   projects           │
+│                      │             │   WHERE phase = 'mvp'│
+│ No queries           │             │                      │
+│ No indexes           │             │ Full SQL queries     │
+│ No joins             │             │ Indexes for speed    │
+│                      │             │ Joins across tables  │
+│ Simple, fast reads   │             │ Complex, flexible    │
+│ Bad for filtering    │             │ Better at scale      │
+└──────────────────────┘             └──────────────────────┘
+```
 
 ### Storage Architecture
 
 ```mermaid
 graph TB
-    subgraph Functions["Netlify Functions"]
+    subgraph Functions["API Layer"]
         P["projects.ts"]
         S["sessions.ts"]
-        T["tools.ts"]
         MA["manual-actions.ts"]
     end
 
-    subgraph StorageLib["lib/storage/"]
-        PS["projects.ts<br/><i>getProject · listProjects<br/>saveProject · deleteProject</i>"]
-        SS["sessions.ts<br/><i>getSession · listByProject<br/>saveSession · deleteSession</i>"]
-        TC["tool-config.ts<br/><i>listToolConfigs<br/>saveToolConfig</i>"]
-        MAS["manual-actions.ts<br/><i>getManualActions<br/>saveManualActions</i>"]
+    subgraph StorageLib["lib/storage/ (Data Access Layer)"]
+        PS["projects.ts"]
+        SS["sessions.ts"]
+        MAS["manual-actions.ts"]
     end
 
-    subgraph Blobs["Netlify Blobs"]
-        B1[("projects<br/><i>key: project.id</i>")]
-        B2[("sessions<br/><i>key: session.id</i>")]
-        B3[("tool-config<br/><i>key: integrationId</i>")]
-        B4[("manual-actions<br/><i>key: projectId</i>")]
-        B5[("prompt-library<br/><i>key: prompt.id</i>")]
-        B6[("scan-results<br/><i>key: scan.id</i>")]
-        B7[("industry-kb<br/><i>key: technology</i>")]
+    subgraph Blobs["Netlify Blobs (Persistence)"]
+        B1[("projects")]
+        B2[("sessions")]
+        B3[("tool-config")]
+        B4[("manual-actions")]
+        B5[("prompt-library")]
+        B6[("scan-results")]
+        B7[("industry-kb")]
     end
 
     P --> PS --> B1
     S --> SS --> B2
-    T --> TC --> B3
     MA --> MAS --> B4
 ```
 
-### Query Pattern (No Index)
+### The "List + Filter" Pattern (Important Limitation)
 
 ```mermaid
 sequenceDiagram
@@ -457,7 +532,7 @@ sequenceDiagram
 
     Fn->>Lib: listSessionsByProject("proj-1")
     Lib->>Blob: store.list()
-    Blob-->>Lib: { blobs: [key1, key2, key3, ...] }
+    Blob-->>Lib: all keys [key1, key2, key3, ...]
 
     par Fetch all values
         Lib->>Blob: store.get(key1)
@@ -465,68 +540,44 @@ sequenceDiagram
         Lib->>Blob: store.get(key3)
     end
 
-    Blob-->>Lib: [session1, session2, session3, ...]
-    Note over Lib: Filter in memory:<br/>sessions.filter(s => s.projectId === "proj-1")
-    Lib-->>Fn: filtered & sorted sessions
+    Note over Lib: Filter IN MEMORY:<br/>sessions.filter(s => s.projectId === "proj-1")
+    Lib-->>Fn: filtered results
 ```
 
-### The Blob Pattern
+**Why this matters**: Blobs have no query engine. Every "query" fetches ALL records and filters in JavaScript. This works for < 100 items. At scale, you'd use a database (Postgres, MongoDB, DynamoDB).
 
-**File**: `netlify/functions/lib/storage/projects.ts`
+### Race Conditions in Concurrent Writes
 
-Every storage module follows the same structure:
+A real bug encountered in buffr — deleting multiple items concurrently:
 
-```typescript
-import { getStore } from "@netlify/blobs";
+```
+BROKEN (Promise.all):
+  Delete A: read [A,B,C] → remove A → write [B,C]
+  Delete B: read [A,B,C] → remove B → write [A,C]   ← concurrent, stale read!
+  Result: A is back! Last write wins.
 
-const STORE_NAME = "projects";
-
-// Get one
-async function getProject(id: string): Promise<Project | null> {
-  const store = getStore(STORE_NAME);
-  return store.get(id, { type: "json" });
-}
-
-// List all (with in-memory filter)
-async function listProjects(): Promise<Project[]> {
-  const store = getStore(STORE_NAME);
-  const { blobs } = await store.list();
-  const all = await Promise.all(
-    blobs.map(b => store.get(b.key, { type: "json" }))
-  );
-  return all.filter(Boolean).sort(/* by date */);
-}
-
-// Save
-async function saveProject(project: Project): Promise<void> {
-  const store = getStore(STORE_NAME);
-  await store.setJSON(project.id, project);
-}
+FIXED (sequential):
+  Delete A: read [A,B,C] → remove A → write [B,C]
+  Delete B: read [B,C]   → remove B → write [C]     ← reads fresh state
+  Result: Both deleted correctly.
 ```
 
-### Key Limitation
-
-Blobs have no indexes or query support. Every "query" is:
-1. `store.list()` — get all keys
-2. `Promise.all(...)` — fetch all values
-3. `.filter(...)` — filter in memory
-
-This works fine for < 100 items per store. At scale, you'd need a database.
+This is a **TOCTOU (Time-of-Check-Time-of-Use)** bug — a universal concurrency problem in any language. buffr fixes it by running blob mutations sequentially, not in parallel.
 
 ---
 
-## Part 5: Tool & Integration System
+## Part 7: Tool & Integration Systems
 
-**Goal**: Understand how external services (GitHub, Notion) plug in.
+**Concept**: A tool registry lets your AI suggest actions that your code executes. This is the foundation of "agentic" AI.
 
-### Registry Architecture
+### The Registry Pattern
 
 ```mermaid
 flowchart TB
     subgraph Boot["Cold Start"]
         RA["registerAllTools()"]
-        RA --> RG["registerGitHubTools()<br/><i>13 tools</i>"]
-        RA --> RN["registerNotionTools()<br/><i>4 tools</i>"]
+        RA --> RG["registerGitHubTools()<br/>10 tools"]
+        RA --> RN["registerNotionTools()<br/>4 tools"]
     end
 
     subgraph Registry["Global Tool Map"]
@@ -534,27 +585,20 @@ flowchart TB
         T2["github_list_commits"]
         T3["github_push_files"]
         T4["notion_list_tasks"]
-        T5["...more"]
     end
 
     subgraph Runtime["Request Time"]
-        REQ["POST /tools?execute<br/>{ tool: 'github_list_issues',<br/>  input: { owner, repo } }"]
+        REQ["POST /tools?execute<br/>{ tool, input }"]
         EXEC["executeTool()"]
-        API["GitHub API"]
+        API["External API"]
     end
 
-    RG --> T1
-    RG --> T2
-    RG --> T3
+    RG --> T1 & T2 & T3
     RN --> T4
-
     REQ --> EXEC
     EXEC -->|"lookup by name"| T1
-    T1 -->|"tool.execute(input)"| API
-    API -->|"{ items: [...] }"| EXEC
+    T1 -->|"execute(input)"| API
 ```
-
-**File**: `netlify/functions/lib/tools/registry.ts`
 
 Each tool is a self-contained unit:
 
@@ -563,90 +607,68 @@ registerTool({
   name: "github_list_issues",
   integrationId: "github",
   description: "List repository issues",
-  inputSchema: { owner: "string", repo: "string", state: "string" },
+  inputSchema: { /* JSON Schema */ },
   execute: async (input) => {
     // Call GitHub API, return structured data
   }
 });
 ```
 
-### Tool Token Resolution in Prompts
+### Tool Resolution in Prompts (RAG Pattern)
+
+buffr implements a form of **Retrieval-Augmented Generation (RAG)** — prompts can embed live data from external services:
 
 ```mermaid
 flowchart LR
-    A["Prompt Template<br/><code>Review: ﹛﹛tool:github_list_issues﹜﹜</code>"] --> B["Regex Match<br/><i>find all ﹛﹛tool:...﹜﹜</i>"]
-    B --> C["Execute Tool<br/><i>registry.executeTool()</i>"]
+    A["Prompt Template<br/>Review: {{tool:github_list_issues}}"] --> B["Regex Match<br/>find {{tool:...}}"]
+    B --> C["Execute Tool<br/>registry.executeTool()"]
     C --> D["GitHub API"]
     D --> E["JSON Result"]
-    E --> F["Resolved Prompt<br/><code>Review: [{title: 'Bug #1'}, ...]</code>"]
+    E --> F["Resolved Prompt<br/>Review: [{title: 'Bug'}]"]
     F --> G["LLM.invoke()"]
-
-    style A fill:#1e1b4b,stroke:#7c3aed,color:#e9d5ff
-    style F fill:#14532d,stroke:#22c55e,color:#bbf7d0
 ```
 
-**File**: `netlify/functions/lib/resolve-tools.ts`
-
-Prompts can embed live data using `{{tool:name}}` tokens:
+**Two-stage resolution** (important security pattern):
 
 ```
-Review these issues: {{tool:github_list_issues:{"owner":"me","repo":"app"}}}
+Stage 1 (sync):   {{project.name}} → "buffr"             Simple string replacement
+Stage 2 (async):  {{tool:github_list_issues}} → [...]     Server-side API call
 ```
 
-Resolution happens server-side before the prompt hits the LLM:
-1. Regex finds all `{{tool:...}}` tokens
-2. Each tool is executed via the registry
-3. Results replace the tokens as JSON strings
-4. The fully-resolved prompt goes to the LLM
+Stage 2 runs **server-side only**. This keeps API keys secure — the browser never sees GitHub tokens.
 
-This keeps API keys on the server and lets prompts reference real-time data.
+### Industry Context: MCP (Model Context Protocol)
 
-### Exercise: Add a new integration
+buffr's tool registry is conceptually similar to **Anthropic's MCP** — a standard for connecting AI models to external data sources. The pattern is:
+
+```
+1. Define capabilities (tools with schemas)
+2. Register at startup
+3. LLM discovers available tools
+4. LLM suggests tool calls
+5. Your code executes them
+6. Results feed back to LLM
+```
+
+This is the same pattern whether you call it "tool use", "function calling" (OpenAI), or "MCP" (Anthropic). The concept is language-agnostic.
+
+### Exercise: Add an Integration
 
 To add a new integration (e.g., Linear):
-1. Create `lib/linear.ts` — API client with fetch calls
-2. Create `lib/tools/linear.ts` — register tools (`linear_list_issues`, etc.)
-3. Add `registerLinearTools()` call in `lib/tools/register-all.ts`
-4. Add config fields in `tools.ts` endpoint
-5. Frontend gets the new integration automatically via `GET /tools`
+1. Create `lib/linear.ts` — API client
+2. Create `lib/tools/linear.ts` — register tools
+3. Add `registerLinearTools()` in `register-all.ts`
+4. The frontend picks it up automatically via `GET /tools`
 
 ---
 
-## Part 6: Frontend → Backend Communication
+## Part 8: Frontend ↔ Backend Communication
 
-**Goal**: Understand how the frontend calls all these backend services.
-
-### Request Flow
-
-```mermaid
-flowchart LR
-    subgraph Frontend
-        C["Component<br/><i>useProvider()</i>"]
-        A["api.ts<br/><i>request()</i>"]
-    end
-
-    subgraph Network
-        F["fetch()<br/><i>/.netlify/functions/...</i>"]
-    end
-
-    subgraph Backend
-        H["Handler<br/><i>req: Request</i>"]
-        R["Response<br/><i>json() / errorResponse()</i>"]
-    end
-
-    C -->|"summarizeSession(items, selected)"| A
-    A -->|"POST, JSON body"| F
-    F --> H
-    H --> R
-    R -->|"{ goal, bullets }"| A
-    A -->|"typed result"| C
-```
-
-### API Client
+### The API Client Pattern
 
 **File**: `src/lib/api.ts`
 
-Single `request<T>()` function wraps all fetch calls:
+One function wraps all HTTP calls:
 
 ```typescript
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
@@ -659,34 +681,25 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
 }
 ```
 
-Every API method is a thin wrapper:
+Every endpoint gets a typed wrapper:
 
 ```typescript
 export const summarizeSession = (items, provider?) =>
-  request("/session-ai?summarize", {
+  request<{ goal: string; bullets: string[] }>("/session-ai?summarize", {
     method: "POST",
     body: JSON.stringify({ activityItems: items, provider }),
   });
 ```
 
-### Pattern: Provider Threading
+### Provider Threading Pattern
 
-```mermaid
-flowchart LR
-    PC["ProviderContext<br/><i>selected: 'openai'</i>"]
-    -->|"useProvider()"| COMP["Component"]
-    -->|"selected"| API["api.summarizeSession(<br/>items, 'openai')"]
-    -->|"body.provider"| BE["Backend<br/>getLLM('openai')"]
-    -->|ChatOpenAI| LLM["GPT-4o"]
+```
+ProviderContext → useProvider() → Component → api.call(data, selected) → Backend → getLLM(provider)
 ```
 
-Components that call AI endpoints pull `selected` from `useProvider()` and pass it explicitly.
+Components pull `selected` from context and pass it explicitly to every AI API call. The backend resolves it to a concrete LLM instance.
 
----
-
-## Part 7: Putting It All Together
-
-### Complete Request Lifecycle: "End Session"
+### Complete Lifecycle: "End Session"
 
 ```mermaid
 sequenceDiagram
@@ -695,184 +708,332 @@ sequenceDiagram
     participant SA as session-ai
     participant TL as tools
     participant MA as manual-actions
-    participant SS as sessions
     participant GH as GitHub API
     participant LLM as LLM Provider
-    participant DB as Netlify Blobs
+    participant DB as Blobs
 
     U->>FE: Click "End Session"
 
-    Note over FE,DB: Phase 1 — Fetch Activity (parallel)
+    Note over FE,DB: Phase 1 — Fetch Activity
     par
-        FE->>TL: POST /tools?execute<br/>{tool: "github_list_issues"}
-        TL->>GH: GET /repos/owner/repo/issues
-        GH-->>TL: issues[]
-        TL-->>FE: { ok: true, result: items }
+        FE->>TL: POST /tools?execute {github_list_issues}
+        TL->>GH: GET /repos/.../issues
+        GH-->>FE: issues[]
     and
-        FE->>MA: GET /manual-actions?projectId=xxx
-        MA->>DB: get("manual-actions", projectId)
-        DB-->>MA: ManualAction[]
-        MA-->>FE: done actions
+        FE->>MA: GET /manual-actions
+        MA->>DB: get actions
+        DB-->>FE: done tasks
     end
 
     Note over FE,DB: Phase 2 — AI Summary
-    FE->>SA: POST /session-ai?summarize<br/>{activityItems, provider: "openai"}
+    FE->>SA: POST /session-ai?summarize
     SA->>LLM: SystemMessage + HumanMessage
-    LLM-->>SA: JSON string
-    SA-->>FE: { goal, bullets[] }
+    LLM-->>FE: { goal, bullets[] }
 
-    Note over FE,DB: Phase 3 — User Review
-    FE-->>U: Pre-filled form<br/>(goal, whatChanged, nextStep)
+    Note over FE,DB: Phase 3 — User Review & Save
     U->>FE: Edit & submit
-
-    Note over FE,DB: Phase 4 — Save + AI Enrich (parallel)
-    FE->>SS: POST /sessions<br/>{projectId, goal, whatChanged, ...}
-    SS->>DB: setJSON("sessions", session)
-
-    par
-        FE->>SA: POST /session-ai?intent
-        SA->>LLM: detect intent
-        LLM-->>SA: { intent }
-    and
-        FE->>SA: POST /session-ai?suggest
-        SA->>LLM: suggest next step
-        LLM-->>SA: { suggestedNextStep }
-    end
-
-    SA-->>FE: AI fields
-
-    Note over FE,DB: Phase 5 — Cleanup
-    FE->>MA: DELETE done manual actions
-    MA->>DB: remove done items
+    FE->>DB: Create session + cleanup done actions
 ```
 
-### Complete Request Lifecycle: "Generate .dev/ Folder"
-
-```mermaid
-sequenceDiagram
-    actor U as User
-    participant FE as Frontend
-    participant GD as generate-dev
-    participant GH as GitHub API
-    participant KB as Industry KB
-    participant LLM as LLM Provider
-    participant DB as Netlify Blobs
-
-    U->>FE: Click "Scan Repository"
-    FE->>GD: POST /generate-dev<br/>{projectId, provider}
-
-    Note over GD,GH: Gather repo data
-    GD->>GH: GET repo metadata
-    GD->>GH: GET file tree
-    GD->>GH: GET package.json, tsconfig, etc.
-    GH-->>GD: repo data
-
-    Note over GD,KB: Load standards
-    GD->>KB: getStandard("react")<br/>getStandard("typescript")
-    KB->>DB: get("industry-kb", tech)
-    DB-->>GD: IndustryStandard[]
-
-    Note over GD,LLM: AI Analysis (largest LLM call)
-    GD->>LLM: Dev Scanner Chain<br/>project + repo + standards
-    LLM-->>GD: { detectedStack, patterns,<br/>gapAnalysis, generatedFiles }
-
-    Note over GD,DB: Persist
-    GD->>DB: setJSON("scan-results", result)
-    GD-->>FE: ScanResult
-
-    Note over FE,GH: Optional push
-    U->>FE: Click "Push to GitHub"
-    FE->>GD: POST /generate-dev?push
-    GD->>GH: Create blobs → tree → commit
-    GH-->>GD: { sha }
-    GD-->>FE: success
-```
-
-### Prompt Execution with Tool Resolution
+### Complete Lifecycle: Prompt Execution with Tool Resolution
 
 ```mermaid
 sequenceDiagram
     actor U as User
     participant FE as Frontend
     participant RP as run-prompt
-    participant DB as Netlify Blobs
+    participant DB as Blobs
     participant TR as Tool Registry
     participant GH as GitHub API
-    participant LLM as LLM Provider
+    participant LLM as LLM
 
-    U->>FE: Select prompt & click "Run"
-    FE->>RP: POST /run-prompt<br/>{promptId, projectId, provider}
+    U->>FE: Click "Run" on prompt
+    FE->>RP: POST /run-prompt {promptId, projectId, provider}
 
-    Note over RP,DB: Load template
-    RP->>DB: getPrompt(promptId)
-    DB-->>RP: "Review {{project.name}} for<br/>{{tool:github_list_issues}}"
+    RP->>DB: Load prompt template
+    DB-->>RP: "Review {{project.name}} issues: {{tool:github_list_issues}}"
 
-    Note over RP: Phase 1 — Sync resolution
-    RP->>RP: Replace {{project.name}}<br/>→ "Review MyApp for<br/>{{tool:github_list_issues}}"
+    Note over RP: Stage 1 — Sync resolution
+    RP->>RP: {{project.name}} → "buffr"
 
-    Note over RP,GH: Phase 2 — Async tool resolution
+    Note over RP,GH: Stage 2 — Async tool resolution
     RP->>TR: executeTool("github_list_issues")
     TR->>GH: GET /repos/.../issues
-    GH-->>TR: issues[]
-    TR-->>RP: JSON result
-    RP->>RP: Replace {{tool:...}}<br/>→ "Review MyApp for<br/>[{title: 'Bug'}, ...]"
+    GH-->>RP: issues[]
 
-    Note over RP,LLM: Phase 3 — LLM call
-    RP->>LLM: Prompt Chain<br/>(fully resolved prompt)
+    Note over RP,LLM: Stage 3 — LLM call
+    RP->>LLM: Fully resolved prompt
     LLM-->>RP: { text, suggestedActions? }
-
-    RP->>DB: Increment usageCount
-    RP-->>FE: { text, suggestedActions }
+    RP-->>FE: Response
 ```
 
 ---
 
-## Part 8: Authentication Flow
+## Part 9: ML & Computer Vision (MediaPipe)
 
-```mermaid
-sequenceDiagram
-    actor U as User
-    participant FE as Login Page
-    participant LG as /login
-    participant MW as middleware.ts
-    participant API as Protected Endpoint
+buffr is an LLM product, but understanding ML broadens your capabilities as an AI product engineer. Here's how the ML world works and where **MediaPipe** fits.
 
-    U->>FE: Enter username + password
-    FE->>LG: POST /login<br/>{username, password}
+### LLM vs ML: Different Problems
 
-    alt Valid credentials
-        LG->>LG: createToken()<br/>JWT: HS256, 7d expiry
-        LG-->>FE: 200 + Set-Cookie:<br/>buffr-token=jwt;<br/>HttpOnly; Secure; SameSite=Lax
-        FE->>FE: Redirect to dashboard
-    else Invalid
-        LG-->>FE: 401 Unauthorized
-    end
-
-    Note over FE,API: Subsequent requests
-    FE->>MW: GET /projects<br/>Cookie: buffr-token=jwt
-    MW->>MW: verifyToken(jwt)
-    alt Valid token
-        MW->>API: Forward request
-        API-->>FE: Response
-    else Expired / invalid
-        MW-->>FE: 302 Redirect to /login
-    end
 ```
+LLM (Language Models)                ML (Machine Learning)
+──────────────────────               ─────────────────────
+Input: Text/prompts                  Input: Images, video, audio, sensors
+Output: Text/JSON                    Output: Classifications, coordinates, signals
+Training: Done by vendor             Training: You might need to do this
+Inference: API call                  Inference: On-device or API call
+Latency: 500ms-5s                    Latency: 1ms-50ms (on-device)
+Cost: Per token                      Cost: Per compute (or free on-device)
+
+Example: "Summarize these commits"   Example: "Is this a cat or dog?"
+Example: "Detect work intent"        Example: "Where are the hands in frame?"
+```
+
+### What Is MediaPipe?
+
+**MediaPipe** is Google's framework for running pre-trained ML models **on-device** (browser, mobile, edge). No server needed. No API keys.
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    MEDIAPIPE PIPELINE                         │
+│                                                              │
+│  Camera/Image → Pre-process → ML Model → Post-process → UI  │
+│                                                              │
+│  ┌──────────┐   ┌─────────┐   ┌────────┐   ┌──────────┐    │
+│  │ Webcam   │──►│ Resize  │──►│ TFLite │──►│ Draw     │    │
+│  │ frame    │   │ Normalize│   │ Model  │   │ landmarks│    │
+│  │ (720p)   │   │ to 256px│   │ (WASM) │   │ on canvas│    │
+│  └──────────┘   └─────────┘   └────────┘   └──────────┘    │
+│                                                              │
+│  Runs at 30+ FPS entirely in the browser                     │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### MediaPipe Solutions
+
+| Solution | What It Does | Frontend Use Case |
+|----------|-------------|-------------------|
+| **Hand Tracking** | 21 3D landmarks per hand | Gesture controls, sign language |
+| **Pose Estimation** | 33 body landmarks | Fitness apps, motion capture |
+| **Face Mesh** | 468 facial landmarks | AR filters, expression detection |
+| **Object Detection** | Bounding boxes + labels | Visual search, accessibility |
+| **Image Segmentation** | Pixel-level masks | Background removal, AR |
+| **Text Classification** | Sentiment, topic | Content moderation |
+| **Audio Classification** | Sound recognition | Voice commands, alerts |
+
+### How MediaPipe Could Extend buffr
+
+Hypothetical feature: **Gesture-based session control**
+
+```
+┌──────────────┐     ┌─────────────────┐     ┌──────────────┐
+│ Webcam feed  │────►│ MediaPipe Hands  │────►│ Gesture      │
+│ (browser)    │     │ (WASM, on-device)│     │ Classifier   │
+│              │     │                  │     │              │
+│              │     │ Returns 21       │     │ 👍 = Done    │
+│              │     │ landmarks per    │     │ ✋ = Skip    │
+│              │     │ hand at 30fps    │     │ 👊 = End     │
+└──────────────┘     └─────────────────┘     └──────────────┘
+                                                    │
+                                                    ▼
+                                            ┌──────────────┐
+                                            │ buffr API    │
+                                            │ handleDone() │
+                                            │ handleSkip() │
+                                            │ endSession() │
+                                            └──────────────┘
+```
+
+### The ML Pipeline (Language-Agnostic)
+
+Whether you use MediaPipe, TensorFlow, PyTorch, or ONNX:
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│               ML PIPELINE (universal)                         │
+│                                                               │
+│  1. DATA COLLECTION                                           │
+│     Gather labeled examples: images, text, audio              │
+│                                                               │
+│  2. PREPROCESSING                                             │
+│     Normalize, resize, augment, split train/test              │
+│                                                               │
+│  3. MODEL SELECTION                                           │
+│     Pre-trained (MediaPipe, BERT) vs custom training          │
+│                                                               │
+│  4. TRAINING (if custom)                                      │
+│     Feed data through model, adjust weights via backprop      │
+│     Measure loss, iterate epochs                              │
+│                                                               │
+│  5. EVALUATION                                                │
+│     Accuracy, precision, recall, F1 on test set               │
+│                                                               │
+│  6. DEPLOYMENT                                                │
+│     Server (API) vs on-device (WASM/ONNX) vs edge (mobile)   │
+│                                                               │
+│  7. MONITORING                                                │
+│     Track accuracy drift, latency, user feedback              │
+└──────────────────────────────────────────────────────────────┘
+```
+
+**As an AI product engineer, you don't need to train models.** You need to:
+- Choose the right pre-trained model
+- Integrate it into your product pipeline
+- Handle edge cases and failures gracefully
+- Understand when to use on-device ML vs server-side LLMs
+
+### Key ML Concepts for Product Engineers
+
+| Concept | What It Means | Analogy |
+|---------|--------------|---------|
+| **Inference** | Running a trained model on new data | Calling `getLLM().invoke()` |
+| **Latency** | Time from input to output | On-device: ~10ms. API: ~1000ms |
+| **Model size** | File size of the neural network | MediaPipe hand: ~5MB. GPT-4: ~1TB |
+| **Quantization** | Shrinking model size (some accuracy loss) | JPEG compression for models |
+| **Edge inference** | Running ML on user's device | MediaPipe WASM in browser |
+| **Confidence score** | How sure the model is (0-1) | `detectedPatterns[].confidence` in buffr |
+| **Batch vs stream** | Process all at once vs frame-by-frame | buffr: batch. MediaPipe: stream |
 
 ---
 
-## Quick Reference: File Locations
+## Part 10: AI Product Engineer Roadmap
+
+### Where You Are Now (Frontend Developer)
+
+```
+✅ React, TypeScript, CSS
+✅ Component architecture
+✅ State management
+✅ API consumption (fetch, REST)
+✅ You built buffr's frontend
+```
+
+### Phase 1: LLM Integration (You're Here)
+
+```
+✅ Provider abstraction pattern        (Part 3 — getLLM)
+✅ Chain architecture                  (Part 4 — chains/)
+✅ Prompt engineering                  (Part 4 — session-prompts.ts)
+✅ Structured output parsing           (Part 4 — stripCodeBlock + JSON.parse)
+✅ Tool/function calling               (Part 7 — registry)
+◻ Streaming responses                 (SSE / WebSocket for token-by-token)
+◻ Embeddings + vector search          (RAG with semantic similarity)
+◻ Multi-turn conversations            (Chat history management)
+```
+
+**Practice in buffr**: Add streaming to the prompt runner. Instead of waiting for the full response, stream tokens to the UI as they arrive using Server-Sent Events.
+
+### Phase 2: Backend Proficiency
+
+```
+✅ Serverless functions                (Part 5 — Netlify Functions)
+✅ REST API design                     (Part 5 — handler pattern)
+✅ Key-value storage                   (Part 6 — Netlify Blobs)
+✅ Auth (JWT)                          (login.ts, middleware.ts)
+◻ Relational databases               (Postgres, SQL basics)
+◻ Queue/job systems                   (Background processing)
+◻ Caching strategies                  (Redis, CDN, stale-while-revalidate)
+◻ Rate limiting                       (Protect LLM endpoints from abuse)
+◻ Observability                       (Logging, tracing, error tracking)
+```
+
+**Practice in buffr**: Add rate limiting to `session-ai.ts`. Track requests per user per minute using a blob store counter.
+
+### Phase 3: ML Awareness
+
+```
+◻ Pre-trained model integration       (MediaPipe, Hugging Face)
+◻ On-device inference                 (WASM, TFLite, ONNX)
+◻ Image/video processing pipeline     (Canvas API + ML model)
+◻ Evaluation metrics                  (When is your AI "good enough"?)
+◻ Data pipeline basics                (Collection → cleaning → training)
+```
+
+**Practice**: Add a MediaPipe hand-tracking feature to buffr. Use the `@mediapipe/tasks-vision` npm package to detect a thumbs-up gesture and trigger `handleActionDone()`.
+
+### Phase 4: AI Product Thinking
+
+```
+◻ Evaluation-driven development       (Measure AI quality with test suites)
+◻ Prompt versioning                   (Track which prompts perform best)
+◻ Cost optimization                   (Token usage tracking, model routing)
+◻ Fallback strategies                 (Model A fails → try Model B)
+◻ Human-in-the-loop                   (User corrects AI, improves over time)
+◻ A/B testing AI features             (Which prompt/model produces better UX?)
+```
+
+### Industry Roles Spectrum
+
+```
+Frontend Dev → Full-Stack Dev → AI Product Engineer → ML Engineer → Research
+     ▲              ▲                  ▲                  ▲            ▲
+  You were       You are            You're             Needs PhD    Needs PhD
+  here           building           heading            level math   level math
+                 towards            here
+                 this
+```
+
+**AI Product Engineer** is the sweet spot: you don't need to train models or publish papers. You need to orchestrate AI capabilities into products that users love. That means:
+
+1. **Choosing the right model** for each task (cost vs quality vs latency)
+2. **Designing reliable pipelines** (chains, fallbacks, retries)
+3. **Building great UX around AI** (loading states, error handling, confidence display)
+4. **Measuring quality** (does the AI actually help users?)
+
+### Recommended Reading
+
+**LLM Fundamentals**
+- [Prompt Engineering Guide](https://www.promptingguide.ai/) — Patterns that work across all models
+- [LangChain.js Concepts](https://js.langchain.com/docs/concepts/) — Chains, agents, tools
+- [Anthropic Cookbook](https://github.com/anthropics/anthropic-cookbook) — Practical prompt patterns
+
+**Backend & Architecture**
+- [The Twelve-Factor App](https://12factor.net/) — Language-agnostic app design
+- [Designing Data-Intensive Applications](https://dataintensive.net/) — Storage, caching, consistency
+
+**ML & MediaPipe**
+- [MediaPipe Solutions Guide](https://ai.google.dev/edge/mediapipe/solutions/guide) — On-device ML tasks
+- [TensorFlow.js](https://www.tensorflow.org/js) — ML in the browser
+- [Hugging Face](https://huggingface.co/) — Pre-trained models for everything
+
+**AI Product Engineering**
+- [Building LLM Apps](https://www.oreilly.com/library/view/building-llm-apps/9781835462317/) — End-to-end product development
+- [AI Engineering](https://www.oreilly.com/library/view/ai-engineering/9781098166298/) — From prototype to production
+
+---
+
+## Quick Reference
+
+### File Locations
 
 | Concept | File |
 |---------|------|
 | LLM factory | `netlify/functions/lib/ai/provider.ts` |
 | All AI chains | `netlify/functions/lib/ai/chains/` |
-| All system prompts | `netlify/functions/lib/ai/prompts/session-prompts.ts` |
-| All storage modules | `netlify/functions/lib/storage/` |
+| System prompts | `netlify/functions/lib/ai/prompts/session-prompts.ts` |
+| Storage modules | `netlify/functions/lib/storage/` |
 | Tool registry | `netlify/functions/lib/tools/registry.ts` |
 | Tool registration | `netlify/functions/lib/tools/register-all.ts` |
-| GitHub/Notion clients | `netlify/functions/lib/{github,notion}.ts` |
+| GitHub client | `netlify/functions/lib/github.ts` |
+| Notion client | `netlify/functions/lib/notion.ts` |
 | API client | `src/lib/api.ts` |
 | Provider context | `src/context/provider-context.tsx` |
 | Response helpers | `netlify/functions/lib/responses.ts` |
 | Auth (JWT) | `netlify/functions/lib/auth.ts` |
+
+### Glossary
+
+| Term | Definition |
+|------|-----------|
+| **Chain** | Input → transform → LLM → parse → output pipeline |
+| **Provider** | An LLM vendor (Anthropic, OpenAI, Google, Ollama) |
+| **Tool** | A registered capability that AI can invoke |
+| **RAG** | Feeding real data into prompts before LLM processing |
+| **Structured Output** | Forcing LLM to return parseable JSON |
+| **Temperature** | Randomness control (0=deterministic, 1=creative) |
+| **Context Window** | Max tokens for prompt + response |
+| **Inference** | Running a trained model on new input |
+| **Edge Inference** | Running ML on user's device (browser/mobile) |
+| **TOCTOU** | Time-of-check-time-of-use race condition |
+| **MCP** | Model Context Protocol — standard for AI tool integration |
+| **Embedding** | Converting text to a numerical vector for similarity search |
