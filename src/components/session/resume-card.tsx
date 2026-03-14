@@ -24,11 +24,12 @@ import "./resume-card.css";
 interface ResumeCardProps {
   project: Project;
   onEndSession: () => void;
+  onActionsChange?: (actions: NextAction[]) => void;
 }
 
 type Tab = "session" | "actions" | "prompts" | "issues" | "tech-debt" | "tools";
 
-export function ResumeCard({ project, onEndSession }: ResumeCardProps) {
+export function ResumeCard({ project, onEndSession, onActionsChange }: ResumeCardProps) {
   const router = useRouter();
   const { selected: selectedProvider } = useProvider();
   const [lastSession, setLastSession] = useState<Session | null>(null);
@@ -86,6 +87,10 @@ export function ResumeCard({ project, onEndSession }: ResumeCardProps) {
       setSyncing(false);
     }
   }
+
+  useEffect(() => {
+    onActionsChange?.(actions);
+  }, [actions, onActionsChange]);
 
   useEffect(() => {
     async function fetchWorkItems(): Promise<WorkItem[]> {

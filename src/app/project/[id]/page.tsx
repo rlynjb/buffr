@@ -1,11 +1,12 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useParams } from "next/navigation";
 import { ResumeCard } from "@/components/session/resume-card";
 import { EndSessionModal } from "@/components/session/end-session-modal";
 import { getProject } from "@/lib/api";
 import type { Project } from "@/lib/types";
+import type { NextAction } from "@/lib/next-actions";
 import "./page.css";
 
 export default function ProjectPage() {
@@ -15,6 +16,7 @@ export default function ProjectPage() {
   const [loading, setLoading] = useState(true);
   const [showEndSession, setShowEndSession] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
+  const actionsRef = useRef<NextAction[]>([]);
 
   useEffect(() => {
     async function load() {
@@ -53,11 +55,13 @@ export default function ProjectPage() {
         key={refreshKey}
         project={project}
         onEndSession={() => setShowEndSession(true)}
+        onActionsChange={(a) => { actionsRef.current = a; }}
       />
       <EndSessionModal
         open={showEndSession}
         onClose={() => setShowEndSession(false)}
         project={project}
+        currentActions={actionsRef.current}
         onSaved={() => setRefreshKey((k) => k + 1)}
       />
     </>

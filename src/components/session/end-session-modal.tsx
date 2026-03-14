@@ -6,16 +6,18 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { IconLoader, IconSparkle, SourceIcon, sourceColor } from "@/components/icons";
-import { createSession, updateProject, summarizeSession, suggestNextStep, detectIntent, executeToolAction, listManualActions, deleteManualAction } from "@/lib/api";
+import { createSession, updateProject, summarizeSession, suggestNextStep, detectIntent, executeToolAction, listManualActions, addManualAction, deleteManualAction } from "@/lib/api";
 import { getToolForCapability } from "@/lib/data-sources";
 import { useProvider } from "@/context/provider-context";
 import type { Project } from "@/lib/types";
+import type { NextAction } from "@/lib/next-actions";
 import "./end-session-modal.css";
 
 interface EndSessionModalProps {
   open: boolean;
   onClose: () => void;
   project: Project;
+  currentActions?: NextAction[];
   onSaved: () => void;
 }
 
@@ -23,6 +25,7 @@ export function EndSessionModal({
   open,
   onClose,
   project,
+  currentActions,
   onSaved,
 }: EndSessionModalProps) {
   const [phase, setPhase] = useState<"fetching" | "summarizing" | "ready">("fetching");
@@ -244,14 +247,24 @@ export function EndSessionModal({
 
       await updateProject(project.id, { lastSessionId: session.id });
 
-      // Clear done manual actions
+      // Preserve undone AI actions by converting them to manual actions
+      if (currentActions) {
+        const undoneAi = currentActions.filter((a) => a.source === "ai" && !a.done);
+        for (const action of undoneAi) {
+          try {
+            await addManualAction(project.id, `manual-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, action.text);
+          } catch {
+            // Best-effort
+          }
+        }
+      }
+
+      // Delete done manual actions sequentially to avoid race conditions
       try {
         const manualItems = await listManualActions(project.id);
-        await Promise.all(
-          manualItems
-            .filter((item) => item.done)
-            .map((item) => deleteManualAction(project.id, item.id))
-        );
+        for (const item of manualItems.filter((i) => i.done)) {
+          await deleteManualAction(project.id, item.id);
+        }
       } catch {
         // Cleanup is best-effort
       }
