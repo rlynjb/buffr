@@ -161,6 +161,7 @@ export function ActionsTab({
               {onReorder && !action.done && !action.skipped && (
                 <span className="actions-tab__drag-handle" aria-hidden="true">⠿</span>
               )}
+              <span className="actions-tab__action-number">{idx + 1}</span>
               <span style={{ color: sourceColor(action.source || "ai") }}>
                 <SourceIcon source={action.source || "ai"} size={14} />
               </span>

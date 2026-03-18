@@ -24,6 +24,10 @@
   @apply flex items-center gap-3 px-3 py-2.5;
 }
 
+.actions-tab__action-number {
+  @apply text-[11px] text-zinc-600 font-mono tabular-nums min-w-[1.25rem] text-right;
+}
+
 .actions-tab__action-text {
   @apply text-sm flex-1 text-zinc-200;
 }
