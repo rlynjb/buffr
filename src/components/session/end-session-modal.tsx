@@ -346,7 +346,7 @@ export function EndSessionModal({
           {/* Next Step */}
           <div className="end-session__field-group">
             <div className="end-session__field-header">
-              <label htmlFor="end-session-next-step" className="end-session__field-label">Next Step</label>
+              <label htmlFor="end-session-next-step" className="end-session__field-label">Next Step (optional)</label>
               <div className="end-session__field-buttons">
                 {hasLLM && goal.trim() && (
                   <button onClick={handleSuggestNext} className="end-session__field-btn--ai">
