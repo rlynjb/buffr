@@ -1,5 +1,14 @@
 import { listToolConfigs } from "./storage/tool-config";
-import type { WorkItem } from "../../../src/lib/types";
+
+interface WorkItem {
+  id: string;
+  title: string;
+  status: string;
+  url: string;
+  source: string;
+  labels?: string[];
+  timestamp?: string;
+}
 
 const API = "https://api.notion.com/v1";
 
