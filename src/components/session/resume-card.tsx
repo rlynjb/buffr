@@ -97,13 +97,15 @@ export function ResumeCard({ project, onEndSession, onActionsChange }: ResumeCar
 
         const ctx: ActionContext = { project, lastSession: last };
         const generated = generateNextActions(ctx);
-        const manual: NextAction[] = manualItems.map((m) => ({
-          id: m.id,
-          text: m.text,
-          done: m.done,
-          skipped: false,
-          source: "manual" as const,
-        }));
+        const manual: NextAction[] = manualItems
+          .filter((m) => !m.done)
+          .map((m) => ({
+            id: m.id,
+            text: m.text,
+            done: false,
+            skipped: false,
+            source: "manual" as const,
+          }));
         setActions([...manual.reverse(), ...generated]);
 
         listIntegrations()
