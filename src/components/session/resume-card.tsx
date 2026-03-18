@@ -7,7 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { IconBack, IconGitHub, IconGlobe, IconSparkle, IconLayers } from "@/components/icons";
 import { PHASE_COLORS } from "@/lib/constants";
-import type { Project, Session, TechDebtScan } from "@/lib/types";
+import type { Project, Session } from "@/lib/types";
 import { generateNextActions, type NextAction, type ActionContext } from "@/lib/next-actions";
 import { listProjects, listSessions, getActionNotes, saveActionNote, executeToolAction, listIntegrations, updateProject, listManualActions, addManualAction, updateManualAction, deleteManualAction, paraphraseText } from "@/lib/api";
 import { timeAgo } from "@/lib/format";
@@ -16,7 +16,6 @@ import { useProvider } from "@/context/provider-context";
 import { SessionTab } from "./session-tab";
 import { ActionsTab } from "./actions-tab";
 import { PromptsTab } from "./prompts-tab";
-import { TechDebtGrid } from "./tech-debt-grid";
 import { ToolsTab } from "./tools-tab";
 import "./resume-card.css";
 
@@ -26,7 +25,7 @@ interface ResumeCardProps {
   onActionsChange?: (actions: NextAction[]) => void;
 }
 
-type Tab = "session" | "actions" | "prompts" | "tech-debt" | "tools";
+type Tab = "session" | "actions" | "prompts" | "tools";
 
 export function ResumeCard({ project, onEndSession, onActionsChange }: ResumeCardProps) {
   const router = useRouter();
@@ -58,10 +57,7 @@ export function ResumeCard({ project, onEndSession, onActionsChange }: ResumeCar
     const [owner, repo] = currentProject.githubRepo.split("/");
     setSyncing(true);
     try {
-      const [analyzeRes, debtRes] = await Promise.all([
-        executeToolAction("github_analyze_repo", { owner, repo }),
-        executeToolAction("github_scan_tech_debt", { owner, repo }),
-      ]);
+      const analyzeRes = await executeToolAction("github_analyze_repo", { owner, repo });
       const updates: Partial<Project> = { lastSyncedAt: new Date().toISOString() };
       if (analyzeRes.ok && analyzeRes.result) {
         const analysis = analyzeRes.result as {
@@ -72,9 +68,6 @@ export function ResumeCard({ project, onEndSession, onActionsChange }: ResumeCar
         if (analysis.detectedStack) updates.stack = analysis.detectedStack;
         if (analysis.detectedPhase) updates.phase = analysis.detectedPhase;
         if (analysis.description) updates.description = analysis.description;
-      }
-      if (debtRes.ok && debtRes.result) {
-        updates.techDebt = debtRes.result as TechDebtScan;
       }
       const updated = await updateProject(currentProject.id, updates);
       setCurrentProject(updated);
@@ -200,7 +193,6 @@ export function ResumeCard({ project, onEndSession, onActionsChange }: ResumeCar
   const tabs = [
     { id: "actions" as Tab, label: "Next Actions" },
     { id: "session" as Tab, label: "Last Session" },
-    ...(currentProject.techDebt?.summary?.length ? [{ id: "tech-debt" as Tab, label: "Tech Debt" }] : []),
     { id: "prompts" as Tab, label: "Prompts" },
     { id: "tools" as Tab, label: "Tools" },
   ];
@@ -361,12 +353,6 @@ export function ResumeCard({ project, onEndSession, onActionsChange }: ResumeCar
           />
         )}
         {activeTab === "session" && <SessionTab lastSession={lastSession} />}
-        {activeTab === "tech-debt" && currentProject.techDebt && (
-          <TechDebtGrid
-            summary={currentProject.techDebt.summary}
-            scannedAt={currentProject.techDebt.scannedAt}
-          />
-        )}
         {activeTab === "prompts" && (
           <PromptsTab
             project={project}

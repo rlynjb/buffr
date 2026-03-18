@@ -117,7 +117,7 @@ export default async function handler(req: Request, _context: Context) {
         "name", "description", "constraints", "goals", "stack", "phase",
         "githubRepo", "repoVisibility", "netlifySiteId", "netlifySiteUrl", "plan",
         "selectedFeatures", "selectedFiles", "dataSources", "dismissedSuggestions",
-        "lastSessionId", "issueCount", "devFolder", "techDebt",
+        "lastSessionId", "issueCount", "devFolder",
       ];
       const updates: Record<string, unknown> = {};
       for (const key of allowedFields) {

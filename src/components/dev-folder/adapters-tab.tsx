@@ -28,7 +28,6 @@ const ADAPTERS = [
 const DEV_CONTEXT_REFS = [
   "- `.dev/context/PROJECT.md` — Project overview and architecture",
   "- `.dev/context/CONVENTIONS.md` — Coding conventions to follow",
-  "- `.dev/context/TECH_DEBT.md` — Known tech debt to be aware of",
   "- `.dev/standards/` — Technology-specific standards for this project",
   "- `.dev/gap-analysis.md` — Industry vs project gap analysis",
 ].join("\n");
@@ -99,7 +98,6 @@ function generateAdapterContent(adapterId: string, stack: string[]): string {
         "read:",
         "  - .dev/context/PROJECT.md",
         "  - .dev/context/CONVENTIONS.md",
-        "  - .dev/context/TECH_DEBT.md",
         "  - .dev/gap-analysis.md",
       ].join("\n");
 

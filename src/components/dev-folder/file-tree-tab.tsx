@@ -51,7 +51,6 @@ const fileDescriptions: Record<string, string> = {
   ".dev/context/PROJECT.md": "Project overview, stack, and architecture",
   ".dev/context/CONVENTIONS.md": "Coding conventions and style rules",
   ".dev/context/DECISIONS.md": "Architecture decision records (ADRs)",
-  ".dev/context/TECH_DEBT.md": "Known tech debt items",
   ".dev/industry/react.md": "React best practices",
   ".dev/industry/nextjs.md": "Next.js best practices",
   ".dev/industry/typescript.md": "TypeScript best practices",

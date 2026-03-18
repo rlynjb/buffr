@@ -19,7 +19,6 @@ export interface Project {
   dismissedSuggestions?: string[];
   issueCount?: number;
   devFolder?: DevFolder | null;
-  techDebt?: TechDebtScan | null;
   lastSyncedAt?: string | null;
   updatedAt: string;
 }
@@ -91,26 +90,6 @@ export interface DetectedPattern {
   evidence: string[];
 }
 
-export interface TechDebtItem {
-  type: string;
-  file: string;
-  line?: number;
-  severity: "high" | "medium" | "low";
-  text: string;
-}
-
-export interface TechDebtSummaryEntry {
-  type: string;
-  count: number;
-  severity: "high" | "medium" | "low";
-}
-
-export interface TechDebtScan {
-  items: TechDebtItem[];
-  summary: TechDebtSummaryEntry[];
-  scannedAt: string;
-}
-
 export interface GapAnalysisEntry {
   practice: string;
   industry: string;
@@ -128,7 +107,7 @@ export interface ScanResult {
   fileTree: ScanResultFile[];
   parsedConfigs: { file: string; content: Record<string, unknown> }[];
   detectedPatterns: DetectedPattern[];
-  techDebtItems: TechDebtItem[];
+  techDebtItems: unknown[];
   gitActivity: { recentCommits: number; activePaths: string[]; lastCommitDate: string };
   generatedFiles: { path: string; content: string; ownership: string }[];
   gapAnalysis: GapAnalysisEntry[];
