@@ -17,6 +17,7 @@ interface ActionsTabProps {
   onDeleteManual?: (id: string) => void;
   onEditManual?: (id: string, text: string) => void;
   onParaphrase?: (text: string) => Promise<string | null>;
+  onReorder?: (fromIndex: number, toIndex: number) => void;
 }
 
 const DEFAULT_NOTE = "Impact: Why this matters for the project.\nOutcome: What \"done\" looks like.";
@@ -33,6 +34,7 @@ export function ActionsTab({
   onDeleteManual,
   onEditManual,
   onParaphrase,
+  onReorder,
 }: ActionsTabProps) {
   const [noteOpen, setNoteOpen] = useState<string | null>(null);
   const [newItem, setNewItem] = useState("");
@@ -40,6 +42,8 @@ export function ActionsTab({
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editText, setEditText] = useState("");
   const editRef = useRef<HTMLInputElement>(null);
+  const dragIdx = useRef<number | null>(null);
+  const [dragOverIdx, setDragOverIdx] = useState<number | null>(null);
 
   useEffect(() => {
     if (editingId && editRef.current) editRef.current.focus();
@@ -126,18 +130,37 @@ export function ActionsTab({
       )}
 
       <div className="actions-tab__list">
-        {actions.map((action) => (
+        {actions.map((action, idx) => (
           <div
             key={action.id}
+            draggable={onReorder && !action.done && !action.skipped}
+            onDragStart={() => { dragIdx.current = idx; }}
+            onDragOver={(e) => {
+              if (dragIdx.current === null || dragIdx.current === idx) return;
+              e.preventDefault();
+              setDragOverIdx(idx);
+            }}
+            onDragLeave={() => { if (dragOverIdx === idx) setDragOverIdx(null); }}
+            onDrop={() => {
+              if (dragIdx.current !== null && dragIdx.current !== idx && onReorder) {
+                onReorder(dragIdx.current, idx);
+              }
+              dragIdx.current = null;
+              setDragOverIdx(null);
+            }}
+            onDragEnd={() => { dragIdx.current = null; setDragOverIdx(null); }}
             className={`actions-tab__action ${
               action.done
                 ? "actions-tab__action--done"
                 : action.skipped
                   ? "actions-tab__action--skipped"
                   : "actions-tab__action--default"
-            }`}
+            } ${dragOverIdx === idx ? "actions-tab__action--drag-over" : ""}`}
           >
             <div className="actions-tab__action-row">
+              {onReorder && !action.done && !action.skipped && (
+                <span className="actions-tab__drag-handle" aria-hidden="true">⠿</span>
+              )}
               <span style={{ color: sourceColor(action.source || "ai") }}>
                 <SourceIcon source={action.source || "ai"} size={14} />
               </span>

@@ -134,3 +134,19 @@
   @apply px-2.5 py-1.5 rounded-lg border border-purple-500/20 text-[11px] text-purple-400 hover:text-purple-300 hover:bg-purple-500/10 transition-colors cursor-pointer disabled:opacity-50 flex items-center gap-1 whitespace-nowrap;
 }
 
+.actions-tab__drag-handle {
+  @apply text-zinc-600 cursor-grab active:cursor-grabbing select-none text-sm leading-none;
+}
+
+.actions-tab__action--drag-over {
+  @apply border-purple-500/40 bg-purple-500/5;
+}
+
+.actions-tab__action[draggable="true"] {
+  @apply cursor-grab;
+}
+
+.actions-tab__action[draggable="true"]:active {
+  @apply cursor-grabbing opacity-60;
+}
+

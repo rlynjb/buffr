@@ -151,6 +151,16 @@ export async function updateManualAction(
   });
 }
 
+export async function reorderManualActions(
+  projectId: string,
+  orderedIds: string[]
+): Promise<ManualActionData[]> {
+  return request<ManualActionData[]>(`/manual-actions?projectId=${encodeURIComponent(projectId)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ orderedIds }),
+  });
+}
+
 export async function deleteManualAction(
   projectId: string,
   actionId: string

@@ -9,7 +9,7 @@ import { IconBack, IconGitHub, IconGlobe, IconSparkle, IconLayers } from "@/comp
 import { PHASE_COLORS } from "@/lib/constants";
 import type { Project, Session } from "@/lib/types";
 import { generateNextActions, type NextAction, type ActionContext } from "@/lib/next-actions";
-import { listProjects, listSessions, getActionNotes, saveActionNote, executeToolAction, listIntegrations, updateProject, listManualActions, addManualAction, updateManualAction, deleteManualAction, paraphraseText } from "@/lib/api";
+import { listProjects, listSessions, getActionNotes, saveActionNote, executeToolAction, listIntegrations, updateProject, listManualActions, addManualAction, updateManualAction, deleteManualAction, reorderManualActions, paraphraseText } from "@/lib/api";
 import { timeAgo } from "@/lib/format";
 import { generateSuggestions, type ProjectSuggestion } from "@/lib/suggestions";
 import { useProvider } from "@/context/provider-context";
@@ -106,7 +106,7 @@ export function ResumeCard({ project, onEndSession, onActionsChange }: ResumeCar
             skipped: false,
             source: "manual" as const,
           }));
-        setActions([...manual.reverse(), ...generated]);
+        setActions([...manual, ...generated]);
 
         listIntegrations()
           .then((integrations) => {
@@ -178,6 +178,20 @@ export function ResumeCard({ project, onEndSession, onActionsChange }: ResumeCar
     } catch (err) {
       console.error("Failed to delete manual action:", err);
     }
+  }
+
+  function handleReorder(fromIndex: number, toIndex: number) {
+    setActions((prev) => {
+      const next = [...prev];
+      const [moved] = next.splice(fromIndex, 1);
+      next.splice(toIndex, 0, moved);
+      // Persist the order of manual actions
+      const manualIds = next.filter((a) => a.source === "manual").map((a) => a.id);
+      if (manualIds.length > 0) {
+        reorderManualActions(project.id, manualIds).catch(() => {});
+      }
+      return next;
+    });
   }
 
   async function handleNoteSave(actionId: string) {
@@ -352,6 +366,7 @@ export function ResumeCard({ project, onEndSession, onActionsChange }: ResumeCar
             onDeleteManual={handleDeleteManual}
             onEditManual={handleEditManual}
             onParaphrase={handleParaphrase}
+            onReorder={handleReorder}
           />
         )}
         {activeTab === "session" && <SessionTab lastSession={lastSession} />}

@@ -31,7 +31,7 @@ export default async function handler(req: Request, _context: Context) {
       }
 
       const actions = await getManualActions(projectId);
-      actions.push({ id, text, done: false });
+      actions.unshift({ id, text, done: false });
       await saveManualActions(projectId, actions);
       return json(actions, 201);
     }
@@ -56,6 +56,34 @@ export default async function handler(req: Request, _context: Context) {
 
       await saveManualActions(projectId, actions);
       return json(actions);
+    }
+
+    // PATCH — reorder manual actions
+    if (req.method === "PATCH") {
+      const body = await req.json();
+      const { orderedIds } = body as { orderedIds: string[] };
+
+      if (!Array.isArray(orderedIds)) {
+        return errorResponse("orderedIds array is required", 400);
+      }
+
+      const actions = await getManualActions(projectId);
+      const byId = new Map(actions.map((a) => [a.id, a]));
+      const reordered: ManualAction[] = [];
+      for (const id of orderedIds) {
+        const action = byId.get(id);
+        if (action) {
+          reordered.push(action);
+          byId.delete(id);
+        }
+      }
+      // Append any actions not in orderedIds (safety net)
+      for (const action of byId.values()) {
+        reordered.push(action);
+      }
+
+      await saveManualActions(projectId, reordered);
+      return json(reordered);
     }
 
     // DELETE — remove a manual action
