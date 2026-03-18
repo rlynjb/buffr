@@ -5,9 +5,7 @@ import {
   saveProject,
   deleteProject,
 } from "./lib/storage/projects";
-import { saveScanResult } from "./lib/storage/scan-results";
-import { detectExistingDevFolder } from "./lib/github";
-import type { Project, ScanResult } from "../../src/lib/types";
+import type { Project } from "../../src/lib/types";
 import { randomUUID } from "crypto";
 import { json, errorResponse } from "./lib/responses";
 
@@ -49,55 +47,8 @@ export default async function handler(req: Request, _context: Context) {
         dataSources: body.dataSources || (body.githubRepo ? ["github"] : []),
         dismissedSuggestions: body.dismissedSuggestions || [],
         issueCount: body.issueCount ?? undefined,
-        devFolder: body.devFolder || null,
         updatedAt: new Date().toISOString(),
       };
-      // Detect existing .dev/ folder in the repo
-      if (project.githubRepo && !project.devFolder) {
-        try {
-          const devFiles = await detectExistingDevFolder(project.githubRepo);
-          if (devFiles && devFiles.length > 0) {
-            const now = new Date().toISOString();
-            const scanId = randomUUID();
-            const scan: ScanResult = {
-              id: scanId,
-              projectId: project.id,
-              repoFullName: project.githubRepo,
-              status: "done",
-              detectedStack: [],
-              detectedPatterns: [],
-              techDebtItems: [],
-              gapAnalysis: [],
-              parsedConfigs: [],
-              gitActivity: { recentCommits: 0, activePaths: [], lastCommitDate: "" },
-              generatedFiles: devFiles.map((f) => ({
-                path: f.path,
-                content: f.content,
-                ownership: "imported",
-              })),
-              fileTree: [],
-              detectedAdapters: devFiles
-                .filter((f) => f.path.startsWith(".dev/adapters/"))
-                .map((f) => f.path.replace(".dev/adapters/", "").replace(/\.\w+$/, "")),
-              analysisSource: "imported",
-              error: null,
-              createdAt: now,
-              updatedAt: now,
-            };
-            await saveScanResult(scan);
-            project.devFolder = {
-              status: "generated",
-              lastScan: now,
-              scanResultId: scanId,
-              gapScore: null,
-              adapters: scan.detectedAdapters,
-            };
-          }
-        } catch (err) {
-          console.warn("Failed to detect existing .dev/ folder:", err);
-          // Non-fatal — project is still created without devFolder
-        }
-      }
 
       const saved = await saveProject(project);
       return json(saved, 201);
@@ -117,7 +68,7 @@ export default async function handler(req: Request, _context: Context) {
         "name", "description", "constraints", "goals", "stack", "phase",
         "githubRepo", "repoVisibility", "netlifySiteId", "netlifySiteUrl", "plan",
         "selectedFeatures", "selectedFiles", "dataSources", "dismissedSuggestions",
-        "lastSessionId", "issueCount", "devFolder",
+        "lastSessionId", "issueCount",
       ];
       const updates: Record<string, unknown> = {};
       for (const key of allowedFields) {

@@ -49,17 +49,7 @@ export function generateSuggestions(
     }
   }
 
-  // Rule 4: No .dev/ folder
-  if (!project.devFolder && !dismissed.includes("dev-folder")) {
-    suggestions.push({
-      id: "dev-folder",
-      text: "Generate .dev/ folder — scan your repo for project intelligence",
-      actionLabel: "Do it",
-      actionRoute: `/dev-folder/${project.id}`,
-    });
-  }
-
-  // Rule 5: No prompts
+  // Rule 4: No prompts
   if (!dismissed.includes("add-prompts")) {
     suggestions.push({
       id: "add-prompts",

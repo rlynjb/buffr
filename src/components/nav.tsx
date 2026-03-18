@@ -15,9 +15,7 @@ export function Nav() {
 
   const label = pathname.startsWith("/project/")
     ? "Resume Card"
-    : pathname.startsWith("/dev-folder/")
-      ? ".dev/"
-      : pageLabels[pathname] || null;
+    : pageLabels[pathname] || null;
 
   return (
     <nav className="nav">

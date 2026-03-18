@@ -7,8 +7,6 @@ import type {
   ToolIntegration,
   ToolConfig,
   PromptResponse,
-  ScanResult,
-  IndustryStandard,
 } from "./types";
 
 const BASE = "/.netlify/functions";
@@ -308,82 +306,6 @@ export async function runPrompt(
   return request<PromptResponse>("/run-prompt", {
     method: "POST",
     body: JSON.stringify({ promptId, projectId, provider }),
-  });
-}
-
-// Scan Results
-export async function getScanResult(id: string): Promise<ScanResult> {
-  return request<ScanResult>(`/scan-results?id=${encodeURIComponent(id)}`);
-}
-
-export async function listScanResults(projectId: string): Promise<ScanResult[]> {
-  return request<ScanResult[]>(`/scan-results?projectId=${encodeURIComponent(projectId)}`);
-}
-
-export async function updateScanResult(
-  id: string,
-  updates: Partial<Pick<ScanResult, "generatedFiles" | "detectedAdapters">>,
-): Promise<ScanResult> {
-  return request<ScanResult>(`/scan-results?id=${encodeURIComponent(id)}`, {
-    method: "PUT",
-    body: JSON.stringify(updates),
-  });
-}
-
-// Industry KB
-export async function listStandards(): Promise<IndustryStandard[]> {
-  return request<IndustryStandard[]>("/industry-kb");
-}
-
-export async function getStandard(technology: string): Promise<IndustryStandard> {
-  return request<IndustryStandard>(`/industry-kb?technology=${encodeURIComponent(technology)}`);
-}
-
-export async function seedIndustryKB(force = false): Promise<{ seeded: string[]; skipped: string[] }> {
-  return request("/industry-kb?seed", {
-    method: "POST",
-    body: JSON.stringify({ force }),
-  });
-}
-
-// Trigger scan / generate .dev/
-export async function triggerScan(projectId: string, provider?: string, skipPush?: boolean): Promise<ScanResult> {
-  return request<ScanResult>("/generate-dev", {
-    method: "POST",
-    body: JSON.stringify({ projectId, provider, skipPush }),
-  });
-}
-
-// Detect existing .dev/ folder in repo
-export async function detectDevFolder(projectId: string): Promise<ScanResult | null> {
-  const res = await request<ScanResult | { detected: false }>("/detect-dev", {
-    method: "POST",
-    body: JSON.stringify({ projectId }),
-  });
-  if ("detected" in res && res.detected === false) return null;
-  return res as ScanResult;
-}
-
-// Push .dev/ files to GitHub repo
-export async function pushDevFiles(
-  scanResultId: string,
-  deletePaths?: string[],
-): Promise<{ sha: string }> {
-  return request<{ sha: string }>("/generate-dev?push", {
-    method: "POST",
-    body: JSON.stringify({ scanResultId, deletePaths }),
-  });
-}
-
-// Install adapter symlink at repo root
-export async function installAdapter(
-  scanResultId: string,
-  adapterPath: string,
-  rootPath: string,
-): Promise<{ sha: string }> {
-  return request<{ sha: string }>("/generate-dev?install-adapter", {
-    method: "POST",
-    body: JSON.stringify({ scanResultId, adapterPath, rootPath }),
   });
 }
 

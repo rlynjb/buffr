@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { Badge } from "@/components/ui/badge";
-import { SourceIcon, IconGitHub, IconGlobe, IconChevron, IconTrash, IconLayers } from "@/components/icons";
+import { SourceIcon, IconGitHub, IconGlobe, IconChevron, IconTrash } from "@/components/icons";
 import { PHASE_COLORS } from "@/lib/constants";
 import type { Project } from "@/lib/types";
 import { timeAgo } from "@/lib/format";
@@ -52,11 +52,6 @@ export function ProjectCard({ project, onClick, onDelete }: ProjectCardProps) {
             {project.name}
           </span>
           <Badge color={PHASE_COLORS[project.phase]}>{project.phase}</Badge>
-          {project.devFolder && (
-            <span className="project-card__dev-icon" title=".dev/ generated">
-              <IconLayers size={12} />
-            </span>
-          )}
           {project.dataSources?.map((ds) => (
             <span key={ds} className="project-card__source-icon">
               <SourceIcon source={ds} size={12} />

@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { IconBack, IconGitHub, IconGlobe, IconSparkle, IconLayers } from "@/components/icons";
+import { IconBack, IconGitHub, IconGlobe, IconSparkle } from "@/components/icons";
 import { PHASE_COLORS } from "@/lib/constants";
 import type { Project, Session } from "@/lib/types";
 import { generateNextActions, type NextAction, type ActionContext } from "@/lib/next-actions";
@@ -291,11 +291,6 @@ export function ResumeCard({ project, onEndSession, onActionsChange }: ResumeCar
           )}
         </div>
         <div className="resume-card__header-actions">
-          {currentProject.githubRepo && (
-            <Link href={`/dev-folder/${currentProject.id}`}>
-              <Button size="sm" variant="secondary"><IconLayers size={14} /> .dev/</Button>
-            </Link>
-          )}
           <Button size="sm" onClick={onEndSession}>End Session</Button>
         </div>
       </div>

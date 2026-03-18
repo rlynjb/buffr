@@ -343,46 +343,6 @@ export async function getDiffs(
   }
 }
 
-/**
- * Checks if a repo already has a .dev/ folder and returns the file paths + contents.
- * Returns null if no .dev/ folder exists.
- */
-export async function detectExistingDevFolder(
-  ownerRepo: string,
-): Promise<Array<{ path: string; content: string }> | null> {
-  const [owner, repo] = ownerRepo.split("/");
-  if (!owner || repo === undefined) return null;
-
-  try {
-    // Get repo info for default branch
-    const repoData = await gh(`/repos/${owner}/${repo}`);
-    const branch = repoData.default_branch as string;
-
-    // Get full tree
-    const data = await gh(
-      `/repos/${owner}/${repo}/git/trees/${branch}?recursive=true`,
-    );
-    const tree = data.tree as Array<{ path: string; type: string }>;
-    const devFiles = tree.filter(
-      (t) => t.type === "blob" && t.path.startsWith(".dev/"),
-    );
-
-    if (devFiles.length === 0) return null;
-
-    // Fetch contents (limit to 30 files to avoid rate limits)
-    const files = await Promise.all(
-      devFiles.slice(0, 30).map(async (f) => {
-        const content = await getFileContent(owner, repo, f.path, branch);
-        return { path: f.path, content: content || "" };
-      }),
-    );
-
-    return files;
-  } catch {
-    return null;
-  }
-}
-
 export async function analyzeRepo(
   owner: string,
   repo: string,
