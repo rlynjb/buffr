@@ -138,6 +138,23 @@ export interface IndustryKBMeta {
   entryCount: number;
 }
 
+export type DevItemCategory = "ai-rules" | "skills" | "community-skills";
+
+export interface DevItem {
+  id: string;
+  category: DevItemCategory;
+  filename: string;
+  path: string;
+  title: string;
+  content: string;
+  scope: "global" | string;
+  communitySource?: string | null;
+  communityVersion?: string | null;
+  tags: string[];
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface Prompt {
   id: string;
   title: string;

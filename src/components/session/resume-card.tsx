@@ -16,6 +16,7 @@ import { useProvider } from "@/context/provider-context";
 import { SessionTab } from "./session-tab";
 import { ActionsTab } from "./actions-tab";
 import { PromptsTab } from "./prompts-tab";
+import { DevTab } from "./dev-tab";
 import { ToolsTab } from "./tools-tab";
 import "./resume-card.css";
 
@@ -25,7 +26,7 @@ interface ResumeCardProps {
   onActionsChange?: (actions: NextAction[]) => void;
 }
 
-type Tab = "session" | "actions" | "prompts" | "tools";
+type Tab = "session" | "actions" | "prompts" | "dev" | "tools";
 
 export function ResumeCard({ project, onEndSession, onActionsChange }: ResumeCardProps) {
   const router = useRouter();
@@ -208,6 +209,7 @@ export function ResumeCard({ project, onEndSession, onActionsChange }: ResumeCar
     { id: "actions" as Tab, label: "Next Actions" },
     { id: "session" as Tab, label: "Last Session" },
     { id: "prompts" as Tab, label: "Prompts" },
+    { id: "dev" as Tab, label: ".dev" },
     { id: "tools" as Tab, label: "Tools" },
   ];
 
@@ -374,6 +376,7 @@ export function ResumeCard({ project, onEndSession, onActionsChange }: ResumeCar
             lastSession={lastSession}
           />
         )}
+        {activeTab === "dev" && <DevTab project={project} />}
         {activeTab === "tools" && <ToolsTab />}
       </div>
     </div>

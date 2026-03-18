@@ -1,0 +1,200 @@
+@reference "../../app/globals.css";
+
+/* Header */
+.dev-tab__header {
+  @apply flex items-center gap-2 mb-4;
+}
+
+.dev-tab__search {
+  @apply flex-1 relative;
+}
+
+.dev-tab__search-icon {
+  @apply absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-500 pointer-events-none;
+}
+
+.dev-tab__search-input {
+  @apply w-full pl-8 pr-3 py-1.5 rounded-lg bg-zinc-900/80 border border-zinc-800/50 text-sm text-zinc-300 placeholder:text-zinc-600 focus:outline-none focus:border-purple-500/40 transition-colors;
+}
+
+/* Categories */
+.dev-tab__categories {
+  @apply flex items-center gap-1 mb-3 flex-wrap;
+}
+
+.dev-tab__category {
+  @apply px-2.5 py-1 rounded-full text-xs transition-colors cursor-pointer flex items-center gap-1.5;
+}
+
+.dev-tab__category--active {
+  @apply bg-purple-500/15 text-purple-300;
+}
+
+.dev-tab__category--inactive {
+  @apply text-zinc-500 hover:text-zinc-300 hover:bg-white/5;
+}
+
+.dev-tab__category-count {
+  @apply text-[10px] text-zinc-600;
+}
+
+/* Adapters */
+.dev-tab__adapters {
+  @apply flex items-center gap-2 mb-4 p-2.5 rounded-lg border border-zinc-800/40 bg-zinc-900/20 flex-wrap;
+}
+
+.dev-tab__adapters-label {
+  @apply text-[11px] text-zinc-500 shrink-0;
+}
+
+.dev-tab__adapters-list {
+  @apply flex items-center gap-3 flex-wrap;
+}
+
+.dev-tab__adapter {
+  @apply flex items-center gap-1.5 cursor-pointer;
+}
+
+.dev-tab__adapter-checkbox {
+  @apply accent-purple-500 w-3 h-3;
+}
+
+.dev-tab__adapter-icon {
+  @apply text-sm font-bold transition-colors;
+}
+
+.dev-tab__adapter-name {
+  @apply text-[11px] text-zinc-300 transition-opacity;
+}
+
+.dev-tab__adapter-name--dim {
+  @apply opacity-40;
+}
+
+/* File tree */
+.dev-tab__tree {
+  @apply space-y-1;
+}
+
+.dev-tab__dir-header {
+  @apply text-[11px] text-zinc-500 font-mono uppercase tracking-wider mt-4 mb-1 px-1 first:mt-0;
+}
+
+.dev-tab__file-row {
+  @apply w-full flex items-center gap-2.5 px-3 py-2 rounded-lg hover:bg-white/[0.02] transition-colors cursor-pointer text-left;
+}
+
+.dev-tab__file-row--expanded {
+  @apply bg-white/[0.02];
+}
+
+.dev-tab__file-dot {
+  @apply w-2 h-2 rounded-full shrink-0;
+}
+
+.dev-tab__file-name {
+  @apply text-sm text-zinc-300 flex-1 font-mono truncate;
+}
+
+.dev-tab__file-hint {
+  @apply text-zinc-600 opacity-0 transition-opacity;
+}
+
+.dev-tab__file-row:hover .dev-tab__file-hint {
+  @apply opacity-100;
+}
+
+/* Expanded */
+.dev-tab__expanded {
+  @apply ml-4 mb-2 rounded-lg border border-zinc-800/40 bg-zinc-900/30 overflow-hidden;
+}
+
+.dev-tab__expanded-header {
+  @apply flex items-center gap-2 px-3 py-2 border-b border-zinc-800/40 flex-wrap;
+}
+
+.dev-tab__expanded-path {
+  @apply text-[11px] text-zinc-500 font-mono flex-1;
+}
+
+.dev-tab__expanded-btn {
+  @apply flex items-center gap-1 px-2 py-0.5 rounded text-[11px] text-zinc-500 hover:text-zinc-300 hover:bg-white/5 transition-colors cursor-pointer;
+}
+
+.dev-tab__expanded-btn--delete {
+  @apply flex items-center gap-1 px-2 py-0.5 rounded text-[11px] text-red-400/70 hover:text-red-400 hover:bg-red-500/10 transition-colors cursor-pointer;
+}
+
+.dev-tab__expanded-content {
+  @apply p-3;
+}
+
+.dev-tab__expanded-pre {
+  @apply text-xs text-zinc-400 font-mono whitespace-pre-wrap leading-relaxed max-h-64 overflow-y-auto;
+}
+
+/* Empty / Loading */
+.dev-tab__empty {
+  @apply py-8 text-center text-sm text-zinc-600;
+}
+
+.dev-tab__loading {
+  @apply space-y-2;
+}
+
+.dev-tab__skeleton {
+  @apply h-10 rounded-lg bg-zinc-800/30 animate-pulse;
+}
+
+/* Modal */
+.dev-tab__modal-form {
+  @apply space-y-4;
+}
+
+.dev-tab__modal-label {
+  @apply block text-xs text-zinc-400 mb-1.5;
+}
+
+.dev-tab__modal-categories {
+  @apply flex gap-2;
+}
+
+.dev-tab__modal-cat {
+  @apply flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs transition-colors cursor-pointer;
+}
+
+.dev-tab__modal-cat--active {
+  @apply bg-white/5 text-zinc-200;
+}
+
+.dev-tab__modal-cat--inactive {
+  @apply border-zinc-800/40 text-zinc-500 hover:text-zinc-300 hover:bg-white/[0.02];
+}
+
+.dev-tab__modal-cat-dot {
+  @apply w-2 h-2 rounded-full;
+}
+
+.dev-tab__modal-path-preview {
+  @apply text-[11px] text-zinc-600 font-mono -mt-2 px-1;
+}
+
+.dev-tab__modal-scope {
+  @apply flex gap-1;
+}
+
+.dev-tab__modal-scope-btn {
+  @apply px-3 py-1 rounded-lg text-xs transition-colors cursor-pointer;
+}
+
+.dev-tab__modal-scope-btn--active {
+  @apply bg-purple-500/15 text-purple-300;
+}
+
+.dev-tab__modal-scope-btn--inactive {
+  @apply text-zinc-500 hover:text-zinc-300 hover:bg-white/5;
+}
+
+.dev-tab__modal-footer {
+  @apply flex justify-end gap-2 pt-2;
+}

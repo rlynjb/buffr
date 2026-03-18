@@ -2,6 +2,7 @@ import type {
   Project,
   Session,
   Prompt,
+  DevItem,
   LLMProvider,
   ToolIntegration,
   ToolConfig,
@@ -383,5 +384,47 @@ export async function installAdapter(
   return request<{ sha: string }>("/generate-dev?install-adapter", {
     method: "POST",
     body: JSON.stringify({ scanResultId, adapterPath, rootPath }),
+  });
+}
+
+// Dev Items
+export async function listDevItems(scope?: string): Promise<DevItem[]> {
+  const q = scope ? `?scope=${encodeURIComponent(scope)}` : "";
+  return request<DevItem[]>(`/dev-items${q}`);
+}
+
+export async function createDevItem(
+  data: Partial<DevItem>,
+): Promise<DevItem> {
+  return request<DevItem>("/dev-items", {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function updateDevItem(
+  id: string,
+  data: Partial<DevItem>,
+): Promise<DevItem> {
+  return request<DevItem>(`/dev-items?id=${encodeURIComponent(id)}`, {
+    method: "PUT",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function deleteDevItemApi(id: string): Promise<void> {
+  await request<{ ok: boolean }>(`/dev-items?id=${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+}
+
+export async function pushDevItems(
+  projectId: string,
+  repo: string,
+  adapterIds?: string[],
+): Promise<{ sha: string }> {
+  return request<{ sha: string }>("/dev-items?push", {
+    method: "POST",
+    body: JSON.stringify({ projectId, repo, adapterIds }),
   });
 }
