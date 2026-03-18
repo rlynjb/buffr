@@ -199,3 +199,97 @@
 .file-tree-tab__gap-dot--aligned {
   @apply bg-emerald-500/15 text-emerald-400;
 }
+
+/* Create file */
+
+.file-tree-tab__create-section {
+  @apply mb-4;
+}
+
+.file-tree-tab__create-trigger {
+  @apply flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-dashed border-zinc-700/50 text-sm text-zinc-500 hover:text-zinc-300 hover:border-zinc-600 transition-colors cursor-pointer;
+}
+
+.file-tree-tab__create-form {
+  @apply p-3 rounded-xl border border-zinc-800/60 bg-zinc-900/30 space-y-2;
+}
+
+.file-tree-tab__create-path-row {
+  @apply flex items-center gap-0 rounded-lg bg-zinc-900/80 border border-zinc-700/50 overflow-hidden focus-within:border-purple-500/40 transition-colors;
+}
+
+.file-tree-tab__create-prefix {
+  @apply px-2.5 py-1.5 text-sm text-zinc-500 font-mono bg-zinc-800/50 border-r border-zinc-700/50 shrink-0;
+}
+
+.file-tree-tab__create-dir-select {
+  @apply px-2 py-1.5 text-sm text-zinc-300 font-mono bg-transparent border-r border-zinc-700/50 outline-none cursor-pointer appearance-none;
+}
+
+.file-tree-tab__create-name {
+  @apply flex-1 px-2.5 py-1.5 text-sm text-zinc-300 font-mono bg-transparent placeholder:text-zinc-600 outline-none;
+}
+
+.file-tree-tab__create-preview {
+  @apply text-[11px] text-zinc-600 font-mono px-1;
+}
+
+.file-tree-tab__create-editor {
+  @apply w-full px-3 py-2 rounded-lg bg-zinc-900/80 border border-zinc-700/50 text-xs text-zinc-300 font-mono placeholder:text-zinc-600 focus:outline-none focus:border-purple-500/40 transition-colors resize-y leading-relaxed;
+}
+
+.file-tree-tab__create-actions {
+  @apply flex items-center justify-end gap-2;
+}
+
+.file-tree-tab__create-cancel {
+  @apply px-3 py-1 rounded-lg text-xs text-zinc-500 hover:text-zinc-300 transition-colors cursor-pointer;
+}
+
+.file-tree-tab__create-save {
+  @apply px-3 py-1 rounded-lg text-xs text-purple-400 border border-purple-500/30 hover:bg-purple-500/10 transition-colors cursor-pointer disabled:opacity-30 disabled:cursor-default;
+}
+
+/* Delete file */
+
+.file-tree-tab__delete-btn {
+  @apply flex items-center gap-1 px-2 py-0.5 rounded text-[11px] text-red-400/70 hover:text-red-400 hover:bg-red-500/10 transition-colors cursor-pointer;
+}
+
+.file-tree-tab__delete-confirm {
+  @apply flex items-center gap-1.5 text-[11px];
+}
+
+.file-tree-tab__delete-confirm-text {
+  @apply text-red-400;
+}
+
+.file-tree-tab__delete-yes {
+  @apply px-1.5 py-0.5 rounded text-red-400 hover:bg-red-500/10 transition-colors cursor-pointer;
+}
+
+.file-tree-tab__delete-no {
+  @apply px-1.5 py-0.5 rounded text-zinc-500 hover:text-zinc-300 hover:bg-white/5 transition-colors cursor-pointer;
+}
+
+/* Move file */
+
+.file-tree-tab__move-btn {
+  @apply px-2 py-0.5 rounded text-[11px] text-zinc-500 hover:text-zinc-300 hover:bg-white/5 transition-colors cursor-pointer;
+}
+
+.file-tree-tab__move-confirm {
+  @apply flex items-center gap-1.5 text-[11px];
+}
+
+.file-tree-tab__move-select {
+  @apply px-1.5 py-0.5 rounded bg-zinc-900/80 border border-zinc-700/50 text-[11px] text-zinc-300 font-mono outline-none cursor-pointer;
+}
+
+.file-tree-tab__move-apply {
+  @apply px-1.5 py-0.5 rounded text-purple-400 hover:bg-purple-500/10 transition-colors cursor-pointer;
+}
+
+.file-tree-tab__move-cancel {
+  @apply px-1.5 py-0.5 rounded text-zinc-500 hover:text-zinc-300 hover:bg-white/5 transition-colors cursor-pointer;
+}

@@ -423,6 +423,47 @@ export default function DevFolderPage() {
     }
   }
 
+  const [deletedPaths, setDeletedPaths] = useState<string[]>([]);
+
+  function handleFileCreate(path: string, content: string, ownership: string) {
+    if (!scanResult) return;
+    const newFile = { path, content, ownership };
+    const updated = [...scanResult.generatedFiles, newFile];
+    setScanResult({ ...scanResult, generatedFiles: updated });
+    updateScanResult(scanResult.id, { generatedFiles: updated }).catch(() => {});
+  }
+
+  function handleFileMove(oldPath: string, newPath: string) {
+    if (!scanResult) return;
+    const updated = scanResult.generatedFiles.map((f) =>
+      f.path === oldPath ? { ...f, path: newPath } : f,
+    );
+    setScanResult({ ...scanResult, generatedFiles: updated });
+    // Transfer any pending edits to the new path
+    setEditedFiles((prev) => {
+      if (!(oldPath in prev)) return prev;
+      const next = { ...prev, [newPath]: prev[oldPath] };
+      delete next[oldPath];
+      return next;
+    });
+    // Old path needs deletion from repo, new path will be pushed
+    setDeletedPaths((prev) => [...prev, oldPath]);
+    updateScanResult(scanResult.id, { generatedFiles: updated }).catch(() => {});
+  }
+
+  function handleFileDelete(path: string) {
+    if (!scanResult) return;
+    const updated = scanResult.generatedFiles.filter((f) => f.path !== path);
+    setScanResult({ ...scanResult, generatedFiles: updated });
+    setEditedFiles((prev) => {
+      const next = { ...prev };
+      delete next[path];
+      return next;
+    });
+    setDeletedPaths((prev) => [...prev, path]);
+    updateScanResult(scanResult.id, { generatedFiles: updated }).catch(() => {});
+  }
+
   async function handlePush() {
     if (!scanResult) return;
     setPushing(true);
@@ -433,7 +474,8 @@ export default function DevFolderPage() {
         setScanResult({ ...scanResult, generatedFiles: mergedFiles });
         setEditedFiles({});
       }
-      await pushDevFiles(scanResult.id);
+      await pushDevFiles(scanResult.id, deletedPaths.length > 0 ? deletedPaths : undefined);
+      setDeletedPaths([]);
     } catch (err) {
       console.error("Push failed:", err);
     } finally {
@@ -617,6 +659,9 @@ export default function DevFolderPage() {
                 onFileEdit={handleFileEdit}
                 onFileReset={handleFileReset}
                 onFileRegenerate={handleFileRegenerate}
+                onFileCreate={handleFileCreate}
+                onFileDelete={handleFileDelete}
+                onFileMove={handleFileMove}
                 regeneratingPaths={regeneratingPaths}
                 fileSources={fileSources}
                 reviewableChanges={reviewableChanges}

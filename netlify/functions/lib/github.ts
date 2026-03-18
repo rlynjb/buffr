@@ -75,7 +75,8 @@ export async function pushFiles(
   owner: string,
   repo: string,
   files: Array<{ path: string; content: string; mode?: string }>,
-  message: string
+  message: string,
+  deletePaths?: string[],
 ): Promise<string> {
   // Get the current HEAD commit to use as parent
   const ref = await gh(`/repos/${owner}/${repo}/git/ref/heads/main`);
@@ -96,14 +97,22 @@ export async function pushFiles(
             : { content: Buffer.from(file.content).toString("base64"), encoding: "base64" },
         ),
       });
-      return { path: file.path, sha: data.sha as string, mode: file.mode || "100644", type: "blob" };
+      return { path: file.path, sha: data.sha as string, mode: file.mode || "100644", type: "blob" as const };
     })
   );
+
+  // Add deletion entries (sha: null removes the file from the tree)
+  const deleteEntries = (deletePaths || []).map((path) => ({
+    path,
+    sha: null,
+    mode: "100644" as const,
+    type: "blob" as const,
+  }));
 
   // Create tree with base_tree so it layers on top of the init commit
   const tree = await gh(`/repos/${owner}/${repo}/git/trees`, {
     method: "POST",
-    body: JSON.stringify({ base_tree: baseTreeSha.sha as string, tree: blobs }),
+    body: JSON.stringify({ base_tree: baseTreeSha.sha as string, tree: [...blobs, ...deleteEntries] }),
   });
 
   // Create commit with parent

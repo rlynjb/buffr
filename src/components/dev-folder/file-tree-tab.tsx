@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef, useMemo } from "react";
 import { Badge } from "@/components/ui/badge";
-import { IconEye, IconRefresh, IconLink, IconCheck, IconX } from "@/components/icons";
+import { IconEye, IconRefresh, IconLink, IconCheck, IconX, IconPlus, IconTrash } from "@/components/icons";
 import { DiffView } from "./diff-view";
 import type { ReviewableChange } from "./review-banner";
 import type { GapAnalysisEntry } from "@/lib/types";
@@ -14,6 +14,9 @@ interface FileTreeTabProps {
   onFileEdit?: (path: string, content: string) => void;
   onFileReset?: (path: string) => void;
   onFileRegenerate?: (path: string) => void;
+  onFileCreate?: (path: string, content: string, ownership: string) => void;
+  onFileDelete?: (path: string) => void;
+  onFileMove?: (oldPath: string, newPath: string) => void;
   regeneratingPaths?: Set<string>;
   fileSources?: Record<string, Array<{ label: string; url: string }>>;
   reviewableChanges?: ReviewableChange[];
@@ -100,6 +103,9 @@ export function FileTreeTab({
   onFileEdit,
   onFileReset,
   onFileRegenerate,
+  onFileCreate,
+  onFileDelete,
+  onFileMove,
   regeneratingPaths,
   fileSources,
   reviewableChanges,
@@ -111,6 +117,27 @@ export function FileTreeTab({
 }: FileTreeTabProps) {
   const [expandedPath, setExpandedPath] = useState<string | null>(null);
   const fileRefs = useRef<Record<string, HTMLDivElement | null>>({});
+  const [showCreateForm, setShowCreateForm] = useState(false);
+  const [newFileDir, setNewFileDir] = useState("context");
+  const [newFileName, setNewFileName] = useState("");
+  const [newFileContent, setNewFileContent] = useState("");
+  const [confirmDeletePath, setConfirmDeletePath] = useState<string | null>(null);
+  const [movingPath, setMovingPath] = useState<string | null>(null);
+  const [moveTargetDir, setMoveTargetDir] = useState("");
+
+  const DIRECTORIES = ["context", "standards", "industry", "prompts", "templates", "adapters"];
+
+  // Collect any custom directories from existing files
+  const existingDirs = useMemo(() => {
+    const dirs = new Set(DIRECTORIES);
+    for (const f of generatedFiles) {
+      const dir = getDirectory(f.path);
+      if (dir) dirs.add(dir);
+    }
+    return Array.from(dirs);
+  }, [generatedFiles]);
+
+  const newFilePath = `.dev/${newFileDir}/${newFileName}${newFileName && !newFileName.endsWith(".md") ? ".md" : ""}`;
 
   const toggleFile = (path: string) => {
     setExpandedPath((prev) => (prev === path ? null : path));
@@ -130,6 +157,16 @@ export function FileTreeTab({
       return () => clearTimeout(timer);
     }
   }, [highlightedFilePath, onHighlightClear]);
+
+  // Sort files by directory so moved files group correctly
+  const sortedFiles = useMemo(() => {
+    return [...generatedFiles].sort((a, b) => {
+      const dirA = getDirectory(a.path);
+      const dirB = getDirectory(b.path);
+      if (dirA !== dirB) return dirA.localeCompare(dirB);
+      return a.path.localeCompare(b.path);
+    });
+  }, [generatedFiles]);
 
   // Build reverse map: file path → gap status counts
   const fileGapStatuses = useMemo(() => {
@@ -181,9 +218,86 @@ export function FileTreeTab({
         </div>
       </div>
 
+      {/* Create new file */}
+      {onFileCreate && (
+        <div className="file-tree-tab__create-section">
+          {!showCreateForm ? (
+            <button
+              className="file-tree-tab__create-trigger"
+              onClick={() => setShowCreateForm(true)}
+            >
+              <IconPlus size={12} /> New file
+            </button>
+          ) : (
+            <div className="file-tree-tab__create-form">
+              <div className="file-tree-tab__create-path-row">
+                <span className="file-tree-tab__create-prefix">.dev/</span>
+                <select
+                  value={newFileDir}
+                  onChange={(e) => setNewFileDir(e.target.value)}
+                  className="file-tree-tab__create-dir-select"
+                >
+                  {existingDirs.map((dir) => (
+                    <option key={dir} value={dir}>{dir}/</option>
+                  ))}
+                </select>
+                <input
+                  type="text"
+                  value={newFileName}
+                  onChange={(e) => setNewFileName(e.target.value)}
+                  placeholder="filename.md"
+                  className="file-tree-tab__create-name"
+                  autoFocus
+                />
+              </div>
+              <p className="file-tree-tab__create-preview">{newFilePath}</p>
+              <textarea
+                value={newFileContent}
+                onChange={(e) => setNewFileContent(e.target.value)}
+                placeholder="File content..."
+                rows={6}
+                className="file-tree-tab__create-editor"
+              />
+              <div className="file-tree-tab__create-actions">
+                <button
+                  className="file-tree-tab__create-cancel"
+                  onClick={() => {
+                    setShowCreateForm(false);
+                    setNewFileDir("context");
+                    setNewFileName("");
+                    setNewFileContent("");
+                  }}
+                >
+                  Cancel
+                </button>
+                <button
+                  className="file-tree-tab__create-save"
+                  disabled={
+                    !newFileName.trim() ||
+                    !newFileContent.trim() ||
+                    generatedFiles.some((f) => f.path === newFilePath)
+                  }
+                  onClick={() => {
+                    onFileCreate(newFilePath, newFileContent, "user");
+                    setShowCreateForm(false);
+                    const createdPath = newFilePath;
+                    setNewFileDir("context");
+                    setNewFileName("");
+                    setNewFileContent("");
+                    setExpandedPath(createdPath);
+                  }}
+                >
+                  Create file
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* File list */}
       <div className="file-tree-tab__list">
-        {generatedFiles.map((file) => {
+        {sortedFiles.map((file) => {
           const ownership = resolveOwnership(file);
           const color = ownershipColors[ownership];
           const directory = getDirectory(file.path);
@@ -283,6 +397,85 @@ export function FileTreeTab({
                       >
                         Reset
                       </button>
+                    )}
+                    {onFileMove && !isSystem && !reviewChange && (
+                      movingPath === file.path ? (
+                        <span className="file-tree-tab__move-confirm">
+                          <select
+                            value={moveTargetDir}
+                            onChange={(e) => setMoveTargetDir(e.target.value)}
+                            className="file-tree-tab__move-select"
+                          >
+                            {existingDirs
+                              .filter((d) => d !== getDirectory(file.path))
+                              .map((dir) => (
+                                <option key={dir} value={dir}>{dir}/</option>
+                              ))}
+                          </select>
+                          <button
+                            className="file-tree-tab__move-apply"
+                            onClick={() => {
+                              const filename = getFilename(file.path);
+                              const newPath = `.dev/${moveTargetDir}/${filename}`;
+                              if (!generatedFiles.some((f) => f.path === newPath)) {
+                                onFileMove(file.path, newPath);
+                                setExpandedPath(newPath);
+                              }
+                              setMovingPath(null);
+                            }}
+                          >
+                            Move
+                          </button>
+                          <button
+                            className="file-tree-tab__move-cancel"
+                            onClick={() => setMovingPath(null)}
+                          >
+                            Cancel
+                          </button>
+                        </span>
+                      ) : (
+                        <button
+                          className="file-tree-tab__move-btn"
+                          onClick={() => {
+                            const currentDir = getDirectory(file.path);
+                            const firstOther = existingDirs.find((d) => d !== currentDir) || existingDirs[0];
+                            setMoveTargetDir(firstOther);
+                            setMovingPath(file.path);
+                          }}
+                        >
+                          Move
+                        </button>
+                      )
+                    )}
+                    {onFileDelete && !isSystem && !reviewChange && (
+                      confirmDeletePath === file.path ? (
+                        <span className="file-tree-tab__delete-confirm">
+                          <span className="file-tree-tab__delete-confirm-text">Delete?</span>
+                          <button
+                            className="file-tree-tab__delete-yes"
+                            onClick={() => {
+                              onFileDelete(file.path);
+                              setConfirmDeletePath(null);
+                              setExpandedPath(null);
+                            }}
+                          >
+                            Yes
+                          </button>
+                          <button
+                            className="file-tree-tab__delete-no"
+                            onClick={() => setConfirmDeletePath(null)}
+                          >
+                            No
+                          </button>
+                        </span>
+                      ) : (
+                        <button
+                          className="file-tree-tab__delete-btn"
+                          onClick={() => setConfirmDeletePath(file.path)}
+                        >
+                          <IconTrash size={11} /> Delete
+                        </button>
+                      )
                     )}
                   </div>
                   <div className="file-tree-tab__expanded-meta">

@@ -365,11 +365,12 @@ export async function detectDevFolder(projectId: string): Promise<ScanResult | n
 
 // Push .dev/ files to GitHub repo
 export async function pushDevFiles(
-  scanResultId: string
+  scanResultId: string,
+  deletePaths?: string[],
 ): Promise<{ sha: string }> {
   return request<{ sha: string }>("/generate-dev?push", {
     method: "POST",
-    body: JSON.stringify({ scanResultId }),
+    body: JSON.stringify({ scanResultId, deletePaths }),
   });
 }
 

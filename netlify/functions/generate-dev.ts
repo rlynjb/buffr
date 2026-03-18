@@ -816,12 +816,12 @@ export default async function handler(req: Request, _context: Context) {
 
     // ── Push existing scan files to repo ──
     if (url.searchParams.has("push")) {
-      const { scanResultId } = body as { scanResultId: string };
+      const { scanResultId, deletePaths } = body as { scanResultId: string; deletePaths?: string[] };
       if (!scanResultId) return errorResponse("scanResultId is required", 400);
 
       const scan = await getScanResult(scanResultId);
       if (!scan) return errorResponse("Scan result not found", 404);
-      if (!scan.generatedFiles.length) return errorResponse("No files to push", 400);
+      if (!scan.generatedFiles.length && !deletePaths?.length) return errorResponse("No files to push", 400);
 
       const repoFullName = scan.repoFullName;
       if (!repoFullName || !repoFullName.includes("/")) {
@@ -833,7 +833,8 @@ export default async function handler(req: Request, _context: Context) {
         o,
         r,
         scan.generatedFiles.map((f) => ({ path: f.path, content: f.content })),
-        "chore: update .dev/ project intelligence folder"
+        "chore: update .dev/ project intelligence folder",
+        deletePaths,
       );
       return json({ sha });
     }
