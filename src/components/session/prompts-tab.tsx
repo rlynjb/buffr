@@ -11,7 +11,7 @@ import {
   IconChevron, IconPlay, IconLoader, IconSparkle, IconCheck, IconLayers,
   sourceColor,
 } from "@/components/icons";
-import type { Prompt, PromptResponse, ToolIntegration, Project, Session, WorkItem } from "@/lib/types";
+import type { Prompt, PromptResponse, ToolIntegration, Project, Session } from "@/lib/types";
 import {
   listPrompts, createPrompt, updatePrompt, deletePrompt,
   listIntegrations, runPrompt, executeToolAction,
@@ -24,7 +24,6 @@ import "./prompts-tab.css";
 interface PromptsTabProps {
   project: Project;
   lastSession: Session | null;
-  workItems: WorkItem[];
 }
 
 const CATEGORIES = [
@@ -195,7 +194,7 @@ function PromptResponseView({
   );
 }
 
-export function PromptsTab({ project, lastSession, workItems }: PromptsTabProps) {
+export function PromptsTab({ project, lastSession }: PromptsTabProps) {
   const { providers, selected } = useProvider();
   const hasLLM = providers.length > 0;
 
@@ -241,10 +240,10 @@ export function PromptsTab({ project, lastSession, workItems }: PromptsTabProps)
   const resolvedBodies = useMemo(() => {
     const bodies: Record<string, string> = {};
     for (const prompt of prompts) {
-      bodies[prompt.id] = resolvePrompt(prompt.body, { project, lastSession, issues: workItems });
+      bodies[prompt.id] = resolvePrompt(prompt.body, { project, lastSession });
     }
     return bodies;
-  }, [prompts, project, lastSession, workItems]);
+  }, [prompts, project, lastSession]);
 
   // CRUD handlers
   function openNew() {
@@ -287,7 +286,7 @@ export function PromptsTab({ project, lastSession, workItems }: PromptsTabProps)
   }
 
   async function handleCopy(prompt: Prompt) {
-    const resolved = resolvePrompt(prompt.body, { project, lastSession, issues: workItems });
+    const resolved = resolvePrompt(prompt.body, { project, lastSession });
     await navigator.clipboard.writeText(resolved);
     setCopiedId(prompt.id);
     setTimeout(() => setCopiedId(null), 1500);

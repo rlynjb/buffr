@@ -1,5 +1,3 @@
-import type { GitHubIssue, WorkItem } from "./types";
-
 /**
  * Maps integration IDs to capabilities and their corresponding tool names.
  * Features call getToolForCapability() to find the right tool, then
@@ -7,7 +5,6 @@ import type { GitHubIssue, WorkItem } from "./types";
  */
 const DATA_SOURCE_TOOLS: Record<string, Record<string, string>> = {
   github: {
-    list_open_items: "github_list_issues",
     list_recent_activity: "github_list_issues",
     create_item: "github_create_issue",
     close_item: "github_close_issue",
@@ -16,7 +13,6 @@ const DATA_SOURCE_TOOLS: Record<string, Record<string, string>> = {
     get_file: "github_get_file",
   },
   notion: {
-    list_open_items: "notion_list_tasks",
     list_recent_activity: "notion_list_tasks",
     create_item: "notion_create_task",
     close_item: "notion_update_task",
@@ -36,14 +32,3 @@ export function getIntegrationsWithCapability(capability: string): string[] {
     .map(([id]) => id);
 }
 
-export function mapGitHubIssuesToWorkItems(issues: GitHubIssue[]): WorkItem[] {
-  return issues.map((issue) => ({
-    id: String(issue.number),
-    title: issue.title,
-    status: "open",
-    url: issue.url,
-    source: "github",
-    labels: issue.labels,
-    timestamp: issue.createdAt,
-  }));
-}

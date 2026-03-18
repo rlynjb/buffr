@@ -5,13 +5,12 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { IconBack, IconGitHub, IconGlobe, IconSparkle, IconLayers, IconLink, SourceIcon, sourceColor } from "@/components/icons";
+import { IconBack, IconGitHub, IconGlobe, IconSparkle, IconLayers } from "@/components/icons";
 import { PHASE_COLORS } from "@/lib/constants";
-import type { Project, Session, WorkItem, TechDebtScan } from "@/lib/types";
+import type { Project, Session, TechDebtScan } from "@/lib/types";
 import { generateNextActions, type NextAction, type ActionContext } from "@/lib/next-actions";
 import { listProjects, listSessions, getActionNotes, saveActionNote, executeToolAction, listIntegrations, updateProject, listManualActions, addManualAction, updateManualAction, deleteManualAction, paraphraseText } from "@/lib/api";
 import { timeAgo } from "@/lib/format";
-import { getToolForCapability } from "@/lib/data-sources";
 import { generateSuggestions, type ProjectSuggestion } from "@/lib/suggestions";
 import { useProvider } from "@/context/provider-context";
 import { SessionTab } from "./session-tab";
@@ -27,14 +26,12 @@ interface ResumeCardProps {
   onActionsChange?: (actions: NextAction[]) => void;
 }
 
-type Tab = "session" | "actions" | "prompts" | "issues" | "tech-debt" | "tools";
+type Tab = "session" | "actions" | "prompts" | "tech-debt" | "tools";
 
 export function ResumeCard({ project, onEndSession, onActionsChange }: ResumeCardProps) {
   const router = useRouter();
   const { selected: selectedProvider } = useProvider();
   const [lastSession, setLastSession] = useState<Session | null>(null);
-  const [workItems, setWorkItems] = useState<WorkItem[]>([]);
-  const [dataSources] = useState<string[]>(project.dataSources || (project.githubRepo ? ["github"] : []));
   const [actions, setActions] = useState<NextAction[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<Tab>("actions");
@@ -93,45 +90,16 @@ export function ResumeCard({ project, onEndSession, onActionsChange }: ResumeCar
   }, [actions, onActionsChange]);
 
   useEffect(() => {
-    async function fetchWorkItems(): Promise<WorkItem[]> {
-      const sources = dataSources;
-      const results = await Promise.all(
-        sources.map(async (source) => {
-          const toolName = getToolForCapability(source, "list_open_items");
-          if (!toolName) return [] as WorkItem[];
-          try {
-            const params: Record<string, unknown> = {};
-            if (source === "github" && project.githubRepo) {
-              const [owner, repo] = project.githubRepo.split("/");
-              params.owner = owner;
-              params.repo = repo;
-            }
-            const res = await executeToolAction(toolName, params);
-            if (res.ok && res.result) {
-              const data = res.result as { items?: WorkItem[] };
-              return data.items || [];
-            }
-            return [] as WorkItem[];
-          } catch {
-            return [] as WorkItem[];
-          }
-        })
-      );
-      return results.flat();
-    }
-
     async function load() {
       try {
-        const [sessions, items, savedNotes, manualItems] = await Promise.all([
+        const [sessions, savedNotes, manualItems] = await Promise.all([
           listSessions(project.id),
-          fetchWorkItems(),
           getActionNotes(project.id).catch(() => ({} as Record<string, string>)),
           listManualActions(project.id).catch(() => []),
         ]);
 
         const last = sessions.length > 0 ? sessions[0] : null;
         setLastSession(last);
-        setWorkItems(items);
         setNotes(savedNotes);
 
         const ctx: ActionContext = { project, lastSession: last };
@@ -162,7 +130,7 @@ export function ResumeCard({ project, onEndSession, onActionsChange }: ResumeCar
       }
     }
     load();
-  }, [project, dataSources]);
+  }, [project]);
 
   function handleActionDone(id: string) {
     setActions((prev) => prev.map((a) => (a.id === id ? { ...a, done: true } : a)));
@@ -232,7 +200,6 @@ export function ResumeCard({ project, onEndSession, onActionsChange }: ResumeCar
   const tabs = [
     { id: "actions" as Tab, label: "Next Actions" },
     { id: "session" as Tab, label: "Last Session" },
-    ...(workItems.length > 0 ? [{ id: "issues" as Tab, label: "Open Issues" }] : []),
     ...(currentProject.techDebt?.summary?.length ? [{ id: "tech-debt" as Tab, label: "Tech Debt" }] : []),
     { id: "prompts" as Tab, label: "Prompts" },
     { id: "tools" as Tab, label: "Tools" },
@@ -394,31 +361,6 @@ export function ResumeCard({ project, onEndSession, onActionsChange }: ResumeCar
           />
         )}
         {activeTab === "session" && <SessionTab lastSession={lastSession} />}
-        {activeTab === "issues" && (
-          <div className="resume-card__issues-list">
-            {workItems.slice(0, 15).map((item) => (
-              <a
-                key={`${item.source}-${item.id}`}
-                href={item.url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="resume-card__issue"
-              >
-                <span style={{ color: sourceColor(item.source) }}>
-                  <SourceIcon source={item.source} size={14} />
-                </span>
-                <span className="resume-card__issue-title">{item.title}</span>
-                <span className="resume-card__issue-id">{item.id}</span>
-                {item.labels?.slice(0, 3).map((l) => (
-                  <Badge key={l} color="#666" small>{l}</Badge>
-                ))}
-                <span className="resume-card__issue-link">
-                  <IconLink size={12} />
-                </span>
-              </a>
-            ))}
-          </div>
-        )}
         {activeTab === "tech-debt" && currentProject.techDebt && (
           <TechDebtGrid
             summary={currentProject.techDebt.summary}
@@ -429,7 +371,6 @@ export function ResumeCard({ project, onEndSession, onActionsChange }: ResumeCar
           <PromptsTab
             project={project}
             lastSession={lastSession}
-            workItems={workItems}
           />
         )}
         {activeTab === "tools" && <ToolsTab />}

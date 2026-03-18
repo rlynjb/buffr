@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { resolvePrompt } from "./resolve-prompt";
-import type { Project, Session, WorkItem } from "./types";
+import type { Project, Session } from "./types";
 
 function makeProject(overrides: Partial<Project> = {}): Project {
   return {
@@ -46,16 +46,6 @@ describe("resolvePrompt", () => {
       lastSession: session,
     });
     expect(result).toBe("Goal: Add auth, Next: Add logout");
-  });
-
-  it("resolves issues variable with WorkItem data", () => {
-    const items: WorkItem[] = [
-      { id: "42", title: "Fix login", status: "open", url: "", source: "github" },
-      { id: "43", title: "Add tests", status: "open", url: "", source: "notion" },
-    ];
-    const result = resolvePrompt("Issues:\n{{issues}}", { issues: items });
-    expect(result).toContain("#42: Fix login");
-    expect(result).toContain("#43: Add tests");
   });
 
   it("replaces unknown variables with empty strings", () => {

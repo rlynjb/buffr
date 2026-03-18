@@ -1,10 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { getToolForCapability, getIntegrationsWithCapability, mapGitHubIssuesToWorkItems } from "./data-sources";
-import type { GitHubIssue } from "./types";
+import { getToolForCapability, getIntegrationsWithCapability } from "./data-sources";
 
 describe("getToolForCapability", () => {
-  it("returns the correct tool for github list_open_items", () => {
-    expect(getToolForCapability("github", "list_open_items")).toBe("github_list_issues");
+  it("returns the correct tool for github list_recent_activity", () => {
+    expect(getToolForCapability("github", "list_recent_activity")).toBe("github_list_issues");
   });
 
   it("returns the correct tool for notion create_item", () => {
@@ -12,7 +11,7 @@ describe("getToolForCapability", () => {
   });
 
   it("returns null for unknown integration", () => {
-    expect(getToolForCapability("slack", "list_open_items")).toBeNull();
+    expect(getToolForCapability("slack", "list_recent_activity")).toBeNull();
   });
 
   it("returns null for unknown capability", () => {
@@ -21,8 +20,8 @@ describe("getToolForCapability", () => {
 });
 
 describe("getIntegrationsWithCapability", () => {
-  it("returns all integrations with list_open_items", () => {
-    const result = getIntegrationsWithCapability("list_open_items");
+  it("returns all integrations with list_recent_activity", () => {
+    const result = getIntegrationsWithCapability("list_recent_activity");
     expect(result).toContain("github");
     expect(result).toContain("notion");
     expect(result).toHaveLength(2);
@@ -35,28 +34,5 @@ describe("getIntegrationsWithCapability", () => {
 
   it("returns empty array for unknown capability", () => {
     expect(getIntegrationsWithCapability("nonexistent")).toEqual([]);
-  });
-});
-
-describe("mapGitHubIssuesToWorkItems", () => {
-  it("maps GitHub issues to WorkItem shape", () => {
-    const issues: GitHubIssue[] = [
-      { number: 42, title: "Fix login", url: "https://github.com/o/r/issues/42", labels: ["bug"], createdAt: "2024-01-01T00:00:00Z" },
-    ];
-    const items = mapGitHubIssuesToWorkItems(issues);
-    expect(items).toHaveLength(1);
-    expect(items[0]).toEqual({
-      id: "42",
-      title: "Fix login",
-      status: "open",
-      url: "https://github.com/o/r/issues/42",
-      source: "github",
-      labels: ["bug"],
-      timestamp: "2024-01-01T00:00:00Z",
-    });
-  });
-
-  it("handles empty array", () => {
-    expect(mapGitHubIssuesToWorkItems([])).toEqual([]);
   });
 });

@@ -1,4 +1,4 @@
-import type { Project, Session, WorkItem } from "./types";
+import type { Project, Session } from "./types";
 
 export interface NextAction {
   id: string;

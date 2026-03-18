@@ -159,24 +159,6 @@ export interface IndustryKBMeta {
   entryCount: number;
 }
 
-export interface GitHubIssue {
-  number: number;
-  title: string;
-  url: string;
-  labels: string[];
-  createdAt: string;
-}
-
-export interface WorkItem {
-  id: string;
-  title: string;
-  status: string;
-  url: string;
-  source: string; // "github" | "notion"
-  labels?: string[];
-  timestamp?: string;
-}
-
 export interface Prompt {
   id: string;
   title: string;

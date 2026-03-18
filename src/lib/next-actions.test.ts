@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { generateNextActions, type ActionContext } from "./next-actions";
-import type { Project, Session, WorkItem } from "./types";
+import type { Project, Session } from "./types";
 
 function makeProject(overrides: Partial<Project> = {}): Project {
   return {
@@ -72,7 +72,6 @@ describe("generateNextActions", () => {
     const ctx: ActionContext = {
       project: makeProject(),
       lastSession: makeSession({ nextStep: "Fix #1: Bug" }),
-      workItems: [{ id: "1", title: "Bug", status: "open", url: "", source: "github" }],
     };
     const actions = generateNextActions(ctx);
     const ids = actions.map((a) => a.id);

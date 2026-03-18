@@ -1,9 +1,8 @@
-import type { Project, Session, WorkItem } from "./types";
+import type { Project, Session } from "./types";
 
 interface PromptContext {
   project?: Project | null;
   lastSession?: Session | null;
-  issues?: WorkItem[];
 }
 
 /**
@@ -26,13 +25,6 @@ export function resolvePrompt(template: string, ctx: PromptContext): string {
     vars["lastSession.goal"] = ctx.lastSession.goal;
     vars["lastSession.nextStep"] = ctx.lastSession.nextStep;
     vars["lastSession.blockers"] = ctx.lastSession.blockers || "";
-  }
-
-  if (ctx.issues && ctx.issues.length > 0) {
-    vars["issues"] = ctx.issues
-      .slice(0, 5)
-      .map((i) => `#${i.id}: ${i.title}`)
-      .join("\n");
   }
 
   return template.replace(/\{\{(\w+(?:\.\w+)*)\}\}/g, (_, key: string) => {

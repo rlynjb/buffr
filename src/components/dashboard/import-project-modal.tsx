@@ -24,7 +24,6 @@ interface AnalysisResult {
   description?: string;
   frameworks?: string[];
   devTools?: string[];
-  openIssues?: number;
   lastCommit?: string;
 }
 
@@ -156,11 +155,6 @@ export function ImportProjectModal({
                 {result.name}
               </span>
               <Badge color={PHASE_COLORS[phase]}>{phase}</Badge>
-              {result.openIssues != null && (
-                <span className="import-modal__result-issues">
-                  {result.openIssues} open issues
-                </span>
-              )}
             </div>
 
             {stack.length > 0 && (
