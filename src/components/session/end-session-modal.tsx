@@ -6,7 +6,7 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { IconLoader, IconSparkle, SourceIcon, sourceColor } from "@/components/icons";
-import { createSession, updateProject, summarizeSession, suggestNextStep, detectIntent, executeToolAction, listManualActions, addManualAction, deleteManualAction } from "@/lib/api";
+import { createSession, updateProject, summarizeSession, suggestNextStep, detectIntent, executeToolAction, listManualActions, addManualAction, cleanDoneManualActions } from "@/lib/api";
 import { getToolForCapability } from "@/lib/data-sources";
 import { useProvider } from "@/context/provider-context";
 import type { Project } from "@/lib/types";
@@ -259,12 +259,9 @@ export function EndSessionModal({
         }
       }
 
-      // Delete done manual actions sequentially to avoid race conditions
+      // Remove all done manual actions in a single atomic operation
       try {
-        const manualItems = await listManualActions(project.id);
-        for (const item of manualItems.filter((i) => i.done)) {
-          await deleteManualAction(project.id, item.id);
-        }
+        await cleanDoneManualActions(project.id);
       } catch {
         // Cleanup is best-effort
       }

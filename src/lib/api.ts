@@ -171,6 +171,15 @@ export async function deleteManualAction(
   );
 }
 
+export async function cleanDoneManualActions(
+  projectId: string,
+): Promise<ManualActionData[]> {
+  return request<ManualActionData[]>(
+    `/manual-actions?projectId=${encodeURIComponent(projectId)}&cleanDone`,
+    { method: "DELETE" }
+  );
+}
+
 // Prompts
 export async function listPrompts(scope?: string): Promise<Prompt[]> {
   const q = scope ? `?scope=${encodeURIComponent(scope)}` : "";

@@ -86,15 +86,19 @@ export default async function handler(req: Request, _context: Context) {
       return json(reordered);
     }
 
-    // DELETE — remove a manual action
+    // DELETE — remove manual action(s)
     if (req.method === "DELETE") {
       const actionId = url.searchParams.get("actionId");
-      if (!actionId) {
-        return errorResponse("actionId is required", 400);
+      const cleanDone = url.searchParams.has("cleanDone");
+
+      if (!actionId && !cleanDone) {
+        return errorResponse("actionId or cleanDone flag is required", 400);
       }
 
       const actions = await getManualActions(projectId);
-      const filtered = actions.filter((a) => a.id !== actionId);
+      const filtered = cleanDone
+        ? actions.filter((a) => !a.done)
+        : actions.filter((a) => a.id !== actionId);
       await saveManualActions(projectId, filtered);
       return json(filtered);
     }
