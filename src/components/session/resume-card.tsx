@@ -63,11 +63,15 @@ export function ResumeCard({ project, onEndSession, onActionsChange }: ResumeCar
       if (analyzeRes.ok && analyzeRes.result) {
         const analysis = analyzeRes.result as {
           name?: string;
+          fullName?: string;
           detectedStack?: string;
           detectedPhase?: "idea" | "mvp" | "polish" | "deploy";
           description?: string;
         };
         if (analysis.name) updates.name = analysis.name;
+        if (analysis.fullName && analysis.fullName !== currentProject.githubRepo) {
+          updates.githubRepo = analysis.fullName;
+        }
         if (analysis.detectedStack) updates.stack = analysis.detectedStack;
         if (analysis.detectedPhase) updates.phase = analysis.detectedPhase;
         if (analysis.description) updates.description = analysis.description;

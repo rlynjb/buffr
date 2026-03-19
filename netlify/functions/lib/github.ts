@@ -132,6 +132,7 @@ export async function pushFiles(
 
 export async function getRepoInfo(ownerRepo: string): Promise<{
   name: string;
+  fullName: string;
   description: string | null;
   defaultBranch: string;
   lastCommit: string;
@@ -141,9 +142,10 @@ export async function getRepoInfo(ownerRepo: string): Promise<{
 
   try {
     const data = await gh(`/repos/${owner}/${repo}`);
+    const fullName = (data.full_name as string) || `${owner}/${repo}`;
     let lastCommit = "";
     try {
-      const commits = await gh(`/repos/${owner}/${repo}/commits?per_page=1`);
+      const commits = await gh(`/repos/${fullName}/commits?per_page=1`);
       if (Array.isArray(commits) && commits.length > 0) {
         lastCommit = (commits[0].sha as string).substring(0, 7);
       }
@@ -152,6 +154,7 @@ export async function getRepoInfo(ownerRepo: string): Promise<{
     }
     return {
       name: data.name as string,
+      fullName,
       description: (data.description as string | null),
       defaultBranch: data.default_branch as string,
       lastCommit,

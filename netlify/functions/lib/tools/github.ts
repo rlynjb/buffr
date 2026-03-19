@@ -97,11 +97,14 @@ export function registerGitHubTools() {
       const owner = input.owner as string;
       const repo = input.repo as string;
       const info = await getRepoInfo(`${owner}/${repo}`);
+      const fullName = info?.fullName || `${owner}/${repo}`;
+      const [resolvedOwner, resolvedRepo] = fullName.split("/");
       const branch = (input.branch as string) || info?.defaultBranch || "main";
-      const analysis = await analyzeRepo(owner, repo, branch);
+      const analysis = await analyzeRepo(resolvedOwner, resolvedRepo, branch);
       return {
         ...analysis,
-        name: info?.name || repo,
+        name: info?.name || resolvedRepo,
+        fullName,
         description: info?.description || null,
         defaultBranch: branch,
       };
