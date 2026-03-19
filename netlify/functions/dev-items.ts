@@ -135,9 +135,7 @@ export default async function handler(req: Request, _context: Context) {
         });
 
         // Build adapter files inside .dev/adapters/ with symlinks from root
-        const targetAdapters = adapterIds && adapterIds.length > 0
-          ? adapterIds
-          : Object.keys(ADAPTERS);
+        const targetAdapters = adapterIds ?? Object.keys(ADAPTERS);
         for (const aid of targetAdapters) {
           const adapter = ADAPTERS[aid];
           if (!adapter) continue;
