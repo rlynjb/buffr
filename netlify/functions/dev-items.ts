@@ -121,7 +121,7 @@ export default async function handler(req: Request, _context: Context) {
         }
 
         // Build dev item files with frontmatter metadata
-        const files: Array<{ path: string; content: string }> = items.map((i) => {
+        const files: Array<{ path: string; content: string; mode?: string }> = items.map((i) => {
           const tags = i.tags || [];
           const fm = [
             "---",
