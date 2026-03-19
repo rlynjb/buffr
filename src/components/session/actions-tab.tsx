@@ -41,12 +41,18 @@ export function ActionsTab({
   const [paraphrasing, setParaphrasing] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editText, setEditText] = useState("");
-  const editRef = useRef<HTMLInputElement>(null);
+  const editRef = useRef<HTMLTextAreaElement>(null);
+  const addRef = useRef<HTMLTextAreaElement>(null);
   const dragIdx = useRef<number | null>(null);
   const [dragOverIdx, setDragOverIdx] = useState<number | null>(null);
 
   useEffect(() => {
-    if (editingId && editRef.current) editRef.current.focus();
+    if (editingId && editRef.current) {
+      const el = editRef.current;
+      el.focus();
+      el.style.height = "auto";
+      el.style.height = `${el.scrollHeight}px`;
+    }
   }, [editingId]);
 
   function startEditing(action: NextAction) {
@@ -69,6 +75,7 @@ export function ActionsTab({
     if (!text || !onAddManual) return;
     onAddManual(text);
     setNewItem("");
+    if (addRef.current) addRef.current.style.height = "auto";
   }
 
   async function handleParaphrase() {
@@ -76,7 +83,13 @@ export function ActionsTab({
     setParaphrasing(true);
     try {
       const result = await onParaphrase(newItem.trim());
-      if (result) setNewItem(result);
+      if (result) {
+        setNewItem(result);
+        requestAnimationFrame(() => {
+          const el = addRef.current;
+          if (el) { el.style.height = "auto"; el.style.height = `${el.scrollHeight}px`; }
+        });
+      }
     } finally {
       setParaphrasing(false);
     }
@@ -87,9 +100,14 @@ export function ActionsTab({
       {onAddManual && (
         <div className="actions-tab__add">
           <textarea
-            rows={3}
+            ref={addRef}
+            rows={1}
             value={newItem}
-            onChange={(e) => setNewItem(e.target.value)}
+            onChange={(e) => {
+              setNewItem(e.target.value);
+              const el = addRef.current;
+              if (el) { el.style.height = "auto"; el.style.height = `${el.scrollHeight}px`; }
+            }}
             onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleAdd(); } }}
             placeholder="Add a task..."
             className="actions-tab__add-input"
@@ -166,13 +184,18 @@ export function ActionsTab({
                 <SourceIcon source={action.source || "ai"} size={14} />
               </span>
               {editingId === action.id ? (
-                <input
+                <textarea
                   ref={editRef}
+                  rows={1}
                   value={editText}
-                  onChange={(e) => setEditText(e.target.value)}
+                  onChange={(e) => {
+                    setEditText(e.target.value);
+                    const el = editRef.current;
+                    if (el) { el.style.height = "auto"; el.style.height = `${el.scrollHeight}px`; }
+                  }}
                   onBlur={commitEdit}
                   onKeyDown={(e) => {
-                    if (e.key === "Enter") { e.preventDefault(); commitEdit(); }
+                    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); commitEdit(); }
                     if (e.key === "Escape") setEditingId(null);
                   }}
                   className="actions-tab__action-edit"

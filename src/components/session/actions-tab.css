@@ -41,7 +41,7 @@
 }
 
 .actions-tab__action-edit {
-  @apply flex-1 text-sm text-zinc-200 bg-zinc-900/80 border border-purple-500/40 rounded px-1.5 py-0.5 outline-none;
+  @apply flex-1 text-sm text-zinc-200 bg-zinc-900/80 border border-purple-500/40 rounded px-1.5 py-0.5 outline-none resize-none overflow-hidden leading-relaxed;
 }
 
 .actions-tab__action-btn--note {
@@ -123,7 +123,7 @@
 }
 
 .actions-tab__add-input {
-  @apply flex-1 px-3 py-1.5 rounded-lg bg-zinc-900/80 border border-zinc-800/50 text-sm text-zinc-300 placeholder:text-zinc-600 focus:outline-none focus:border-purple-500/40 transition-colors resize-none leading-relaxed;
+  @apply flex-1 px-3 py-1.5 rounded-lg bg-zinc-900/80 border border-zinc-800/50 text-sm text-zinc-300 placeholder:text-zinc-600 focus:outline-none focus:border-purple-500/40 transition-colors resize-none leading-relaxed overflow-hidden;
 }
 
 .actions-tab__add-actions {
