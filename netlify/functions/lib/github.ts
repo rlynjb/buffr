@@ -74,12 +74,49 @@ export async function createRepo(
 export async function pushFiles(
   owner: string,
   repo: string,
-  files: Array<{ path: string; content: string; mode?: string }>,
+  inputFiles: Array<{ path: string; content: string; mode?: string }>,
   message: string,
   deletePaths?: string[],
   branch?: string,
 ): Promise<string> {
   const targetBranch = branch || "main";
+  let files = inputFiles;
+
+  // Check if repo has commits
+  let headSha: string | null = null;
+  let baseTreeSha: string | null = null;
+  try {
+    const ref = await gh(`/repos/${owner}/${repo}/git/ref/heads/${targetBranch}`);
+    headSha = (ref.object as Record<string, unknown>).sha as string;
+    const headCommit = await gh(`/repos/${owner}/${repo}/git/commits/${headSha}`);
+    baseTreeSha = (headCommit.tree as Record<string, unknown>).sha as string;
+  } catch {
+    // Empty repo — no existing commits
+  }
+
+  // Empty repo: Git Data API won't work. Bootstrap with Contents API, then proceed.
+  if (!headSha) {
+    const initFile = files[0];
+    const initRes = await gh(`/repos/${owner}/${repo}/contents/${initFile.path}`, {
+      method: "PUT",
+      body: JSON.stringify({
+        message,
+        content: Buffer.from(initFile.content).toString("base64"),
+        branch: targetBranch,
+      }),
+    });
+    // If only one file, we're done
+    if (files.length === 1) {
+      return (initRes.commit as Record<string, unknown>).sha as string;
+    }
+    // Re-fetch HEAD now that repo is initialized
+    const ref = await gh(`/repos/${owner}/${repo}/git/ref/heads/${targetBranch}`);
+    headSha = (ref.object as Record<string, unknown>).sha as string;
+    const headCommit = await gh(`/repos/${owner}/${repo}/git/commits/${headSha}`);
+    baseTreeSha = (headCommit.tree as Record<string, unknown>).sha as string;
+    // Remove the first file since it's already committed
+    files = files.slice(1);
+  }
 
   // Create blobs for each file
   const blobs = await Promise.all(
@@ -105,51 +142,23 @@ export async function pushFiles(
     type: "blob" as const,
   }));
 
-  // Check if repo has commits
-  let headSha: string | null = null;
-  let baseTreeSha: string | null = null;
-  try {
-    const ref = await gh(`/repos/${owner}/${repo}/git/ref/heads/${targetBranch}`);
-    headSha = (ref.object as Record<string, unknown>).sha as string;
-    const headCommit = await gh(`/repos/${owner}/${repo}/git/commits/${headSha}`);
-    baseTreeSha = (headCommit.tree as Record<string, unknown>).sha as string;
-  } catch {
-    // Empty repo — no existing commits
-  }
-
-  // Create tree (with or without base_tree)
-  const treePayload: Record<string, unknown> = {
-    tree: [...blobs, ...deleteEntries],
-  };
-  if (baseTreeSha) treePayload.base_tree = baseTreeSha;
+  // Create tree on top of existing base
   const tree = await gh(`/repos/${owner}/${repo}/git/trees`, {
     method: "POST",
-    body: JSON.stringify(treePayload),
+    body: JSON.stringify({ base_tree: baseTreeSha, tree: [...blobs, ...deleteEntries] }),
   });
 
-  // Create commit (with or without parent)
-  const commitPayload: Record<string, unknown> = {
-    message,
-    tree: tree.sha as string,
-  };
-  if (headSha) commitPayload.parents = [headSha];
+  // Create commit with parent
   const commit = await gh(`/repos/${owner}/${repo}/git/commits`, {
     method: "POST",
-    body: JSON.stringify(commitPayload),
+    body: JSON.stringify({ message, tree: tree.sha as string, parents: [headSha] }),
   });
 
-  // Update or create branch ref
-  if (headSha) {
-    await gh(`/repos/${owner}/${repo}/git/refs/heads/${targetBranch}`, {
-      method: "PATCH",
-      body: JSON.stringify({ sha: commit.sha as string }),
-    });
-  } else {
-    await gh(`/repos/${owner}/${repo}/git/refs`, {
-      method: "POST",
-      body: JSON.stringify({ ref: `refs/heads/${targetBranch}`, sha: commit.sha as string }),
-    });
-  }
+  // Update branch ref
+  await gh(`/repos/${owner}/${repo}/git/refs/heads/${targetBranch}`, {
+    method: "PATCH",
+    body: JSON.stringify({ sha: commit.sha as string }),
+  });
 
   return commit.sha as string;
 }
