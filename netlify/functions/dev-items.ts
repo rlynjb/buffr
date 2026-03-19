@@ -134,7 +134,7 @@ export default async function handler(req: Request, _context: Context) {
           return { path: i.path, content: fm.join("\n") + (i.content || "") };
         });
 
-        // Build adapter files
+        // Build adapter files inside .dev/adapters/ with symlinks from root
         const targetAdapters = adapterIds && adapterIds.length > 0
           ? adapterIds
           : Object.keys(ADAPTERS);
@@ -142,7 +142,11 @@ export default async function handler(req: Request, _context: Context) {
           const adapter = ADAPTERS[aid];
           if (!adapter) continue;
           const content = buildAdapterContent(aid, items);
-          files.push({ path: adapter.rootPath, content });
+          const devPath = `.dev/adapters/${adapter.file}`;
+          // Actual content lives in .dev/adapters/
+          files.push({ path: devPath, content });
+          // Root path is a symlink pointing to .dev/adapters/
+          files.push({ path: adapter.rootPath, content: devPath, mode: "120000" });
         }
 
         try {
