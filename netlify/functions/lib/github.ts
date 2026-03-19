@@ -77,9 +77,11 @@ export async function pushFiles(
   files: Array<{ path: string; content: string; mode?: string }>,
   message: string,
   deletePaths?: string[],
+  branch?: string,
 ): Promise<string> {
   // Get the current HEAD commit to use as parent
-  const ref = await gh(`/repos/${owner}/${repo}/git/ref/heads/main`);
+  const targetBranch = branch || "main";
+  const ref = await gh(`/repos/${owner}/${repo}/git/ref/heads/${targetBranch}`);
   const headSha = (ref.object as Record<string, unknown>).sha as string;
   const headCommit = await gh(`/repos/${owner}/${repo}/git/commits/${headSha}`);
   const baseTreeSha = headCommit.tree as Record<string, unknown>;
@@ -122,7 +124,7 @@ export async function pushFiles(
   });
 
   // Update main branch ref
-  await gh(`/repos/${owner}/${repo}/git/refs/heads/main`, {
+  await gh(`/repos/${owner}/${repo}/git/refs/heads/${targetBranch}`, {
     method: "PATCH",
     body: JSON.stringify({ sha: commit.sha as string }),
   });

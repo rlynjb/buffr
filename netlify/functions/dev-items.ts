@@ -5,7 +5,7 @@ import {
   saveDevItem,
   deleteDevItem,
 } from "./lib/storage/dev-items";
-import { pushFiles } from "./lib/github";
+import { pushFiles, getRepoInfo } from "./lib/github";
 import type { DevItem, DevItemCategory } from "../../src/lib/types";
 import { randomUUID } from "crypto";
 import { json, errorResponse } from "./lib/responses";
@@ -108,7 +108,11 @@ export default async function handler(req: Request, _context: Context) {
         };
         if (!repo?.includes("/")) return errorResponse("repo is required (owner/repo)", 400);
 
-        const [owner, repoName] = repo.split("/");
+        // Resolve current repo name (handles GitHub renames/redirects)
+        const repoInfo = await getRepoInfo(repo);
+        if (!repoInfo) return errorResponse(`Repository not found: ${repo}`, 404);
+        const [resolvedOwner, resolvedRepo] = repoInfo.fullName.split("/");
+
         let items = await listDevItems();
         items = items.filter((i) => i.scope === "global" || i.scope === projectId);
 
@@ -136,10 +140,12 @@ export default async function handler(req: Request, _context: Context) {
         }
 
         const sha = await pushFiles(
-          owner,
-          repoName,
+          resolvedOwner,
+          resolvedRepo,
           files,
           "chore: update .dev/ rules, skills, and adapters from buffr",
+          undefined,
+          repoInfo.defaultBranch,
         );
         return json({ sha });
       }
