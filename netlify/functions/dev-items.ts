@@ -114,15 +114,16 @@ export default async function handler(req: Request, _context: Context) {
 
         // Build dev item files with frontmatter metadata
         const files: Array<{ path: string; content: string }> = items.map((i) => {
+          const tags = i.tags || [];
           const fm = [
             "---",
-            `title: ${i.title}`,
+            `title: ${i.title || i.filename}`,
             `category: ${i.category}`,
             `scope: ${i.scope === "global" ? "global" : "project"}`,
           ];
-          if (i.tags.length > 0) fm.push(`tags: [${i.tags.join(", ")}]`);
+          if (tags.length > 0) fm.push(`tags: [${tags.join(", ")}]`);
           fm.push("---", "");
-          return { path: i.path, content: fm.join("\n") + i.content };
+          return { path: i.path, content: fm.join("\n") + (i.content || "") };
         });
 
         // Build adapter files
