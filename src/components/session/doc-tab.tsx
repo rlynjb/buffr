@@ -57,7 +57,7 @@ export function DocTab({ project }: DocTabProps) {
   const [content, setContent] = useState("");
   const [category, setCategory] = useState<DocItemCategory>("docs");
   const [filename, setFilename] = useState("");
-  const [scope, setScope] = useState<"global" | "project">("global");
+  const [scope, setScope] = useState<"global" | "project">("project");
   const [tags, setTags] = useState("");
 
   // Push
@@ -86,7 +86,7 @@ export function DocTab({ project }: DocTabProps) {
     setContent("");
     setCategory(cat || "docs");
     setFilename("");
-    setScope("global");
+    setScope("project");
     setTags("");
     setModalOpen(true);
   }
