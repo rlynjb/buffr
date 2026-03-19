@@ -79,15 +79,9 @@ export async function pushFiles(
   deletePaths?: string[],
   branch?: string,
 ): Promise<string> {
-  // Get the current HEAD commit to use as parent
   const targetBranch = branch || "main";
-  const ref = await gh(`/repos/${owner}/${repo}/git/ref/heads/${targetBranch}`);
-  const headSha = (ref.object as Record<string, unknown>).sha as string;
-  const headCommit = await gh(`/repos/${owner}/${repo}/git/commits/${headSha}`);
-  const baseTreeSha = headCommit.tree as Record<string, unknown>;
 
   // Create blobs for each file
-  // For symlinks (mode 120000), content is the target path (UTF-8, no base64)
   const blobs = await Promise.all(
     files.map(async (file) => {
       const isSymlink = file.mode === "120000";
@@ -111,23 +105,51 @@ export async function pushFiles(
     type: "blob" as const,
   }));
 
-  // Create tree with base_tree so it layers on top of the init commit
+  // Check if repo has commits
+  let headSha: string | null = null;
+  let baseTreeSha: string | null = null;
+  try {
+    const ref = await gh(`/repos/${owner}/${repo}/git/ref/heads/${targetBranch}`);
+    headSha = (ref.object as Record<string, unknown>).sha as string;
+    const headCommit = await gh(`/repos/${owner}/${repo}/git/commits/${headSha}`);
+    baseTreeSha = (headCommit.tree as Record<string, unknown>).sha as string;
+  } catch {
+    // Empty repo — no existing commits
+  }
+
+  // Create tree (with or without base_tree)
+  const treePayload: Record<string, unknown> = {
+    tree: [...blobs, ...deleteEntries],
+  };
+  if (baseTreeSha) treePayload.base_tree = baseTreeSha;
   const tree = await gh(`/repos/${owner}/${repo}/git/trees`, {
     method: "POST",
-    body: JSON.stringify({ base_tree: baseTreeSha.sha as string, tree: [...blobs, ...deleteEntries] }),
+    body: JSON.stringify(treePayload),
   });
 
-  // Create commit with parent
+  // Create commit (with or without parent)
+  const commitPayload: Record<string, unknown> = {
+    message,
+    tree: tree.sha as string,
+  };
+  if (headSha) commitPayload.parents = [headSha];
   const commit = await gh(`/repos/${owner}/${repo}/git/commits`, {
     method: "POST",
-    body: JSON.stringify({ message, tree: tree.sha as string, parents: [headSha] }),
+    body: JSON.stringify(commitPayload),
   });
 
-  // Update main branch ref
-  await gh(`/repos/${owner}/${repo}/git/refs/heads/${targetBranch}`, {
-    method: "PATCH",
-    body: JSON.stringify({ sha: commit.sha as string }),
-  });
+  // Update or create branch ref
+  if (headSha) {
+    await gh(`/repos/${owner}/${repo}/git/refs/heads/${targetBranch}`, {
+      method: "PATCH",
+      body: JSON.stringify({ sha: commit.sha as string }),
+    });
+  } else {
+    await gh(`/repos/${owner}/${repo}/git/refs`, {
+      method: "POST",
+      body: JSON.stringify({ ref: `refs/heads/${targetBranch}`, sha: commit.sha as string }),
+    });
+  }
 
   return commit.sha as string;
 }
