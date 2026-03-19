@@ -60,6 +60,21 @@ export interface Session {
 
 export type DevItemCategory = "ai-rules" | "skills" | "community-skills";
 
+export type DocItemCategory = "docs" | "ideas" | "plans";
+
+export interface DocItem {
+  id: string;
+  category: DocItemCategory;
+  filename: string;
+  path: string;
+  title: string;
+  content: string;
+  scope: "global" | string;
+  tags: string[];
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface DevItem {
   id: string;
   category: DevItemCategory;

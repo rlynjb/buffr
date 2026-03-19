@@ -1,0 +1,167 @@
+@reference "../../app/globals.css";
+
+/* Header */
+.doc-tab__header {
+  @apply flex items-center gap-2 mb-4;
+}
+
+.doc-tab__search {
+  @apply flex-1 relative;
+}
+
+.doc-tab__search-icon {
+  @apply absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-500 pointer-events-none;
+}
+
+.doc-tab__search-input {
+  @apply w-full pl-8 pr-3 py-1.5 rounded-lg bg-zinc-900/80 border border-zinc-800/50 text-sm text-zinc-300 placeholder:text-zinc-600 focus:outline-none focus:border-amber-500/40 transition-colors;
+}
+
+/* Categories */
+.doc-tab__categories {
+  @apply flex items-center gap-1 mb-3 flex-wrap;
+}
+
+.doc-tab__category {
+  @apply px-2.5 py-1 rounded-full text-xs transition-colors cursor-pointer flex items-center gap-1.5;
+}
+
+.doc-tab__category--active {
+  @apply bg-amber-500/15 text-amber-300;
+}
+
+.doc-tab__category--inactive {
+  @apply text-zinc-500 hover:text-zinc-300 hover:bg-white/5;
+}
+
+.doc-tab__category-count {
+  @apply text-[10px] text-zinc-600;
+}
+
+/* File tree */
+.doc-tab__tree {
+  @apply space-y-1;
+}
+
+.doc-tab__dir-header {
+  @apply text-[11px] text-zinc-500 font-mono uppercase tracking-wider mt-4 mb-1 px-1 first:mt-0;
+}
+
+.doc-tab__file-row {
+  @apply w-full flex items-center gap-2.5 px-3 py-2 rounded-lg hover:bg-white/[0.02] transition-colors cursor-pointer text-left;
+}
+
+.doc-tab__file-row--expanded {
+  @apply bg-white/[0.02];
+}
+
+.doc-tab__file-dot {
+  @apply w-2 h-2 rounded-full shrink-0;
+}
+
+.doc-tab__file-name {
+  @apply text-sm text-zinc-300 flex-1 font-mono truncate;
+}
+
+.doc-tab__file-hint {
+  @apply text-zinc-600 opacity-0 transition-opacity;
+}
+
+.doc-tab__file-row:hover .doc-tab__file-hint {
+  @apply opacity-100;
+}
+
+/* Expanded */
+.doc-tab__expanded {
+  @apply ml-4 mb-2 rounded-lg border border-zinc-800/40 bg-zinc-900/30 overflow-hidden;
+}
+
+.doc-tab__expanded-header {
+  @apply flex items-center gap-2 px-3 py-2 border-b border-zinc-800/40 flex-wrap;
+}
+
+.doc-tab__expanded-path {
+  @apply text-[11px] text-zinc-500 font-mono flex-1;
+}
+
+.doc-tab__expanded-btn {
+  @apply flex items-center gap-1 px-2 py-0.5 rounded text-[11px] text-zinc-500 hover:text-zinc-300 hover:bg-white/5 transition-colors cursor-pointer;
+}
+
+.doc-tab__expanded-btn--delete {
+  @apply flex items-center gap-1 px-2 py-0.5 rounded text-[11px] text-red-400/70 hover:text-red-400 hover:bg-red-500/10 transition-colors cursor-pointer;
+}
+
+.doc-tab__expanded-content {
+  @apply p-3;
+}
+
+.doc-tab__expanded-pre {
+  @apply text-xs text-zinc-400 font-mono whitespace-pre-wrap leading-relaxed max-h-64 overflow-y-auto;
+}
+
+/* Empty / Loading */
+.doc-tab__empty {
+  @apply py-8 text-center text-sm text-zinc-600;
+}
+
+.doc-tab__loading {
+  @apply space-y-2;
+}
+
+.doc-tab__skeleton {
+  @apply h-10 rounded-lg bg-zinc-800/30 animate-pulse;
+}
+
+/* Modal */
+.doc-tab__modal-form {
+  @apply space-y-4;
+}
+
+.doc-tab__modal-label {
+  @apply block text-xs text-zinc-400 mb-1.5;
+}
+
+.doc-tab__modal-categories {
+  @apply flex gap-2;
+}
+
+.doc-tab__modal-cat {
+  @apply flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs transition-colors cursor-pointer;
+}
+
+.doc-tab__modal-cat--active {
+  @apply bg-white/5 text-zinc-200;
+}
+
+.doc-tab__modal-cat--inactive {
+  @apply border-zinc-800/40 text-zinc-500 hover:text-zinc-300 hover:bg-white/[0.02];
+}
+
+.doc-tab__modal-cat-dot {
+  @apply w-2 h-2 rounded-full;
+}
+
+.doc-tab__modal-path-preview {
+  @apply text-[11px] text-zinc-600 font-mono -mt-2 px-1;
+}
+
+.doc-tab__modal-scope {
+  @apply flex gap-1;
+}
+
+.doc-tab__modal-scope-btn {
+  @apply px-3 py-1 rounded-lg text-xs transition-colors cursor-pointer;
+}
+
+.doc-tab__modal-scope-btn--active {
+  @apply bg-amber-500/15 text-amber-300;
+}
+
+.doc-tab__modal-scope-btn--inactive {
+  @apply text-zinc-500 hover:text-zinc-300 hover:bg-white/5;
+}
+
+.doc-tab__modal-footer {
+  @apply flex justify-end gap-2 pt-2;
+}

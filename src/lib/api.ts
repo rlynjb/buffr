@@ -3,6 +3,7 @@ import type {
   Session,
   Prompt,
   DevItem,
+  DocItem,
   LLMProvider,
   ToolIntegration,
   ToolConfig,
@@ -348,5 +349,46 @@ export async function pushDevItems(
   return request<{ sha: string }>("/dev-items?push", {
     method: "POST",
     body: JSON.stringify({ projectId, repo, adapterIds }),
+  });
+}
+
+// Doc Items
+export async function listDocItems(scope?: string): Promise<DocItem[]> {
+  const q = scope ? `?scope=${encodeURIComponent(scope)}` : "";
+  return request<DocItem[]>(`/doc-items${q}`);
+}
+
+export async function createDocItem(
+  data: Partial<DocItem>,
+): Promise<DocItem> {
+  return request<DocItem>("/doc-items", {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function updateDocItem(
+  id: string,
+  data: Partial<DocItem>,
+): Promise<DocItem> {
+  return request<DocItem>(`/doc-items?id=${encodeURIComponent(id)}`, {
+    method: "PUT",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function deleteDocItemApi(id: string): Promise<void> {
+  await request<{ ok: boolean }>(`/doc-items?id=${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+}
+
+export async function pushDocItems(
+  projectId: string,
+  repo: string,
+): Promise<{ sha: string }> {
+  return request<{ sha: string }>("/doc-items?push", {
+    method: "POST",
+    body: JSON.stringify({ projectId, repo }),
   });
 }
