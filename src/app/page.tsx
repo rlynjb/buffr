@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { ProjectCard } from "@/components/dashboard/project-card";
@@ -19,27 +19,39 @@ export default function Dashboard() {
   const [deleteTarget, setDeleteTarget] = useState<Project | null>(null);
 
 
-  useEffect(() => {
-    async function load() {
-      try {
-        const data = await listProjects();
-        setProjects(data);
-      } catch (err) {
-        console.error("Failed to load projects:", err);
-      } finally {
-        setLoading(false);
-      }
+  const loadProjects = useCallback(async () => {
+    try {
+      const data = await listProjects();
+      setProjects(data);
+    } catch (err) {
+      console.error("Failed to load projects:", err);
+    } finally {
+      setLoading(false);
     }
-    load();
+  }, []);
+
+  useEffect(() => {
+    loadProjects();
 
     // Listen for command palette "Load Existing" action
     function onOpenImport() { setImportOpen(true); }
     window.addEventListener("buffr:open-import", onOpenImport);
-    return () => window.removeEventListener("buffr:open-import", onOpenImport);
-  }, []);
+
+    // Re-fetch projects when navigating back to this page
+    function onFocus() { loadProjects(); }
+    window.addEventListener("focus", onFocus);
+
+    return () => {
+      window.removeEventListener("buffr:open-import", onOpenImport);
+      window.removeEventListener("focus", onFocus);
+    };
+  }, [loadProjects]);
 
   function handleCreated(project: Project) {
     setImportOpen(false);
+    setProjects((prev) => [project, ...prev]);
+    // Cache newly created project so the project page renders instantly
+    try { sessionStorage.setItem(`buffr-project-${project.id}`, JSON.stringify(project)); } catch { /* best-effort */ }
     router.push(`/project/${project.id}`);
   }
 

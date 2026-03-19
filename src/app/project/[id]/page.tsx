@@ -12,8 +12,18 @@ import "./page.css";
 export default function ProjectPage() {
   const params = useParams();
   const id = params.id as string;
-  const [project, setProject] = useState<Project | null>(null);
-  const [loading, setLoading] = useState(true);
+  // Use cached project data from sessionStorage for instant display after import
+  const [project, setProject] = useState<Project | null>(() => {
+    try {
+      const cached = sessionStorage.getItem(`buffr-project-${id}`);
+      if (cached) {
+        sessionStorage.removeItem(`buffr-project-${id}`);
+        return JSON.parse(cached) as Project;
+      }
+    } catch { /* ignore */ }
+    return null;
+  });
+  const [loading, setLoading] = useState(!project);
   const [showEndSession, setShowEndSession] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
   const actionsRef = useRef<NextAction[]>([]);
