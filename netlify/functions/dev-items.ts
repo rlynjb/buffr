@@ -112,11 +112,18 @@ export default async function handler(req: Request, _context: Context) {
         let items = await listDevItems();
         items = items.filter((i) => i.scope === "global" || i.scope === projectId);
 
-        // Build dev item files
-        const files: Array<{ path: string; content: string }> = items.map((i) => ({
-          path: i.path,
-          content: i.content,
-        }));
+        // Build dev item files with frontmatter metadata
+        const files: Array<{ path: string; content: string }> = items.map((i) => {
+          const fm = [
+            "---",
+            `title: ${i.title}`,
+            `category: ${i.category}`,
+            `scope: ${i.scope === "global" ? "global" : "project"}`,
+          ];
+          if (i.tags.length > 0) fm.push(`tags: [${i.tags.join(", ")}]`);
+          fm.push("---", "");
+          return { path: i.path, content: fm.join("\n") + i.content };
+        });
 
         // Build adapter files
         const targetAdapters = adapterIds || Object.keys(ADAPTERS);

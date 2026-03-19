@@ -377,7 +377,7 @@ export function ResumeCard({ project, onEndSession, onActionsChange }: ResumeCar
             lastSession={lastSession}
           />
         )}
-        {activeTab === "dev" && <DevTab project={project} />}
+        {activeTab === "dev" && <DevTab project={currentProject} />}
         {activeTab === "tools" && <ToolsTab />}
       </div>
     </div>
