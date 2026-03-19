@@ -6,7 +6,6 @@ import type { NextAction } from "@/lib/next-actions";
 import "./actions-tab.css";
 
 const PERSONAS = [
-  { id: undefined, label: "Rewrite", desc: "Clear & actionable" },
   { id: "user-story", label: "User Story", desc: "As a user, I want..." },
   { id: "backend-dev", label: "Backend Dev", desc: "Technical / API focus" },
   { id: "frontend-dev", label: "Frontend Dev", desc: "UI/UX / component focus" },
@@ -137,29 +136,38 @@ export function ActionsTab({
           />
           <div className="actions-tab__add-actions">
             {onParaphrase && (
-              <div className="actions-tab__rewrite-wrap" ref={rewriteRef}>
+              <>
                 <button
-                  onClick={() => setRewriteOpen((o) => !o)}
+                  onClick={() => handleParaphrase()}
                   disabled={paraphrasing || !newItem.trim()}
                   className="actions-tab__add-paraphrase"
                 >
-                  <IconSparkle size={10} /> {paraphrasing ? "..." : "Rewrite ▾"}
+                  <IconSparkle size={10} /> {paraphrasing ? "..." : "Rewrite"}
                 </button>
-                {rewriteOpen && (
-                  <div className="actions-tab__rewrite-menu">
-                    {PERSONAS.map((p) => (
-                      <button
-                        key={p.id ?? "default"}
-                        onClick={() => handleParaphrase(p.id)}
-                        className="actions-tab__rewrite-option"
-                      >
-                        <span className="actions-tab__rewrite-option-label">{p.label}</span>
-                        <span className="actions-tab__rewrite-option-desc">{p.desc}</span>
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
+                <div className="actions-tab__rewrite-wrap" ref={rewriteRef}>
+                  <button
+                    onClick={() => setRewriteOpen((o) => !o)}
+                    disabled={paraphrasing || !newItem.trim()}
+                    className="actions-tab__add-persona"
+                  >
+                    {paraphrasing ? "..." : "Persona ▾"}
+                  </button>
+                  {rewriteOpen && (
+                    <div className="actions-tab__rewrite-menu">
+                      {PERSONAS.map((p) => (
+                        <button
+                          key={p.id}
+                          onClick={() => handleParaphrase(p.id)}
+                          className="actions-tab__rewrite-option"
+                        >
+                          <span className="actions-tab__rewrite-option-label">{p.label}</span>
+                          <span className="actions-tab__rewrite-option-desc">{p.desc}</span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </>
             )}
             <button
               onClick={handleAdd}
