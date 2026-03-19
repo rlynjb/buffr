@@ -62,16 +62,21 @@ export function ResumeCard({ project, onEndSession, onActionsChange }: ResumeCar
       const updates: Partial<Project> = { lastSyncedAt: new Date().toISOString() };
       if (analyzeRes.ok && analyzeRes.result) {
         const analysis = analyzeRes.result as {
+          name?: string;
           detectedStack?: string;
           detectedPhase?: "idea" | "mvp" | "polish" | "deploy";
           description?: string;
         };
+        if (analysis.name) updates.name = analysis.name;
         if (analysis.detectedStack) updates.stack = analysis.detectedStack;
         if (analysis.detectedPhase) updates.phase = analysis.detectedPhase;
         if (analysis.description) updates.description = analysis.description;
       }
       const updated = await updateProject(currentProject.id, updates);
       setCurrentProject(updated);
+      setAllProjects((prev) =>
+        prev.map((p) => (p.id === updated.id ? { ...p, name: updated.name } : p))
+      );
     } catch (err) {
       console.error("Sync failed:", err);
     } finally {
@@ -246,6 +251,7 @@ export function ResumeCard({ project, onEndSession, onActionsChange }: ResumeCar
 
       <div className="resume-card__header">
         <div className="resume-card__name-row">
+          <h1 className="resume-card__title">{currentProject.name}</h1>
           <Badge color={PHASE_COLORS[currentProject.phase]}>
             {currentProject.phase}
           </Badge>

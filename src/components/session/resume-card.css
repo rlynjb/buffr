@@ -113,6 +113,10 @@
   @apply flex items-center gap-2.5 mb-1;
 }
 
+.resume-card__title {
+  @apply text-lg font-semibold text-zinc-100 font-mono m-0;
+}
+
 .resume-card__suggestion-text {
   @apply flex items-center gap-2;
 }
