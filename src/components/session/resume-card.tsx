@@ -161,9 +161,9 @@ export function ResumeCard({ project, onEndSession, onActionsChange }: ResumeCar
     }
   }
 
-  async function handleParaphrase(text: string): Promise<string | null> {
+  async function handleParaphrase(text: string, persona?: string): Promise<string | null> {
     try {
-      const result = await paraphraseText(text, selectedProvider);
+      const result = await paraphraseText(text, selectedProvider, persona);
       return result.text || null;
     } catch (err) {
       console.error("Paraphrase failed:", err);

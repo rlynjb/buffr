@@ -58,7 +58,7 @@ export default async function handler(req: Request, _context: Context) {
         return errorResponse("text is required", 400);
       }
       const chain = createParaphraseChain(llm);
-      const result = await chain.invoke({ text: body.text });
+      const result = await chain.invoke({ text: body.text, persona: body.persona });
       return json(result);
     }
 

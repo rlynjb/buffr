@@ -5,6 +5,15 @@ import { SourceIcon, sourceColor, IconSparkle, IconPlus, IconTrash } from "@/com
 import type { NextAction } from "@/lib/next-actions";
 import "./actions-tab.css";
 
+const PERSONAS = [
+  { id: undefined, label: "Rewrite", desc: "Clear & actionable" },
+  { id: "user-story", label: "User Story", desc: "As a user, I want..." },
+  { id: "backend-dev", label: "Backend Dev", desc: "Technical / API focus" },
+  { id: "frontend-dev", label: "Frontend Dev", desc: "UI/UX / component focus" },
+  { id: "stakeholder", label: "Stakeholder", desc: "Business value focus" },
+  { id: "project-manager", label: "Project Manager", desc: "Scope & deliverables" },
+] as const;
+
 interface ActionsTabProps {
   actions: NextAction[];
   notes: Record<string, string>;
@@ -16,7 +25,7 @@ interface ActionsTabProps {
   onAddManual?: (text: string) => void;
   onDeleteManual?: (id: string) => void;
   onEditManual?: (id: string, text: string) => void;
-  onParaphrase?: (text: string) => Promise<string | null>;
+  onParaphrase?: (text: string, persona?: string) => Promise<string | null>;
   onReorder?: (fromIndex: number, toIndex: number) => void;
 }
 
@@ -39,6 +48,8 @@ export function ActionsTab({
   const [noteOpen, setNoteOpen] = useState<string | null>(null);
   const [newItem, setNewItem] = useState("");
   const [paraphrasing, setParaphrasing] = useState(false);
+  const [rewriteOpen, setRewriteOpen] = useState(false);
+  const rewriteRef = useRef<HTMLDivElement>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editText, setEditText] = useState("");
   const editRef = useRef<HTMLTextAreaElement>(null);
@@ -54,6 +65,17 @@ export function ActionsTab({
       el.style.height = `${el.scrollHeight}px`;
     }
   }, [editingId]);
+
+  useEffect(() => {
+    if (!rewriteOpen) return;
+    function handleClickOutside(e: MouseEvent) {
+      if (rewriteRef.current && !rewriteRef.current.contains(e.target as Node)) {
+        setRewriteOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, [rewriteOpen]);
 
   function startEditing(action: NextAction) {
     if (action.source !== "manual" || !onEditManual) return;
@@ -78,11 +100,12 @@ export function ActionsTab({
     if (addRef.current) addRef.current.style.height = "auto";
   }
 
-  async function handleParaphrase() {
+  async function handleParaphrase(persona?: string) {
     if (!onParaphrase || !newItem.trim()) return;
+    setRewriteOpen(false);
     setParaphrasing(true);
     try {
-      const result = await onParaphrase(newItem.trim());
+      const result = await onParaphrase(newItem.trim(), persona);
       if (result) {
         setNewItem(result);
         requestAnimationFrame(() => {
@@ -114,13 +137,29 @@ export function ActionsTab({
           />
           <div className="actions-tab__add-actions">
             {onParaphrase && (
-              <button
-                onClick={handleParaphrase}
-                disabled={paraphrasing || !newItem.trim()}
-                className="actions-tab__add-paraphrase"
-              >
-                <IconSparkle size={10} /> {paraphrasing ? "..." : "Rewrite"}
-              </button>
+              <div className="actions-tab__rewrite-wrap" ref={rewriteRef}>
+                <button
+                  onClick={() => setRewriteOpen((o) => !o)}
+                  disabled={paraphrasing || !newItem.trim()}
+                  className="actions-tab__add-paraphrase"
+                >
+                  <IconSparkle size={10} /> {paraphrasing ? "..." : "Rewrite ▾"}
+                </button>
+                {rewriteOpen && (
+                  <div className="actions-tab__rewrite-menu">
+                    {PERSONAS.map((p) => (
+                      <button
+                        key={p.id ?? "default"}
+                        onClick={() => handleParaphrase(p.id)}
+                        className="actions-tab__rewrite-option"
+                      >
+                        <span className="actions-tab__rewrite-option-label">{p.label}</span>
+                        <span className="actions-tab__rewrite-option-desc">{p.desc}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
             )}
             <button
               onClick={handleAdd}

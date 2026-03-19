@@ -300,10 +300,11 @@ export async function suggestNextStep(
 export async function paraphraseText(
   text: string,
   provider?: string,
+  persona?: string,
 ): Promise<{ text: string }> {
   return request("/session-ai?paraphrase", {
     method: "POST",
-    body: JSON.stringify({ text, provider }),
+    body: JSON.stringify({ text, provider, persona }),
   });
 }
 
