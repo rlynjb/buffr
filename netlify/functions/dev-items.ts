@@ -116,6 +116,10 @@ export default async function handler(req: Request, _context: Context) {
         let items = await listDevItems();
         items = items.filter((i) => i.scope === "global" || i.scope === projectId);
 
+        if (items.length === 0) {
+          return errorResponse("No .dev items to push", 400);
+        }
+
         // Build dev item files with frontmatter metadata
         const files: Array<{ path: string; content: string }> = items.map((i) => {
           const tags = i.tags || [];
@@ -131,7 +135,9 @@ export default async function handler(req: Request, _context: Context) {
         });
 
         // Build adapter files
-        const targetAdapters = adapterIds || Object.keys(ADAPTERS);
+        const targetAdapters = adapterIds && adapterIds.length > 0
+          ? adapterIds
+          : Object.keys(ADAPTERS);
         for (const aid of targetAdapters) {
           const adapter = ADAPTERS[aid];
           if (!adapter) continue;
@@ -139,15 +145,21 @@ export default async function handler(req: Request, _context: Context) {
           files.push({ path: adapter.rootPath, content });
         }
 
-        const sha = await pushFiles(
-          resolvedOwner,
-          resolvedRepo,
-          files,
-          "chore: update .dev/ rules, skills, and adapters from buffr",
-          undefined,
-          repoInfo.defaultBranch,
-        );
-        return json({ sha });
+        try {
+          const sha = await pushFiles(
+            resolvedOwner,
+            resolvedRepo,
+            files,
+            "chore: update .dev/ rules, skills, and adapters from buffr",
+            undefined,
+            repoInfo.defaultBranch,
+          );
+          return json({ sha });
+        } catch (pushErr) {
+          const msg = pushErr instanceof Error ? pushErr.message : "Push failed";
+          console.error("GitHub push error:", msg);
+          return errorResponse(`GitHub push failed: ${msg}`, 502);
+        }
       }
 
       // Create item
