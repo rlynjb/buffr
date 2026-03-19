@@ -183,7 +183,20 @@ export function ResumeCard({ project, onEndSession, onActionsChange }: ResumeCar
   async function handleDeleteManual(id: string) {
     setActions((prev) => prev.filter((a) => a.id !== id));
     try {
-      await deleteManualAction(project.id, id);
+      const remaining = await deleteManualAction(project.id, id);
+      // Reconcile local state with backend to prevent stale data on re-render
+      setActions((prev) => {
+        const remainingIds = new Set(remaining.map((m) => m.id));
+        const nonManual = prev.filter((a) => a.source !== "manual");
+        const freshManual = remaining.map((m) => ({
+          id: m.id,
+          text: m.text,
+          done: m.done,
+          skipped: false,
+          source: "manual" as const,
+        }));
+        return [...freshManual, ...nonManual];
+      });
     } catch (err) {
       console.error("Failed to delete manual action:", err);
     }
