@@ -101,6 +101,7 @@ export function registerGitHubTools() {
       const analysis = await analyzeRepo(owner, repo, branch);
       return {
         ...analysis,
+        name: info?.name || repo,
         description: info?.description || null,
         defaultBranch: branch,
       };

@@ -62,7 +62,7 @@ export function ImportProjectModal({
       const analysis = res.result as AnalysisResult;
       setResult({
         ...analysis,
-        name: parsed.repo,
+        name: analysis.name || parsed.repo,
       });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to analyze");
