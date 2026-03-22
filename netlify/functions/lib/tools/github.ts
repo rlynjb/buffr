@@ -1,15 +1,15 @@
 import { registerTool } from "./registry";
 import {
   getRepoInfo,
-  getIssues,
+  listIssues,
   getUserRepos,
   analyzeRepo,
   createRepo,
   pushFiles,
   createIssue,
   closeIssue,
-  getCommits,
-  getDiffs,
+  listCommits,
+  listDiffs,
   getFileContent,
 } from "../github";
 
@@ -50,7 +50,7 @@ export function registerGitHubTools() {
     },
     execute: async (input) => {
       const state = (input.state as "open" | "closed" | "all") || "open";
-      const raw = await getIssues(
+      const raw = await listIssues(
         input.owner as string,
         input.repo as string,
         (input.limit as number) || 10,
@@ -231,7 +231,7 @@ export function registerGitHubTools() {
       required: ["owner", "repo"],
     },
     execute: async (input) => {
-      return getCommits(
+      return listCommits(
         input.owner as string,
         input.repo as string,
         (input.since as string) || undefined,
@@ -255,7 +255,7 @@ export function registerGitHubTools() {
       required: ["owner", "repo", "base"],
     },
     execute: async (input) => {
-      return getDiffs(
+      return listDiffs(
         input.owner as string,
         input.repo as string,
         input.base as string,

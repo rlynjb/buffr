@@ -26,9 +26,4 @@ export function getToolForCapability(
   return DATA_SOURCE_TOOLS[integrationId]?.[capability] ?? null;
 }
 
-export function getIntegrationsWithCapability(capability: string): string[] {
-  return Object.entries(DATA_SOURCE_TOOLS)
-    .filter(([, caps]) => capability in caps)
-    .map(([id]) => id);
-}
 

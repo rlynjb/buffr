@@ -12,6 +12,31 @@ import type {
 
 const BASE = "/.netlify/functions";
 
+// Auth
+export async function authCheck(): Promise<{ authenticated: boolean }> {
+  const res = await fetch(`${BASE}/auth-check`);
+  return res.json();
+}
+
+export async function login(
+  username: string,
+  password: string,
+): Promise<void> {
+  const res = await fetch(`${BASE}/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, password }),
+  });
+  if (!res.ok) {
+    const data = await res.json();
+    throw new Error(data.error || "Login failed");
+  }
+}
+
+export async function logout(): Promise<void> {
+  await fetch(`${BASE}/logout`, { method: "POST" });
+}
+
 async function request<T>(
   path: string,
   options: RequestInit = {}

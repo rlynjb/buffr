@@ -232,7 +232,7 @@ export async function getFileContent(
   }
 }
 
-export async function getIssues(
+export async function listIssues(
   owner: string,
   repo: string,
   limit: number = 10,
@@ -317,7 +317,7 @@ export async function closeIssue(
   });
 }
 
-export async function getCommits(
+export async function listCommits(
   owner: string,
   repo: string,
   since?: string,
@@ -348,7 +348,7 @@ export async function getCommits(
   }
 }
 
-export async function getDiffs(
+export async function listDiffs(
   owner: string,
   repo: string,
   base: string,
