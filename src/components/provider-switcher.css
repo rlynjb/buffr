@@ -5,9 +5,9 @@
 }
 
 .provider-switcher__label {
-  @apply text-xs text-zinc-500 font-mono;
+  @apply text-xs text-zinc-500 font-mono hidden sm:inline truncate max-w-[120px] sm:max-w-none;
 }
 
 .provider-switcher__select {
-  @apply bg-zinc-800/80 border border-zinc-700/50 rounded-lg px-2 py-1.5 text-xs text-zinc-300 font-mono focus:outline-none focus:border-purple-500/40 cursor-pointer;
+  @apply bg-zinc-800/80 border border-zinc-700/50 rounded-lg px-2 py-1.5 text-xs text-zinc-300 font-mono focus:outline-none focus:border-purple-500/40 cursor-pointer max-w-[100px] sm:max-w-none truncate;
 }

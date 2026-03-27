@@ -14,7 +14,7 @@
 }
 
 .resume-card__project-nav-item {
-  @apply px-3 py-1.5 rounded-lg text-lg font-semibold font-mono text-zinc-500 hover:text-zinc-300 hover:bg-white/5 transition-colors cursor-pointer whitespace-nowrap;
+  @apply px-2.5 sm:px-3 py-1.5 rounded-lg text-sm sm:text-lg font-semibold font-mono text-zinc-500 hover:text-zinc-300 hover:bg-white/5 transition-colors cursor-pointer whitespace-nowrap;
 }
 
 .resume-card__project-nav-item--active {
@@ -34,7 +34,7 @@
 }
 
 .resume-card__meta {
-  @apply flex items-center gap-3 text-xs text-zinc-500;
+  @apply flex items-center gap-3 text-xs text-zinc-500 flex-wrap;
 }
 
 .resume-card__meta-link {
@@ -50,7 +50,7 @@
 }
 
 .resume-card__suggestion {
-  @apply flex items-center justify-between px-3 py-2 mb-2 rounded-lg border border-amber-500/20 bg-amber-500/5 text-amber-200 text-[13px];
+  @apply flex items-start sm:items-center justify-between gap-2 px-3 py-2 mb-2 rounded-lg border border-amber-500/20 bg-amber-500/5 text-amber-200 text-[13px] flex-wrap sm:flex-nowrap;
 }
 
 .resume-card__suggestion-buttons {
@@ -80,11 +80,16 @@
 }
 
 .resume-card__tabs {
-  @apply flex gap-1 mb-4 border-b border-zinc-800/60;
+  @apply flex gap-1 mb-4 border-b border-zinc-800/60 overflow-x-auto;
+  scrollbar-width: none;
+}
+
+.resume-card__tabs::-webkit-scrollbar {
+  display: none;
 }
 
 .resume-card__tab {
-  @apply px-3 py-2 text-sm font-medium transition-colors border-b-2 -mb-px cursor-pointer;
+  @apply px-3 py-2 text-sm font-medium transition-colors border-b-2 -mb-px cursor-pointer whitespace-nowrap;
 }
 
 .resume-card__tab--active {
@@ -110,11 +115,11 @@
 }
 
 .resume-card__name-row {
-  @apply flex items-center gap-2.5 mb-1;
+  @apply flex items-center gap-2.5 mb-1 min-w-0;
 }
 
 .resume-card__title {
-  @apply text-lg font-semibold text-zinc-100 font-mono m-0;
+  @apply text-base sm:text-lg font-semibold text-zinc-100 font-mono m-0 truncate;
 }
 
 .resume-card__suggestion-text {

@@ -5,7 +5,12 @@
 }
 
 .prompts-tab__category-filter {
-  @apply flex items-center gap-1.5 pb-3 mb-3 border-b border-zinc-800/50;
+  @apply flex items-center gap-1.5 pb-3 mb-3 border-b border-zinc-800/50 overflow-x-auto;
+  scrollbar-width: none;
+}
+
+.prompts-tab__category-filter::-webkit-scrollbar {
+  display: none;
 }
 
 .prompts-tab__category {

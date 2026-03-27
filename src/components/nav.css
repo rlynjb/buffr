@@ -29,11 +29,11 @@
 }
 
 .nav__left {
-  @apply flex items-center gap-4;
+  @apply flex items-center gap-4 min-w-0;
 }
 
 .nav__right {
-  @apply flex items-center gap-2;
+  @apply flex items-center gap-1 sm:gap-2 min-w-0;
 }
 
 .nav__cmd-label {
@@ -41,5 +41,5 @@
 }
 
 .nav__signout {
-  @apply text-xs text-zinc-500 hover:text-zinc-300 px-2 py-1.5 rounded-lg hover:bg-white/5 transition-colors;
+  @apply text-xs text-zinc-500 hover:text-zinc-300 px-2 py-1.5 rounded-lg hover:bg-white/5 transition-colors hidden sm:inline;
 }

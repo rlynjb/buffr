@@ -13,9 +13,7 @@ export function Nav() {
   const pathname = usePathname();
   const { logout } = useAuth();
 
-  const label = pathname.startsWith("/project/")
-    ? "Resume Card"
-    : pageLabels[pathname] || null;
+  const label = pageLabels[pathname] || null;
 
   return (
     <nav className="nav">
