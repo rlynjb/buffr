@@ -44,6 +44,7 @@ export function ResumeCard({ project, onEndSession, onActionsChange }: ResumeCar
   const [currentProject, setCurrentProject] = useState(project);
   const [allProjects, setAllProjects] = useState<Project[]>([]);
   const [healthMap, setHealthMap] = useState<Record<string, ProjectHealth>>({});
+  const [lastCommitDate, setLastCommitDate] = useState<string | null>(null);
 
   async function handleDismissSuggestion(id: string) {
     setSuggestions((prev) => prev.filter((s) => s.id !== id));
@@ -131,8 +132,26 @@ export function ResumeCard({ project, onEndSession, onActionsChange }: ResumeCar
             setAllProjects(projects);
             const entries = await Promise.all(
               projects.map(async (p) => {
-                const s = await listSessions(p.id).catch(() => []);
-                return [p.id, computeProjectHealth(p.id, s, p.lastSyncedAt)] as const;
+                const [sessions, commitDate] = await Promise.all([
+                  listSessions(p.id).catch(() => []),
+                  p.githubRepo
+                    ? executeToolAction("github_list_commits", {
+                        owner: p.githubRepo.split("/")[0],
+                        repo: p.githubRepo.split("/")[1],
+                        limit: 1,
+                      })
+                        .then((res) =>
+                          res.ok && Array.isArray(res.result) && res.result.length > 0
+                            ? (res.result[0].date as string)
+                            : null
+                        )
+                        .catch(() => null)
+                    : Promise.resolve(null),
+                ]);
+                if (p.id === project.id && commitDate) {
+                  setLastCommitDate(commitDate);
+                }
+                return [p.id, computeProjectHealth(p.id, sessions, p.lastSyncedAt, commitDate)] as const;
               })
             );
             setHealthMap(Object.fromEntries(entries));
@@ -296,6 +315,11 @@ export function ResumeCard({ project, onEndSession, onActionsChange }: ResumeCar
           {lastSession && (
             <span className="resume-card__stamp">
               Last session: {formatDayDate(lastSession.createdAt)} ({timeAgo(lastSession.createdAt)})
+            </span>
+          )}
+          {lastCommitDate && (
+            <span className="resume-card__stamp">
+              Last commit: {formatDayDate(lastCommitDate)} ({timeAgo(lastCommitDate)})
             </span>
           )}
           {currentProject.lastSyncedAt && (

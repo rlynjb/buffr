@@ -16,7 +16,8 @@ function getWeekStart(date: Date): Date {
 export function computeProjectHealth(
   projectId: string,
   sessions: Session[],
-  lastSyncedAt?: string | null
+  lastSyncedAt?: string | null,
+  lastCommitDate?: string | null
 ): ProjectHealth {
   const now = new Date();
   const weekStart = getWeekStart(now);
@@ -26,6 +27,9 @@ export function computeProjectHealth(
   const activityDates = sessions.map((s) => new Date(s.createdAt));
   if (lastSyncedAt) {
     activityDates.push(new Date(lastSyncedAt));
+  }
+  if (lastCommitDate) {
+    activityDates.push(new Date(lastCommitDate));
   }
 
   const hasActivityThisWeek = activityDates.some(
