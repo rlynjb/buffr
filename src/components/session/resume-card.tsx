@@ -12,6 +12,7 @@ import { generateNextActions, type NextAction, type ActionContext } from "@/lib/
 import { listProjects, listSessions, getActionNotes, saveActionNote, executeToolAction, listIntegrations, updateProject, listManualActions, addManualAction, updateManualAction, deleteManualAction, reorderManualActions, paraphraseText } from "@/lib/api";
 import { timeAgo } from "@/lib/format";
 import { generateSuggestions, type ProjectSuggestion } from "@/lib/suggestions";
+import { computeProjectHealth, type ProjectHealth } from "@/lib/project-health";
 import { useProvider } from "@/context/provider-context";
 import { SessionTab } from "./session-tab";
 import { ActionsTab } from "./actions-tab";
@@ -42,6 +43,7 @@ export function ResumeCard({ project, onEndSession, onActionsChange }: ResumeCar
   const [syncing, setSyncing] = useState(false);
   const [currentProject, setCurrentProject] = useState(project);
   const [allProjects, setAllProjects] = useState<Project[]>([]);
+  const [healthMap, setHealthMap] = useState<Record<string, ProjectHealth>>({});
 
   async function handleDismissSuggestion(id: string) {
     setSuggestions((prev) => prev.filter((s) => s.id !== id));
@@ -125,7 +127,16 @@ export function ResumeCard({ project, onEndSession, onActionsChange }: ResumeCar
           .catch(() => setSuggestions([]));
 
         listProjects()
-          .then((p) => setAllProjects(p))
+          .then(async (projects) => {
+            setAllProjects(projects);
+            const entries = await Promise.all(
+              projects.map(async (p) => {
+                const s = await listSessions(p.id).catch(() => []);
+                return [p.id, computeProjectHealth(p.id, s, p.lastSyncedAt)] as const;
+              })
+            );
+            setHealthMap(Object.fromEntries(entries));
+          })
           .catch(() => {});
       } catch {
         setActions(generateNextActions({ project, lastSession: null }));
@@ -253,19 +264,66 @@ export function ResumeCard({ project, onEndSession, onActionsChange }: ResumeCar
       </Link>
 
       {allProjects.length > 1 && (
-        <nav className="resume-card__project-nav">
-          {allProjects.map((p) => (
-            <button
-              key={p.id}
-              onClick={() => router.push(`/project/${p.id}`)}
-              className={`resume-card__project-nav-item ${
-                p.id === project.id ? "resume-card__project-nav-item--active" : ""
-              }`}
-            >
-              {p.name}
-            </button>
-          ))}
-        </nav>
+        <>
+          {Object.keys(healthMap).length > 0 && (
+            <div className="resume-card__week-calendar">
+              <div className="resume-card__week-header">
+                <span className="resume-card__week-label">This week</span>
+                <div className="resume-card__week-days-header">
+                  {["S", "M", "T", "W", "T", "F", "S"].map((d, i) => (
+                    <span key={i} className="resume-card__week-day-label">{d}</span>
+                  ))}
+                </div>
+              </div>
+              {allProjects.map((p) => {
+                const health = healthMap[p.id];
+                if (!health) return null;
+                return (
+                  <div
+                    key={p.id}
+                    className={`resume-card__week-row ${
+                      health.needsAttention ? "resume-card__week-row--attention" : ""
+                    } ${p.id === project.id ? "resume-card__week-row--current" : ""}`}
+                    onClick={() => router.push(`/project/${p.id}`)}
+                  >
+                    <span className="resume-card__week-project-name">{p.name}</span>
+                    <div className="resume-card__week-dots">
+                      {health.weekDays.map((day, i) => (
+                        <span
+                          key={i}
+                          className={`resume-card__week-dot ${
+                            day.active
+                              ? "resume-card__week-dot--active"
+                              : "resume-card__week-dot--inactive"
+                          }`}
+                        />
+                      ))}
+                    </div>
+                    <span className="resume-card__week-streak">
+                      {health.weeklyStreak > 0 ? `${health.weeklyStreak}w` : ""}
+                    </span>
+                    {health.needsAttention && (
+                      <span className="resume-card__week-attention">needs attention</span>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+          <nav className="resume-card__project-nav">
+            {allProjects.map((p) => (
+              <button
+                key={p.id}
+                onClick={() => router.push(`/project/${p.id}`)}
+                className={`resume-card__project-nav-item ${
+                  p.id === project.id ? "resume-card__project-nav-item--active" : ""
+                }`}
+              >
+                {p.name}
+              </button>
+            ))}
+          </nav>
+        </>
       )}
 
       <div className="resume-card__header">
