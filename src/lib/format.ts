@@ -12,3 +12,14 @@ export function timeAgo(dateStr: string): string {
   const days = Math.floor(hours / 24);
   return `${days}d ago`;
 }
+
+const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/**
+ * Format a date as "Wed, Mar 19" style with day of week.
+ */
+export function formatDayDate(dateStr: string): string {
+  const d = new Date(dateStr);
+  return `${DAYS[d.getDay()]}, ${MONTHS[d.getMonth()]} ${d.getDate()}`;
+}

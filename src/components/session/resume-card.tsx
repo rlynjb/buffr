@@ -10,7 +10,7 @@ import { PHASE_COLORS } from "@/lib/constants";
 import type { Project, Session } from "@/lib/types";
 import { generateNextActions, type NextAction, type ActionContext } from "@/lib/next-actions";
 import { listProjects, listSessions, getActionNotes, saveActionNote, executeToolAction, listIntegrations, updateProject, listManualActions, addManualAction, updateManualAction, deleteManualAction, reorderManualActions, paraphraseText } from "@/lib/api";
-import { timeAgo } from "@/lib/format";
+import { timeAgo, formatDayDate } from "@/lib/format";
 import { generateSuggestions, type ProjectSuggestion } from "@/lib/suggestions";
 import { computeProjectHealth, type ProjectHealth } from "@/lib/project-health";
 import { useProvider } from "@/context/provider-context";
@@ -264,54 +264,10 @@ export function ResumeCard({ project, onEndSession, onActionsChange }: ResumeCar
       </Link>
 
       {allProjects.length > 1 && (
-        <>
-          {Object.keys(healthMap).length > 0 && (
-            <div className="resume-card__week-calendar">
-              <div className="resume-card__week-header">
-                <span className="resume-card__week-label">This week</span>
-                <div className="resume-card__week-days-header">
-                  {["S", "M", "T", "W", "T", "F", "S"].map((d, i) => (
-                    <span key={i} className="resume-card__week-day-label">{d}</span>
-                  ))}
-                </div>
-              </div>
-              {allProjects.map((p) => {
-                const health = healthMap[p.id];
-                if (!health) return null;
-                return (
-                  <div
-                    key={p.id}
-                    className={`resume-card__week-row ${
-                      health.needsAttention ? "resume-card__week-row--attention" : ""
-                    } ${p.id === project.id ? "resume-card__week-row--current" : ""}`}
-                    onClick={() => router.push(`/project/${p.id}`)}
-                  >
-                    <span className="resume-card__week-project-name">{p.name}</span>
-                    <div className="resume-card__week-dots">
-                      {health.weekDays.map((day, i) => (
-                        <span
-                          key={i}
-                          className={`resume-card__week-dot ${
-                            day.active
-                              ? "resume-card__week-dot--active"
-                              : "resume-card__week-dot--inactive"
-                          }`}
-                        />
-                      ))}
-                    </div>
-                    <span className="resume-card__week-streak">
-                      {health.weeklyStreak > 0 ? `${health.weeklyStreak}w` : ""}
-                    </span>
-                    {health.needsAttention && (
-                      <span className="resume-card__week-attention">needs attention</span>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          )}
-          <nav className="resume-card__project-nav">
-            {allProjects.map((p) => (
+        <nav className="resume-card__project-nav">
+          {allProjects.map((p) => {
+            const health = healthMap[p.id];
+            return (
               <button
                 key={p.id}
                 onClick={() => router.push(`/project/${p.id}`)}
@@ -319,14 +275,35 @@ export function ResumeCard({ project, onEndSession, onActionsChange }: ResumeCar
                   p.id === project.id ? "resume-card__project-nav-item--active" : ""
                 }`}
               >
+                <span
+                  className={`resume-card__health-dot ${
+                    health
+                      ? health.needsAttention
+                        ? "resume-card__health-dot--attention"
+                        : "resume-card__health-dot--good"
+                      : ""
+                  }`}
+                />
                 {p.name}
               </button>
-            ))}
-          </nav>
-        </>
+            );
+          })}
+        </nav>
       )}
 
       <div className="resume-card__header">
+        <div className="resume-card__activity-stamps">
+          {lastSession && (
+            <span className="resume-card__stamp">
+              Last session: {formatDayDate(lastSession.createdAt)} ({timeAgo(lastSession.createdAt)})
+            </span>
+          )}
+          {currentProject.lastSyncedAt && (
+            <span className="resume-card__stamp">
+              Last sync: {formatDayDate(currentProject.lastSyncedAt)} ({timeAgo(currentProject.lastSyncedAt)})
+            </span>
+          )}
+        </div>
         <div className="resume-card__name-row">
           <h1 className="resume-card__title">{currentProject.name}</h1>
           <Badge color={PHASE_COLORS[currentProject.phase]}>

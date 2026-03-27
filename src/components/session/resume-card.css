@@ -14,7 +14,7 @@
 }
 
 .resume-card__project-nav-item {
-  @apply px-2.5 sm:px-3 py-1.5 rounded-lg text-sm sm:text-lg font-semibold font-mono text-zinc-500 hover:text-zinc-300 hover:bg-white/5 transition-colors cursor-pointer whitespace-nowrap;
+  @apply flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-lg text-sm sm:text-lg font-semibold font-mono text-zinc-500 hover:text-zinc-300 hover:bg-white/5 transition-colors cursor-pointer whitespace-nowrap;
 }
 
 .resume-card__project-nav-item--active {
@@ -143,63 +143,24 @@
   @apply flex items-center justify-end gap-2 mt-3;
 }
 
-/* Week calendar */
-.resume-card__week-calendar {
-  @apply mb-3 rounded-lg border border-zinc-800/60 bg-zinc-900/30 px-3 py-2.5 text-xs;
+/* Health dot in project nav */
+.resume-card__health-dot {
+  @apply inline-block w-2 h-2 rounded-full shrink-0;
 }
 
-.resume-card__week-header {
-  @apply flex items-center gap-2 mb-1.5 text-[10px] text-zinc-600 uppercase tracking-wider font-semibold;
-}
-
-.resume-card__week-label {
-  @apply w-24 sm:w-28 shrink-0 truncate;
-}
-
-.resume-card__week-days-header {
-  @apply flex gap-2.5;
-}
-
-.resume-card__week-day-label {
-  @apply w-2.5 text-center;
-}
-
-.resume-card__week-row {
-  @apply flex items-center gap-2 py-1 rounded px-1 -mx-1 cursor-pointer transition-colors hover:bg-white/[0.03];
-}
-
-.resume-card__week-row--current {
-  @apply bg-white/[0.03];
-}
-
-.resume-card__week-row--attention {
-  @apply bg-amber-500/[0.04];
-}
-
-.resume-card__week-project-name {
-  @apply w-24 sm:w-28 shrink-0 truncate text-zinc-400 font-mono text-[11px];
-}
-
-.resume-card__week-dots {
-  @apply flex gap-2.5;
-}
-
-.resume-card__week-dot {
-  @apply w-2.5 h-2.5 rounded-full shrink-0;
-}
-
-.resume-card__week-dot--active {
+.resume-card__health-dot--good {
   @apply bg-emerald-400;
 }
 
-.resume-card__week-dot--inactive {
-  @apply bg-zinc-800;
+.resume-card__health-dot--attention {
+  @apply bg-yellow-400;
 }
 
-.resume-card__week-streak {
-  @apply text-[10px] text-emerald-500/70 font-mono ml-1 w-6;
+/* Activity timestamps above project name */
+.resume-card__activity-stamps {
+  @apply flex flex-wrap items-center gap-x-4 gap-y-0.5 mb-1;
 }
 
-.resume-card__week-attention {
-  @apply text-[10px] text-amber-400/70 whitespace-nowrap;
+.resume-card__stamp {
+  @apply text-[11px] text-zinc-500;
 }
