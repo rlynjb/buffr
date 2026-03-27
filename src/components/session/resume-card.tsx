@@ -322,11 +322,6 @@ export function ResumeCard({ project, onEndSession, onActionsChange }: ResumeCar
               Last commit: {formatDayDate(lastCommitDate)} ({timeAgo(lastCommitDate)})
             </span>
           )}
-          {currentProject.lastSyncedAt && (
-            <span className="resume-card__stamp">
-              Last sync: {formatDayDate(currentProject.lastSyncedAt)} ({timeAgo(currentProject.lastSyncedAt)})
-            </span>
-          )}
         </div>
         <div className="resume-card__name-row">
           <h1 className="resume-card__title">{currentProject.name}</h1>
