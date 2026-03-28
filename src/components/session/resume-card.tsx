@@ -261,9 +261,9 @@ export function ResumeCard({ project, onEndSession, onActionsChange }: ResumeCar
   const tabs = [
     { id: "actions" as Tab, label: "Next Actions" },
     { id: "session" as Tab, label: "Last Session" },
-    { id: "prompts" as Tab, label: "Prompts" },
     { id: "dev" as Tab, label: ".dev" },
     { id: "doc" as Tab, label: ".doc" },
+    { id: "prompts" as Tab, label: "Prompts" },
     { id: "tools" as Tab, label: "Tools" },
   ];
 
