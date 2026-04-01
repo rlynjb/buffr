@@ -10,7 +10,7 @@ import {
   IconSearch, IconPlus, IconEdit, IconTrash, IconCheck,
   IconEye, IconGitHub, IconLoader,
 } from "@/components/icons";
-import type { DevItem, DevItemCategory, Project } from "@/lib/types";
+import type { DevItem, Project } from "@/lib/types";
 import {
   listDevItems, createDevItem, updateDevItem, deleteDevItemApi, pushDevItems,
 } from "@/lib/api";
@@ -19,25 +19,6 @@ import "./dev-tab.css";
 interface DevTabProps {
   project: Project;
 }
-
-const CATEGORIES: Array<{ key: "all" | DevItemCategory; label: string }> = [
-  { key: "all", label: "All" },
-  { key: "ai-rules", label: "AI Rules" },
-  { key: "skills", label: "Skills" },
-  { key: "community-skills", label: "Community Skills" },
-];
-
-const CATEGORY_COLORS: Record<DevItemCategory, string> = {
-  "ai-rules": "#60a5fa",
-  skills: "#34d399",
-  "community-skills": "#a78bfa",
-};
-
-const CATEGORY_LABELS: Record<DevItemCategory, string> = {
-  "ai-rules": "AI Rule",
-  skills: "Skill",
-  "community-skills": "Community Skill",
-};
 
 const ADAPTERS = [
   { id: "claude-code", name: "Claude Code", file: "CLAUDE.md", icon: "C", color: "#c084fc" },
@@ -48,15 +29,10 @@ const ADAPTERS = [
   { id: "continue", name: "Continue", file: ".continuerules", icon: "\u2192", color: "#f472b6" },
 ];
 
-function getDirectory(item: DevItem): string {
-  return item.category;
-}
-
 export function DevTab({ project }: DevTabProps) {
   const [items, setItems] = useState<DevItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [query, setQuery] = useState("");
-  const [activeCategory, setActiveCategory] = useState<"all" | DevItemCategory>("all");
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
   // CRUD modal
@@ -64,7 +40,6 @@ export function DevTab({ project }: DevTabProps) {
   const [editing, setEditing] = useState<DevItem | null>(null);
   const [title, setTitle] = useState("");
   const [content, setContent] = useState("");
-  const [category, setCategory] = useState<DevItemCategory>("ai-rules");
   const [filename, setFilename] = useState("");
   const [scope, setScope] = useState<"global" | "project">("global");
   const [tags, setTags] = useState("");
@@ -90,11 +65,10 @@ export function DevTab({ project }: DevTabProps) {
   }
 
   // Modal helpers
-  function openNew(cat?: DevItemCategory) {
+  function openNew() {
     setEditing(null);
     setTitle("");
     setContent("");
-    setCategory(cat || "ai-rules");
     setFilename("");
     setScope("global");
     setTags("");
@@ -105,7 +79,6 @@ export function DevTab({ project }: DevTabProps) {
     setEditing(item);
     setTitle(item.title);
     setContent(item.content);
-    setCategory(item.category);
     setFilename(item.filename);
     setScope(item.scope === "global" ? "global" : "project");
     setTags(item.tags.join(", "));
@@ -119,12 +92,12 @@ export function DevTab({ project }: DevTabProps) {
 
     if (editing) {
       const updated = await updateDevItem(editing.id, {
-        title, content, category, filename: resolvedFilename, tags: parsedTags, scope: resolvedScope,
+        title, content, filename: resolvedFilename, tags: parsedTags, scope: resolvedScope,
       });
       setItems((prev) => prev.map((i) => (i.id === updated.id ? updated : i)));
     } else {
       const created = await createDevItem({
-        title, content, category, filename: resolvedFilename, tags: parsedTags, scope: resolvedScope,
+        title, content, filename: resolvedFilename, tags: parsedTags, scope: resolvedScope,
       });
       setItems((prev) => [created, ...prev]);
     }
@@ -159,30 +132,16 @@ export function DevTab({ project }: DevTabProps) {
     });
   }
 
-  // Filter and group
   const filtered = useMemo(() => {
     return items
       .filter((i) => {
-        const matchesCategory = activeCategory === "all" || i.category === activeCategory;
-        const matchesQuery = !query ||
+        return !query ||
           i.title.toLowerCase().includes(query.toLowerCase()) ||
           i.filename.toLowerCase().includes(query.toLowerCase()) ||
           i.tags.some((t) => t.includes(query.toLowerCase()));
-        return matchesCategory && matchesQuery;
       })
-      .sort((a, b) => {
-        if (a.category !== b.category) return a.category.localeCompare(b.category);
-        return a.filename.localeCompare(b.filename);
-      });
-  }, [items, activeCategory, query]);
-
-  const categoryCounts = useMemo(() => {
-    const counts: Record<string, number> = { all: items.length };
-    for (const i of items) counts[i.category] = (counts[i.category] || 0) + 1;
-    return counts;
-  }, [items]);
-
-  let lastDir = "";
+      .sort((a, b) => a.filename.localeCompare(b.filename));
+  }, [items, query]);
 
   return (
     <div>
@@ -212,24 +171,6 @@ export function DevTab({ project }: DevTabProps) {
             {pushing ? "Pushing..." : pushSuccess ? "Pushed" : "Push to Repo"}
           </Button>
         )}
-      </div>
-
-      {/* Category filter */}
-      <div className="dev-tab__categories">
-        {CATEGORIES.map((cat) => (
-          <button
-            key={cat.key}
-            onClick={() => setActiveCategory(cat.key)}
-            className={`dev-tab__category ${
-              activeCategory === cat.key ? "dev-tab__category--active" : "dev-tab__category--inactive"
-            }`}
-          >
-            {cat.label}
-            {categoryCounts[cat.key] ? (
-              <span className="dev-tab__category-count">{categoryCounts[cat.key]}</span>
-            ) : null}
-          </button>
-        ))}
       </div>
 
       {/* Adapters */}
@@ -272,23 +213,15 @@ export function DevTab({ project }: DevTabProps) {
       ) : (
         <div className="dev-tab__tree">
           {filtered.map((item) => {
-            const dir = getDirectory(item);
-            const showDirHeader = dir !== lastDir;
-            lastDir = dir;
             const isExpanded = expandedId === item.id;
-            const color = CATEGORY_COLORS[item.category];
 
             return (
               <div key={item.id}>
-                {showDirHeader && (
-                  <div className="dev-tab__dir-header">{item.category}/</div>
-                )}
-
                 <button
                   className={`dev-tab__file-row ${isExpanded ? "dev-tab__file-row--expanded" : ""}`}
                   onClick={() => setExpandedId(isExpanded ? null : item.id)}
                 >
-                  <span className="dev-tab__file-dot" style={{ backgroundColor: color }} />
+                  <span className="dev-tab__file-dot" />
                   <span className="dev-tab__file-name">{item.filename}</span>
                   <Badge color={item.scope === "global" ? "#71717a" : "#60a5fa"} small>
                     {item.scope === "global" ? "global" : "project"}
@@ -305,7 +238,6 @@ export function DevTab({ project }: DevTabProps) {
                   <div className="dev-tab__expanded">
                     <div className="dev-tab__expanded-header">
                       <span className="dev-tab__expanded-path">{item.path}</span>
-                      <Badge color={color} small>{CATEGORY_LABELS[item.category]}</Badge>
                       <button onClick={() => openEdit(item)} className="dev-tab__expanded-btn">
                         <IconEdit size={11} /> Edit
                       </button>
@@ -331,23 +263,6 @@ export function DevTab({ project }: DevTabProps) {
         title={editing ? "Edit File" : "New File"}
       >
         <div className="dev-tab__modal-form">
-          <div>
-            <label className="dev-tab__modal-label">Category</label>
-            <div className="dev-tab__modal-categories">
-              {(["ai-rules", "skills", "community-skills"] as DevItemCategory[]).map((cat) => (
-                <button
-                  key={cat}
-                  onClick={() => setCategory(cat)}
-                  className={`dev-tab__modal-cat ${category === cat ? "dev-tab__modal-cat--active" : "dev-tab__modal-cat--inactive"}`}
-                  style={category === cat ? { borderColor: CATEGORY_COLORS[cat] } : undefined}
-                >
-                  <span className="dev-tab__modal-cat-dot" style={{ backgroundColor: CATEGORY_COLORS[cat] }} />
-                  {CATEGORY_LABELS[cat]}
-                </button>
-              ))}
-            </div>
-          </div>
-
           <Input
             label="Title"
             value={title}
@@ -363,7 +278,7 @@ export function DevTab({ project }: DevTabProps) {
           />
 
           <p className="dev-tab__modal-path-preview">
-            .dev/{category}/{filename || (title ? `${title.toLowerCase().replace(/[^a-z0-9]+/g, "-")}.md` : "...")}
+            .dev/{filename || (title ? `${title.toLowerCase().replace(/[^a-z0-9]+/g, "-")}.md` : "...")}
           </p>
 
           <div>

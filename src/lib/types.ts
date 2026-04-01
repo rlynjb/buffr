@@ -58,8 +58,6 @@ export interface Session {
   createdAt: string;
 }
 
-export type DevItemCategory = "ai-rules" | "skills" | "community-skills";
-
 export type DocItemCategory = "docs" | "ideas" | "plans";
 
 export interface DocItem {
@@ -77,7 +75,6 @@ export interface DocItem {
 
 export interface DevItem {
   id: string;
-  category: DevItemCategory;
   filename: string;
   path: string;
   title: string;

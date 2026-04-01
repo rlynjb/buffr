@@ -6,7 +6,7 @@ import {
   deleteDevItem,
 } from "./lib/storage/dev-items";
 import { pushFiles, getRepoInfo } from "./lib/github";
-import type { DevItem, DevItemCategory } from "../../src/lib/types";
+import type { DevItem } from "../../src/lib/types";
 import { randomUUID } from "crypto";
 import { json, errorResponse } from "./lib/responses";
 
@@ -23,36 +23,12 @@ function buildAdapterContent(
   adapterId: string,
   items: DevItem[],
 ): string {
-  const rules = items.filter((i) => i.category === "ai-rules");
-  const skills = items.filter((i) => i.category === "skills");
-  const community = items.filter((i) => i.category === "community-skills");
-
   const sections: string[] = [];
 
-  if (rules.length > 0) {
-    sections.push("## AI Rules\n");
-    for (const r of rules) {
-      sections.push(r.content.trim());
-      sections.push("");
-    }
-  }
-
-  if (skills.length > 0) {
-    sections.push("## Skills\n");
-    for (const s of skills) {
-      sections.push(`### ${s.title}\n`);
-      sections.push(s.content.trim());
-      sections.push("");
-    }
-  }
-
-  if (community.length > 0) {
-    sections.push("## Community Skills\n");
-    for (const c of community) {
-      sections.push(`### ${c.title}\n`);
-      sections.push(c.content.trim());
-      sections.push("");
-    }
+  for (const item of items) {
+    sections.push(`## ${item.title}\n`);
+    sections.push(item.content.trim());
+    sections.push("");
   }
 
   const body = sections.join("\n").trim();
@@ -126,7 +102,6 @@ export default async function handler(req: Request, _context: Context) {
           const fm = [
             "---",
             `title: ${i.title || i.filename}`,
-            `category: ${i.category}`,
             `scope: ${i.scope === "global" ? "global" : "project"}`,
           ];
           if (tags.length > 0) fm.push(`tags: [${tags.join(", ")}]`);
@@ -166,14 +141,12 @@ export default async function handler(req: Request, _context: Context) {
 
       // Create item
       if (!body.title?.trim()) return errorResponse("title is required", 400);
-      const category: DevItemCategory = body.category || "ai-rules";
       const filename = body.filename || `${body.title.toLowerCase().replace(/[^a-z0-9]+/g, "-")}.md`;
       const now = new Date().toISOString();
       const item: DevItem = {
         id: randomUUID(),
-        category,
         filename,
-        path: `.dev/${category}/${filename}`,
+        path: `.dev/${filename}`,
         title: body.title,
         content: body.content || "",
         scope: body.scope || "global",
@@ -193,19 +166,15 @@ export default async function handler(req: Request, _context: Context) {
       const existing = await getDevItem(id);
       if (!existing) return errorResponse("Item not found", 404);
       const body = await req.json();
+      const updatedFilename = body.filename ?? existing.filename;
       const updated: DevItem = {
         ...existing,
         title: body.title ?? existing.title,
         content: body.content ?? existing.content,
-        category: body.category ?? existing.category,
-        filename: body.filename ?? existing.filename,
+        filename: updatedFilename,
         tags: body.tags ?? existing.tags,
         scope: body.scope ?? existing.scope,
-        path: body.category
-          ? `.dev/${body.category}/${body.filename ?? existing.filename}`
-          : body.filename
-            ? `.dev/${existing.category}/${body.filename}`
-            : existing.path,
+        path: `.dev/${updatedFilename}`,
         updatedAt: new Date().toISOString(),
       };
       const saved = await saveDevItem(updated);
