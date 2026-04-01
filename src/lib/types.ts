@@ -79,7 +79,6 @@ export interface DevItem {
   path: string;
   title: string;
   content: string;
-  scope: "global" | string;
   communitySource?: string | null;
   communityVersion?: string | null;
   tags: string[];
