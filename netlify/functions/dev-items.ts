@@ -54,6 +54,7 @@ function buildAdapterContent(
 export default async function handler(req: Request, _context: Context) {
   const url = new URL(req.url);
   const id = url.searchParams.get("id");
+  const scope = url.searchParams.get("scope");
 
   try {
     // GET — list or get single
@@ -63,7 +64,10 @@ export default async function handler(req: Request, _context: Context) {
         if (!item) return errorResponse("Item not found", 404);
         return json(item);
       }
-      const items = await listDevItems();
+      let items = await listDevItems();
+      if (scope) {
+        items = items.filter((i) => i.scope === scope);
+      }
       return json(items);
     }
 
@@ -73,7 +77,8 @@ export default async function handler(req: Request, _context: Context) {
 
       // Push to GitHub
       if (url.searchParams.has("push")) {
-        const { repo, adapterIds } = body as {
+        const { projectId, repo, adapterIds } = body as {
+          projectId: string;
           repo: string;
           adapterIds?: string[];
         };
@@ -84,7 +89,8 @@ export default async function handler(req: Request, _context: Context) {
         if (!repoInfo) return errorResponse(`Repository not found: ${repo}`, 404);
         const [resolvedOwner, resolvedRepo] = repoInfo.fullName.split("/");
 
-        const items = await listDevItems();
+        let items = await listDevItems();
+        items = items.filter((i) => i.scope === projectId);
 
         if (items.length === 0) {
           return errorResponse("No .dev items to push", 400);
@@ -142,6 +148,7 @@ export default async function handler(req: Request, _context: Context) {
         path: `.dev/${filename}`,
         title: body.title,
         content: body.content || "",
+        scope: body.scope || "",
         communitySource: body.communitySource || null,
         communityVersion: body.communityVersion || null,
         tags: body.tags || [],
@@ -165,6 +172,7 @@ export default async function handler(req: Request, _context: Context) {
         content: body.content ?? existing.content,
         filename: updatedFilename,
         tags: body.tags ?? existing.tags,
+        scope: body.scope ?? existing.scope,
         path: `.dev/${updatedFilename}`,
         updatedAt: new Date().toISOString(),
       };

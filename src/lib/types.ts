@@ -67,6 +67,7 @@ export interface DocItem {
   path: string;
   title: string;
   content: string;
+  scope: string;
   tags: string[];
   createdAt: string;
   updatedAt: string;
@@ -78,6 +79,7 @@ export interface DevItem {
   path: string;
   title: string;
   content: string;
+  scope: string;
   communitySource?: string | null;
   communityVersion?: string | null;
   tags: string[];

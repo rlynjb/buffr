@@ -69,7 +69,7 @@ export function DocTab({ project }: DocTabProps) {
 
   async function loadItems() {
     try {
-      const data = await listDocItems();
+      const data = await listDocItems(project.id);
       setItems(data);
     } catch (err) {
       console.error("Failed to load doc items:", err);
@@ -105,12 +105,12 @@ export function DocTab({ project }: DocTabProps) {
 
     if (editing) {
       const updated = await updateDocItem(editing.id, {
-        title, content, category, filename: resolvedFilename, tags: parsedTags,
+        title, content, category, filename: resolvedFilename, tags: parsedTags, scope: project.id,
       });
       setItems((prev) => prev.map((i) => (i.id === updated.id ? updated : i)));
     } else {
       const created = await createDocItem({
-        title, content, category, filename: resolvedFilename, tags: parsedTags,
+        title, content, category, filename: resolvedFilename, tags: parsedTags, scope: project.id,
       });
       setItems((prev) => [created, ...prev]);
     }
@@ -127,7 +127,7 @@ export function DocTab({ project }: DocTabProps) {
     if (!project.githubRepo) return;
     setPushing(true);
     try {
-      await pushDocItems(project.githubRepo);
+      await pushDocItems(project.id, project.githubRepo);
       setPushSuccess(true);
       setTimeout(() => setPushSuccess(false), 3000);
     } catch (err) {
