@@ -57,7 +57,6 @@ export function DocTab({ project }: DocTabProps) {
   const [content, setContent] = useState("");
   const [category, setCategory] = useState<DocItemCategory>("docs");
   const [filename, setFilename] = useState("");
-  const [scope, setScope] = useState<"global" | "project">("project");
   const [tags, setTags] = useState("");
 
   // Push
@@ -70,7 +69,7 @@ export function DocTab({ project }: DocTabProps) {
 
   async function loadItems() {
     try {
-      const data = await listDocItems(project.id);
+      const data = await listDocItems();
       setItems(data);
     } catch (err) {
       console.error("Failed to load doc items:", err);
@@ -86,7 +85,6 @@ export function DocTab({ project }: DocTabProps) {
     setContent("");
     setCategory(cat || "docs");
     setFilename("");
-    setScope("project");
     setTags("");
     setModalOpen(true);
   }
@@ -97,7 +95,6 @@ export function DocTab({ project }: DocTabProps) {
     setContent(item.content);
     setCategory(item.category);
     setFilename(item.filename);
-    setScope(item.scope === "global" ? "global" : "project");
     setTags(item.tags.join(", "));
     setModalOpen(true);
   }
@@ -105,16 +102,15 @@ export function DocTab({ project }: DocTabProps) {
   async function handleSave() {
     const parsedTags = tags.split(",").map((t) => t.trim().toLowerCase()).filter(Boolean);
     const resolvedFilename = filename.trim() || `${title.toLowerCase().replace(/[^a-z0-9]+/g, "-")}.md`;
-    const resolvedScope = scope === "project" ? project.id : "global";
 
     if (editing) {
       const updated = await updateDocItem(editing.id, {
-        title, content, category, filename: resolvedFilename, tags: parsedTags, scope: resolvedScope,
+        title, content, category, filename: resolvedFilename, tags: parsedTags,
       });
       setItems((prev) => prev.map((i) => (i.id === updated.id ? updated : i)));
     } else {
       const created = await createDocItem({
-        title, content, category, filename: resolvedFilename, tags: parsedTags, scope: resolvedScope,
+        title, content, category, filename: resolvedFilename, tags: parsedTags,
       });
       setItems((prev) => [created, ...prev]);
     }
@@ -131,7 +127,7 @@ export function DocTab({ project }: DocTabProps) {
     if (!project.githubRepo) return;
     setPushing(true);
     try {
-      await pushDocItems(project.id, project.githubRepo);
+      await pushDocItems(project.githubRepo);
       setPushSuccess(true);
       setTimeout(() => setPushSuccess(false), 3000);
     } catch (err) {
@@ -246,9 +242,6 @@ export function DocTab({ project }: DocTabProps) {
                 >
                   <span className="doc-tab__file-dot" style={{ backgroundColor: color }} />
                   <span className="doc-tab__file-name">{item.filename}</span>
-                  <Badge color={item.scope === "global" ? "#71717a" : "#60a5fa"} small>
-                    {item.scope === "global" ? "global" : "project"}
-                  </Badge>
                   {item.tags.slice(0, 2).map((t) => (
                     <Badge key={t} color="#555" small>{t}</Badge>
                   ))}
@@ -339,24 +332,6 @@ export function DocTab({ project }: DocTabProps) {
             onChange={(e) => setTags(e.target.value)}
             placeholder="api, auth, v2"
           />
-
-          <div>
-            <label className="doc-tab__modal-label">Scope</label>
-            <div className="doc-tab__modal-scope">
-              <button
-                onClick={() => setScope("global")}
-                className={`doc-tab__modal-scope-btn ${scope === "global" ? "doc-tab__modal-scope-btn--active" : "doc-tab__modal-scope-btn--inactive"}`}
-              >
-                Global
-              </button>
-              <button
-                onClick={() => setScope("project")}
-                className={`doc-tab__modal-scope-btn ${scope === "project" ? "doc-tab__modal-scope-btn--active" : "doc-tab__modal-scope-btn--inactive"}`}
-              >
-                Project
-              </button>
-            </div>
-          </div>
 
           <div className="doc-tab__modal-footer">
             <Button variant="ghost" onClick={() => setModalOpen(false)}>Cancel</Button>

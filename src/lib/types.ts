@@ -67,7 +67,6 @@ export interface DocItem {
   path: string;
   title: string;
   content: string;
-  scope: "global" | string;
   tags: string[];
   createdAt: string;
   updatedAt: string;

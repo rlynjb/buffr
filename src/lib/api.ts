@@ -386,9 +386,8 @@ export async function pushDevItems(
 }
 
 // Doc Items
-export async function listDocItems(scope?: string): Promise<DocItem[]> {
-  const q = scope ? `?scope=${encodeURIComponent(scope)}` : "";
-  return request<DocItem[]>(`/doc-items${q}`);
+export async function listDocItems(): Promise<DocItem[]> {
+  return request<DocItem[]>("/doc-items");
 }
 
 export async function createDocItem(
@@ -417,11 +416,10 @@ export async function deleteDocItemApi(id: string): Promise<void> {
 }
 
 export async function pushDocItems(
-  projectId: string,
   repo: string,
 ): Promise<{ sha: string }> {
   return request<{ sha: string }>("/doc-items?push", {
     method: "POST",
-    body: JSON.stringify({ projectId, repo }),
+    body: JSON.stringify({ repo }),
   });
 }

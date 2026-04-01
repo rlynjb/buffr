@@ -13,7 +13,6 @@ import { json, errorResponse } from "./lib/responses";
 export default async function handler(req: Request, _context: Context) {
   const url = new URL(req.url);
   const id = url.searchParams.get("id");
-  const scope = url.searchParams.get("scope");
 
   try {
     // GET — list or get single
@@ -23,10 +22,7 @@ export default async function handler(req: Request, _context: Context) {
         if (!item) return errorResponse("Item not found", 404);
         return json(item);
       }
-      let items = await listDocItems();
-      if (scope) {
-        items = items.filter((i) => i.scope === "global" || i.scope === scope);
-      }
+      const items = await listDocItems();
       return json(items);
     }
 
@@ -36,8 +32,7 @@ export default async function handler(req: Request, _context: Context) {
 
       // Push to GitHub
       if (url.searchParams.has("push")) {
-        const { projectId, repo } = body as {
-          projectId: string;
+        const { repo } = body as {
           repo: string;
         };
         if (!repo?.includes("/")) return errorResponse("repo is required (owner/repo)", 400);
@@ -46,8 +41,7 @@ export default async function handler(req: Request, _context: Context) {
         if (!repoInfo) return errorResponse(`Repository not found: ${repo}`, 404);
         const [resolvedOwner, resolvedRepo] = repoInfo.fullName.split("/");
 
-        let items = await listDocItems();
-        items = items.filter((i) => i.scope === "global" || i.scope === projectId);
+        const items = await listDocItems();
 
         if (items.length === 0) {
           return errorResponse("No .doc items to push", 400);
@@ -59,7 +53,6 @@ export default async function handler(req: Request, _context: Context) {
             "---",
             `title: ${i.title || i.filename}`,
             `category: ${i.category}`,
-            `scope: ${i.scope === "global" ? "global" : "project"}`,
           ];
           if (tags.length > 0) fm.push(`tags: [${tags.join(", ")}]`);
           fm.push("---", "");
@@ -95,7 +88,6 @@ export default async function handler(req: Request, _context: Context) {
         path: `.doc/${category}/${filename}`,
         title: body.title,
         content: body.content || "",
-        scope: body.scope || "global",
         tags: body.tags || [],
         createdAt: now,
         updatedAt: now,
@@ -117,7 +109,6 @@ export default async function handler(req: Request, _context: Context) {
         category: body.category ?? existing.category,
         filename: body.filename ?? existing.filename,
         tags: body.tags ?? existing.tags,
-        scope: body.scope ?? existing.scope,
         path: body.category
           ? `.doc/${body.category}/${body.filename ?? existing.filename}`
           : body.filename
