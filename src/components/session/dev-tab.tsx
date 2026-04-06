@@ -54,7 +54,7 @@ export function DevTab({ project }: DevTabProps) {
 
   async function loadItems() {
     try {
-      const data = await listDevItems(project.id);
+      const data = await listDevItems();
       setItems(data);
     } catch (err) {
       console.error("Failed to load dev items:", err);
@@ -88,12 +88,12 @@ export function DevTab({ project }: DevTabProps) {
 
     if (editing) {
       const updated = await updateDevItem(editing.id, {
-        title, content, filename: resolvedFilename, tags: parsedTags, scope: project.id,
+        title, content, filename: resolvedFilename, tags: parsedTags,
       });
       setItems((prev) => prev.map((i) => (i.id === updated.id ? updated : i)));
     } else {
       const created = await createDevItem({
-        title, content, filename: resolvedFilename, tags: parsedTags, scope: project.id,
+        title, content, filename: resolvedFilename, tags: parsedTags,
       });
       setItems((prev) => [created, ...prev]);
     }
@@ -110,7 +110,7 @@ export function DevTab({ project }: DevTabProps) {
     if (!project.githubRepo) return;
     setPushing(true);
     try {
-      await pushDevItems(project.id, project.githubRepo, Array.from(selectedAdapters));
+      await pushDevItems(project.githubRepo, Array.from(selectedAdapters));
       setPushSuccess(true);
       setTimeout(() => setPushSuccess(false), 3000);
     } catch (err) {

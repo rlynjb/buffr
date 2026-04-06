@@ -346,8 +346,8 @@ export async function runPrompt(
 }
 
 // Dev Items
-export async function listDevItems(projectId: string): Promise<DevItem[]> {
-  return request<DevItem[]>(`/dev-items?scope=${encodeURIComponent(projectId)}`);
+export async function listDevItems(): Promise<DevItem[]> {
+  return request<DevItem[]>("/dev-items");
 }
 
 export async function createDevItem(
@@ -376,13 +376,12 @@ export async function deleteDevItemApi(id: string): Promise<void> {
 }
 
 export async function pushDevItems(
-  projectId: string,
   repo: string,
   adapterIds?: string[],
 ): Promise<{ sha: string }> {
   return request<{ sha: string }>("/dev-items?push", {
     method: "POST",
-    body: JSON.stringify({ projectId, repo, adapterIds }),
+    body: JSON.stringify({ repo, adapterIds }),
   });
 }
 
