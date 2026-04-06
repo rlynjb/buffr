@@ -278,6 +278,7 @@ export function DocTab({ project }: DocTabProps) {
         open={modalOpen}
         onClose={() => setModalOpen(false)}
         title={editing ? "Edit Document" : "New Document"}
+        size="wide"
       >
         <div className="doc-tab__modal-form">
           <div>

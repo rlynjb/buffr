@@ -9,11 +9,12 @@ interface ModalProps {
   onClose: () => void;
   title: string;
   subtitle?: string;
+  size?: "default" | "wide";
   children: React.ReactNode;
 }
 
 // TODO: Add focus trap to keep keyboard focus within modal while open (consider focus-trap library)
-export function Modal({ open, onClose, title, subtitle, children }: ModalProps) {
+export function Modal({ open, onClose, title, subtitle, size = "default", children }: ModalProps) {
   const overlayRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -36,7 +37,7 @@ export function Modal({ open, onClose, title, subtitle, children }: ModalProps) 
       }}
     >
       <div className="modal__backdrop" />
-      <div className="modal__content" role="dialog" aria-modal="true">
+      <div className={`modal__content ${size === "wide" ? "modal__content--wide" : ""}`} role="dialog" aria-modal="true">
         <div className="modal__header">
           <div>
             <h3 className="modal__title">{title}</h3>
