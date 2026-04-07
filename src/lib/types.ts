@@ -45,8 +45,6 @@ export interface DevItem {
   path: string;
   title: string;
   content: string;
-  communitySource?: string | null;
-  communityVersion?: string | null;
   createdAt: string;
   updatedAt: string;
 }

@@ -141,8 +141,6 @@ export default async function handler(req: Request, _context: Context) {
         path: `.dev/${filename}`,
         title: body.title,
         content: body.content || "",
-        communitySource: body.communitySource || null,
-        communityVersion: body.communityVersion || null,
         createdAt: now,
         updatedAt: now,
       };
