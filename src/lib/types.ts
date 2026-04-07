@@ -54,7 +54,6 @@ export interface Prompt {
   title: string;
   body: string;
   scope: "global" | string; // "global" or a projectId
-  projectId?: string | null;
   usageCount?: number;
   source?: "library" | "dev";
   devFilename?: string | null;
