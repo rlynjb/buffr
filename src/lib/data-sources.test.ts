@@ -6,10 +6,6 @@ describe("getToolForCapability", () => {
     expect(getToolForCapability("github", "list_recent_activity")).toBe("github_list_issues");
   });
 
-  it("returns the correct tool for notion create_item", () => {
-    expect(getToolForCapability("notion", "create_item")).toBe("notion_create_task");
-  });
-
   it("returns null for unknown integration", () => {
     expect(getToolForCapability("slack", "list_recent_activity")).toBeNull();
   });

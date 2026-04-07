@@ -101,7 +101,7 @@ export function ToolsTab() {
           Default Data Sources for New Projects
         </div>
         <div className="tools-tab__defaults-row">
-          {["github", "notion"].map((s) => {
+          {["github"].map((s) => {
             const isConnected = connectedIds.includes(s);
             return (
               <label key={s} className="tools-tab__defaults-option">
@@ -171,7 +171,7 @@ export function ToolsTab() {
                 <Button size="sm" variant="ghost" onClick={() => openTest(integration.tools[0]?.name || integration.id)}>
                   Test
                 </Button>
-                {!["github", "notion"].includes(integration.id) && (
+                {integration.id !== "github" && (
                   <button
                     onClick={() => handleDelete(integration.id, integration.name)}
                     className="tools-tab__integration-remove"

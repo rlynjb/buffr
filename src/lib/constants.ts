@@ -7,7 +7,6 @@ export const PHASE_COLORS: Record<string, string> = {
 
 export const SOURCE_COLORS: Record<string, string> = {
   github: "#8b949e",
-  notion: "#ffffffcc",
   ai: "#c084fc",
   session: "#a78bfa",
   manual: "#71717a",

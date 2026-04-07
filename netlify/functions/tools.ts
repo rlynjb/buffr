@@ -25,14 +25,6 @@ const BUILTIN_INTEGRATIONS: Record<
       { key: "token", label: "GitHub Personal Access Token", secret: true },
     ],
   },
-  notion: {
-    name: "Notion",
-    description: "Task management via Notion databases",
-    configFields: [
-      { key: "token", label: "Notion Integration Token", secret: true },
-      { key: "databaseId", label: "Notion Database ID", secret: false },
-    ],
-  },
 };
 
 // GET — list all integrations with status + tools
@@ -60,9 +52,6 @@ async function handleList(): Promise<Response> {
 
       // Auto-detect from env vars
       if (id === "github" && !config?.enabled && process.env.GITHUB_TOKEN) {
-        status = "connected";
-      }
-      if (id === "notion" && !config?.enabled && process.env.NOTION_TOKEN) {
         status = "connected";
       }
       return {

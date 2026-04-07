@@ -12,11 +12,6 @@ const DATA_SOURCE_TOOLS: Record<string, Record<string, string>> = {
     get_diffs: "github_get_diffs",
     get_file: "github_get_file",
   },
-  notion: {
-    list_recent_activity: "notion_list_tasks",
-    create_item: "notion_create_task",
-    close_item: "notion_update_task",
-  },
 };
 
 export function getToolForCapability(

@@ -56,7 +56,7 @@ export interface ToolDefinition {
 }
 
 export interface ToolIntegration {
-  id: string; // "github" | "notion"
+  id: string; // "github"
   name: string;
   description: string;
   status: "connected" | "error" | "not_configured";

@@ -61,7 +61,7 @@ describe("generateSuggestions", () => {
 
   it("limits to 2 suggestions", () => {
     const project = makeProject({ dataSources: [] });
-    const suggestions = generateSuggestions(project, null, ["github", "notion"]);
+    const suggestions = generateSuggestions(project, null, ["github"]);
     expect(suggestions.length).toBeLessThanOrEqual(2);
   });
 });
