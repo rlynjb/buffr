@@ -7,8 +7,6 @@ function makeProject(overrides: Partial<Project> = {}): Project {
     id: "p1",
     name: "MyApp",
     description: "A cool app",
-    constraints: "Must be fast",
-    goals: "Launch MVP",
     stack: "Next.js + TypeScript",
     phase: "mvp",
     lastSessionId: null,

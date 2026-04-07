@@ -32,8 +32,6 @@ export default async function handler(req: Request, _context: Context) {
         id: randomUUID(),
         name: body.name || "Untitled",
         description: body.description || "",
-        constraints: body.constraints || "",
-        goals: body.goals || "",
         stack: body.stack || "",
         phase: body.phase || "idea",
         lastSessionId: null,
@@ -62,7 +60,7 @@ export default async function handler(req: Request, _context: Context) {
       const body = await req.json();
       // Whitelist allowed fields to prevent arbitrary field injection
       const allowedFields = [
-        "name", "description", "constraints", "goals", "stack", "phase",
+        "name", "description", "stack", "phase",
         "githubRepo", "repoVisibility", "netlifySiteId", "netlifySiteUrl",
         "dataSources", "dismissedSuggestions",
         "lastSessionId", "issueCount", "lastSyncedAt",

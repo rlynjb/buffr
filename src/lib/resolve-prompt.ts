@@ -17,8 +17,6 @@ export function resolvePrompt(template: string, ctx: PromptContext): string {
     vars["project.stack"] = ctx.project.stack;
     vars["project.description"] = ctx.project.description;
     vars["project.phase"] = ctx.project.phase;
-    vars["project.goals"] = ctx.project.goals;
-    vars["project.constraints"] = ctx.project.constraints;
   }
 
   if (ctx.lastSession) {

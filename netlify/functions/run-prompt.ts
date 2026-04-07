@@ -57,8 +57,6 @@ export default async function handler(req: Request, _context: Context) {
         vars["project.stack"] = project.stack;
         vars["project.description"] = project.description;
         vars["project.phase"] = project.phase;
-        vars["project.goals"] = project.goals;
-        vars["project.constraints"] = project.constraints;
 
         if (project.githubRepo) {
           const [owner, repo] = project.githubRepo.split("/");

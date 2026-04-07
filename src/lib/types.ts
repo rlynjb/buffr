@@ -2,8 +2,6 @@ export interface Project {
   id: string;
   name: string;
   description: string;
-  constraints: string;
-  goals: string;
   stack: string;
   phase: "idea" | "mvp" | "polish" | "deploy";
   lastSessionId: string | null;

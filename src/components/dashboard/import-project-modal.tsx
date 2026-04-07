@@ -86,8 +86,6 @@ export function ImportProjectModal({
         githubRepo: `${parsed.owner}/${parsed.repo}`,
         repoVisibility: "private",
         dataSources: ["github"],
-        constraints: "",
-        goals: "",
       });
 
       handleClose();
