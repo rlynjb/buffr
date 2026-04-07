@@ -2,24 +2,18 @@
 
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useRouter } from "next/navigation";
-import type { Prompt } from "@/lib/types";
-import { listPrompts } from "@/lib/api";
-import { Badge } from "@/components/ui/badge";
 import {
   IconSearch,
   IconFolder,
   IconBack,
-  IconSparkle,
   IconCheck,
 } from "@/components/icons";
-import { isReferencePrompt } from "@/lib/prompt-utils";
 import "./command-palette.css";
 
 interface Command {
   id: string;
   label: string;
   description: string;
-  kind: "action" | "prompt";
   icon: React.ReactNode;
   action: () => void;
 }
@@ -31,19 +25,11 @@ export function CommandPalette() {
   const [selectedIndex, setSelectedIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  const [prompts, setPrompts] = useState<Prompt[]>([]);
-
-  useEffect(() => {
-    if (!open) return;
-    listPrompts().then(setPrompts).catch(() => setPrompts([]));
-  }, [open]);
-
   const commands: Command[] = [
     {
       id: "load-existing",
       label: "Load Existing",
       description: "Import a GitHub repo",
-      kind: "action",
       icon: <IconFolder size={14} />,
       action: () => {
         setOpen(false);
@@ -55,7 +41,6 @@ export function CommandPalette() {
       id: "end-session",
       label: "End Session",
       description: "Save progress and close session",
-      kind: "action",
       icon: <IconCheck size={14} />,
       action: () => {
         setOpen(false);
@@ -65,29 +50,12 @@ export function CommandPalette() {
       id: "dashboard",
       label: "Dashboard",
       description: "View all projects",
-      kind: "action",
       icon: <IconBack size={14} />,
       action: () => {
         setOpen(false);
         router.push("/");
       },
     },
-    ...[...prompts]
-      .sort((a, b) => (b.usageCount || 0) - (a.usageCount || 0))
-      .map((p) => {
-        const isRef = isReferencePrompt(p.body);
-        return {
-          id: `prompt-${p.id}`,
-          label: p.title,
-          description: isRef ? "Reference prompt" : "Prompt template",
-          kind: "prompt" as const,
-          icon: <IconSparkle size={14} />,
-          action: () => {
-            navigator.clipboard.writeText(p.body);
-            setOpen(false);
-          },
-        };
-      }),
   ];
 
   const filtered = commands.filter(
@@ -163,7 +131,7 @@ export function CommandPalette() {
             type="text"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search commands, prompts..."
+            placeholder="Search commands..."
             className="command-palette__search-input"
           />
           <kbd className="command-palette__search-kbd">ESC</kbd>
@@ -180,11 +148,7 @@ export function CommandPalette() {
                   i === selectedIndex ? "command-palette__item--selected" : ""
                 }`}
               >
-                <span
-                  className={`command-palette__item-icon ${
-                    cmd.kind === "prompt" ? "command-palette__item-icon--prompt" : ""
-                  }`}
-                >
+                <span className="command-palette__item-icon">
                   {cmd.icon}
                 </span>
                 <div className="command-palette__item-content">
@@ -193,12 +157,6 @@ export function CommandPalette() {
                     {cmd.description}
                   </div>
                 </div>
-                {cmd.kind === "prompt" && (
-                  <span className="command-palette__item-badges">
-                    <Badge color="#c084fc" small>Run</Badge>
-                    <Badge small>Copy</Badge>
-                  </span>
-                )}
               </button>
             ))
           )}

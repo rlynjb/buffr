@@ -49,25 +49,6 @@ export interface DevItem {
   updatedAt: string;
 }
 
-export interface Prompt {
-  id: string;
-  title: string;
-  body: string;
-  scope: "global" | string; // "global" or a projectId
-  usageCount?: number;
-  source?: "library" | "dev";
-  devFilename?: string | null;
-  createdAt: string;
-  updatedAt: string;
-}
-
-export interface PromptResponse {
-  text: string;
-  suggestedActions?: Array<{ tool: string; params: Record<string, unknown>; label: string }>;
-  resolvedVariables?: Array<{ token: string; toolName: string; success: boolean }>;
-  artifact?: boolean;
-}
-
 export interface ToolDefinition {
   name: string;
   description: string;

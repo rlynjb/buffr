@@ -16,7 +16,6 @@ import { computeProjectHealth, type ProjectHealth } from "@/lib/project-health";
 import { useProvider } from "@/context/provider-context";
 import { SessionTab } from "./session-tab";
 import { ActionsTab } from "./actions-tab";
-import { PromptsTab } from "./prompts-tab";
 import { DevTab } from "./dev-tab";
 import { DocTab } from "./doc-tab";
 import { ToolsTab } from "./tools-tab";
@@ -28,7 +27,7 @@ interface ResumeCardProps {
   onActionsChange?: (actions: NextAction[]) => void;
 }
 
-type Tab = "session" | "actions" | "prompts" | "dev" | "doc" | "tools";
+type Tab = "session" | "actions" | "dev" | "doc" | "tools";
 
 export function ResumeCard({ project, onEndSession, onActionsChange }: ResumeCardProps) {
   const router = useRouter();
@@ -263,7 +262,6 @@ export function ResumeCard({ project, onEndSession, onActionsChange }: ResumeCar
     { id: "session" as Tab, label: "Last Session" },
     { id: "dev" as Tab, label: ".dev" },
     { id: "doc" as Tab, label: ".doc" },
-    { id: "prompts" as Tab, label: "Prompts" },
     { id: "tools" as Tab, label: "Tools" },
   ];
 
@@ -381,8 +379,8 @@ export function ResumeCard({ project, onEndSession, onActionsChange }: ResumeCar
             {s.text}
           </span>
           <div className="resume-card__suggestion-buttons">
-            {s.actionRoute === "#tools-tab" || s.actionRoute === "#prompts-tab" ? (
-              <button onClick={() => setActiveTab(s.actionRoute === "#tools-tab" ? "tools" : "prompts")} className="resume-card__suggestion-action">
+            {s.actionRoute === "#tools-tab" ? (
+              <button onClick={() => setActiveTab("tools")} className="resume-card__suggestion-action">
                 {s.actionLabel}
               </button>
             ) : s.actionRoute ? (
@@ -444,12 +442,6 @@ export function ResumeCard({ project, onEndSession, onActionsChange }: ResumeCar
           />
         )}
         {activeTab === "session" && <SessionTab lastSession={lastSession} />}
-        {activeTab === "prompts" && (
-          <PromptsTab
-            project={project}
-            lastSession={lastSession}
-          />
-        )}
         {activeTab === "dev" && <DevTab project={currentProject} />}
         {activeTab === "doc" && <DocTab project={currentProject} />}
         {activeTab === "tools" && <ToolsTab />}

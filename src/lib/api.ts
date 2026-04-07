@@ -1,13 +1,11 @@
 import type {
   Project,
   Session,
-  Prompt,
   DevItem,
   DocItem,
   LLMProvider,
   ToolIntegration,
   ToolConfig,
-  PromptResponse,
 } from "./types";
 
 const BASE = "/.netlify/functions";
@@ -205,37 +203,6 @@ export async function cleanDoneManualActions(
   );
 }
 
-// Prompts
-export async function listPrompts(scope?: string): Promise<Prompt[]> {
-  const q = scope ? `?scope=${encodeURIComponent(scope)}` : "";
-  return request<Prompt[]>(`/prompts${q}`);
-}
-
-export async function createPrompt(
-  data: Partial<Prompt>
-): Promise<Prompt> {
-  return request<Prompt>("/prompts", {
-    method: "POST",
-    body: JSON.stringify(data),
-  });
-}
-
-export async function updatePrompt(
-  id: string,
-  data: Partial<Prompt>
-): Promise<Prompt> {
-  return request<Prompt>(`/prompts?id=${encodeURIComponent(id)}`, {
-    method: "PUT",
-    body: JSON.stringify(data),
-  });
-}
-
-export async function deletePrompt(id: string): Promise<void> {
-  await request(`/prompts?id=${encodeURIComponent(id)}`, {
-    method: "DELETE",
-  });
-}
-
 // Tools / Integrations
 export async function listIntegrations(): Promise<ToolIntegration[]> {
   return request<ToolIntegration[]>("/tools");
@@ -330,18 +297,6 @@ export async function paraphraseText(
   return request("/session-ai?paraphrase", {
     method: "POST",
     body: JSON.stringify({ text, provider, persona }),
-  });
-}
-
-// Run Prompt
-export async function runPrompt(
-  promptId: string,
-  projectId?: string,
-  provider?: string,
-): Promise<PromptResponse> {
-  return request<PromptResponse>("/run-prompt", {
-    method: "POST",
-    body: JSON.stringify({ promptId, projectId, provider }),
   });
 }
 
