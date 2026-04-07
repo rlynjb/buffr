@@ -79,9 +79,7 @@ export function CommandPalette() {
         return {
           id: `prompt-${p.id}`,
           label: p.title,
-          description: isRef
-            ? p.tags.join(", ") || "Reference prompt"
-            : p.tags.join(", ") || "Prompt template",
+          description: isRef ? "Reference prompt" : "Prompt template",
           kind: "prompt" as const,
           icon: <IconSparkle size={14} />,
           action: () => {

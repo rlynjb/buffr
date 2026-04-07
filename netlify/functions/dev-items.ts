@@ -92,13 +92,12 @@ export default async function handler(req: Request, _context: Context) {
 
         // Build dev item files with frontmatter metadata
         const files: Array<{ path: string; content: string; mode?: string }> = items.map((i) => {
-          const tags = i.tags || [];
           const fm = [
             "---",
             `title: ${i.title || i.filename}`,
+            "---",
+            "",
           ];
-          if (tags.length > 0) fm.push(`tags: [${tags.join(", ")}]`);
-          fm.push("---", "");
           return { path: i.path, content: fm.join("\n") + (i.content || "") };
         });
 
@@ -144,7 +143,6 @@ export default async function handler(req: Request, _context: Context) {
         content: body.content || "",
         communitySource: body.communitySource || null,
         communityVersion: body.communityVersion || null,
-        tags: body.tags || [],
         createdAt: now,
         updatedAt: now,
       };
@@ -164,7 +162,6 @@ export default async function handler(req: Request, _context: Context) {
         title: body.title ?? existing.title,
         content: body.content ?? existing.content,
         filename: updatedFilename,
-        tags: body.tags ?? existing.tags,
         path: `.dev/${updatedFilename}`,
         updatedAt: new Date().toISOString(),
       };

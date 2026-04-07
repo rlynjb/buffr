@@ -43,7 +43,6 @@ export interface DocItem {
   title: string;
   content: string;
   scope: string;
-  tags: string[];
   createdAt: string;
   updatedAt: string;
 }
@@ -56,7 +55,6 @@ export interface DevItem {
   content: string;
   communitySource?: string | null;
   communityVersion?: string | null;
-  tags: string[];
   createdAt: string;
   updatedAt: string;
 }
@@ -65,7 +63,6 @@ export interface Prompt {
   id: string;
   title: string;
   body: string;
-  tags: string[];
   scope: "global" | string; // "global" or a projectId
   projectId?: string | null;
   usageCount?: number;

@@ -38,14 +38,6 @@ const CATEGORIES = [
 
 type Category = typeof CATEGORIES[number]["key"];
 
-const TAG_TO_CATEGORY: Record<string, Category> = {
-  setup: "setup", standards: "setup", architecture: "setup", deploy: "setup", changelog: "setup", docs: "setup",
-  dev: "dev", development: "dev", diagram: "dev", triage: "dev", refactor: "dev", planning: "dev", github: "dev", workflow: "dev", "code-quality": "dev", visual: "dev",
-  session: "session", kickoff: "session", summary: "session", progress: "session", context: "session", reporting: "session",
-  quality: "quality", review: "quality", checklist: "quality", pr: "quality", dependency: "quality", qa: "quality", maintenance: "quality",
-  reference: "reference", template: "reference", prompt: "reference",
-};
-
 function hasToolTokens(body: string): boolean {
   return /\{\{tool:\w+/.test(body);
 }
@@ -56,10 +48,6 @@ function hasAnyTokens(body: string): boolean {
 
 function getPromptCategory(prompt: Prompt): Category {
   if (isReferencePrompt(prompt.body)) return "reference";
-  for (const tag of prompt.tags) {
-    const cat = TAG_TO_CATEGORY[tag.toLowerCase()];
-    if (cat) return cat;
-  }
   return "dev";
 }
 
@@ -212,7 +200,6 @@ export function PromptsTab({ project, lastSession }: PromptsTabProps) {
   const [editing, setEditing] = useState<Prompt | null>(null);
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
-  const [tags, setTags] = useState("");
   const [scope, setScope] = useState<"global" | "project">("global");
 
   // Run + response
@@ -250,7 +237,6 @@ export function PromptsTab({ project, lastSession }: PromptsTabProps) {
     setEditing(null);
     setTitle("");
     setBody("");
-    setTags("");
     setScope("global");
     setModalOpen(true);
   }
@@ -259,22 +245,16 @@ export function PromptsTab({ project, lastSession }: PromptsTabProps) {
     setEditing(prompt);
     setTitle(prompt.title);
     setBody(prompt.body);
-    setTags(prompt.tags.join(", "));
     setScope(prompt.scope === "global" ? "global" : "project");
     setModalOpen(true);
   }
 
   async function handleSave() {
-    const parsedTags = tags
-      .split(",")
-      .map((t) => t.trim().toLowerCase())
-      .filter(Boolean);
-
     if (editing) {
-      const updated = await updatePrompt(editing.id, { title, body, tags: parsedTags, scope });
+      const updated = await updatePrompt(editing.id, { title, body, scope });
       setPrompts((prev) => prev.map((p) => (p.id === updated.id ? updated : p)));
     } else {
-      const created = await createPrompt({ title, body, tags: parsedTags, scope });
+      const created = await createPrompt({ title, body, scope });
       setPrompts((prev) => [created, ...prev]);
     }
     setModalOpen(false);
@@ -338,8 +318,7 @@ export function PromptsTab({ project, lastSession }: PromptsTabProps) {
     .filter((p) => {
       const matchesQuery = !query ||
         p.title.toLowerCase().includes(query.toLowerCase()) ||
-        p.body.toLowerCase().includes(query.toLowerCase()) ||
-        p.tags.some((t) => t.toLowerCase().includes(query.toLowerCase()));
+        p.body.toLowerCase().includes(query.toLowerCase());
       const matchesCategory = activeCategory === "all"
         ? true
         : activeCategory === "from-dev"
@@ -454,9 +433,6 @@ export function PromptsTab({ project, lastSession }: PromptsTabProps) {
                       <Badge color="#34d399" small><IconLayers size={10} /> .dev/</Badge>
                     )}
                     {isReference && <Badge color="#71717a" small>reference</Badge>}
-                    {prompt.tags.slice(0, 2).map((t) => (
-                      <Badge key={t} color="#555" small>{t}</Badge>
-                    ))}
                     <span className="prompts-tab__prompt-usage">{prompt.usageCount || 0}×</span>
                     {prompt.scope === "project" && <Badge color="#60a5fa" small>project</Badge>}
                   </div>
@@ -601,12 +577,6 @@ export function PromptsTab({ project, lastSession }: PromptsTabProps) {
               Variables: {"{{project.name}}"}, {"{{project.stack}}"}, {"{{lastSession.goal}}"}. Tools: {"{{tool:name}}"}.
             </p>
           </div>
-          <Input
-            label="Tags (comma-separated)"
-            value={tags}
-            onChange={(e) => setTags(e.target.value)}
-            placeholder="debug, react, performance"
-          />
           <div>
             <label className="prompts-tab__scope-label">
               Scope

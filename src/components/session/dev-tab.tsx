@@ -1,7 +1,6 @@
 "use client";
 
 import { useState, useEffect, useMemo } from "react";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Modal } from "@/components/ui/modal";
 import { Input } from "@/components/ui/input";
@@ -41,7 +40,6 @@ export function DevTab({ project }: DevTabProps) {
   const [title, setTitle] = useState("");
   const [content, setContent] = useState("");
   const [filename, setFilename] = useState("");
-  const [tags, setTags] = useState("");
 
   // Push
   const [pushing, setPushing] = useState(false);
@@ -69,7 +67,6 @@ export function DevTab({ project }: DevTabProps) {
     setTitle("");
     setContent("");
     setFilename("");
-    setTags("");
     setModalOpen(true);
   }
 
@@ -78,22 +75,20 @@ export function DevTab({ project }: DevTabProps) {
     setTitle(item.title);
     setContent(item.content);
     setFilename(item.filename);
-    setTags(item.tags.join(", "));
     setModalOpen(true);
   }
 
   async function handleSave() {
-    const parsedTags = tags.split(",").map((t) => t.trim().toLowerCase()).filter(Boolean);
     const resolvedFilename = filename.trim() || `${title.toLowerCase().replace(/[^a-z0-9]+/g, "-")}.md`;
 
     if (editing) {
       const updated = await updateDevItem(editing.id, {
-        title, content, filename: resolvedFilename, tags: parsedTags,
+        title, content, filename: resolvedFilename,
       });
       setItems((prev) => prev.map((i) => (i.id === updated.id ? updated : i)));
     } else {
       const created = await createDevItem({
-        title, content, filename: resolvedFilename, tags: parsedTags,
+        title, content, filename: resolvedFilename,
       });
       setItems((prev) => [created, ...prev]);
     }
@@ -133,8 +128,7 @@ export function DevTab({ project }: DevTabProps) {
       .filter((i) => {
         return !query ||
           i.title.toLowerCase().includes(query.toLowerCase()) ||
-          i.filename.toLowerCase().includes(query.toLowerCase()) ||
-          i.tags.some((t) => t.includes(query.toLowerCase()));
+          i.filename.toLowerCase().includes(query.toLowerCase());
       })
       .sort((a, b) => a.filename.localeCompare(b.filename));
   }, [items, query]);
@@ -219,9 +213,6 @@ export function DevTab({ project }: DevTabProps) {
                 >
                   <span className="dev-tab__file-dot" />
                   <span className="dev-tab__file-name">{item.filename}</span>
-                  {item.tags.slice(0, 2).map((t) => (
-                    <Badge key={t} color="#555" small>{t}</Badge>
-                  ))}
                   <span className="dev-tab__file-hint">
                     <IconEye size={12} />
                   </span>
@@ -284,13 +275,6 @@ export function DevTab({ project }: DevTabProps) {
               mono
             />
           </div>
-
-          <Input
-            label="Tags (comma-separated)"
-            value={tags}
-            onChange={(e) => setTags(e.target.value)}
-            placeholder="typescript, quality"
-          />
 
           <div className="dev-tab__modal-footer">
             <Button variant="ghost" onClick={() => setModalOpen(false)}>Cancel</Button>

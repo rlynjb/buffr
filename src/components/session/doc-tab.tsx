@@ -57,7 +57,6 @@ export function DocTab({ project }: DocTabProps) {
   const [content, setContent] = useState("");
   const [category, setCategory] = useState<DocItemCategory>("docs");
   const [filename, setFilename] = useState("");
-  const [tags, setTags] = useState("");
 
   // Push
   const [pushing, setPushing] = useState(false);
@@ -85,7 +84,6 @@ export function DocTab({ project }: DocTabProps) {
     setContent("");
     setCategory(cat || "docs");
     setFilename("");
-    setTags("");
     setModalOpen(true);
   }
 
@@ -95,22 +93,20 @@ export function DocTab({ project }: DocTabProps) {
     setContent(item.content);
     setCategory(item.category);
     setFilename(item.filename);
-    setTags(item.tags.join(", "));
     setModalOpen(true);
   }
 
   async function handleSave() {
-    const parsedTags = tags.split(",").map((t) => t.trim().toLowerCase()).filter(Boolean);
     const resolvedFilename = filename.trim() || `${title.toLowerCase().replace(/[^a-z0-9]+/g, "-")}.md`;
 
     if (editing) {
       const updated = await updateDocItem(editing.id, {
-        title, content, category, filename: resolvedFilename, tags: parsedTags, scope: project.id,
+        title, content, category, filename: resolvedFilename, scope: project.id,
       });
       setItems((prev) => prev.map((i) => (i.id === updated.id ? updated : i)));
     } else {
       const created = await createDocItem({
-        title, content, category, filename: resolvedFilename, tags: parsedTags, scope: project.id,
+        title, content, category, filename: resolvedFilename, scope: project.id,
       });
       setItems((prev) => [created, ...prev]);
     }
@@ -144,8 +140,7 @@ export function DocTab({ project }: DocTabProps) {
         const matchesCategory = activeCategory === "all" || i.category === activeCategory;
         const matchesQuery = !query ||
           i.title.toLowerCase().includes(query.toLowerCase()) ||
-          i.filename.toLowerCase().includes(query.toLowerCase()) ||
-          i.tags.some((t) => t.includes(query.toLowerCase()));
+          i.filename.toLowerCase().includes(query.toLowerCase());
         return matchesCategory && matchesQuery;
       })
       .sort((a, b) => {
@@ -242,9 +237,6 @@ export function DocTab({ project }: DocTabProps) {
                 >
                   <span className="doc-tab__file-dot" style={{ backgroundColor: color }} />
                   <span className="doc-tab__file-name">{item.filename}</span>
-                  {item.tags.slice(0, 2).map((t) => (
-                    <Badge key={t} color="#555" small>{t}</Badge>
-                  ))}
                   <span className="doc-tab__file-hint">
                     <IconEye size={12} />
                   </span>
@@ -326,13 +318,6 @@ export function DocTab({ project }: DocTabProps) {
               mono
             />
           </div>
-
-          <Input
-            label="Tags (comma-separated)"
-            value={tags}
-            onChange={(e) => setTags(e.target.value)}
-            placeholder="api, auth, v2"
-          />
 
           <div className="doc-tab__modal-footer">
             <Button variant="ghost" onClick={() => setModalOpen(false)}>Cancel</Button>

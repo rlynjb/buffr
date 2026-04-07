@@ -54,14 +54,13 @@ export default async function handler(req: Request, _context: Context) {
         }
 
         const files: Array<{ path: string; content: string }> = items.map((i) => {
-          const tags = i.tags || [];
           const fm = [
             "---",
             `title: ${i.title || i.filename}`,
             `category: ${i.category}`,
+            "---",
+            "",
           ];
-          if (tags.length > 0) fm.push(`tags: [${tags.join(", ")}]`);
-          fm.push("---", "");
           return { path: i.path, content: fm.join("\n") + (i.content || "") };
         });
 
@@ -95,7 +94,6 @@ export default async function handler(req: Request, _context: Context) {
         title: body.title,
         content: body.content || "",
         scope: body.scope || "",
-        tags: body.tags || [],
         createdAt: now,
         updatedAt: now,
       };
@@ -115,7 +113,6 @@ export default async function handler(req: Request, _context: Context) {
         content: body.content ?? existing.content,
         category: body.category ?? existing.category,
         filename: body.filename ?? existing.filename,
-        tags: body.tags ?? existing.tags,
         scope: body.scope ?? existing.scope,
         path: body.category
           ? `.doc/${body.category}/${body.filename ?? existing.filename}`
