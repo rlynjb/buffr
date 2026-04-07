@@ -121,24 +121,6 @@ export async function getProviders(): Promise<{
   return request("/providers");
 }
 
-// Action Notes
-export async function getActionNotes(
-  projectId: string
-): Promise<Record<string, string>> {
-  return request(`/action-notes?projectId=${encodeURIComponent(projectId)}`);
-}
-
-export async function saveActionNote(
-  projectId: string,
-  actionId: string,
-  note: string
-): Promise<Record<string, string>> {
-  return request(`/action-notes?projectId=${encodeURIComponent(projectId)}`, {
-    method: "PUT",
-    body: JSON.stringify({ actionId, note }),
-  });
-}
-
 // Manual Actions
 export interface ManualActionData {
   id: string;

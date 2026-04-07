@@ -44,10 +44,6 @@
   @apply flex-1 text-sm text-zinc-200 bg-zinc-900/80 border border-purple-500/40 rounded px-1.5 py-0.5 outline-none resize-none overflow-hidden leading-relaxed;
 }
 
-.actions-tab__action-btn--note {
-  @apply px-1.5 py-0.5 rounded text-[10px] text-zinc-500 hover:text-zinc-300 hover:bg-white/5 transition-colors cursor-pointer;
-}
-
 .actions-tab__action-btn--done {
   @apply px-2 py-0.5 rounded text-[10px] text-emerald-400 hover:bg-emerald-500/10 transition-colors cursor-pointer;
 }
@@ -56,48 +52,8 @@
   @apply px-2 py-0.5 rounded text-[10px] text-zinc-500 hover:text-zinc-300 hover:bg-white/5 transition-colors cursor-pointer;
 }
 
-.actions-tab__note {
-  @apply px-3 pb-2.5;
-}
-
-.actions-tab__note-textarea {
-  @apply w-full px-2.5 py-1.5 rounded-lg bg-zinc-900/80 border border-zinc-700/50 text-xs text-zinc-300 placeholder:text-zinc-600 focus:outline-none focus:border-purple-500/40 transition-colors leading-relaxed;
-}
-
-.actions-tab__note-footer {
-  @apply flex items-center justify-between mt-1.5;
-}
-
-.actions-tab__note-hint {
-  @apply text-[10px] text-zinc-600 flex items-center gap-1;
-}
-
-.actions-tab__note-clear {
-  @apply text-[10px] text-zinc-500 hover:text-zinc-300 transition-colors cursor-pointer;
-}
-
-.actions-tab__note-save {
-  @apply text-[10px] text-purple-400 hover:text-purple-300 transition-colors disabled:opacity-50 cursor-pointer;
-}
-
 .actions-tab__purpose {
   @apply text-[11px] text-zinc-600 mb-2;
-}
-
-.actions-tab__desc {
-  @apply text-[11px] text-zinc-600 mb-3 flex items-center gap-1.5;
-}
-
-.actions-tab__desc-icon {
-  @apply inline-flex items-center;
-}
-
-.actions-tab__desc-label {
-  @apply text-zinc-500 mr-1;
-}
-
-.actions-tab__desc-sep {
-  @apply text-zinc-700 mx-0.5;
 }
 
 .actions-tab__list {
@@ -106,10 +62,6 @@
 
 .actions-tab__action-buttons {
   @apply flex gap-1;
-}
-
-.actions-tab__note-actions {
-  @apply flex gap-2;
 }
 
 .actions-tab__divider {

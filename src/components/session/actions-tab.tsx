@@ -15,11 +15,7 @@ const PERSONAS = [
 
 interface ActionsTabProps {
   actions: ManualActionData[];
-  notes: Record<string, string>;
-  savingNote: string | null;
   onDone: (id: string) => void;
-  onNoteChange: (id: string, value: string) => void;
-  onNoteSave: (id: string) => void;
   onAddManual?: (text: string) => void;
   onDeleteManual?: (id: string) => void;
   onEditManual?: (id: string, text: string) => void;
@@ -27,22 +23,15 @@ interface ActionsTabProps {
   onReorder?: (fromIndex: number, toIndex: number) => void;
 }
 
-const DEFAULT_NOTE = "Impact: Why this matters for the project.\nOutcome: What \"done\" looks like.";
-
 export function ActionsTab({
   actions,
-  notes,
-  savingNote,
   onDone,
-  onNoteChange,
-  onNoteSave,
   onAddManual,
   onDeleteManual,
   onEditManual,
   onParaphrase,
   onReorder,
 }: ActionsTabProps) {
-  const [noteOpen, setNoteOpen] = useState<string | null>(null);
   const [newItem, setNewItem] = useState("");
   const [paraphrasing, setParaphrasing] = useState(false);
   const [rewriteOpen, setRewriteOpen] = useState(false);
@@ -255,37 +244,6 @@ export function ActionsTab({
                 </div>
               )}
             </div>
-
-            {noteOpen === action.id && (
-              <div className="actions-tab__note">
-                <textarea
-                  rows={3}
-                  value={notes[action.id] ?? DEFAULT_NOTE}
-                  onChange={(e) => onNoteChange(action.id, e.target.value)}
-                  className="actions-tab__note-textarea"
-                />
-                <div className="actions-tab__note-footer">
-                  <span className="actions-tab__note-hint">
-                    <IconSparkle size={10} /> AI-suggested — edit freely
-                  </span>
-                  <div className="actions-tab__note-actions">
-                    <button
-                      onClick={() => onNoteChange(action.id, "")}
-                      className="actions-tab__note-clear"
-                    >
-                      Clear
-                    </button>
-                    <button
-                      onClick={() => onNoteSave(action.id)}
-                      disabled={savingNote === action.id}
-                      className="actions-tab__note-save"
-                    >
-                      {savingNote === action.id ? "Saving..." : "Save"}
-                    </button>
-                  </div>
-                </div>
-              </div>
-            )}
           </div>
         ))}
       </div>

@@ -9,7 +9,7 @@ import { IconBack, IconGitHub, IconGlobe, IconSparkle } from "@/components/icons
 import { PHASE_COLORS } from "@/lib/constants";
 import type { Project, Session } from "@/lib/types";
 import type { ManualActionData } from "@/lib/api";
-import { listProjects, listSessions, getActionNotes, saveActionNote, executeToolAction, listIntegrations, updateProject, listManualActions, addManualAction, updateManualAction, deleteManualAction, reorderManualActions, paraphraseText } from "@/lib/api";
+import { listProjects, listSessions, executeToolAction, listIntegrations, updateProject, listManualActions, addManualAction, updateManualAction, deleteManualAction, reorderManualActions, paraphraseText } from "@/lib/api";
 import { timeAgo, formatDayDate } from "@/lib/format";
 import { generateSuggestions, type ProjectSuggestion } from "@/lib/suggestions";
 import { computeProjectHealth, type ProjectHealth } from "@/lib/project-health";
@@ -36,8 +36,6 @@ export function ResumeCard({ project, onEndSession, onActionsChange }: ResumeCar
   const [actions, setActions] = useState<ManualActionData[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<Tab>("actions");
-  const [notes, setNotes] = useState<Record<string, string>>({});
-  const [savingNote, setSavingNote] = useState<string | null>(null);
   const [suggestions, setSuggestions] = useState<ProjectSuggestion[]>([]);
   const [syncing, setSyncing] = useState(false);
   const [currentProject, setCurrentProject] = useState(project);
@@ -98,15 +96,13 @@ export function ResumeCard({ project, onEndSession, onActionsChange }: ResumeCar
   useEffect(() => {
     async function load() {
       try {
-        const [sessions, savedNotes, manualItems] = await Promise.all([
+        const [sessions, manualItems] = await Promise.all([
           listSessions(project.id),
-          getActionNotes(project.id).catch(() => ({} as Record<string, string>)),
           listManualActions(project.id).catch(() => []),
         ]);
 
         const last = sessions.length > 0 ? sessions[0] : null;
         setLastSession(last);
-        setNotes(savedNotes);
         setActions(manualItems);
 
         listIntegrations()
@@ -210,18 +206,6 @@ export function ResumeCard({ project, onEndSession, onActionsChange }: ResumeCar
       reorderManualActions(project.id, ids).catch(() => {});
       return next;
     });
-  }
-
-  async function handleNoteSave(actionId: string) {
-    setSavingNote(actionId);
-    try {
-      const updated = await saveActionNote(project.id, actionId, notes[actionId] || "");
-      setNotes(updated);
-    } catch (err) {
-      console.error("Failed to save note:", err);
-    } finally {
-      setSavingNote(null);
-    }
   }
 
   const tabs = [
@@ -395,11 +379,7 @@ export function ResumeCard({ project, onEndSession, onActionsChange }: ResumeCar
         {activeTab === "actions" && (
           <ActionsTab
             actions={actions}
-            notes={notes}
-            savingNote={savingNote}
             onDone={handleActionDone}
-            onNoteChange={(id, value) => setNotes((prev) => ({ ...prev, [id]: value }))}
-            onNoteSave={handleNoteSave}
             onAddManual={handleAddManual}
             onDeleteManual={handleDeleteManual}
             onEditManual={handleEditManual}
