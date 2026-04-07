@@ -11,31 +11,12 @@ export interface Project {
   repoVisibility: "public" | "private";
   netlifySiteId: string | null;
   netlifySiteUrl: string | null;
-  plan: ProjectPlan | null;
-  selectedFeatures: string[] | null;
-  selectedFiles: string[] | null;
   dataSources?: string[];
   githubIssuesSync?: boolean;
   dismissedSuggestions?: string[];
   issueCount?: number;
   lastSyncedAt?: string | null;
   updatedAt: string;
-}
-
-export interface ProjectPlan {
-  projectName: string;
-  description: string;
-  recommendedStack: string;
-  features: PlanFeature[];
-  deployChecklist: string[];
-}
-
-export interface PlanFeature {
-  name: string;
-  description: string;
-  complexity: "simple" | "medium" | "complex";
-  phase: 1 | 2;
-  checked: boolean;
 }
 
 export interface Session {

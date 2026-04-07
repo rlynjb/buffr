@@ -16,9 +16,6 @@ function makeProject(overrides: Partial<Project> = {}): Project {
     repoVisibility: "private",
     netlifySiteId: null,
     netlifySiteUrl: null,
-    plan: null,
-    selectedFeatures: null,
-    selectedFiles: null,
     updatedAt: "2024-01-01T00:00:00Z",
     ...overrides,
   };
