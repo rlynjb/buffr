@@ -40,7 +40,6 @@ export default async function handler(req: Request, _context: Context) {
         whatChanged: body.whatChanged || [],
         nextStep: body.nextStep || "",
         blockers: body.blockers || null,
-        aiSummary: body.aiSummary || undefined,
         detectedIntent: body.detectedIntent || undefined,
         suggestedNextStep: body.suggestedNextStep || undefined,
         createdAt: new Date().toISOString(),

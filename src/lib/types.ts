@@ -20,16 +20,8 @@ export interface Session {
   whatChanged: string[];
   nextStep: string;
   blockers: string | null;
-  gitSnapshot?: {
-    branch?: string;
-    lastCommit?: string;
-    changedFiles?: string[];
-    dirty?: boolean;
-  } | null;
-  aiSummary?: string;
   detectedIntent?: string;
   suggestedNextStep?: string;
-  linkedSessionIds?: string[];
   createdAt: string;
 }
 
