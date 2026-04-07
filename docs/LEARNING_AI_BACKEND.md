@@ -577,14 +577,12 @@ flowchart TB
     subgraph Boot["Cold Start"]
         RA["registerAllTools()"]
         RA --> RG["registerGitHubTools()<br/>10 tools"]
-        RA --> RN["registerNotionTools()<br/>4 tools"]
     end
 
     subgraph Registry["Global Tool Map"]
         T1["github_list_issues"]
         T2["github_list_commits"]
         T3["github_push_files"]
-        T4["notion_list_tasks"]
     end
 
     subgraph Runtime["Request Time"]
@@ -1015,7 +1013,6 @@ Frontend Dev → Full-Stack Dev → AI Product Engineer → ML Engineer → Rese
 | Tool registry | `netlify/functions/lib/tools/registry.ts` |
 | Tool registration | `netlify/functions/lib/tools/register-all.ts` |
 | GitHub client | `netlify/functions/lib/github.ts` |
-| Notion client | `netlify/functions/lib/notion.ts` |
 | API client | `src/lib/api.ts` |
 | Provider context | `src/context/provider-context.tsx` |
 | Response helpers | `netlify/functions/lib/responses.ts` |

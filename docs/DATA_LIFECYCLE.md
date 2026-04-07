@@ -49,8 +49,7 @@ No database. All state lives in Netlify Blobs key-value stores.
 | `industry-kb` | `{technology}` | Best practices per tech (react, nextjs, etc.) |
 | `industry-kb-meta` | `{technology}` | KB metadata (version, seed date) |
 | `settings` | `{key}` | App settings (e.g., default-data-sources) |
-| `action-notes` | `{projectId}` | Per-project action notes |
-| `tool-config` | `{integrationId}` | GitHub/Notion integration configs |
+| `tool-config` | `{integrationId}` | GitHub integration configs |
 
 **Storage pattern:** All stores use `getStore(STORE_NAME)` from `@netlify/blobs`.
 
@@ -102,8 +101,7 @@ s.delete(key)                 → remove
 
 | Integration | Env Vars | Status Logic |
 |-------------|----------|--------------|
-| Notion | `NOTION_TOKEN`, `NOTION_DATABASE_ID` | env set → connected, else check `tool-config` store |
-| GitHub | `GITHUB_TOKEN` | same |
+| GitHub | `GITHUB_TOKEN` | env set → connected, else check `tool-config` store |
 
 ---
 
@@ -164,8 +162,8 @@ Frontend                     Backend                    External
 POST /run-prompt ──────────► Load prompt from Blobs
                               ├─► Resolve tools
                               ├─► LLM: prompt chain    ──────► LLM provider
-                              │   (may call GitHub/     ──────► github.com
-                              │    Notion tools)        ──────► notion.so
+                              │   (may call GitHub      ──────► github.com
+                              │    tools)
   ◄──────── Result JSON
 ```
 
@@ -181,8 +179,6 @@ POST /run-prompt ──────────► Load prompt from Blobs
 | `GOOGLE_API_KEY` | Optional | Gemini access |
 | `OLLAMA_BASE_URL` | Optional | Local LLM |
 | `DEFAULT_LLM_PROVIDER` | No (default: anthropic) | Which LLM to use by default |
-| `NOTION_TOKEN` | Optional | Notion integration |
-| `NOTION_DATABASE_ID` | Optional | Notion database for tasks |
 
 ---
 
