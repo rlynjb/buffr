@@ -43,7 +43,6 @@ describe("generateSuggestions", () => {
       projectId: "p1",
       goal: "Work",
       whatChanged: [],
-      nextStep: "",
       blockers: null,
       createdAt: oldDate,
     };

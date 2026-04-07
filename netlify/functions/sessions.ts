@@ -38,10 +38,8 @@ export default async function handler(req: Request, _context: Context) {
         projectId: body.projectId,
         goal: body.goal || "",
         whatChanged: body.whatChanged || [],
-        nextStep: body.nextStep || "",
         blockers: body.blockers || null,
         detectedIntent: body.detectedIntent || undefined,
-        suggestedNextStep: body.suggestedNextStep || undefined,
         createdAt: new Date().toISOString(),
       };
       const saved = await saveSession(session);

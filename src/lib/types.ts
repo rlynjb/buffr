@@ -18,10 +18,8 @@ export interface Session {
   projectId: string;
   goal: string;
   whatChanged: string[];
-  nextStep: string;
   blockers: string | null;
   detectedIntent?: string;
-  suggestedNextStep?: string;
   createdAt: string;
 }
 

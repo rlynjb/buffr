@@ -144,6 +144,7 @@ export interface ManualActionData {
   id: string;
   text: string;
   done: boolean;
+  createdAt: string;
 }
 
 export async function listManualActions(
@@ -272,20 +273,6 @@ export async function detectIntent(
   return request("/session-ai?intent", {
     method: "POST",
     body: JSON.stringify({ goal, whatChanged, projectPhase, provider }),
-  });
-}
-
-export async function suggestNextStep(
-  goal: string,
-  whatChanged: string,
-  currentNextStep?: string,
-  projectContext?: string,
-  openItems?: string,
-  provider?: string,
-): Promise<{ suggestedNextStep: string }> {
-  return request("/session-ai?suggest", {
-    method: "POST",
-    body: JSON.stringify({ goal, whatChanged, currentNextStep, projectContext, openItems, provider }),
   });
 }
 

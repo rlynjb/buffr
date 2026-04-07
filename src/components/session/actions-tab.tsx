@@ -1,8 +1,8 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
-import { SourceIcon, sourceColor, IconSparkle, IconPlus, IconTrash } from "@/components/icons";
-import type { NextAction } from "@/lib/next-actions";
+import { IconSparkle, IconPlus, IconTrash } from "@/components/icons";
+import type { ManualActionData } from "@/lib/api";
 import "./actions-tab.css";
 
 const PERSONAS = [
@@ -14,11 +14,10 @@ const PERSONAS = [
 ] as const;
 
 interface ActionsTabProps {
-  actions: NextAction[];
+  actions: ManualActionData[];
   notes: Record<string, string>;
   savingNote: string | null;
   onDone: (id: string) => void;
-  onSkip: (id: string) => void;
   onNoteChange: (id: string, value: string) => void;
   onNoteSave: (id: string) => void;
   onAddManual?: (text: string) => void;
@@ -35,7 +34,6 @@ export function ActionsTab({
   notes,
   savingNote,
   onDone,
-  onSkip,
   onNoteChange,
   onNoteSave,
   onAddManual,
@@ -76,8 +74,8 @@ export function ActionsTab({
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, [rewriteOpen]);
 
-  function startEditing(action: NextAction) {
-    if (action.source !== "manual" || !onEditManual) return;
+  function startEditing(action: ManualActionData) {
+    if (!onEditManual) return;
     setEditingId(action.id);
     setEditText(action.text);
   }
@@ -185,20 +183,12 @@ export function ActionsTab({
       <p className="actions-tab__purpose">
         Track what to work on next. Items carry over between sessions and feed into End Session summaries.
       </p>
-      {actions.length > 0 && (
-        <p className="actions-tab__desc">
-          <span className="actions-tab__desc-label">Sources:</span>
-          <span className="actions-tab__desc-icon" style={{ color: "#c084fc" }}><SourceIcon source="ai" size={11} /></span> AI-suggested
-          <span className="actions-tab__desc-sep">·</span>
-          <span className="actions-tab__desc-icon" style={{ color: "#71717a" }}><SourceIcon source="manual" size={11} /></span> Manual
-        </p>
-      )}
 
       <div className="actions-tab__list">
         {actions.map((action, idx) => (
           <div
             key={action.id}
-            draggable={onReorder && !action.done && !action.skipped}
+            draggable={onReorder && !action.done}
             onDragStart={() => { dragIdx.current = idx; }}
             onDragOver={(e) => {
               if (dragIdx.current === null || dragIdx.current === idx) return;
@@ -217,19 +207,14 @@ export function ActionsTab({
             className={`actions-tab__action ${
               action.done
                 ? "actions-tab__action--done"
-                : action.skipped
-                  ? "actions-tab__action--skipped"
-                  : "actions-tab__action--default"
+                : "actions-tab__action--default"
             } ${dragOverIdx === idx ? "actions-tab__action--drag-over" : ""}`}
           >
             <div className="actions-tab__action-row">
-              {onReorder && !action.done && !action.skipped && (
+              {onReorder && !action.done && (
                 <span className="actions-tab__drag-handle" aria-hidden="true">⠿</span>
               )}
               <span className="actions-tab__action-number">{idx + 1}</span>
-              <span style={{ color: sourceColor(action.source || "ai") }}>
-                <SourceIcon source={action.source || "ai"} size={14} />
-              </span>
               {editingId === action.id ? (
                 <textarea
                   ref={editRef}
@@ -251,32 +236,20 @@ export function ActionsTab({
                 <span
                   className={`actions-tab__action-text ${
                     action.done ? "actions-tab__action-text--done" : ""
-                  } ${action.source === "manual" && onEditManual ? "actions-tab__action-text--editable" : ""}`}
-                  onClick={() => !action.done && !action.skipped && startEditing(action)}
+                  } ${onEditManual ? "actions-tab__action-text--editable" : ""}`}
+                  onClick={() => !action.done && startEditing(action)}
                 >
                   {action.text}
                 </span>
               )}
-              {!action.done && !action.skipped && (
+              {!action.done && (
                 <div className="actions-tab__action-buttons">
-                  {action.source !== "manual" && action.source !== "ai" && (
-                    <button
-                      onClick={() => setNoteOpen(noteOpen === action.id ? null : action.id)}
-                      className="actions-tab__action-btn--note"
-                    >
-                      Note
-                    </button>
-                  )}
                   <button onClick={() => onDone(action.id)} className="actions-tab__action-btn--done">
                     Done
                   </button>
-                  {action.source === "manual" && onDeleteManual ? (
+                  {onDeleteManual && (
                     <button onClick={() => onDeleteManual(action.id)} className="actions-tab__action-btn--skip">
                       <IconTrash size={10} />
-                    </button>
-                  ) : (
-                    <button onClick={() => onSkip(action.id)} className="actions-tab__action-btn--skip">
-                      Skip
                     </button>
                   )}
                 </div>

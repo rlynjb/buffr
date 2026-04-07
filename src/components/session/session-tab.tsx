@@ -36,12 +36,6 @@ export function SessionTab({ lastSession }: SessionTabProps) {
           </div>
         </div>
       )}
-      {lastSession.nextStep && (
-        <div>
-          <div className="session-tab__label">Next Step</div>
-          <div className="session-tab__value">{lastSession.nextStep}</div>
-        </div>
-      )}
       {lastSession.blockers && (
         <div>
           <div className="session-tab__label--blocker">Blockers</div>

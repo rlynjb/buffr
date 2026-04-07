@@ -6,8 +6,7 @@ import { SourceIcon, IconGitHub, IconGlobe, IconChevron, IconTrash } from "@/com
 import { PHASE_COLORS } from "@/lib/constants";
 import type { Project } from "@/lib/types";
 import { timeAgo } from "@/lib/format";
-import { listSessions, listManualActions } from "@/lib/api";
-import { generateNextActions, type NextAction } from "@/lib/next-actions";
+import { listManualActions, type ManualActionData } from "@/lib/api";
 import "./project-card.css";
 
 interface ProjectCardProps {
@@ -18,30 +17,12 @@ interface ProjectCardProps {
 
 export function ProjectCard({ project, onClick, onDelete }: ProjectCardProps) {
   const updatedAgo = timeAgo(project.updatedAt);
-  const [actions, setActions] = useState<NextAction[]>([]);
+  const [actions, setActions] = useState<ManualActionData[]>([]);
 
   useEffect(() => {
-    async function load() {
-      try {
-        const [sessions, manualItems] = await Promise.all([
-          listSessions(project.id),
-          listManualActions(project.id).catch(() => []),
-        ]);
-        const last = sessions.length > 0 ? sessions[0] : null;
-        const generated = generateNextActions({ project, lastSession: last });
-        const manual: NextAction[] = manualItems.map((m) => ({
-          id: m.id,
-          text: m.text,
-          done: m.done,
-          skipped: false,
-          source: "manual" as const,
-        }));
-        setActions([...generated, ...manual].filter((a) => !a.done));
-      } catch {
-        // Silent — card still renders without actions
-      }
-    }
-    load();
+    listManualActions(project.id)
+      .then((items) => setActions(items.filter((a) => !a.done)))
+      .catch(() => {});
   }, [project]);
 
   return (

@@ -4,7 +4,6 @@ import type { Context } from "@netlify/functions";
 import { getLLM } from "./lib/ai/provider";
 import { createSummarizeChain } from "./lib/ai/chains/session-summarizer";
 import { createIntentChain } from "./lib/ai/chains/intent-detector";
-import { createSuggestChain } from "./lib/ai/chains/next-step-suggester";
 import { createParaphraseChain } from "./lib/ai/chains/paraphraser";
 import { json, errorResponse, classifyError } from "./lib/responses";
 
@@ -41,18 +40,6 @@ export default async function handler(req: Request, _context: Context) {
       return json(result);
     }
 
-    if (url.searchParams.has("suggest")) {
-      const chain = createSuggestChain(llm);
-      const result = await chain.invoke({
-        goal: body.goal || "",
-        whatChanged: body.whatChanged || "",
-        currentNextStep: body.currentNextStep || "",
-        projectContext: body.projectContext || "",
-        openItems: body.openItems || "",
-      });
-      return json(result);
-    }
-
     if (url.searchParams.has("paraphrase")) {
       if (!body.text) {
         return errorResponse("text is required", 400);
@@ -62,7 +49,7 @@ export default async function handler(req: Request, _context: Context) {
       return json(result);
     }
 
-    return errorResponse("Unknown action. Use ?summarize, ?intent, ?suggest, or ?paraphrase", 400);
+    return errorResponse("Unknown action. Use ?summarize, ?intent, or ?paraphrase", 400);
   } catch (err) {
     console.error("session-ai function error:", err);
     const { message, status } = classifyError(err, "Session AI failed");

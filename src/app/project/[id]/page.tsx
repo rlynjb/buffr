@@ -6,7 +6,6 @@ import { ResumeCard } from "@/components/session/resume-card";
 import { EndSessionModal } from "@/components/session/end-session-modal";
 import { getProject } from "@/lib/api";
 import type { Project } from "@/lib/types";
-import type { NextAction } from "@/lib/next-actions";
 import "./page.css";
 
 export default function ProjectPage() {
@@ -26,7 +25,7 @@ export default function ProjectPage() {
   const [loading, setLoading] = useState(!project);
   const [showEndSession, setShowEndSession] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
-  const actionsRef = useRef<NextAction[]>([]);
+  const actionsRef = useRef<import("@/lib/api").ManualActionData[]>([]);
 
   useEffect(() => {
     async function load() {
@@ -71,7 +70,6 @@ export default function ProjectPage() {
         open={showEndSession}
         onClose={() => setShowEndSession(false)}
         project={project}
-        currentActions={actionsRef.current}
         onSaved={() => setRefreshKey((k) => k + 1)}
       />
     </>

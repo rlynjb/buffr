@@ -6,18 +6,16 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { IconLoader, IconSparkle, SourceIcon, sourceColor } from "@/components/icons";
-import { createSession, updateProject, summarizeSession, suggestNextStep, detectIntent, executeToolAction, listManualActions, addManualAction, cleanDoneManualActions } from "@/lib/api";
+import { createSession, updateProject, summarizeSession, detectIntent, executeToolAction, listManualActions, addManualAction, cleanDoneManualActions } from "@/lib/api";
 import { getToolForCapability } from "@/lib/data-sources";
 import { useProvider } from "@/context/provider-context";
 import type { Project } from "@/lib/types";
-import type { NextAction } from "@/lib/next-actions";
 import "./end-session-modal.css";
 
 interface EndSessionModalProps {
   open: boolean;
   onClose: () => void;
   project: Project;
-  currentActions?: NextAction[];
   onSaved: () => void;
 }
 
@@ -25,13 +23,11 @@ export function EndSessionModal({
   open,
   onClose,
   project,
-  currentActions,
   onSaved,
 }: EndSessionModalProps) {
   const [phase, setPhase] = useState<"fetching" | "summarizing" | "ready">("fetching");
   const [goal, setGoal] = useState("");
   const [whatChanged, setWhatChanged] = useState("");
-  const [nextStep, setNextStep] = useState("");
   const [blockers, setBlockers] = useState("");
   const [saving, setSaving] = useState(false);
   const [aiLabel, setAiLabel] = useState("");
@@ -45,7 +41,6 @@ export function EndSessionModal({
     setPhase("fetching");
     setGoal("");
     setWhatChanged("");
-    setNextStep("");
     setBlockers("");
     setAiLabel("");
 
@@ -149,22 +144,6 @@ export function EndSessionModal({
             setWhatChanged(summary.bullets.map((b) => `• ${b}`).join("\n"));
           }
 
-          try {
-            const suggestion = await suggestNextStep(
-              summary.goal || "",
-              summary.bullets.join("\n"),
-              "",
-              `${project.name} (${project.phase}): ${project.description}`,
-              "",
-              selected,
-            );
-            if (!cancelled && suggestion.suggestedNextStep) {
-              setNextStep(suggestion.suggestedNextStep);
-            }
-          } catch {
-            // Next step suggestion is optional
-          }
-
           setAiLabel(
             `AI-generated from ${activityItems.length} item${activityItems.length !== 1 ? "s" : ""} across ${sources.length} source${sources.length !== 1 ? "s" : ""}`
           );
@@ -199,24 +178,6 @@ export function EndSessionModal({
     }
   }
 
-  async function handleSuggestNext() {
-    try {
-      const result = await suggestNextStep(
-        goal,
-        whatChanged,
-        nextStep,
-        `${project.name} (${project.phase}): ${project.description}`,
-        "",
-        selected,
-      );
-      if (result.suggestedNextStep) {
-        setNextStep(result.suggestedNextStep);
-      }
-    } catch (err) {
-      console.error("Suggest failed:", err);
-    }
-  }
-
   async function handleSave() {
     setSaving(true);
     try {
@@ -239,25 +200,11 @@ export function EndSessionModal({
         projectId: project.id,
         goal,
         whatChanged: changes,
-        nextStep,
         blockers: blockers || null,
         detectedIntent: detectedIntentValue,
-        suggestedNextStep: nextStep || undefined,
       });
 
       await updateProject(project.id, { lastSessionId: session.id });
-
-      // Preserve undone AI actions by converting them to manual actions
-      if (currentActions) {
-        const undoneAi = currentActions.filter((a) => a.source === "ai" && !a.done);
-        for (const action of undoneAi) {
-          try {
-            await addManualAction(project.id, `manual-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, action.text);
-          } catch {
-            // Best-effort
-          }
-        }
-      }
 
       // Remove all done manual actions in a single atomic operation
       try {
@@ -337,31 +284,6 @@ export function EndSessionModal({
               rows={7}
               className="end-session__textarea"
               placeholder="What did you change? (one per line)"
-            />
-          </div>
-
-          {/* Next Step */}
-          <div className="end-session__field-group">
-            <div className="end-session__field-header">
-              <label htmlFor="end-session-next-step" className="end-session__field-label">Next Step (optional)</label>
-              <div className="end-session__field-buttons">
-                {hasLLM && goal.trim() && (
-                  <button onClick={handleSuggestNext} className="end-session__field-btn--ai">
-                    AI Suggest
-                  </button>
-                )}
-                <button onClick={() => setNextStep("")} className="end-session__field-btn--clear">
-                  Clear
-                </button>
-              </div>
-            </div>
-            <textarea
-              id="end-session-next-step"
-              value={nextStep}
-              onChange={(e) => setNextStep(e.target.value)}
-              rows={3}
-              className="end-session__textarea"
-              placeholder="What's next?"
             />
           </div>
 

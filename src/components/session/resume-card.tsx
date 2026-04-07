@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/button";
 import { IconBack, IconGitHub, IconGlobe, IconSparkle } from "@/components/icons";
 import { PHASE_COLORS } from "@/lib/constants";
 import type { Project, Session } from "@/lib/types";
-import { generateNextActions, type NextAction, type ActionContext } from "@/lib/next-actions";
+import type { ManualActionData } from "@/lib/api";
 import { listProjects, listSessions, getActionNotes, saveActionNote, executeToolAction, listIntegrations, updateProject, listManualActions, addManualAction, updateManualAction, deleteManualAction, reorderManualActions, paraphraseText } from "@/lib/api";
 import { timeAgo, formatDayDate } from "@/lib/format";
 import { generateSuggestions, type ProjectSuggestion } from "@/lib/suggestions";
@@ -24,7 +24,7 @@ import "./resume-card.css";
 interface ResumeCardProps {
   project: Project;
   onEndSession: () => void;
-  onActionsChange?: (actions: NextAction[]) => void;
+  onActionsChange?: (actions: ManualActionData[]) => void;
 }
 
 type Tab = "session" | "actions" | "dev" | "doc" | "tools";
@@ -33,7 +33,7 @@ export function ResumeCard({ project, onEndSession, onActionsChange }: ResumeCar
   const router = useRouter();
   const { selected: selectedProvider } = useProvider();
   const [lastSession, setLastSession] = useState<Session | null>(null);
-  const [actions, setActions] = useState<NextAction[]>([]);
+  const [actions, setActions] = useState<ManualActionData[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<Tab>("actions");
   const [notes, setNotes] = useState<Record<string, string>>({});
@@ -107,17 +107,7 @@ export function ResumeCard({ project, onEndSession, onActionsChange }: ResumeCar
         const last = sessions.length > 0 ? sessions[0] : null;
         setLastSession(last);
         setNotes(savedNotes);
-
-        const ctx: ActionContext = { project, lastSession: last };
-        const generated = generateNextActions(ctx);
-        const manual: NextAction[] = manualItems.map((m) => ({
-          id: m.id,
-          text: m.text,
-          done: m.done,
-          skipped: false,
-          source: "manual" as const,
-        }));
-        setActions([...manual, ...generated]);
+        setActions(manualItems);
 
         listIntegrations()
           .then((integrations) => {
@@ -157,7 +147,7 @@ export function ResumeCard({ project, onEndSession, onActionsChange }: ResumeCar
           })
           .catch(() => {});
       } catch {
-        setActions(generateNextActions({ project, lastSession: null }));
+        setActions([]);
       } finally {
         setLoading(false);
       }
@@ -167,20 +157,12 @@ export function ResumeCard({ project, onEndSession, onActionsChange }: ResumeCar
 
   function handleActionDone(id: string) {
     setActions((prev) => prev.map((a) => (a.id === id ? { ...a, done: true } : a)));
-    // Persist done state for manual actions
-    const action = actions.find((a) => a.id === id);
-    if (action?.source === "manual") {
-      updateManualAction(project.id, id, { done: true }).catch(() => {});
-    }
-  }
-
-  function handleActionSkip(id: string) {
-    setActions((prev) => prev.map((a) => (a.id === id ? { ...a, skipped: true } : a)));
+    updateManualAction(project.id, id, { done: true }).catch(() => {});
   }
 
   async function handleAddManual(text: string) {
     const id = `manual-${Date.now()}`;
-    const newAction: NextAction = { id, text, done: false, skipped: false, source: "manual" };
+    const newAction: ManualActionData = { id, text, done: false, createdAt: new Date().toISOString() };
     setActions((prev) => [newAction, ...prev]);
     try {
       await addManualAction(project.id, id, text);
@@ -213,19 +195,7 @@ export function ResumeCard({ project, onEndSession, onActionsChange }: ResumeCar
     setActions((prev) => prev.filter((a) => a.id !== id));
     try {
       const remaining = await deleteManualAction(project.id, id);
-      // Reconcile local state with backend to prevent stale data on re-render
-      setActions((prev) => {
-        const remainingIds = new Set(remaining.map((m) => m.id));
-        const nonManual = prev.filter((a) => a.source !== "manual");
-        const freshManual = remaining.map((m) => ({
-          id: m.id,
-          text: m.text,
-          done: m.done,
-          skipped: false,
-          source: "manual" as const,
-        }));
-        return [...freshManual, ...nonManual];
-      });
+      setActions(remaining);
     } catch (err) {
       console.error("Failed to delete manual action:", err);
     }
@@ -236,11 +206,8 @@ export function ResumeCard({ project, onEndSession, onActionsChange }: ResumeCar
       const next = [...prev];
       const [moved] = next.splice(fromIndex, 1);
       next.splice(toIndex, 0, moved);
-      // Persist the order of manual actions
-      const manualIds = next.filter((a) => a.source === "manual").map((a) => a.id);
-      if (manualIds.length > 0) {
-        reorderManualActions(project.id, manualIds).catch(() => {});
-      }
+      const ids = next.map((a) => a.id);
+      reorderManualActions(project.id, ids).catch(() => {});
       return next;
     });
   }
@@ -431,7 +398,6 @@ export function ResumeCard({ project, onEndSession, onActionsChange }: ResumeCar
             notes={notes}
             savingNote={savingNote}
             onDone={handleActionDone}
-            onSkip={handleActionSkip}
             onNoteChange={(id, value) => setNotes((prev) => ({ ...prev, [id]: value }))}
             onNoteSave={handleNoteSave}
             onAddManual={handleAddManual}
