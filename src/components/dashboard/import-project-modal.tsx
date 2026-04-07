@@ -84,7 +84,6 @@ export function ImportProjectModal({
         stack: result.detectedStack || "",
         phase: result.detectedPhase || "mvp",
         githubRepo: `${parsed.owner}/${parsed.repo}`,
-        repoVisibility: "private",
         dataSources: ["github"],
       });
 

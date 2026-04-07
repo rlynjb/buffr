@@ -6,13 +6,9 @@ export interface Project {
   phase: "idea" | "mvp" | "polish" | "deploy";
   lastSessionId: string | null;
   githubRepo: string | null;
-  repoVisibility: "public" | "private";
-  netlifySiteId: string | null;
   netlifySiteUrl: string | null;
   dataSources?: string[];
-  githubIssuesSync?: boolean;
   dismissedSuggestions?: string[];
-  issueCount?: number;
   lastSyncedAt?: string | null;
   updatedAt: string;
 }

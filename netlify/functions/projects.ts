@@ -36,12 +36,9 @@ export default async function handler(req: Request, _context: Context) {
         phase: body.phase || "idea",
         lastSessionId: null,
         githubRepo: body.githubRepo || null,
-        repoVisibility: body.repoVisibility || "private",
-        netlifySiteId: body.netlifySiteId || null,
         netlifySiteUrl: body.netlifySiteUrl || null,
         dataSources: body.dataSources || (body.githubRepo ? ["github"] : []),
         dismissedSuggestions: body.dismissedSuggestions || [],
-        issueCount: body.issueCount ?? undefined,
         updatedAt: new Date().toISOString(),
       };
 
@@ -61,9 +58,9 @@ export default async function handler(req: Request, _context: Context) {
       // Whitelist allowed fields to prevent arbitrary field injection
       const allowedFields = [
         "name", "description", "stack", "phase",
-        "githubRepo", "repoVisibility", "netlifySiteId", "netlifySiteUrl",
+        "githubRepo", "netlifySiteUrl",
         "dataSources", "dismissedSuggestions",
-        "lastSessionId", "issueCount", "lastSyncedAt",
+        "lastSessionId", "lastSyncedAt",
       ];
       const updates: Record<string, unknown> = {};
       for (const key of allowedFields) {
