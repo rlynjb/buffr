@@ -4,8 +4,6 @@ import { useAuth } from "@/context/auth-context";
 import { ProviderProvider } from "@/context/provider-context";
 import { NotificationProvider } from "@/components/ui/notification";
 import { Nav } from "@/components/nav";
-import { CommandPalette } from "@/components/command-palette";
-
 export function AppShell({ children }: { children: React.ReactNode }) {
   const { authenticated, loading } = useAuth();
 
@@ -26,7 +24,6 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       <NotificationProvider>
         <Nav />
         <main className="main__container">{children}</main>
-        <CommandPalette />
       </NotificationProvider>
     </ProviderProvider>
   );
