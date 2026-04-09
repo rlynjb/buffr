@@ -49,16 +49,6 @@ export function generateSuggestions(
     }
   }
 
-  // Rule 4: No prompts
-  if (!dismissed.includes("add-prompts")) {
-    suggestions.push({
-      id: "add-prompts",
-      text: "Add prompts to your library to speed up your AI workflow.",
-      actionLabel: "Prompt Library",
-      actionRoute: "#prompts-tab",
-    });
-  }
-
   // Filter dismissed, limit to 2
   return suggestions
     .filter((s) => !dismissed.includes(s.id))

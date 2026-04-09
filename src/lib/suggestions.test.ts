@@ -52,10 +52,9 @@ describe("generateSuggestions", () => {
   });
 
   it("filters dismissed suggestions", () => {
-    const project = makeProject({ dismissedSuggestions: ["first-session", "add-prompts"] });
+    const project = makeProject({ dismissedSuggestions: ["first-session"] });
     const suggestions = generateSuggestions(project, null, []);
     expect(suggestions.some((s) => s.id === "first-session")).toBe(false);
-    expect(suggestions.some((s) => s.id === "add-prompts")).toBe(false);
   });
 
   it("limits to 2 suggestions", () => {
