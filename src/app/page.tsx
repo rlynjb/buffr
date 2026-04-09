@@ -33,16 +33,11 @@ export default function Dashboard() {
   useEffect(() => {
     loadProjects();
 
-    // Listen for command palette "Load Existing" action
-    function onOpenImport() { setImportOpen(true); }
-    window.addEventListener("buffr:open-import", onOpenImport);
-
     // Re-fetch projects when navigating back to this page
     function onFocus() { loadProjects(); }
     window.addEventListener("focus", onFocus);
 
     return () => {
-      window.removeEventListener("buffr:open-import", onOpenImport);
       window.removeEventListener("focus", onFocus);
     };
   }, [loadProjects]);

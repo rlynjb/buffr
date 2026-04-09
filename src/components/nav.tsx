@@ -4,7 +4,6 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useAuth } from "@/context/auth-context";
 import { ProviderSwitcher } from "./provider-switcher";
-import { IconCmd } from "./icons";
 import "./nav.css";
 
 const pageLabels: Record<string, string> = {};
@@ -29,17 +28,6 @@ export function Nav() {
         )}
       </div>
       <div className="nav__right">
-        <button
-          onClick={() => {
-            window.dispatchEvent(
-              new KeyboardEvent("keydown", { key: "k", metaKey: true, bubbles: true })
-            );
-          }}
-          className="nav__cmd-button"
-        >
-          <IconCmd size={14} />
-          <span className="nav__cmd-label">Cmd+K</span>
-        </button>
         <ProviderSwitcher />
         <button onClick={logout} className="nav__signout">
           Sign out
