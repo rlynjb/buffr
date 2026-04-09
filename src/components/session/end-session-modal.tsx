@@ -83,32 +83,6 @@ export function EndSessionModal({
             }
           }
 
-          const activityTool = getToolForCapability(source, "list_recent_activity");
-          if (activityTool) {
-            try {
-              const params: Record<string, unknown> = {};
-              if (source === "github" && project.githubRepo) {
-                const [owner, repo] = project.githubRepo.split("/");
-                params.owner = owner;
-                params.repo = repo;
-                params.limit = 25;
-                params.state = "closed";
-              }
-              const res = await executeToolAction(activityTool, params);
-              if (res.ok && res.result) {
-                const data = res.result as { items?: Array<{ title?: string; id?: string }> };
-                if (data.items) {
-                  for (const item of data.items) {
-                    if (item.title) {
-                      activityItems.push({ title: item.title, source });
-                    }
-                  }
-                }
-              }
-            } catch {
-              // Activity fetch failed — continue
-            }
-          }
         });
 
         await Promise.all(fetches);

@@ -5,7 +5,6 @@
  */
 const DATA_SOURCE_TOOLS: Record<string, Record<string, string>> = {
   github: {
-    list_recent_activity: "github_list_issues",
     create_item: "github_create_issue",
     close_item: "github_close_issue",
     list_commits: "github_list_commits",
