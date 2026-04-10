@@ -14,6 +14,7 @@ import { timeAgo, formatDayDate } from "@/lib/format";
 import { generateSuggestions, type ProjectSuggestion } from "@/lib/suggestions";
 import { computeProjectHealth, type ProjectHealth } from "@/lib/project-health";
 import { useProvider } from "@/context/provider-context";
+import { useNotification } from "@/components/ui/notification";
 import { SessionTab } from "./session-tab";
 import { ActionsTab } from "./actions-tab";
 import { DevTab } from "./dev-tab";
@@ -32,6 +33,7 @@ type Tab = "session" | "actions" | "dev" | "doc" | "tools";
 export function ResumeCard({ project, onEndSession, onActionsChange }: ResumeCardProps) {
   const router = useRouter();
   const { selected: selectedProvider } = useProvider();
+  const { notify } = useNotification();
   const [lastSession, setLastSession] = useState<Session | null>(null);
   const [actions, setActions] = useState<ManualActionData[]>([]);
   const [loading, setLoading] = useState(true);
@@ -151,9 +153,16 @@ export function ResumeCard({ project, onEndSession, onActionsChange }: ResumeCar
     load();
   }, [project]);
 
-  function handleActionDone(id: string) {
+  async function handleActionDone(id: string) {
+    const previous = actions;
     setActions((prev) => prev.map((a) => (a.id === id ? { ...a, done: true } : a)));
-    updateManualAction(project.id, id, { done: true }).catch(() => {});
+    try {
+      const updated = await updateManualAction(project.id, id, { done: true });
+      setActions(updated);
+    } catch {
+      setActions(previous);
+      notify("error", "Failed to mark done — reverted");
+    }
   }
 
   async function handleAddManual(text: string) {
@@ -179,11 +188,14 @@ export function ResumeCard({ project, onEndSession, onActionsChange }: ResumeCar
   }
 
   async function handleEditManual(id: string, text: string) {
+    const previous = actions;
     setActions((prev) => prev.map((a) => (a.id === id ? { ...a, text } : a)));
     try {
-      await updateManualAction(project.id, id, { text });
-    } catch (err) {
-      console.error("Failed to edit manual action:", err);
+      const updated = await updateManualAction(project.id, id, { text });
+      setActions(updated);
+    } catch {
+      setActions(previous);
+      notify("error", "Edit failed — reverted");
     }
   }
 
@@ -197,15 +209,19 @@ export function ResumeCard({ project, onEndSession, onActionsChange }: ResumeCar
     }
   }
 
-  function handleReorder(fromIndex: number, toIndex: number) {
-    setActions((prev) => {
-      const next = [...prev];
-      const [moved] = next.splice(fromIndex, 1);
-      next.splice(toIndex, 0, moved);
-      const ids = next.map((a) => a.id);
-      reorderManualActions(project.id, ids).catch(() => {});
-      return next;
-    });
+  async function handleReorder(fromIndex: number, toIndex: number) {
+    const previous = actions;
+    const next = [...actions];
+    const [moved] = next.splice(fromIndex, 1);
+    next.splice(toIndex, 0, moved);
+    setActions(next);
+    try {
+      const updated = await reorderManualActions(project.id, next.map((a) => a.id));
+      setActions(updated);
+    } catch {
+      setActions(previous);
+      notify("error", "Reorder failed — reverted");
+    }
   }
 
   const tabs = [
