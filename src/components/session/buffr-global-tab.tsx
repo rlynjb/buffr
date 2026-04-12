@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useMemo } from "react";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Modal } from "@/components/ui/modal";
 import { Input } from "@/components/ui/input";
@@ -9,15 +10,38 @@ import {
   IconSearch, IconPlus, IconEdit, IconTrash, IconCheck,
   IconEye, IconGitHub, IconLoader,
 } from "@/components/icons";
-import type { DevItem, Project } from "@/lib/types";
+import type { BuffrGlobalItem, BuffrGlobalCategory, Project } from "@/lib/types";
 import {
-  listDevItems, createDevItem, updateDevItem, deleteDevItemApi, pushDevItems,
+  listBuffrGlobalItems, createBuffrGlobalItem, updateBuffrGlobalItem,
+  deleteBuffrGlobalItemApi, pushBuffrGlobalItems,
 } from "@/lib/api";
 import "./dev-tab.css";
 
-interface DevTabProps {
+interface BuffrGlobalTabProps {
   project: Project;
 }
+
+const CATEGORIES: Array<{ key: "all" | BuffrGlobalCategory; label: string }> = [
+  { key: "all", label: "All" },
+  { key: "identity", label: "Identity" },
+  { key: "rules", label: "Rules" },
+  { key: "stack", label: "Stack" },
+  { key: "skills", label: "Skills" },
+];
+
+const CATEGORY_COLORS: Record<BuffrGlobalCategory, string> = {
+  identity: "#fbbf24",
+  rules: "#60a5fa",
+  stack: "#34d399",
+  skills: "#a78bfa",
+};
+
+const CATEGORY_LABELS: Record<BuffrGlobalCategory, string> = {
+  identity: "Identity",
+  rules: "Rules",
+  stack: "Stack",
+  skills: "Skills",
+};
 
 const ADAPTERS = [
   { id: "claude-code", name: "Claude Code", file: "CLAUDE.md", icon: "C", color: "#c084fc" },
@@ -28,17 +52,19 @@ const ADAPTERS = [
   { id: "continue", name: "Continue", file: ".continuerules", icon: "\u2192", color: "#f472b6" },
 ];
 
-export function DevTab({ project }: DevTabProps) {
-  const [items, setItems] = useState<DevItem[]>([]);
+export function BuffrGlobalTab({ project }: BuffrGlobalTabProps) {
+  const [items, setItems] = useState<BuffrGlobalItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [query, setQuery] = useState("");
+  const [activeCategory, setActiveCategory] = useState<"all" | BuffrGlobalCategory>("all");
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
   // CRUD modal
   const [modalOpen, setModalOpen] = useState(false);
-  const [editing, setEditing] = useState<DevItem | null>(null);
+  const [editing, setEditing] = useState<BuffrGlobalItem | null>(null);
   const [title, setTitle] = useState("");
   const [content, setContent] = useState("");
+  const [category, setCategory] = useState<BuffrGlobalCategory>("rules");
   const [filename, setFilename] = useState("");
 
   // Push
@@ -52,28 +78,29 @@ export function DevTab({ project }: DevTabProps) {
 
   async function loadItems() {
     try {
-      const data = await listDevItems();
+      const data = await listBuffrGlobalItems();
       setItems(data);
     } catch (err) {
-      console.error("Failed to load dev items:", err);
+      console.error("Failed to load buffr global items:", err);
     } finally {
       setLoading(false);
     }
   }
 
-  // Modal helpers
-  function openNew() {
+  function openNew(cat?: BuffrGlobalCategory) {
     setEditing(null);
     setTitle("");
     setContent("");
+    setCategory(cat || "rules");
     setFilename("");
     setModalOpen(true);
   }
 
-  function openEdit(item: DevItem) {
+  function openEdit(item: BuffrGlobalItem) {
     setEditing(item);
     setTitle(item.title);
     setContent(item.content);
+    setCategory(item.category);
     setFilename(item.filename);
     setModalOpen(true);
   }
@@ -82,13 +109,13 @@ export function DevTab({ project }: DevTabProps) {
     const resolvedFilename = filename.trim() || `${title.toLowerCase().replace(/[^a-z0-9]+/g, "-")}.md`;
 
     if (editing) {
-      const updated = await updateDevItem(editing.id, {
-        title, content, filename: resolvedFilename,
+      const updated = await updateBuffrGlobalItem(editing.id, {
+        title, content, category, filename: resolvedFilename,
       });
       setItems((prev) => prev.map((i) => (i.id === updated.id ? updated : i)));
     } else {
-      const created = await createDevItem({
-        title, content, filename: resolvedFilename,
+      const created = await createBuffrGlobalItem({
+        title, content, category, filename: resolvedFilename,
       });
       setItems((prev) => [created, ...prev]);
     }
@@ -96,7 +123,7 @@ export function DevTab({ project }: DevTabProps) {
   }
 
   async function handleDelete(id: string) {
-    await deleteDevItemApi(id);
+    await deleteBuffrGlobalItemApi(id);
     setItems((prev) => prev.filter((i) => i.id !== id));
     if (expandedId === id) setExpandedId(null);
   }
@@ -105,7 +132,7 @@ export function DevTab({ project }: DevTabProps) {
     if (!project.githubRepo) return;
     setPushing(true);
     try {
-      await pushDevItems(project.githubRepo, Array.from(selectedAdapters));
+      await pushBuffrGlobalItems(project.githubRepo, Array.from(selectedAdapters));
       setPushSuccess(true);
       setTimeout(() => setPushSuccess(false), 3000);
     } catch (err) {
@@ -126,12 +153,20 @@ export function DevTab({ project }: DevTabProps) {
   const filtered = useMemo(() => {
     return items
       .filter((i) => {
-        return !query ||
+        const matchesCategory = activeCategory === "all" || i.category === activeCategory;
+        const matchesQuery = !query ||
           i.title.toLowerCase().includes(query.toLowerCase()) ||
           i.filename.toLowerCase().includes(query.toLowerCase());
+        return matchesCategory && matchesQuery;
       })
       .sort((a, b) => a.filename.localeCompare(b.filename));
-  }, [items, query]);
+  }, [items, activeCategory, query]);
+
+  const categoryCounts = useMemo(() => {
+    const counts: Record<string, number> = { all: items.length };
+    for (const i of items) counts[i.category] = (counts[i.category] || 0) + 1;
+    return counts;
+  }, [items]);
 
   return (
     <div>
@@ -161,6 +196,24 @@ export function DevTab({ project }: DevTabProps) {
             {pushing ? "Pushing..." : pushSuccess ? "Pushed" : "Push to Repo"}
           </Button>
         )}
+      </div>
+
+      {/* Category filter */}
+      <div className="dev-tab__categories">
+        {CATEGORIES.map((cat) => (
+          <button
+            key={cat.key}
+            onClick={() => setActiveCategory(cat.key)}
+            className={`dev-tab__category ${
+              activeCategory === cat.key ? "dev-tab__category--active" : "dev-tab__category--inactive"
+            }`}
+          >
+            {cat.label}
+            {categoryCounts[cat.key] ? (
+              <span className="dev-tab__category-count">{categoryCounts[cat.key]}</span>
+            ) : null}
+          </button>
+        ))}
       </div>
 
       {/* Adapters */}
@@ -197,13 +250,14 @@ export function DevTab({ project }: DevTabProps) {
       ) : filtered.length === 0 ? (
         <div className="dev-tab__empty">
           {items.length === 0
-            ? "No .dev files yet. Create your first AI rule or skill."
+            ? "No .buffr/global files yet. Create your first rule or identity file."
             : "No files match your search."}
         </div>
       ) : (
         <div className="dev-tab__tree">
           {filtered.map((item) => {
             const isExpanded = expandedId === item.id;
+            const color = CATEGORY_COLORS[item.category];
 
             return (
               <div key={item.id}>
@@ -211,8 +265,9 @@ export function DevTab({ project }: DevTabProps) {
                   className={`dev-tab__file-row ${isExpanded ? "dev-tab__file-row--expanded" : ""}`}
                   onClick={() => setExpandedId(isExpanded ? null : item.id)}
                 >
-                  <span className="dev-tab__file-dot" />
+                  <span className="dev-tab__file-dot" style={{ backgroundColor: color }} />
                   <span className="dev-tab__file-name">{item.filename}</span>
+                  <Badge color={color} small>{CATEGORY_LABELS[item.category]}</Badge>
                   <span className="dev-tab__file-hint">
                     <IconEye size={12} />
                   </span>
@@ -247,6 +302,23 @@ export function DevTab({ project }: DevTabProps) {
         title={editing ? "Edit File" : "New File"}
       >
         <div className="dev-tab__modal-form">
+          <div>
+            <label className="dev-tab__modal-label">Category</label>
+            <div className="dev-tab__modal-categories">
+              {(["identity", "rules", "stack", "skills"] as BuffrGlobalCategory[]).map((cat) => (
+                <button
+                  key={cat}
+                  onClick={() => setCategory(cat)}
+                  className={`dev-tab__modal-cat ${category === cat ? "dev-tab__modal-cat--active" : "dev-tab__modal-cat--inactive"}`}
+                  style={category === cat ? { borderColor: CATEGORY_COLORS[cat] } : undefined}
+                >
+                  <span className="dev-tab__modal-cat-dot" style={{ backgroundColor: CATEGORY_COLORS[cat] }} />
+                  {CATEGORY_LABELS[cat]}
+                </button>
+              ))}
+            </div>
+          </div>
+
           <Input
             label="Title"
             value={title}
@@ -262,7 +334,7 @@ export function DevTab({ project }: DevTabProps) {
           />
 
           <p className="dev-tab__modal-path-preview">
-            .dev/{filename || (title ? `${title.toLowerCase().replace(/[^a-z0-9]+/g, "-")}.md` : "...")}
+            .buffr/global/{filename || (title ? `${title.toLowerCase().replace(/[^a-z0-9]+/g, "-")}.md` : "...")}
           </p>
 
           <div>

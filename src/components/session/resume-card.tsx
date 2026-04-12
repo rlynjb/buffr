@@ -17,8 +17,8 @@ import { useProvider } from "@/context/provider-context";
 import { useNotification } from "@/components/ui/notification";
 import { SessionTab } from "./session-tab";
 import { ActionsTab } from "./actions-tab";
-import { DevTab } from "./dev-tab";
-import { DocTab } from "./doc-tab";
+import { BuffrGlobalTab } from "./buffr-global-tab";
+import { BuffrSpecsTab } from "./buffr-specs-tab";
 import { ToolsTab } from "./tools-tab";
 import "./resume-card.css";
 
@@ -28,7 +28,7 @@ interface ResumeCardProps {
   onActionsChange?: (actions: ManualActionData[]) => void;
 }
 
-type Tab = "session" | "actions" | "dev" | "doc" | "tools";
+type Tab = "session" | "actions" | "buffr-global" | "buffr-specs" | "tools";
 
 export function ResumeCard({ project, onEndSession, onActionsChange }: ResumeCardProps) {
   const router = useRouter();
@@ -227,8 +227,8 @@ export function ResumeCard({ project, onEndSession, onActionsChange }: ResumeCar
   const tabs = [
     { id: "actions" as Tab, label: "Next Actions" },
     { id: "session" as Tab, label: "Last Session" },
-    { id: "dev" as Tab, label: ".dev" },
-    { id: "doc" as Tab, label: ".doc" },
+    { id: "buffr-global" as Tab, label: ".buffr/global" },
+    { id: "buffr-specs" as Tab, label: ".buffr/specs" },
     { id: "tools" as Tab, label: "Tools" },
   ];
 
@@ -404,8 +404,8 @@ export function ResumeCard({ project, onEndSession, onActionsChange }: ResumeCar
           />
         )}
         {activeTab === "session" && <SessionTab lastSession={lastSession} />}
-        {activeTab === "dev" && <DevTab project={currentProject} />}
-        {activeTab === "doc" && <DocTab project={currentProject} />}
+        {activeTab === "buffr-global" && <BuffrGlobalTab project={currentProject} />}
+        {activeTab === "buffr-specs" && <BuffrSpecsTab project={currentProject} />}
         {activeTab === "tools" && <ToolsTab />}
       </div>
     </div>

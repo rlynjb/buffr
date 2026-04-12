@@ -1,8 +1,8 @@
 import type {
   Project,
   Session,
-  DevItem,
-  DocItem,
+  BuffrGlobalItem,
+  BuffrSpecItem,
   LLMProvider,
   ToolIntegration,
   ToolConfig,
@@ -269,81 +269,81 @@ export async function paraphraseText(
   });
 }
 
-// Dev Items
-export async function listDevItems(): Promise<DevItem[]> {
-  return request<DevItem[]>("/dev-items");
+// Buffr Global Items
+export async function listBuffrGlobalItems(): Promise<BuffrGlobalItem[]> {
+  return request<BuffrGlobalItem[]>("/buffr-global");
 }
 
-export async function createDevItem(
-  data: Partial<DevItem>,
-): Promise<DevItem> {
-  return request<DevItem>("/dev-items", {
+export async function createBuffrGlobalItem(
+  data: Partial<BuffrGlobalItem>,
+): Promise<BuffrGlobalItem> {
+  return request<BuffrGlobalItem>("/buffr-global", {
     method: "POST",
     body: JSON.stringify(data),
   });
 }
 
-export async function updateDevItem(
+export async function updateBuffrGlobalItem(
   id: string,
-  data: Partial<DevItem>,
-): Promise<DevItem> {
-  return request<DevItem>(`/dev-items?id=${encodeURIComponent(id)}`, {
+  data: Partial<BuffrGlobalItem>,
+): Promise<BuffrGlobalItem> {
+  return request<BuffrGlobalItem>(`/buffr-global?id=${encodeURIComponent(id)}`, {
     method: "PUT",
     body: JSON.stringify(data),
   });
 }
 
-export async function deleteDevItemApi(id: string): Promise<void> {
-  await request<{ ok: boolean }>(`/dev-items?id=${encodeURIComponent(id)}`, {
+export async function deleteBuffrGlobalItemApi(id: string): Promise<void> {
+  await request<{ ok: boolean }>(`/buffr-global?id=${encodeURIComponent(id)}`, {
     method: "DELETE",
   });
 }
 
-export async function pushDevItems(
+export async function pushBuffrGlobalItems(
   repo: string,
   adapterIds?: string[],
 ): Promise<{ sha: string }> {
-  return request<{ sha: string }>("/dev-items?push", {
+  return request<{ sha: string }>("/buffr-global?push", {
     method: "POST",
     body: JSON.stringify({ repo, adapterIds }),
   });
 }
 
-// Doc Items
-export async function listDocItems(projectId: string): Promise<DocItem[]> {
-  return request<DocItem[]>(`/doc-items?scope=${encodeURIComponent(projectId)}`);
+// Buffr Spec Items
+export async function listBuffrSpecItems(projectId: string): Promise<BuffrSpecItem[]> {
+  return request<BuffrSpecItem[]>(`/buffr-specs?scope=${encodeURIComponent(projectId)}`);
 }
 
-export async function createDocItem(
-  data: Partial<DocItem>,
-): Promise<DocItem> {
-  return request<DocItem>("/doc-items", {
+export async function createBuffrSpecItem(
+  data: Partial<BuffrSpecItem>,
+): Promise<BuffrSpecItem> {
+  return request<BuffrSpecItem>("/buffr-specs", {
     method: "POST",
     body: JSON.stringify(data),
   });
 }
 
-export async function updateDocItem(
+export async function updateBuffrSpecItem(
   id: string,
-  data: Partial<DocItem>,
-): Promise<DocItem> {
-  return request<DocItem>(`/doc-items?id=${encodeURIComponent(id)}`, {
+  data: Partial<BuffrSpecItem>,
+): Promise<BuffrSpecItem> {
+  return request<BuffrSpecItem>(`/buffr-specs?id=${encodeURIComponent(id)}`, {
     method: "PUT",
     body: JSON.stringify(data),
   });
 }
 
-export async function deleteDocItemApi(id: string): Promise<void> {
-  await request<{ ok: boolean }>(`/doc-items?id=${encodeURIComponent(id)}`, {
+export async function deleteBuffrSpecItemApi(id: string): Promise<void> {
+  await request<{ ok: boolean }>(`/buffr-specs?id=${encodeURIComponent(id)}`, {
     method: "DELETE",
   });
 }
 
-export async function pushDocItems(
+export async function pushBuffrSpecItems(
   projectId: string,
   repo: string,
 ): Promise<{ sha: string }> {
-  return request<{ sha: string }>("/doc-items?push", {
+  return request<{ sha: string }>("/buffr-specs?push", {
     method: "POST",
     body: JSON.stringify({ projectId, repo }),
   });

@@ -23,26 +23,35 @@ export interface Session {
   createdAt: string;
 }
 
-export type DocItemCategory = "docs" | "ideas" | "plans";
+export type BuffrGlobalCategory = "identity" | "rules" | "stack" | "skills";
 
-export interface DocItem {
+export interface BuffrGlobalItem {
   id: string;
-  category: DocItemCategory;
+  filename: string;
+  path: string;
+  category: BuffrGlobalCategory;
+  title: string;
+  content: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type BuffrSpecCategory =
+  | "features" | "bugs" | "tests" | "phases"
+  | "migrations" | "refactors" | "prompts"
+  | "performance" | "integrations";
+
+export type BuffrSpecStatus = "draft" | "ready" | "in-progress" | "done";
+
+export interface BuffrSpecItem {
+  id: string;
+  category: BuffrSpecCategory;
   filename: string;
   path: string;
   title: string;
   content: string;
   scope: string;
-  createdAt: string;
-  updatedAt: string;
-}
-
-export interface DevItem {
-  id: string;
-  filename: string;
-  path: string;
-  title: string;
-  content: string;
+  status: BuffrSpecStatus;
   createdAt: string;
   updatedAt: string;
 }

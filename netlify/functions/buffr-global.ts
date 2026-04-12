@@ -1,12 +1,12 @@
 import type { Context } from "@netlify/functions";
 import {
-  getDevItem,
-  listDevItems,
-  saveDevItem,
-  deleteDevItem,
-} from "./lib/storage/dev-items";
+  getBuffrGlobalItem,
+  listBuffrGlobalItems,
+  saveBuffrGlobalItem,
+  deleteBuffrGlobalItem,
+} from "./lib/storage/buffr-global";
 import { pushFiles, getRepoInfo } from "./lib/github";
-import type { DevItem } from "../../src/lib/types";
+import type { BuffrGlobalItem, BuffrGlobalCategory } from "../../src/lib/types";
 import { randomUUID } from "crypto";
 import { json, errorResponse } from "./lib/responses";
 
@@ -21,7 +21,7 @@ const ADAPTERS: Record<string, { file: string; rootPath: string }> = {
 
 function buildAdapterContent(
   adapterId: string,
-  items: DevItem[],
+  items: BuffrGlobalItem[],
 ): string {
   const sections: string[] = [];
 
@@ -59,11 +59,11 @@ export default async function handler(req: Request, _context: Context) {
     // GET — list all
     if (req.method === "GET") {
       if (id) {
-        const item = await getDevItem(id);
+        const item = await getBuffrGlobalItem(id);
         if (!item) return errorResponse("Item not found", 404);
         return json(item);
       }
-      const items = await listDevItems();
+      const items = await listBuffrGlobalItems();
       return json(items);
     }
 
@@ -84,10 +84,10 @@ export default async function handler(req: Request, _context: Context) {
         if (!repoInfo) return errorResponse(`Repository not found: ${repo}`, 404);
         const [resolvedOwner, resolvedRepo] = repoInfo.fullName.split("/");
 
-        const items = await listDevItems();
+        const items = await listBuffrGlobalItems();
 
         if (items.length === 0) {
-          return errorResponse("No .dev items to push", 400);
+          return errorResponse("No .buffr/global items to push", 400);
         }
 
         // Build dev item files with frontmatter metadata
@@ -101,16 +101,16 @@ export default async function handler(req: Request, _context: Context) {
           return { path: i.path, content: fm.join("\n") + (i.content || "") };
         });
 
-        // Build adapter files inside .dev/adapters/ with symlinks from root
+        // Build adapter files inside .buffr/global/adapters/ with symlinks from root
         const targetAdapters = adapterIds ?? Object.keys(ADAPTERS);
         for (const aid of targetAdapters) {
           const adapter = ADAPTERS[aid];
           if (!adapter) continue;
           const content = buildAdapterContent(aid, items);
-          const devPath = `.dev/adapters/${adapter.file}`;
-          // Actual content lives in .dev/adapters/
+          const devPath = `.buffr/global/adapters/${adapter.file}`;
+          // Actual content lives in .buffr/global/adapters/
           files.push({ path: devPath, content });
-          // Root path is a symlink pointing to .dev/adapters/
+          // Root path is a symlink pointing to .buffr/global/adapters/
           files.push({ path: adapter.rootPath, content: devPath, mode: "120000" });
         }
 
@@ -119,7 +119,7 @@ export default async function handler(req: Request, _context: Context) {
             resolvedOwner,
             resolvedRepo,
             files,
-            "chore: update .dev/ rules, skills, and adapters from buffr",
+            "chore: update .buffr/global/ rules and adapters from buffr",
             undefined,
             repoInfo.defaultBranch,
           );
@@ -135,48 +135,50 @@ export default async function handler(req: Request, _context: Context) {
       if (!body.title?.trim()) return errorResponse("title is required", 400);
       const filename = body.filename || `${body.title.toLowerCase().replace(/[^a-z0-9]+/g, "-")}.md`;
       const now = new Date().toISOString();
-      const item: DevItem = {
+      const item: BuffrGlobalItem = {
         id: randomUUID(),
         filename,
-        path: `.dev/${filename}`,
+        path: `.buffr/global/${filename}`,
         title: body.title,
         content: body.content || "",
+        category: body.category || "rules",
         createdAt: now,
         updatedAt: now,
       };
-      const saved = await saveDevItem(item);
+      const saved = await saveBuffrGlobalItem(item);
       return json(saved, 201);
     }
 
     // PUT — update
     if (req.method === "PUT") {
       if (!id) return errorResponse("id is required", 400);
-      const existing = await getDevItem(id);
+      const existing = await getBuffrGlobalItem(id);
       if (!existing) return errorResponse("Item not found", 404);
       const body = await req.json();
       const updatedFilename = body.filename ?? existing.filename;
-      const updated: DevItem = {
+      const updated: BuffrGlobalItem = {
         ...existing,
         title: body.title ?? existing.title,
         content: body.content ?? existing.content,
         filename: updatedFilename,
-        path: `.dev/${updatedFilename}`,
+        path: `.buffr/global/${updatedFilename}`,
+        category: body.category ?? existing.category,
         updatedAt: new Date().toISOString(),
       };
-      const saved = await saveDevItem(updated);
+      const saved = await saveBuffrGlobalItem(updated);
       return json(saved);
     }
 
     // DELETE
     if (req.method === "DELETE") {
       if (!id) return errorResponse("id is required", 400);
-      await deleteDevItem(id);
+      await deleteBuffrGlobalItem(id);
       return json({ ok: true });
     }
 
     return errorResponse("Method not allowed", 405);
   } catch (err) {
-    console.error("dev-items function error:", err);
+    console.error("buffr-global function error:", err);
     return errorResponse("Internal server error", 500);
   }
 }

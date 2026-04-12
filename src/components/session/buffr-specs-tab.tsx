@@ -10,52 +10,80 @@ import {
   IconSearch, IconPlus, IconEdit, IconTrash, IconCheck,
   IconEye, IconGitHub, IconLoader,
 } from "@/components/icons";
-import type { DocItem, DocItemCategory, Project } from "@/lib/types";
+import type { BuffrSpecItem, BuffrSpecCategory, BuffrSpecStatus, Project } from "@/lib/types";
 import {
-  listDocItems, createDocItem, updateDocItem, deleteDocItemApi, pushDocItems,
+  listBuffrSpecItems, createBuffrSpecItem, updateBuffrSpecItem,
+  deleteBuffrSpecItemApi, pushBuffrSpecItems,
 } from "@/lib/api";
 import "./doc-tab.css";
 
-interface DocTabProps {
+interface BuffrSpecsTabProps {
   project: Project;
 }
 
-const CATEGORIES: Array<{ key: "all" | DocItemCategory; label: string }> = [
+const CATEGORIES: Array<{ key: "all" | BuffrSpecCategory; label: string }> = [
   { key: "all", label: "All" },
-  { key: "docs", label: "Documentation" },
-  { key: "ideas", label: "Ideas" },
-  { key: "plans", label: "Plans" },
+  { key: "features", label: "Features" },
+  { key: "bugs", label: "Bugs" },
+  { key: "tests", label: "Tests" },
+  { key: "phases", label: "Phases" },
+  { key: "migrations", label: "Migrations" },
+  { key: "refactors", label: "Refactors" },
+  { key: "prompts", label: "Prompts" },
+  { key: "performance", label: "Performance" },
+  { key: "integrations", label: "Integrations" },
 ];
 
-const CATEGORY_COLORS: Record<DocItemCategory, string> = {
-  docs: "#fbbf24",
-  ideas: "#f472b6",
-  plans: "#38bdf8",
+const CATEGORY_COLORS: Record<BuffrSpecCategory, string> = {
+  features: "#34d399",
+  bugs: "#ef4444",
+  tests: "#fbbf24",
+  phases: "#818cf8",
+  migrations: "#f472b6",
+  refactors: "#38bdf8",
+  prompts: "#c084fc",
+  performance: "#fb923c",
+  integrations: "#22d3ee",
 };
 
-const CATEGORY_LABELS: Record<DocItemCategory, string> = {
-  docs: "Doc",
-  ideas: "Idea",
-  plans: "Plan",
+const CATEGORY_LABELS: Record<BuffrSpecCategory, string> = {
+  features: "Feature",
+  bugs: "Bug",
+  tests: "Test",
+  phases: "Phase",
+  migrations: "Migration",
+  refactors: "Refactor",
+  prompts: "Prompt",
+  performance: "Perf",
+  integrations: "Integration",
 };
 
-function getDirectory(item: DocItem): string {
+const STATUS_OPTIONS: Array<{ key: BuffrSpecStatus; label: string; color: string }> = [
+  { key: "draft", label: "Draft", color: "#71717a" },
+  { key: "ready", label: "Ready", color: "#60a5fa" },
+  { key: "in-progress", label: "In Progress", color: "#fbbf24" },
+  { key: "done", label: "Done", color: "#34d399" },
+];
+
+function getDirectory(item: BuffrSpecItem): string {
   return item.category;
 }
 
-export function DocTab({ project }: DocTabProps) {
-  const [items, setItems] = useState<DocItem[]>([]);
+export function BuffrSpecsTab({ project }: BuffrSpecsTabProps) {
+  const [items, setItems] = useState<BuffrSpecItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [query, setQuery] = useState("");
-  const [activeCategory, setActiveCategory] = useState<"all" | DocItemCategory>("all");
+  const [activeCategory, setActiveCategory] = useState<"all" | BuffrSpecCategory>("all");
+  const [activeStatus, setActiveStatus] = useState<"all" | BuffrSpecStatus>("all");
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
   // CRUD modal
   const [modalOpen, setModalOpen] = useState(false);
-  const [editing, setEditing] = useState<DocItem | null>(null);
+  const [editing, setEditing] = useState<BuffrSpecItem | null>(null);
   const [title, setTitle] = useState("");
   const [content, setContent] = useState("");
-  const [category, setCategory] = useState<DocItemCategory>("docs");
+  const [category, setCategory] = useState<BuffrSpecCategory>("features");
+  const [status, setStatus] = useState<BuffrSpecStatus>("draft");
   const [filename, setFilename] = useState("");
 
   // Push
@@ -68,30 +96,31 @@ export function DocTab({ project }: DocTabProps) {
 
   async function loadItems() {
     try {
-      const data = await listDocItems(project.id);
+      const data = await listBuffrSpecItems(project.id);
       setItems(data);
     } catch (err) {
-      console.error("Failed to load doc items:", err);
+      console.error("Failed to load buffr spec items:", err);
     } finally {
       setLoading(false);
     }
   }
 
-  // Modal helpers
-  function openNew(cat?: DocItemCategory) {
+  function openNew(cat?: BuffrSpecCategory) {
     setEditing(null);
     setTitle("");
     setContent("");
-    setCategory(cat || "docs");
+    setCategory(cat || "features");
+    setStatus("draft");
     setFilename("");
     setModalOpen(true);
   }
 
-  function openEdit(item: DocItem) {
+  function openEdit(item: BuffrSpecItem) {
     setEditing(item);
     setTitle(item.title);
     setContent(item.content);
     setCategory(item.category);
+    setStatus(item.status);
     setFilename(item.filename);
     setModalOpen(true);
   }
@@ -100,13 +129,13 @@ export function DocTab({ project }: DocTabProps) {
     const resolvedFilename = filename.trim() || `${title.toLowerCase().replace(/[^a-z0-9]+/g, "-")}.md`;
 
     if (editing) {
-      const updated = await updateDocItem(editing.id, {
-        title, content, category, filename: resolvedFilename, scope: project.id,
+      const updated = await updateBuffrSpecItem(editing.id, {
+        title, content, category, status, filename: resolvedFilename, scope: project.id,
       });
       setItems((prev) => prev.map((i) => (i.id === updated.id ? updated : i)));
     } else {
-      const created = await createDocItem({
-        title, content, category, filename: resolvedFilename, scope: project.id,
+      const created = await createBuffrSpecItem({
+        title, content, category, status, filename: resolvedFilename, scope: project.id,
       });
       setItems((prev) => [created, ...prev]);
     }
@@ -114,7 +143,7 @@ export function DocTab({ project }: DocTabProps) {
   }
 
   async function handleDelete(id: string) {
-    await deleteDocItemApi(id);
+    await deleteBuffrSpecItemApi(id);
     setItems((prev) => prev.filter((i) => i.id !== id));
     if (expandedId === id) setExpandedId(null);
   }
@@ -123,7 +152,7 @@ export function DocTab({ project }: DocTabProps) {
     if (!project.githubRepo) return;
     setPushing(true);
     try {
-      await pushDocItems(project.id, project.githubRepo);
+      await pushBuffrSpecItems(project.id, project.githubRepo);
       setPushSuccess(true);
       setTimeout(() => setPushSuccess(false), 3000);
     } catch (err) {
@@ -133,21 +162,21 @@ export function DocTab({ project }: DocTabProps) {
     }
   }
 
-  // Filter and group
   const filtered = useMemo(() => {
     return items
       .filter((i) => {
         const matchesCategory = activeCategory === "all" || i.category === activeCategory;
+        const matchesStatus = activeStatus === "all" || i.status === activeStatus;
         const matchesQuery = !query ||
           i.title.toLowerCase().includes(query.toLowerCase()) ||
           i.filename.toLowerCase().includes(query.toLowerCase());
-        return matchesCategory && matchesQuery;
+        return matchesCategory && matchesStatus && matchesQuery;
       })
       .sort((a, b) => {
         if (a.category !== b.category) return a.category.localeCompare(b.category);
         return a.filename.localeCompare(b.filename);
       });
-  }, [items, activeCategory, query]);
+  }, [items, activeCategory, activeStatus, query]);
 
   const categoryCounts = useMemo(() => {
     const counts: Record<string, number> = { all: items.length };
@@ -167,7 +196,7 @@ export function DocTab({ project }: DocTabProps) {
             type="text"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search docs..."
+            placeholder="Search specs..."
             className="doc-tab__search-input"
           />
         </div>
@@ -205,6 +234,25 @@ export function DocTab({ project }: DocTabProps) {
         ))}
       </div>
 
+      {/* Status filter */}
+      <div className="doc-tab__categories">
+        <button
+          onClick={() => setActiveStatus("all")}
+          className={`doc-tab__category ${activeStatus === "all" ? "doc-tab__category--active" : "doc-tab__category--inactive"}`}
+        >
+          All Status
+        </button>
+        {STATUS_OPTIONS.map((s) => (
+          <button
+            key={s.key}
+            onClick={() => setActiveStatus(s.key)}
+            className={`doc-tab__category ${activeStatus === s.key ? "doc-tab__category--active" : "doc-tab__category--inactive"}`}
+          >
+            {s.label}
+          </button>
+        ))}
+      </div>
+
       {/* File tree */}
       {loading ? (
         <div className="doc-tab__loading">
@@ -213,8 +261,8 @@ export function DocTab({ project }: DocTabProps) {
       ) : filtered.length === 0 ? (
         <div className="doc-tab__empty">
           {items.length === 0
-            ? "No .doc files yet. Create your first document, idea, or plan."
-            : "No files match your search."}
+            ? "No specs yet. Create your first feature, bug, or test spec."
+            : "No specs match your search."}
         </div>
       ) : (
         <div className="doc-tab__tree">
@@ -224,6 +272,7 @@ export function DocTab({ project }: DocTabProps) {
             lastDir = dir;
             const isExpanded = expandedId === item.id;
             const color = CATEGORY_COLORS[item.category];
+            const statusOption = STATUS_OPTIONS.find((s) => s.key === item.status);
 
             return (
               <div key={item.id}>
@@ -237,6 +286,9 @@ export function DocTab({ project }: DocTabProps) {
                 >
                   <span className="doc-tab__file-dot" style={{ backgroundColor: color }} />
                   <span className="doc-tab__file-name">{item.filename}</span>
+                  {statusOption && (
+                    <Badge color={statusOption.color} small>{statusOption.label}</Badge>
+                  )}
                   <span className="doc-tab__file-hint">
                     <IconEye size={12} />
                   </span>
@@ -269,14 +321,14 @@ export function DocTab({ project }: DocTabProps) {
       <Modal
         open={modalOpen}
         onClose={() => setModalOpen(false)}
-        title={editing ? "Edit Document" : "New Document"}
+        title={editing ? "Edit Spec" : "New Spec"}
         size="wide"
       >
         <div className="doc-tab__modal-form">
           <div>
             <label className="doc-tab__modal-label">Category</label>
             <div className="doc-tab__modal-categories">
-              {(["docs", "ideas", "plans"] as DocItemCategory[]).map((cat) => (
+              {(["features", "bugs", "tests", "phases", "migrations", "refactors", "prompts", "performance", "integrations"] as BuffrSpecCategory[]).map((cat) => (
                 <button
                   key={cat}
                   onClick={() => setCategory(cat)}
@@ -290,11 +342,28 @@ export function DocTab({ project }: DocTabProps) {
             </div>
           </div>
 
+          <div>
+            <label className="doc-tab__modal-label">Status</label>
+            <div className="doc-tab__modal-categories">
+              {STATUS_OPTIONS.map((s) => (
+                <button
+                  key={s.key}
+                  onClick={() => setStatus(s.key)}
+                  className={`doc-tab__modal-cat ${status === s.key ? "doc-tab__modal-cat--active" : "doc-tab__modal-cat--inactive"}`}
+                  style={status === s.key ? { borderColor: s.color } : undefined}
+                >
+                  <span className="doc-tab__modal-cat-dot" style={{ backgroundColor: s.color }} />
+                  {s.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
           <Input
             label="Title"
             value={title}
             onChange={(e) => setTitle(e.target.value)}
-            placeholder="API Authentication Flow"
+            placeholder="Agent routing refactor"
           />
 
           <Input
@@ -305,7 +374,7 @@ export function DocTab({ project }: DocTabProps) {
           />
 
           <p className="doc-tab__modal-path-preview">
-            .doc/{category}/{filename || (title ? `${title.toLowerCase().replace(/[^a-z0-9]+/g, "-")}.md` : "...")}
+            .buffr/specs/{category}/{filename || (title ? `${title.toLowerCase().replace(/[^a-z0-9]+/g, "-")}.md` : "...")}
           </p>
 
           <div>
@@ -313,7 +382,7 @@ export function DocTab({ project }: DocTabProps) {
               label="Content"
               value={content}
               onChange={(e) => setContent(e.target.value)}
-              placeholder="Write your documentation, idea, or plan..."
+              placeholder="Write your spec content..."
               rows={8}
               mono
             />

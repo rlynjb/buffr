@@ -1,12 +1,12 @@
 import type { Context } from "@netlify/functions";
 import {
-  getDocItem,
-  listDocItems,
-  saveDocItem,
-  deleteDocItem,
-} from "./lib/storage/doc-items";
+  getBuffrSpecItem,
+  listBuffrSpecItems,
+  saveBuffrSpecItem,
+  deleteBuffrSpecItem,
+} from "./lib/storage/buffr-specs";
 import { pushFiles, getRepoInfo } from "./lib/github";
-import type { DocItem, DocItemCategory } from "../../src/lib/types";
+import type { BuffrSpecItem, BuffrSpecCategory } from "../../src/lib/types";
 import { randomUUID } from "crypto";
 import { json, errorResponse } from "./lib/responses";
 
@@ -19,11 +19,11 @@ export default async function handler(req: Request, _context: Context) {
     // GET — list or get single
     if (req.method === "GET") {
       if (id) {
-        const item = await getDocItem(id);
+        const item = await getBuffrSpecItem(id);
         if (!item) return errorResponse("Item not found", 404);
         return json(item);
       }
-      let items = await listDocItems();
+      let items = await listBuffrSpecItems();
       if (scope) {
         items = items.filter((i) => i.scope === scope);
       }
@@ -46,11 +46,11 @@ export default async function handler(req: Request, _context: Context) {
         if (!repoInfo) return errorResponse(`Repository not found: ${repo}`, 404);
         const [resolvedOwner, resolvedRepo] = repoInfo.fullName.split("/");
 
-        let items = await listDocItems();
+        let items = await listBuffrSpecItems();
         items = items.filter((i) => i.scope === projectId);
 
         if (items.length === 0) {
-          return errorResponse("No .doc items to push", 400);
+          return errorResponse("No .buffr/specs items to push", 400);
         }
 
         const files: Array<{ path: string; content: string }> = items.map((i) => {
@@ -69,7 +69,7 @@ export default async function handler(req: Request, _context: Context) {
             resolvedOwner,
             resolvedRepo,
             files,
-            "docs: update .doc/ documentation from buffr",
+            "docs: update .buffr/specs/ from buffr",
             undefined,
             repoInfo.defaultBranch,
           );
@@ -83,58 +83,60 @@ export default async function handler(req: Request, _context: Context) {
 
       // Create item
       if (!body.title?.trim()) return errorResponse("title is required", 400);
-      const category: DocItemCategory = body.category || "docs";
+      const category: BuffrSpecCategory = body.category || "features";
       const filename = body.filename || `${body.title.toLowerCase().replace(/[^a-z0-9]+/g, "-")}.md`;
       const now = new Date().toISOString();
-      const item: DocItem = {
+      const item: BuffrSpecItem = {
         id: randomUUID(),
         category,
         filename,
-        path: `.doc/${category}/${filename}`,
+        path: `.buffr/specs/${category}/${filename}`,
         title: body.title,
         content: body.content || "",
+        status: body.status || "draft",
         scope: body.scope || "",
         createdAt: now,
         updatedAt: now,
       };
-      const saved = await saveDocItem(item);
+      const saved = await saveBuffrSpecItem(item);
       return json(saved, 201);
     }
 
     // PUT — update
     if (req.method === "PUT") {
       if (!id) return errorResponse("id is required", 400);
-      const existing = await getDocItem(id);
+      const existing = await getBuffrSpecItem(id);
       if (!existing) return errorResponse("Item not found", 404);
       const body = await req.json();
-      const updated: DocItem = {
+      const updated: BuffrSpecItem = {
         ...existing,
         title: body.title ?? existing.title,
         content: body.content ?? existing.content,
         category: body.category ?? existing.category,
         filename: body.filename ?? existing.filename,
         scope: body.scope ?? existing.scope,
+        status: body.status ?? existing.status,
         path: body.category
-          ? `.doc/${body.category}/${body.filename ?? existing.filename}`
+          ? `.buffr/specs/${body.category}/${body.filename ?? existing.filename}`
           : body.filename
-            ? `.doc/${existing.category}/${body.filename}`
+            ? `.buffr/specs/${existing.category}/${body.filename}`
             : existing.path,
         updatedAt: new Date().toISOString(),
       };
-      const saved = await saveDocItem(updated);
+      const saved = await saveBuffrSpecItem(updated);
       return json(saved);
     }
 
     // DELETE
     if (req.method === "DELETE") {
       if (!id) return errorResponse("id is required", 400);
-      await deleteDocItem(id);
+      await deleteBuffrSpecItem(id);
       return json({ ok: true });
     }
 
     return errorResponse("Method not allowed", 405);
   } catch (err) {
-    console.error("doc-items function error:", err);
+    console.error("buffr-specs function error:", err);
     return errorResponse("Internal server error", 500);
   }
 }
