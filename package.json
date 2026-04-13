@@ -17,6 +17,7 @@
     "@langchain/openai": "^1.2.9",
     "@netlify/blobs": "^10.7.0",
     "@netlify/functions": "^5.1.2",
+    "@netlify/neon": "^0.1.2",
     "drizzle-orm": "^0.45.2",
     "jose": "^4.15.9",
     "next": "16.1.6",
