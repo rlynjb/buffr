@@ -1,5 +1,7 @@
 import { getStore } from "@netlify/blobs";
 import type { Project } from "../../../../src/lib/types";
+import { dbWrite } from "./db/write-guard";
+import { upsertProject, deleteProjectDb } from "./db/projects";
 
 const STORE_NAME = "projects";
 
@@ -33,10 +35,12 @@ export async function saveProject(project: Project): Promise<Project> {
   const s = store();
   project.updatedAt = new Date().toISOString();
   await s.set(project.id, JSON.stringify(project));
+  await dbWrite("saveProject", () => upsertProject(project));
   return project;
 }
 
 export async function deleteProject(id: string): Promise<void> {
   const s = store();
   await s.delete(id);
+  await dbWrite("deleteProject", () => deleteProjectDb(id));
 }

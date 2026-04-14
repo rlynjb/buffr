@@ -1,6 +1,8 @@
 // TODO: listSessionsByProject fetches ALL sessions and filters in memory — consider indexed storage for scale
 import { getStore } from "@netlify/blobs";
 import type { Session } from "../../../../src/lib/types";
+import { dbWrite } from "./db/write-guard";
+import { upsertSession, deleteSessionDb } from "./db/sessions";
 
 const STORE_NAME = "sessions";
 
@@ -39,10 +41,12 @@ export async function listSessionsByProject(
 export async function saveSession(session: Session): Promise<Session> {
   const s = store();
   await s.set(session.id, JSON.stringify(session));
+  await dbWrite("saveSession", () => upsertSession(session));
   return session;
 }
 
 export async function deleteSession(id: string): Promise<void> {
   const s = store();
   await s.delete(id);
+  await dbWrite("deleteSession", () => deleteSessionDb(id));
 }

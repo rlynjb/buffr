@@ -1,5 +1,7 @@
 import { getStore } from "@netlify/blobs";
 import type { BuffrSpecItem } from "../../../../src/lib/types";
+import { dbWrite } from "./db/write-guard";
+import { upsertBuffrSpecItem, deleteBuffrSpecItemDb } from "./db/buffr-specs";
 
 const STORE_NAME = "buffr-specs";
 
@@ -32,10 +34,12 @@ export async function listBuffrSpecItems(): Promise<BuffrSpecItem[]> {
 export async function saveBuffrSpecItem(item: BuffrSpecItem): Promise<BuffrSpecItem> {
   const s = store();
   await s.set(item.id, JSON.stringify(item));
+  await dbWrite("saveBuffrSpecItem", () => upsertBuffrSpecItem(item));
   return item;
 }
 
 export async function deleteBuffrSpecItem(id: string): Promise<void> {
   const s = store();
   await s.delete(id);
+  await dbWrite("deleteBuffrSpecItem", () => deleteBuffrSpecItemDb(id));
 }

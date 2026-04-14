@@ -1,4 +1,6 @@
 import { getStore } from "@netlify/blobs";
+import { dbWrite } from "./db/write-guard";
+import { syncManualActions } from "./db/manual-actions";
 
 const STORE_NAME = "manual-actions";
 
@@ -25,5 +27,6 @@ export async function saveManualActions(
 ): Promise<ManualAction[]> {
   const s = store();
   await s.set(projectId, JSON.stringify(actions));
+  await dbWrite("saveManualActions", () => syncManualActions(projectId, actions));
   return actions;
 }

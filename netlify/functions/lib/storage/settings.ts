@@ -1,4 +1,6 @@
 import { getStore } from "@netlify/blobs";
+import { dbWrite } from "./db/write-guard";
+import { upsertSetting } from "./db/settings";
 
 const STORE_NAME = "settings";
 
@@ -16,5 +18,6 @@ export async function getSettings<T = unknown>(key: string): Promise<T | null> {
 export async function saveSettings<T = unknown>(key: string, value: T): Promise<T> {
   const s = store();
   await s.set(key, JSON.stringify(value));
+  await dbWrite("saveSettings", () => upsertSetting(key, value));
   return value;
 }
