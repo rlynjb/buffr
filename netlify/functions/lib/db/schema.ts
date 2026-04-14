@@ -58,7 +58,7 @@ export const sessions = pgTable(
 export const manualActions = pgTable(
   "manual_actions",
   {
-    id: uuid("id").primaryKey().defaultRandom(),
+    id: text("id").primaryKey(),
     projectId: uuid("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
     text: text("text").notNull(),
     done: boolean("done").notNull().default(false),
