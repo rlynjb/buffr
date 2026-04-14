@@ -1,16 +1,7 @@
-import { getStore } from "@netlify/blobs";
 import type { Project } from "../../../../src/lib/types";
 import { db } from "../db/client";
 import { projects } from "../db/schema";
 import { eq, desc } from "drizzle-orm";
-import { dbWrite } from "./db/write-guard";
-import { upsertProject, deleteProjectDb } from "./db/projects";
-
-const STORE_NAME = "projects";
-
-function store() {
-  return getStore(STORE_NAME);
-}
 
 function rowToProject(row: typeof projects.$inferSelect): Project {
   return {
@@ -41,15 +32,39 @@ export async function listProjects(): Promise<Project[]> {
 }
 
 export async function saveProject(project: Project): Promise<Project> {
-  const s = store();
   project.updatedAt = new Date().toISOString();
-  await s.set(project.id, JSON.stringify(project));
-  await dbWrite("saveProject", () => upsertProject(project));
+  await db.insert(projects).values({
+    id: project.id,
+    name: project.name,
+    description: project.description,
+    stack: project.stack,
+    phase: project.phase,
+    githubRepo: project.githubRepo,
+    netlifySiteUrl: project.netlifySiteUrl,
+    dataSources: project.dataSources || [],
+    dismissedSuggestions: project.dismissedSuggestions || [],
+    lastSessionId: project.lastSessionId,
+    lastSyncedAt: project.lastSyncedAt ? new Date(project.lastSyncedAt) : null,
+    updatedAt: new Date(project.updatedAt),
+  }).onConflictDoUpdate({
+    target: projects.id,
+    set: {
+      name: project.name,
+      description: project.description,
+      stack: project.stack,
+      phase: project.phase,
+      githubRepo: project.githubRepo,
+      netlifySiteUrl: project.netlifySiteUrl,
+      dataSources: project.dataSources || [],
+      dismissedSuggestions: project.dismissedSuggestions || [],
+      lastSessionId: project.lastSessionId,
+      lastSyncedAt: project.lastSyncedAt ? new Date(project.lastSyncedAt) : null,
+      updatedAt: new Date(project.updatedAt),
+    },
+  });
   return project;
 }
 
 export async function deleteProject(id: string): Promise<void> {
-  const s = store();
-  await s.delete(id);
-  await dbWrite("deleteProject", () => deleteProjectDb(id));
+  await db.delete(projects).where(eq(projects.id, id));
 }

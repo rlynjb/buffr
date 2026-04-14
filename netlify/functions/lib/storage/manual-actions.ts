@@ -1,15 +1,6 @@
-import { getStore } from "@netlify/blobs";
 import { db } from "../db/client";
 import { manualActions } from "../db/schema";
 import { eq, asc } from "drizzle-orm";
-import { dbWrite } from "./db/write-guard";
-import { syncManualActions } from "./db/manual-actions";
-
-const STORE_NAME = "manual-actions";
-
-function store() {
-  return getStore(STORE_NAME);
-}
 
 export interface ManualAction {
   id: string;
@@ -34,8 +25,17 @@ export async function saveManualActions(
   projectId: string,
   actions: ManualAction[],
 ): Promise<ManualAction[]> {
-  const s = store();
-  await s.set(projectId, JSON.stringify(actions));
-  await dbWrite("saveManualActions", () => syncManualActions(projectId, actions));
+  await db.delete(manualActions).where(eq(manualActions.projectId, projectId));
+  if (actions.length > 0) {
+    await db.insert(manualActions).values(
+      actions.map((a, i) => ({
+        id: a.id,
+        projectId,
+        text: a.text,
+        done: a.done,
+        position: i,
+      })),
+    );
+  }
   return actions;
 }

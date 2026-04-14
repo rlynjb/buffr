@@ -1,16 +1,7 @@
-import { getStore } from "@netlify/blobs";
 import type { Session } from "../../../../src/lib/types";
 import { db } from "../db/client";
 import { sessions } from "../db/schema";
 import { eq, desc } from "drizzle-orm";
-import { dbWrite } from "./db/write-guard";
-import { upsertSession, deleteSessionDb } from "./db/sessions";
-
-const STORE_NAME = "sessions";
-
-function store() {
-  return getStore(STORE_NAME);
-}
 
 function rowToSession(row: typeof sessions.$inferSelect): Session {
   return {
@@ -42,14 +33,26 @@ export async function listSessionsByProject(
 }
 
 export async function saveSession(session: Session): Promise<Session> {
-  const s = store();
-  await s.set(session.id, JSON.stringify(session));
-  await dbWrite("saveSession", () => upsertSession(session));
+  await db.insert(sessions).values({
+    id: session.id,
+    projectId: session.projectId,
+    goal: session.goal,
+    whatChanged: session.whatChanged,
+    blockers: session.blockers,
+    detectedIntent: session.detectedIntent,
+    createdAt: new Date(session.createdAt),
+  }).onConflictDoUpdate({
+    target: sessions.id,
+    set: {
+      goal: session.goal,
+      whatChanged: session.whatChanged,
+      blockers: session.blockers,
+      detectedIntent: session.detectedIntent,
+    },
+  });
   return session;
 }
 
 export async function deleteSession(id: string): Promise<void> {
-  const s = store();
-  await s.delete(id);
-  await dbWrite("deleteSession", () => deleteSessionDb(id));
+  await db.delete(sessions).where(eq(sessions.id, id));
 }

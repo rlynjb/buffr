@@ -1,16 +1,7 @@
-import { getStore } from "@netlify/blobs";
 import type { BuffrSpecItem } from "../../../../src/lib/types";
 import { db } from "../db/client";
 import { buffrSpecs } from "../db/schema";
 import { eq, desc } from "drizzle-orm";
-import { dbWrite } from "./db/write-guard";
-import { upsertBuffrSpecItem, deleteBuffrSpecItemDb } from "./db/buffr-specs";
-
-const STORE_NAME = "buffr-specs";
-
-function store() {
-  return getStore(STORE_NAME);
-}
 
 function rowToItem(row: typeof buffrSpecs.$inferSelect): BuffrSpecItem {
   return {
@@ -39,14 +30,33 @@ export async function listBuffrSpecItems(): Promise<BuffrSpecItem[]> {
 }
 
 export async function saveBuffrSpecItem(item: BuffrSpecItem): Promise<BuffrSpecItem> {
-  const s = store();
-  await s.set(item.id, JSON.stringify(item));
-  await dbWrite("saveBuffrSpecItem", () => upsertBuffrSpecItem(item));
+  await db.insert(buffrSpecs).values({
+    id: item.id,
+    projectId: item.scope,
+    category: item.category,
+    filename: item.filename,
+    path: item.path,
+    title: item.title,
+    content: item.content,
+    status: item.status,
+    createdAt: new Date(item.createdAt),
+    updatedAt: new Date(item.updatedAt),
+  }).onConflictDoUpdate({
+    target: buffrSpecs.id,
+    set: {
+      projectId: item.scope,
+      category: item.category,
+      filename: item.filename,
+      path: item.path,
+      title: item.title,
+      content: item.content,
+      status: item.status,
+      updatedAt: new Date(item.updatedAt),
+    },
+  });
   return item;
 }
 
 export async function deleteBuffrSpecItem(id: string): Promise<void> {
-  const s = store();
-  await s.delete(id);
-  await dbWrite("deleteBuffrSpecItem", () => deleteBuffrSpecItemDb(id));
+  await db.delete(buffrSpecs).where(eq(buffrSpecs.id, id));
 }

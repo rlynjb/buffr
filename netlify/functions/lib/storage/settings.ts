@@ -1,15 +1,6 @@
-import { getStore } from "@netlify/blobs";
 import { db } from "../db/client";
 import { settings } from "../db/schema";
 import { eq } from "drizzle-orm";
-import { dbWrite } from "./db/write-guard";
-import { upsertSetting } from "./db/settings";
-
-const STORE_NAME = "settings";
-
-function store() {
-  return getStore(STORE_NAME);
-}
 
 export async function getSettings<T = unknown>(key: string): Promise<T | null> {
   const rows = await db.select().from(settings).where(eq(settings.key, key)).limit(1);
@@ -18,8 +9,12 @@ export async function getSettings<T = unknown>(key: string): Promise<T | null> {
 }
 
 export async function saveSettings<T = unknown>(key: string, value: T): Promise<T> {
-  const s = store();
-  await s.set(key, JSON.stringify(value));
-  await dbWrite("saveSettings", () => upsertSetting(key, value));
+  await db.insert(settings).values({
+    key,
+    value,
+  }).onConflictDoUpdate({
+    target: settings.key,
+    set: { value },
+  });
   return value;
 }
