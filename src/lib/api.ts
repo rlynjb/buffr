@@ -305,6 +305,19 @@ export async function pushBuffrContextItems(
   });
 }
 
+// Buffr Agent
+export async function buildSpec(
+  intent: string,
+  projectId: string,
+  answers?: Record<string, string>,
+  provider?: string,
+): Promise<{ spec: string; path: string; gaps: string[]; conversationId: string }> {
+  return request("/buffr-agent?buildSpec", {
+    method: "POST",
+    body: JSON.stringify({ intent, projectId, answers, provider }),
+  });
+}
+
 // Buffr Global Items
 export async function listBuffrGlobalItems(): Promise<BuffrGlobalItem[]> {
   return request<BuffrGlobalItem[]>("/buffr-global");
