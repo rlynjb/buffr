@@ -1,5 +1,8 @@
 import { getStore } from "@netlify/blobs";
 import type { ToolConfig } from "../../../../src/lib/types";
+import { db } from "../db/client";
+import { toolConfigs } from "../db/schema";
+import { eq } from "drizzle-orm";
 import { dbWrite } from "./db/write-guard";
 import { upsertToolConfig, deleteToolConfigDb } from "./db/tool-configs";
 
@@ -10,16 +13,13 @@ function store() {
 }
 
 export async function listToolConfigs(): Promise<ToolConfig[]> {
-  const s = store();
-  const { blobs } = await s.list();
-  const configs: ToolConfig[] = [];
-  for (const blob of blobs) {
-    const data = await s.get(blob.key, { type: "text" });
-    if (data) {
-      configs.push(JSON.parse(data) as ToolConfig);
-    }
-  }
-  return configs;
+  const rows = await db.select().from(toolConfigs);
+  return rows.map((r) => ({
+    integrationId: r.integrationId,
+    values: r.values as Record<string, string>,
+    enabled: r.enabled,
+    updatedAt: r.updatedAt.toISOString(),
+  }));
 }
 
 export async function saveToolConfig(config: ToolConfig): Promise<ToolConfig> {
