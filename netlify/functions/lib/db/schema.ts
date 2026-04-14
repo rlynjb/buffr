@@ -63,6 +63,7 @@ export const manualActions = pgTable(
     text: text("text").notNull(),
     done: boolean("done").notNull().default(false),
     position: integer("position").notNull(),
+    specPath: text("spec_path"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },

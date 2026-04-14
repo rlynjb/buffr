@@ -299,6 +299,19 @@ export function BuffrSpecsTab({ project }: BuffrSpecsTabProps) {
                     <div className="doc-tab__expanded-header">
                       <span className="doc-tab__expanded-path">{item.path}</span>
                       <Badge color={color} small>{CATEGORY_LABELS[item.category]}</Badge>
+                      {STATUS_OPTIONS.map((s) => (
+                        <button
+                          key={s.key}
+                          onClick={async () => {
+                            const updated = await updateBuffrSpecItem(item.id, { status: s.key });
+                            setItems((prev) => prev.map((i) => (i.id === updated.id ? updated : i)));
+                          }}
+                          className={`doc-tab__expanded-btn${item.status === s.key ? "" : "--inactive"}`}
+                          style={item.status === s.key ? { color: s.color } : undefined}
+                        >
+                          {s.label}
+                        </button>
+                      ))}
                       <button onClick={() => openEdit(item)} className="doc-tab__expanded-btn">
                         <IconEdit size={11} /> Edit
                       </button>

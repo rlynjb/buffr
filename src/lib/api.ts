@@ -128,6 +128,7 @@ export interface ManualActionData {
   text: string;
   done: boolean;
   createdAt: string;
+  specPath?: string | null;
 }
 
 export async function listManualActions(

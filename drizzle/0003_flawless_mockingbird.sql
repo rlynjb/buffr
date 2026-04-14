@@ -1,0 +1,1 @@
+ALTER TABLE "manual_actions" ADD COLUMN "spec_path" text;

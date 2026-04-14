@@ -21,6 +21,7 @@ import { BuffrGlobalTab } from "./buffr-global-tab";
 import { BuffrSpecsTab } from "./buffr-specs-tab";
 import { BuffrProjectTab } from "./buffr-project-tab";
 import { ToolsTab } from "./tools-tab";
+import { SpecBuilderModal } from "./spec-builder-modal";
 import "./resume-card.css";
 
 interface ResumeCardProps {
@@ -45,6 +46,22 @@ export function ResumeCard({ project, onEndSession, onActionsChange }: ResumeCar
   const [allProjects, setAllProjects] = useState<Project[]>([]);
   const [healthMap, setHealthMap] = useState<Record<string, ProjectHealth>>({});
   const [lastCommitDate, setLastCommitDate] = useState<string | null>(null);
+  const [specModalOpen, setSpecModalOpen] = useState(false);
+  const [specActionId, setSpecActionId] = useState("");
+  const [specActionText, setSpecActionText] = useState("");
+
+  function handleGenerateSpec(actionId: string, actionText: string) {
+    setSpecActionId(actionId);
+    setSpecActionText(actionText);
+    setSpecModalOpen(true);
+  }
+
+  function handleSpecCreated(specPath: string) {
+    setActions((prev) =>
+      prev.map((a) => (a.id === specActionId ? { ...a, specPath } : a)),
+    );
+    updateManualAction(currentProject.id, specActionId, { text: specActionText }).catch(() => {});
+  }
 
   async function handleDismissSuggestion(id: string) {
     setSuggestions((prev) => prev.filter((s) => s.id !== id));
@@ -405,6 +422,8 @@ export function ResumeCard({ project, onEndSession, onActionsChange }: ResumeCar
             onEditManual={handleEditManual}
             onParaphrase={handleParaphrase}
             onReorder={handleReorder}
+            onGenerateSpec={handleGenerateSpec}
+            onSpecClick={(path) => { setActiveTab("buffr-specs"); }}
           />
         )}
         {activeTab === "session" && <SessionTab lastSession={lastSession} />}
@@ -413,6 +432,14 @@ export function ResumeCard({ project, onEndSession, onActionsChange }: ResumeCar
         {activeTab === "buffr-specs" && <BuffrSpecsTab project={currentProject} />}
         {activeTab === "tools" && <ToolsTab />}
       </div>
+
+      <SpecBuilderModal
+        open={specModalOpen}
+        onClose={() => setSpecModalOpen(false)}
+        actionText={specActionText}
+        projectId={currentProject.id}
+        onSpecCreated={handleSpecCreated}
+      />
     </div>
   );
 }
