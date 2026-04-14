@@ -23,6 +23,20 @@ export interface Session {
   createdAt: string;
 }
 
+export type BuffrContextCategory = "context" | "rules" | "stack" | "agents";
+
+export interface BuffrContextItem {
+  id: string;
+  projectId: string;
+  filename: string;
+  path: string;
+  category: BuffrContextCategory;
+  title: string;
+  content: string;
+  generatedAt: string;
+  updatedAt: string;
+}
+
 export type BuffrGlobalCategory = "identity" | "rules" | "stack" | "skills";
 
 export interface BuffrGlobalItem {

@@ -84,6 +84,26 @@ export const buffrGlobal = pgTable("buffr_global", {
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
+// --- Buffr Context (per-project context files) ---
+
+export const buffrContext = pgTable(
+  "buffr_context",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    projectId: uuid("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
+    filename: text("filename").notNull(),
+    path: text("path").notNull(),
+    category: text("category").notNull(),
+    title: text("title").notNull(),
+    content: text("content").notNull(),
+    generatedAt: timestamp("generated_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("buffr_context_project_id_idx").on(table.projectId),
+  ],
+);
+
 // --- Buffr Specs (replaces doc-items Blob store) ---
 
 export const buffrSpecs = pgTable(

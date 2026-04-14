@@ -3,6 +3,7 @@ import type {
   Session,
   BuffrGlobalItem,
   BuffrSpecItem,
+  BuffrContextItem,
   LLMProvider,
   ToolIntegration,
   ToolConfig,
@@ -266,6 +267,41 @@ export async function paraphraseText(
   return request("/session-ai?paraphrase", {
     method: "POST",
     body: JSON.stringify({ text, provider, persona }),
+  });
+}
+
+// Buffr Context Items
+export async function listBuffrContextItems(projectId: string): Promise<BuffrContextItem[]> {
+  return request<BuffrContextItem[]>(`/buffr-context?projectId=${encodeURIComponent(projectId)}`);
+}
+
+export async function generateBuffrContext(
+  projectId: string,
+  provider?: string,
+): Promise<BuffrContextItem> {
+  return request<BuffrContextItem>("/buffr-context?generate", {
+    method: "POST",
+    body: JSON.stringify({ projectId, provider }),
+  });
+}
+
+export async function updateBuffrContextItem(
+  id: string,
+  data: { content?: string; title?: string },
+): Promise<BuffrContextItem> {
+  return request<BuffrContextItem>(`/buffr-context?id=${encodeURIComponent(id)}`, {
+    method: "PUT",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function pushBuffrContextItems(
+  projectId: string,
+  repo: string,
+): Promise<{ sha: string }> {
+  return request<{ sha: string }>("/buffr-context?push", {
+    method: "POST",
+    body: JSON.stringify({ projectId, repo }),
   });
 }
 
