@@ -8,32 +8,32 @@
 
 | # | Concept | Category | Difficulty |
 |---|---------|----------|------------|
-| 1 | Schema-First Development | Thinking in Code | Foundational |
-| 2 | Type-Driven Design | Thinking in Code | Foundational |
-| 3 | Separation of Concerns | Systems Thinking | Foundational |
-| 4 | Provider Abstraction | Thinking in Code | Foundational |
-| 5 | Capability Mapping | Systems Thinking | Foundational |
-| 6 | Rule-Based Engines | Systems Thinking | Foundational |
-| 7 | Optimistic UI | Thinking in Code | Intermediate |
-| 8 | Rollback Patterns | Thinking in Code | Intermediate |
-| 9 | Error Classification | Thinking in Code | Intermediate |
-| 10 | Prompt Engineering | AI Product Engineering | Intermediate |
-| 11 | Prompt Chaining | Agentic AI | Intermediate |
-| 12 | Structured Output Parsing | AI Product Engineering | Intermediate |
-| 13 | Storage Abstraction | Systems Thinking | Intermediate |
-| 14 | Migration Strategy (Strangler Fig) | Systems Thinking | Intermediate |
-| 15 | Idempotency | Systems Thinking | Intermediate |
-| 16 | Race Conditions & Structural Fixes | Systems Thinking | Intermediate |
-| 17 | Context Window Management | AI Product Engineering | Intermediate |
-| 18 | Persona-Based Prompting | AI Product Engineering | Intermediate |
-| 19 | LLM vs Agent | Agentic AI | Advanced |
-| 20 | Tool Calling | Agentic AI | Advanced |
-| 21 | ReAct Loop | Agentic AI | Advanced |
-| 22 | Conversation Memory | Agentic AI | Advanced |
-| 23 | Spec-Driven Development | AI Product Engineering | Advanced |
-| 24 | Adapter Pattern | Language-Agnostic | Intermediate |
-| 25 | Upsert Pattern | Language-Agnostic | Foundational |
-| 26 | Indirection via Lookup Tables | Language-Agnostic | Foundational |
+| 1 | [Schema-First Development](#1-schema-first-development) | Thinking in Code | Foundational |
+| 2 | [Type-Driven Design](#2-type-driven-design) | Thinking in Code | Foundational |
+| 3 | [Separation of Concerns](#3-separation-of-concerns) | Systems Thinking | Foundational |
+| 4 | [Provider Abstraction](#4-provider-abstraction) | Thinking in Code | Foundational |
+| 5 | [Capability Mapping](#5-capability-mapping) | Systems Thinking | Foundational |
+| 6 | [Rule-Based Engines](#6-rule-based-engines) | Systems Thinking | Foundational |
+| 7 | [Optimistic UI](#7-optimistic-ui) | Thinking in Code | Intermediate |
+| 8 | [Rollback Patterns](#8-rollback-patterns) | Thinking in Code | Intermediate |
+| 9 | [Error Classification](#9-error-classification) | Thinking in Code | Intermediate |
+| 10 | [Prompt Engineering](#10-prompt-engineering) | AI Product Engineering | Intermediate |
+| 11 | [Prompt Chaining](#11-prompt-chaining) | Agentic AI | Intermediate |
+| 12 | [Structured Output Parsing](#12-structured-output-parsing) | AI Product Engineering | Intermediate |
+| 13 | [Storage Abstraction](#13-storage-abstraction) | Systems Thinking | Intermediate |
+| 14 | [Migration Strategy (Strangler Fig)](#14-migration-strategy-strangler-fig) | Systems Thinking | Intermediate |
+| 15 | [Idempotency](#15-idempotency) | Systems Thinking | Intermediate |
+| 16 | [Race Conditions & Structural Fixes](#16-race-conditions--structural-fixes) | Systems Thinking | Intermediate |
+| 17 | [Context Window Management](#17-context-window-management) | AI Product Engineering | Intermediate |
+| 18 | [Persona-Based Prompting](#18-persona-based-prompting) | AI Product Engineering | Intermediate |
+| 19 | [LLM vs Agent](#19-llm-vs-agent) | Agentic AI | Advanced |
+| 20 | [Tool Calling](#20-tool-calling) | Agentic AI | Advanced |
+| 21 | [ReAct Loop](#21-react-loop) | Agentic AI | Advanced |
+| 22 | [Conversation Memory](#22-conversation-memory) | Agentic AI | Advanced |
+| 23 | [Spec-Driven Development](#23-spec-driven-development) | AI Product Engineering | Advanced |
+| 24 | [Adapter Pattern](#24-adapter-pattern) | Language-Agnostic | Intermediate |
+| 25 | [Upsert Pattern](#25-upsert-pattern) | Language-Agnostic | Foundational |
+| 26 | [Indirection via Lookup Tables](#26-indirection-via-lookup-tables) | Language-Agnostic | Foundational |
 
 ---
 
@@ -75,6 +75,14 @@
 
 **What it is:** Each module should have one reason to change. Organize code so that changing the database doesn't require changing the UI, and changing the AI provider doesn't require changing the storage layer.
 
+```mermaid
+flowchart LR
+  UI[UI] --> API[API Client]
+  API --> FN[Netlify Function]
+  FN --> ST[Storage]
+  ST --> DB[Database]
+```
+
 **Where it lives:** buffr has four clean layers:
 1. **Schema** (`lib/db/schema.ts`) — data shape
 2. **Storage** (`lib/storage/*.ts`) — data access (Drizzle queries)
@@ -114,6 +122,14 @@ Each Netlify function imports from storage, never from the DB client directly. T
 
 **What it is:** Map abstract capabilities to concrete implementations via a lookup table, so features can describe what they need without knowing which tool provides it.
 
+```mermaid
+flowchart LR
+  Feature[Feature asks for capability] --> Map[Capability map]
+  Map --> ToolName[Tool name]
+  ToolName --> Registry[Tool registry]
+  Registry --> Impl[Executable function]
+```
+
 **Where it lives:** `src/lib/data-sources.ts` maps `(integrationId, capability)` pairs to tool names: `github.create_item` -> `github_create_issue`, `github.list_commits` -> `github_list_commits`. The end session modal calls `getToolForCapability("github", "list_commits")` to find the right tool, then executes it.
 
 **Why it exists:** When Notion was removed, only the mapping table changed — the end session modal's code didn't need to know that Notion was gone. When a new integration is added, only the mapping table and tool registration need updating.
@@ -129,6 +145,16 @@ Each Netlify function imports from storage, never from the DB client directly. T
 **Category:** Systems Thinking | **Difficulty:** Foundational
 
 **What it is:** Encode business logic as explicit, testable rules rather than scattered if-statements. Each rule is independent and composable.
+
+```mermaid
+flowchart LR
+  Input[Project state] --> Rule1[Rule 1]
+  Input --> Rule2[Rule 2]
+  Input --> Rule3[Rule 3]
+  Rule1 --> Results[Suggestions]
+  Rule2 --> Results
+  Rule3 --> Results
+```
 
 **Where it lives:** `src/lib/suggestions.ts` implements a suggestion engine with three rules:
 1. No data sources -> suggest connecting
@@ -232,6 +258,14 @@ The `context-generator.ts` chain has a longer system prompt that specifies 7 req
 
 **What it is:** Break complex AI tasks into sequential steps, each with its own prompt and parser. The output of one step becomes the input of the next. Each step is simpler and more reliable than one monolithic prompt.
 
+```mermaid
+flowchart LR
+  Input[Session data] --> Step1[Summarize]
+  Step1 --> Step2[Detect intent]
+  Step2 --> Step3[Paraphrase or next action]
+  Step3 --> Output[Structured result]
+```
+
 **Where it lives:** `netlify/functions/session-ai.ts` orchestrates three independent chains: `?summarize`, `?intent`, `?paraphrase`. The end session modal calls summarize first, then uses the summary to call intent detection. Each chain is a `RunnableSequence` from LangChain with two steps: (1) LLM call with formatted prompt, (2) output parser.
 
 **Why it exists:** A single prompt asking "summarize this session, detect the intent, and suggest next steps" produces unreliable output. Splitting into chains means each LLM call has one job, structured output, and a simple parser. If intent detection fails, summarization still works.
@@ -264,6 +298,14 @@ The `context-generator.ts` chain has a longer system prompt that specifies 7 req
 
 **What it is:** Wrap your database client in a module that exports domain-typed functions. Callers never write SQL or know about table names — they call `getProject(id)` and get a `Project` back.
 
+```mermaid
+flowchart LR
+  Caller[Function or API layer] --> Storage[Storage module]
+  Storage --> Mapper[rowToType]
+  Mapper --> Domain[Domain type]
+  Storage --> DB[Drizzle + Postgres]
+```
+
 **Where it lives:** Every file in `netlify/functions/lib/storage/` follows the same pattern:
 1. Import `db` client and schema table
 2. Define a `rowToType()` mapper (e.g., `rowToProject`, `rowToSession`)
@@ -284,6 +326,14 @@ For example, `storage/projects.ts` maps `projects.$inferSelect` (Drizzle's row t
 **Category:** Systems Thinking | **Difficulty:** Intermediate
 
 **What it is:** Replace a legacy system incrementally: run old and new in parallel, gradually shift traffic, then remove the old system. Named after strangler fig trees that grow around and eventually replace their host.
+
+```mermaid
+flowchart LR
+  Legacy[Read/write legacy store] --> DualWrite[Dual write]
+  DualWrite --> Backfill[Backfill historical data]
+  Backfill --> Cutover[Switch reads to new store]
+  Cutover --> Remove[Remove legacy system]
+```
 
 **Where it lives:** buffr's Blob-to-Postgres migration followed this exact sequence:
 - **Phase 3:** Parallel writes — write to both Blobs and Postgres, read from Blobs
@@ -307,6 +357,13 @@ The `DB_WRITE_ENABLED` flag in Phase 3 allowed instant rollback by setting it to
 
 **What it is:** An operation is idempotent if running it once produces the same result as running it N times. Critical for scripts, APIs, and any operation that might be retried.
 
+```mermaid
+flowchart LR
+  Request1[Run operation] --> State[Saved state]
+  Request2[Retry same operation] --> State
+  Request3[Retry again] --> State
+```
+
 **Where it lives:** The backfill script uses `onConflictDoUpdate` (Postgres `INSERT ... ON CONFLICT DO UPDATE`) for every table. Running the script twice doesn't create duplicates — it updates existing rows. The manual-actions backfill uses `DELETE` + `INSERT` (replace all) which is also idempotent.
 
 **Why it exists:** Migration scripts run in uncertain environments — they might timeout, be interrupted, or need to be re-run after fixing a bug. If the backfill script created duplicates on retry, the migration would require manual cleanup.
@@ -322,6 +379,16 @@ The `DB_WRITE_ENABLED` flag in Phase 3 allowed instant rollback by setting it to
 **Category:** Systems Thinking | **Difficulty:** Intermediate
 
 **What it is:** A race condition occurs when the outcome depends on the timing of concurrent operations. The best fix is structural — change the data model so the race can't happen, rather than adding locks or retries.
+
+```mermaid
+flowchart TD
+  A1[Client A updates item 1] --> Old[Single JSON blob]
+  B1[Client B updates item 2] --> Old
+  Old --> Loss[Last write wins]
+  A2[Client A updates row 1] --> New[One row per action]
+  B2[Client B updates row 2] --> New
+  New --> Safe[Independent writes]
+```
 
 **Where it lives:** The original `manual-actions` Blob store stored all actions for a project in a single JSON array. Two parallel "mark done" PUTs would: (1) both read the full array, (2) each mark one item done, (3) the last write wins, overwriting the other's change. Bug 3 in `bug-manual-actions.md` documents this.
 
@@ -382,6 +449,19 @@ The default prompt (no persona) is a generic "concise technical writing assistan
 
 **What it is:** An LLM is a stateless text transformer — input prompt, output text. An agent uses an LLM as a reasoning engine but adds: tool access, memory, and a loop that decides what to do next based on results.
 
+```mermaid
+flowchart LR
+  Prompt[Prompt] --> LLM[LLM]
+  LLM --> Text[Text output]
+
+  Goal[Goal] --> Agent[Agent]
+  Agent --> Tools[Tools]
+  Tools --> Agent
+  Agent --> Memory[Memory]
+  Memory --> Agent
+  Agent --> Result[Structured result]
+```
+
 **Where it lives:** Compare `session-ai.ts` (LLM usage) with `buffr-agent.ts` (agent usage):
 - `session-ai.ts`: One prompt in, one response out. No tools, no memory, no loop. Each chain is a single LLM call.
 - `buffr-agent.ts`: Calls `runSpecAgent` which executes a 5-step tool pipeline, stores each step in conversation memory, and returns structured results.
@@ -399,6 +479,15 @@ The default prompt (no persona) is a generic "concise technical writing assistan
 **Category:** Agentic AI | **Difficulty:** Advanced
 
 **What it is:** Give an AI agent access to functions it can invoke to read data, perform actions, or validate results. Each tool has a name, description, and an execute function.
+
+```mermaid
+flowchart LR
+  Agent[Agent] --> Load[loadContext]
+  Agent --> Select[selectTemplate]
+  Agent --> Build[buildSpec]
+  Agent --> Validate[validateSpec]
+  Agent --> Save[saveSpec]
+```
 
 **Where it lives:** `netlify/functions/lib/ai/tools/types.ts` defines the `AgentTool` interface:
 ```typescript
@@ -425,6 +514,16 @@ Five tools implement this interface: `loadContext` (database read), `selectTempl
 
 **What it is:** Reason-Act-Observe: the agent reasons about what to do, acts (calls a tool), observes the result, then reasons again. The loop continues until the task is complete.
 
+```mermaid
+flowchart LR
+  Think[Reason] --> Act[Call tool]
+  Act --> Observe[Store result]
+  Observe --> Think
+  Observe --> Done{Task complete?}
+  Done -- No --> Think
+  Done -- Yes --> Finish[Return result]
+```
+
 **Where it lives:** `netlify/functions/lib/ai/agent.ts` implements a simplified ReAct loop. The "reasoning" is implicit (hardcoded sequence), the "acting" is tool calls, and the "observing" is storing results as conversation messages:
 
 ```typescript
@@ -449,6 +548,15 @@ await addMessage(cid, "tool", `Selected: ${category}`, ...);   // Observe 2
 **Category:** Agentic AI | **Difficulty:** Advanced
 
 **What it is:** Persist agent interactions in a structured format so that: (1) the agent can reference previous turns, (2) humans can audit the agent's reasoning, (3) conversations can be resumed or replayed.
+
+```mermaid
+flowchart LR
+  User[User input] --> Log[Conversation log]
+  Tool[Tool output] --> Log
+  Agent[Agent response] --> Log
+  Log --> Replay[Audit or replay]
+  Log --> Resume[Resume later]
+```
 
 **Where it lives:** `netlify/functions/lib/storage/conversations.ts` implements:
 - `createConversation(projectId, title)` — creates a conversation container
@@ -558,42 +666,42 @@ The `saveProject` function doesn't distinguish between create and update. The da
 
 Start here. These are patterns you'll use in every project, regardless of language or framework.
 
-1. **Schema-First Development** -- Read `schema.ts`, understand how tables map to types
-2. **Type-Driven Design** -- Read `types.ts`, notice how union types flow to UI
-3. **Upsert Pattern** -- Read any storage module's save function
-4. **Indirection via Lookup Tables** -- Read `CATEGORY_COLORS` and `REQUIRED_SECTIONS`
-5. **Separation of Concerns** -- Trace a request from API -> Function -> Storage -> DB
-6. **Provider Abstraction** -- Read `provider.ts`, understand `BaseChatModel`
-7. **Capability Mapping** -- Read `data-sources.ts`
-8. **Rule-Based Engines** -- Read `suggestions.ts` and its tests
+1. **[Schema-First Development](#1-schema-first-development)** -- Read `schema.ts`, understand how tables map to types
+2. **[Type-Driven Design](#2-type-driven-design)** -- Read `types.ts`, notice how union types flow to UI
+3. **[Upsert Pattern](#25-upsert-pattern)** -- Read any storage module's save function
+4. **[Indirection via Lookup Tables](#26-indirection-via-lookup-tables)** -- Read `CATEGORY_COLORS` and `REQUIRED_SECTIONS`
+5. **[Separation of Concerns](#3-separation-of-concerns)** -- Trace a request from API -> Function -> Storage -> DB
+6. **[Provider Abstraction](#4-provider-abstraction)** -- Read `provider.ts`, understand `BaseChatModel`
+7. **[Capability Mapping](#5-capability-mapping)** -- Read `data-sources.ts`
+8. **[Rule-Based Engines](#6-rule-based-engines)** -- Read `suggestions.ts` and its tests
 
 **Phase 2: Intermediate Patterns** (Concepts 7-18)
 
 These patterns emerge when your system has real users, concurrent access, or AI integration.
 
-9. **Optimistic UI** -- Read `handleActionDone` in `resume-card.tsx`
-10. **Rollback Patterns** -- Read `handleEditManual` and the notification system
-11. **Error Classification** -- Read `responses.ts` and `classifyError`
-12. **Storage Abstraction** -- Read `rowToProject` and compare with the raw schema
-13. **Idempotency** -- Read the backfill script's upsert logic
-14. **Race Conditions** -- Read `bug-manual-actions.md`, understand the structural fix
-15. **Migration Strategy** -- Read `buffr-plan.md` Phases 3-6 in sequence
-16. **Prompt Engineering** -- Read every system prompt in `prompts/` and `chains/`
-17. **Structured Output Parsing** -- Read `parse-utils.ts` and the fallback logic in each chain
-18. **Prompt Chaining** -- Read `session-ai.ts` and trace through a chain
-19. **Context Window Management** -- Find the `slice(0, 10)` in context-generator
-20. **Persona-Based Prompting** -- Read `paraphraser.ts` persona prompts
-21. **Adapter Pattern** -- Read `buildAdapterContent` in `buffr-global.ts`
+9. **[Optimistic UI](#7-optimistic-ui)** -- Read `handleActionDone` in `resume-card.tsx`
+10. **[Rollback Patterns](#8-rollback-patterns)** -- Read `handleEditManual` and the notification system
+11. **[Error Classification](#9-error-classification)** -- Read `responses.ts` and `classifyError`
+12. **[Storage Abstraction](#13-storage-abstraction)** -- Read `rowToProject` and compare with the raw schema
+13. **[Idempotency](#15-idempotency)** -- Read the backfill script's upsert logic
+14. **[Race Conditions & Structural Fixes](#16-race-conditions--structural-fixes)** -- Read `bug-manual-actions.md`, understand the structural fix
+15. **[Migration Strategy (Strangler Fig)](#14-migration-strategy-strangler-fig)** -- Read `buffr-plan.md` Phases 3-6 in sequence
+16. **[Prompt Engineering](#10-prompt-engineering)** -- Read every system prompt in `prompts/` and `chains/`
+17. **[Structured Output Parsing](#12-structured-output-parsing)** -- Read `parse-utils.ts` and the fallback logic in each chain
+18. **[Prompt Chaining](#11-prompt-chaining)** -- Read `session-ai.ts` and trace through a chain
+19. **[Context Window Management](#17-context-window-management)** -- Find the `slice(0, 10)` in context-generator
+20. **[Persona-Based Prompting](#18-persona-based-prompting)** -- Read `paraphraser.ts` persona prompts
+21. **[Adapter Pattern](#24-adapter-pattern)** -- Read `buildAdapterContent` in `buffr-global.ts`
 
 **Phase 3: Advanced** (Concepts 19-23)
 
 These are the concepts that separate "uses AI" from "builds AI products."
 
-22. **LLM vs Agent** -- Compare `session-ai.ts` with `buffr-agent.ts`
-23. **Tool Calling** -- Read all 5 tools in `ai/tools/`, run the tests
-24. **ReAct Loop** -- Read `agent.ts`, trace the conversation messages
-25. **Conversation Memory** -- Read `conversations.ts`, query the messages table
-26. **Spec-Driven Development** -- Read `buffr-plan.md`, then generate a spec using the modal
+22. **[LLM vs Agent](#19-llm-vs-agent)** -- Compare `session-ai.ts` with `buffr-agent.ts`
+23. **[Tool Calling](#20-tool-calling)** -- Read all 5 tools in `ai/tools/`, run the tests
+24. **[ReAct Loop](#21-react-loop)** -- Read `agent.ts`, trace the conversation messages
+25. **[Conversation Memory](#22-conversation-memory)** -- Read `conversations.ts`, query the messages table
+26. **[Spec-Driven Development](#23-spec-driven-development)** -- Read `buffr-plan.md`, then generate a spec using the modal
 
 ### Exercises
 
