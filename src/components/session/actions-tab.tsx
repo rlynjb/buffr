@@ -1,7 +1,6 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
-import { Badge } from "@/components/ui/badge";
 import { IconSparkle, IconPlus, IconTrash } from "@/components/icons";
 import type { ManualActionData } from "@/lib/api";
 import "./actions-tab.css";
@@ -22,8 +21,6 @@ interface ActionsTabProps {
   onEditManual?: (id: string, text: string) => void;
   onParaphrase?: (text: string, persona?: string) => Promise<string | null>;
   onReorder?: (fromIndex: number, toIndex: number) => void;
-  onGenerateSpec?: (actionId: string, actionText: string) => void;
-  onSpecClick?: (specPath: string) => void;
 }
 
 export function ActionsTab({
@@ -34,8 +31,6 @@ export function ActionsTab({
   onEditManual,
   onParaphrase,
   onReorder,
-  onGenerateSpec,
-  onSpecClick,
 }: ActionsTabProps) {
   const [newItem, setNewItem] = useState("");
   const [paraphrasing, setParaphrasing] = useState(false);
@@ -236,22 +231,8 @@ export function ActionsTab({
                   {action.text}
                 </span>
               )}
-              {action.specPath && onSpecClick && (
-                <button onClick={() => onSpecClick(action.specPath!)} style={{ background: "none", border: "none", cursor: "pointer", padding: 0 }}>
-                  <Badge color="#c084fc" small>spec</Badge>
-                </button>
-              )}
               {!action.done && (
                 <div className="actions-tab__action-buttons">
-                  {onGenerateSpec && !action.specPath && (
-                    <button
-                      onClick={() => onGenerateSpec(action.id, action.text)}
-                      className="actions-tab__action-btn--done"
-                      style={{ color: "#c084fc" }}
-                    >
-                      <IconSparkle size={10} /> Spec
-                    </button>
-                  )}
                   <button onClick={() => onDone(action.id)} className="actions-tab__action-btn--done">
                     Done
                   </button>

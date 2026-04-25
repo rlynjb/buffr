@@ -1,9 +1,6 @@
 import type {
   Project,
   Session,
-  BuffrGlobalItem,
-  BuffrSpecItem,
-  BuffrContextItem,
   LLMProvider,
   ToolIntegration,
   ToolConfig,
@@ -128,7 +125,6 @@ export interface ManualActionData {
   text: string;
   done: boolean;
   createdAt: string;
-  specPath?: string | null;
 }
 
 export async function listManualActions(
@@ -271,130 +267,3 @@ export async function paraphraseText(
   });
 }
 
-// Buffr Context Items
-export async function listBuffrContextItems(projectId: string): Promise<BuffrContextItem[]> {
-  return request<BuffrContextItem[]>(`/buffr-context?projectId=${encodeURIComponent(projectId)}`);
-}
-
-export async function generateBuffrContext(
-  projectId: string,
-  provider?: string,
-): Promise<BuffrContextItem> {
-  return request<BuffrContextItem>("/buffr-context?generate", {
-    method: "POST",
-    body: JSON.stringify({ projectId, provider }),
-  });
-}
-
-export async function updateBuffrContextItem(
-  id: string,
-  data: { content?: string; title?: string },
-): Promise<BuffrContextItem> {
-  return request<BuffrContextItem>(`/buffr-context?id=${encodeURIComponent(id)}`, {
-    method: "PUT",
-    body: JSON.stringify(data),
-  });
-}
-
-export async function pushBuffrContextItems(
-  projectId: string,
-  repo: string,
-): Promise<{ sha: string }> {
-  return request<{ sha: string }>("/buffr-context?push", {
-    method: "POST",
-    body: JSON.stringify({ projectId, repo }),
-  });
-}
-
-// Buffr Agent
-export async function buildSpec(
-  intent: string,
-  projectId: string,
-  answers?: Record<string, string>,
-  provider?: string,
-): Promise<{ spec: string; path: string; gaps: string[]; conversationId: string }> {
-  return request("/buffr-agent?buildSpec", {
-    method: "POST",
-    body: JSON.stringify({ intent, projectId, answers, provider }),
-  });
-}
-
-// Buffr Global Items
-export async function listBuffrGlobalItems(): Promise<BuffrGlobalItem[]> {
-  return request<BuffrGlobalItem[]>("/buffr-global");
-}
-
-export async function createBuffrGlobalItem(
-  data: Partial<BuffrGlobalItem>,
-): Promise<BuffrGlobalItem> {
-  return request<BuffrGlobalItem>("/buffr-global", {
-    method: "POST",
-    body: JSON.stringify(data),
-  });
-}
-
-export async function updateBuffrGlobalItem(
-  id: string,
-  data: Partial<BuffrGlobalItem>,
-): Promise<BuffrGlobalItem> {
-  return request<BuffrGlobalItem>(`/buffr-global?id=${encodeURIComponent(id)}`, {
-    method: "PUT",
-    body: JSON.stringify(data),
-  });
-}
-
-export async function deleteBuffrGlobalItemApi(id: string): Promise<void> {
-  await request<{ ok: boolean }>(`/buffr-global?id=${encodeURIComponent(id)}`, {
-    method: "DELETE",
-  });
-}
-
-export async function pushBuffrGlobalItems(
-  repo: string,
-  adapterIds?: string[],
-): Promise<{ sha: string }> {
-  return request<{ sha: string }>("/buffr-global?push", {
-    method: "POST",
-    body: JSON.stringify({ repo, adapterIds }),
-  });
-}
-
-// Buffr Spec Items
-export async function listBuffrSpecItems(projectId: string): Promise<BuffrSpecItem[]> {
-  return request<BuffrSpecItem[]>(`/buffr-specs?scope=${encodeURIComponent(projectId)}`);
-}
-
-export async function createBuffrSpecItem(
-  data: Partial<BuffrSpecItem>,
-): Promise<BuffrSpecItem> {
-  return request<BuffrSpecItem>("/buffr-specs", {
-    method: "POST",
-    body: JSON.stringify(data),
-  });
-}
-
-export async function updateBuffrSpecItem(
-  id: string,
-  data: Partial<BuffrSpecItem>,
-): Promise<BuffrSpecItem> {
-  return request<BuffrSpecItem>(`/buffr-specs?id=${encodeURIComponent(id)}`, {
-    method: "PUT",
-    body: JSON.stringify(data),
-  });
-}
-
-export async function deleteBuffrSpecItemApi(id: string): Promise<void> {
-  await request<{ ok: boolean }>(`/buffr-specs?id=${encodeURIComponent(id)}`, {
-    method: "DELETE",
-  });
-}
-
-export async function pushBuffrSpecItems(
-  projectId: string,
-  repo: string,
-): Promise<{ sha: string }> {
-  return request<{ sha: string }>("/buffr-specs?push", {
-    method: "POST",
-    body: JSON.stringify({ projectId, repo }),
-  });
-}

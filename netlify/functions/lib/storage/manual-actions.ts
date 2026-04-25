@@ -6,7 +6,6 @@ export interface ManualAction {
   id: string;
   text: string;
   done: boolean;
-  specPath?: string | null;
 }
 
 export async function getManualActions(projectId: string): Promise<ManualAction[]> {
@@ -19,7 +18,6 @@ export async function getManualActions(projectId: string): Promise<ManualAction[
     id: r.id,
     text: r.text,
     done: r.done,
-    specPath: r.specPath,
   }));
 }
 
@@ -36,19 +34,8 @@ export async function saveManualActions(
         text: a.text,
         done: a.done,
         position: i,
-        specPath: a.specPath ?? null,
       })),
     );
   }
   return actions;
-}
-
-export async function updateManualActionSpecPath(
-  projectId: string,
-  actionId: string,
-  specPath: string,
-): Promise<void> {
-  await db.update(manualActions)
-    .set({ specPath })
-    .where(eq(manualActions.id, actionId));
 }

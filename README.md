@@ -7,9 +7,8 @@ A lightweight developer continuity and momentum tool. Flow preserver, setup elim
 - Next.js + TypeScript
 - Tailwind CSS
 - Netlify Functions (serverless API)
-- Netlify Blobs (storage)
-- LangChain.js (AI plan generation)
-- Octokit (GitHub API)
+- Neon Postgres via Drizzle ORM
+- LangChain.js (session summaries, intent detection, task paraphrasing)
 
 ## Setup
 
@@ -37,13 +36,17 @@ See `.env.example` for all required variables. At minimum, configure one LLM pro
 
 ```
 src/
-  app/           — Next.js App Router pages
-  components/    — React components (ui, flow, session, dashboard)
-  context/       — React context providers
+  app/           — Next.js App Router pages (login, dashboard, project workspace)
+  components/    — React components (ui, dashboard, session, tools)
+  context/       — Auth + LLM-provider context providers
   lib/           — Types, API client, utilities
-  hooks/         — Custom React hooks
 netlify/
-  functions/     — Serverless API (CRUD, AI, scaffold, deploy)
-    lib/ai/      — LangChain chains and provider factory
-    lib/storage/ — Netlify Blobs storage layer
+  functions/     — Serverless API (auth, projects, sessions, manual-actions, AI, tools)
+    lib/ai/      — LangChain chains + provider factory
+    lib/storage/ — Drizzle-backed Postgres data access
+    lib/db/      — Drizzle schema + client
+    lib/tools/   — Tool registry + GitHub tools
+drizzle/         — Postgres migrations
 ```
+
+For the full spec, see [SPEC.md](SPEC.md).

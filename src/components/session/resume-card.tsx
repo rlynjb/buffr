@@ -9,7 +9,7 @@ import { IconBack, IconGitHub, IconGlobe, IconSparkle } from "@/components/icons
 import { PHASE_COLORS } from "@/lib/constants";
 import type { Project, Session } from "@/lib/types";
 import type { ManualActionData } from "@/lib/api";
-import { listProjects, listSessions, executeToolAction, listIntegrations, updateProject, listManualActions, addManualAction, updateManualAction, deleteManualAction, reorderManualActions, paraphraseText, generateBuffrContext } from "@/lib/api";
+import { listProjects, listSessions, executeToolAction, listIntegrations, updateProject, listManualActions, addManualAction, updateManualAction, deleteManualAction, reorderManualActions, paraphraseText } from "@/lib/api";
 import { timeAgo, formatDayDate } from "@/lib/format";
 import { generateSuggestions, type ProjectSuggestion } from "@/lib/suggestions";
 import { computeProjectHealth, type ProjectHealth } from "@/lib/project-health";
@@ -17,11 +17,7 @@ import { useProvider } from "@/context/provider-context";
 import { useNotification } from "@/components/ui/notification";
 import { SessionTab } from "./session-tab";
 import { ActionsTab } from "./actions-tab";
-import { BuffrGlobalTab } from "./buffr-global-tab";
-import { BuffrSpecsTab } from "./buffr-specs-tab";
-import { BuffrProjectTab } from "./buffr-project-tab";
 import { ToolsTab } from "./tools-tab";
-import { SpecBuilderModal } from "./spec-builder-modal";
 import "./resume-card.css";
 
 interface ResumeCardProps {
@@ -30,7 +26,7 @@ interface ResumeCardProps {
   onActionsChange?: (actions: ManualActionData[]) => void;
 }
 
-type Tab = "session" | "actions" | "buffr-project" | "buffr-global" | "buffr-specs" | "tools";
+type Tab = "session" | "actions" | "tools";
 
 export function ResumeCard({ project, onEndSession, onActionsChange }: ResumeCardProps) {
   const router = useRouter();
@@ -46,22 +42,6 @@ export function ResumeCard({ project, onEndSession, onActionsChange }: ResumeCar
   const [allProjects, setAllProjects] = useState<Project[]>([]);
   const [healthMap, setHealthMap] = useState<Record<string, ProjectHealth>>({});
   const [lastCommitDate, setLastCommitDate] = useState<string | null>(null);
-  const [specModalOpen, setSpecModalOpen] = useState(false);
-  const [specActionId, setSpecActionId] = useState("");
-  const [specActionText, setSpecActionText] = useState("");
-
-  function handleGenerateSpec(actionId: string, actionText: string) {
-    setSpecActionId(actionId);
-    setSpecActionText(actionText);
-    setSpecModalOpen(true);
-  }
-
-  function handleSpecCreated(specPath: string) {
-    setActions((prev) =>
-      prev.map((a) => (a.id === specActionId ? { ...a, specPath } : a)),
-    );
-    updateManualAction(currentProject.id, specActionId, { text: specActionText }).catch(() => {});
-  }
 
   async function handleDismissSuggestion(id: string) {
     setSuggestions((prev) => prev.filter((s) => s.id !== id));
@@ -102,8 +82,6 @@ export function ResumeCard({ project, onEndSession, onActionsChange }: ResumeCar
       setAllProjects((prev) =>
         prev.map((p) => (p.id === updated.id ? { ...p, name: updated.name } : p))
       );
-      // Auto-regenerate project context after sync
-      generateBuffrContext(currentProject.id, selectedProvider).catch(() => {});
     } catch (err) {
       console.error("Sync failed:", err);
     } finally {
@@ -247,9 +225,6 @@ export function ResumeCard({ project, onEndSession, onActionsChange }: ResumeCar
   const tabs = [
     { id: "actions" as Tab, label: "Next Actions" },
     { id: "session" as Tab, label: "Last Session" },
-    { id: "buffr-project" as Tab, label: ".buffr/project" },
-    { id: "buffr-global" as Tab, label: ".buffr/global" },
-    { id: "buffr-specs" as Tab, label: ".buffr/specs" },
     { id: "tools" as Tab, label: "Tools" },
   ];
 
@@ -422,24 +397,11 @@ export function ResumeCard({ project, onEndSession, onActionsChange }: ResumeCar
             onEditManual={handleEditManual}
             onParaphrase={handleParaphrase}
             onReorder={handleReorder}
-            onGenerateSpec={handleGenerateSpec}
-            onSpecClick={(path) => { setActiveTab("buffr-specs"); }}
           />
         )}
         {activeTab === "session" && <SessionTab lastSession={lastSession} />}
-        {activeTab === "buffr-project" && <BuffrProjectTab project={currentProject} />}
-        {activeTab === "buffr-global" && <BuffrGlobalTab project={currentProject} />}
-        {activeTab === "buffr-specs" && <BuffrSpecsTab project={currentProject} />}
         {activeTab === "tools" && <ToolsTab />}
       </div>
-
-      <SpecBuilderModal
-        open={specModalOpen}
-        onClose={() => setSpecModalOpen(false)}
-        actionText={specActionText}
-        projectId={currentProject.id}
-        onSpecCreated={handleSpecCreated}
-      />
     </div>
   );
 }

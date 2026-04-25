@@ -7,7 +7,6 @@ import {
   timestamp,
   jsonb,
   index,
-  unique,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 
@@ -63,67 +62,11 @@ export const manualActions = pgTable(
     text: text("text").notNull(),
     done: boolean("done").notNull().default(false),
     position: integer("position").notNull(),
-    specPath: text("spec_path"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
     index("manual_actions_project_id_position_idx").on(table.projectId, table.position),
-  ],
-);
-
-// --- Buffr Global (replaces dev-items Blob store) ---
-
-export const buffrGlobal = pgTable("buffr_global", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  filename: text("filename").notNull().unique(),
-  path: text("path").notNull(),
-  category: text("category").notNull(),
-  title: text("title").notNull(),
-  content: text("content").notNull(),
-  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-});
-
-// --- Buffr Context (per-project context files) ---
-
-export const buffrContext = pgTable(
-  "buffr_context",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    projectId: uuid("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
-    filename: text("filename").notNull(),
-    path: text("path").notNull(),
-    category: text("category").notNull(),
-    title: text("title").notNull(),
-    content: text("content").notNull(),
-    generatedAt: timestamp("generated_at", { withTimezone: true }).notNull().defaultNow(),
-    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-  },
-  (table) => [
-    index("buffr_context_project_id_idx").on(table.projectId),
-  ],
-);
-
-// --- Buffr Specs (replaces doc-items Blob store) ---
-
-export const buffrSpecs = pgTable(
-  "buffr_specs",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    projectId: uuid("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
-    category: text("category").notNull(),
-    filename: text("filename").notNull(),
-    path: text("path").notNull(),
-    title: text("title").notNull(),
-    content: text("content").notNull(),
-    status: text("status").notNull().default("draft"),
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-  },
-  (table) => [
-    unique("buffr_specs_project_id_path_key").on(table.projectId, table.path),
-    index("buffr_specs_project_id_category_idx").on(table.projectId, table.category),
   ],
 );
 
@@ -142,37 +85,3 @@ export const settings = pgTable("settings", {
   key: text("key").primaryKey(),
   value: jsonb("value").notNull(),
 });
-
-// --- Conversations (Phase 8 prep) ---
-
-export const conversations = pgTable(
-  "conversations",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    projectId: uuid("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
-    title: text("title"),
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-  },
-  (table) => [
-    index("conversations_project_id_idx").on(table.projectId, table.updatedAt),
-  ],
-);
-
-// --- Messages ---
-
-export const messages = pgTable(
-  "messages",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    conversationId: uuid("conversation_id").notNull().references(() => conversations.id, { onDelete: "cascade" }),
-    role: text("role").notNull(),
-    content: text("content").notNull(),
-    toolCalls: jsonb("tool_calls"),
-    toolResults: jsonb("tool_results"),
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-  },
-  (table) => [
-    index("messages_conversation_id_idx").on(table.conversationId, table.createdAt),
-  ],
-);

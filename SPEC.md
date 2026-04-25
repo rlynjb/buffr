@@ -1,6 +1,6 @@
 # buffr — Product Spec
 
-> Developer continuity and momentum tool. Flow preserver, setup eliminator, and structured idea helper.
+> Developer continuity and momentum tool. Flow preserver and setup eliminator.
 
 ---
 
@@ -8,30 +8,35 @@
 
 ### What buffr Is
 
-buffr is a single-user developer productivity tool that helps maintain continuity across coding sessions. It solves the "where was I?" problem by tracking session history, managing next actions, syncing with GitHub repos, providing AI-assisted summarization of work, and generating structured specs from todo items.
+buffr is a **single-user developer productivity tool** that maintains continuity across coding sessions on multiple side projects. It tracks session history, manages next actions, syncs with GitHub, and AI-summarizes work so you can pick a project back up without burning a session on rebuilding mental state. All data lives in Neon Postgres.
 
 ### Who It's For
 
-Solo developers managing multiple side projects who need to quickly context-switch between codebases without losing momentum.
+Solo developers managing multiple side projects who context-switch between codebases and need to rebuild mental state quickly.
 
 ### Core Value Loop
 
-**Start session -> Work -> End session (auto-summarize) -> Next session picks up seamlessly**
+**Start session → Work → End session (auto-summarize from commits + completed tasks) → Detect intent → Next session picks up seamlessly with last intent banner + carried-over tasks.**
 
 ---
 
 ## 2. Tech Stack
 
-| Layer | Technology |
-|-------|------------|
-| Frontend | Next.js 16 + React 19 + TypeScript 5 + Tailwind CSS v4 |
-| Backend | Netlify Functions (serverless) |
-| Database | Neon Postgres via Drizzle ORM |
-| AI | LangChain.js with multi-provider support (Anthropic, OpenAI, Google, Ollama) |
-| Auth | Single-user JWT (jose) with HTTP-only cookies |
-| External APIs | GitHub (fetch wrapper) |
-| Testing | Vitest |
-| Deploy | Netlify |
+| Layer | Technology | Version |
+|-------|------------|---------|
+| Framework | Next.js (App Router) | 16.1.6 |
+| UI | React + TypeScript | 19.2.3 / 5 |
+| Styling | Tailwind CSS v4 (`@theme inline`) | 4 |
+| Backend | Netlify Functions (serverless) | `@netlify/functions` 5.1.2 |
+| Database | Neon Postgres via Drizzle ORM | `drizzle-orm` 0.45.2, `postgres` 3.4.9 |
+| Migrations | drizzle-kit | 0.31.10 |
+| AI | LangChain.js multi-provider | `@langchain/core` 1.1.27 |
+| Auth | JWT (jose) in HTTP-only cookie | `jose` 4.15.9 |
+| Testing | Vitest | 4.0.18 |
+| Lint | ESLint (Next config) | 9 |
+| Deploy | Netlify (esbuild bundler, 120s function timeout) | — |
+
+LLM providers (each is optional; only those with env keys appear in the UI): `@langchain/anthropic`, `@langchain/openai`, `@langchain/google-genai`, `@langchain/ollama`.
 
 ---
 
@@ -39,230 +44,157 @@ Solo developers managing multiple side projects who need to quickly context-swit
 
 ```
 src/
-  app/                    Next.js App Router pages
-    login/                Login page
-    project/[id]/         Project detail page
-    page.tsx              Dashboard (project list)
-    layout.tsx            Root layout with auth + providers
-    globals.css           Design tokens + base styles
+  app/
+    login/page.tsx                 Login page
+    project/[id]/page.tsx          Project workspace (cached via sessionStorage)
+    page.tsx                       Dashboard (project list)
+    layout.tsx                     Root layout: AuthProvider + AppShell, fonts
+    globals.css                    Design tokens + base styles
   components/
-    ui/                   Primitives (Button, Input, Modal, Badge, Notification)
-    dashboard/            Project cards, import modal
-    session/              ResumeCard, ActionsTab, SessionTab,
-                          BuffrGlobalTab, BuffrSpecsTab, BuffrProjectTab,
-                          ToolsTab, EndSessionModal, SpecBuilderModal
-    tools/                ConfigModal, TestToolModal
-    app-shell.tsx         Auth gate + layout wrapper
-    nav.tsx               Top nav with provider switcher
-    icons.tsx             SVG icon components
+    ui/                            Primitives: Button, Input, Modal, Badge, Card,
+                                   Checkbox, Textarea, Notification
+    dashboard/                     ProjectCard, ImportProjectModal
+    session/                       ResumeCard, SessionTab, ActionsTab,
+                                   ToolsTab, EndSessionModal
+    tools/                         ConfigModal, TestToolModal
+    app-shell.tsx                  Auth gate + Provider/Notification context wrap
+    nav.tsx                        Top nav (logo, provider switcher, sign out)
+    provider-switcher.tsx          LLM provider dropdown
+    icons.tsx                      Inline SVG icon set + sourceColor()/SourceIcon
   context/
-    auth-context.tsx      Auth state + login/logout
-    provider-context.tsx  LLM provider selection
+    auth-context.tsx               authenticated/loading + login/logout
+    provider-context.tsx           providers list + selected (persisted to localStorage)
   lib/
-    api.ts                Fetch wrapper for all Netlify Functions
-    types.ts              Shared TypeScript interfaces
-    constants.ts          Phase colors, source colors
-    format.ts             Time formatting utilities
-    data-sources.ts       Capability -> tool name mapping
-    suggestions.ts        Smart suggestion engine
-    project-health.ts     Weekly activity health computation
+    api.ts                         Fetch wrapper for Netlify Functions
+    types.ts                       Shared TypeScript interfaces
+    constants.ts                   PHASE_COLORS + SOURCE_COLORS
+    format.ts                      timeAgo + formatDayDate
+    data-sources.ts                Capability → tool-name mapping
+    suggestions.ts                 Smart suggestion engine
+    project-health.ts              Weekly activity health computation
+    suggestions.test.ts            Vitest
+    data-sources.test.ts           Vitest
+  middleware.ts                    Next.js JWT auth guard
 
 netlify/functions/
   login.ts / logout.ts / auth-check.ts    Auth endpoints
-  projects.ts                              CRUD for projects
-  sessions.ts                              CRUD for sessions
-  manual-actions.ts                        Task list CRUD + reorder
-  buffr-global.ts                          .buffr/global file CRUD + GitHub push
-  buffr-specs.ts                           .buffr/specs file CRUD + GitHub push
-  buffr-context.ts                         .buffr/project context CRUD + AI generation
-  buffr-agent.ts                           Spec-building agent endpoint
+  projects.ts                              Projects CRUD
+  sessions.ts                              Sessions CRUD
+  manual-actions.ts                        Task list CRUD + reorder + cleanDone
   session-ai.ts                            AI chains (summarize, intent, paraphrase)
   providers.ts                             Available LLM providers
   tools.ts                                 Integration registry + tool execution
   lib/
     ai/
-      provider.ts                          Multi-provider LLM factory
-      agent.ts                             ReAct agent loop for spec building
-      chains/                              LangChain chains
-        context-generator.ts               Project context generation
-        session-summarizer.ts              Session activity summarization
-        intent-detector.ts                 Session intent detection
-        paraphraser.ts                     Task text rewriting with personas
-      tools/                               Agent tools
-        types.ts                           AgentTool interface
-        load-context.ts                    Load project context from DB
-        select-template.ts                 Classify intent -> spec type
-        build-spec.ts                      LLM-powered spec generation
-        validate-spec.ts                   Check required sections
-        save-spec.ts                       Save spec to DB with unique filename
-      prompts/                             System prompts
-      parse-utils.ts                       JSON response cleaning
+      provider.ts                          Multi-provider LLM factory (temperature 0.7)
+      parse-utils.ts                       stripCodeBlock for ``` json ``` LLM output
+      chains/
+        session-summarizer.ts              Session activity → goal + bullets
+        intent-detector.ts                 Session intent classification
+        paraphraser.ts                     Task rewriting (default + 5 personas)
+      prompts/
+        session-prompts.ts                 SUMMARIZE_SYSTEM_PROMPT + INTENT_SYSTEM_PROMPT
     storage/                               Drizzle-backed data access
       projects.ts
       sessions.ts
       manual-actions.ts
-      buffr-global.ts
-      buffr-specs.ts
-      buffr-context.ts
-      conversations.ts
       tool-config.ts
       settings.ts
     db/
-      client.ts                            Drizzle + postgres client
-      schema.ts                            Full DB schema (10 tables)
-    tools/                                 Tool registry + GitHub tools
-    github.ts                              GitHub API wrapper
-    auth.ts                                JWT creation/verification
-    responses.ts                           HTTP response helpers
+      client.ts                            postgres-js + Drizzle (uses NETLIFY_DATABASE_URL)
+      schema.ts                            5 tables: projects, sessions, manual_actions,
+                                           tool_configs, settings
+    tools/
+      registry.ts                          Map<name, Tool> + executeTool
+      register-all.ts                      Cold-start registration (idempotent)
+      github.ts                            11 GitHub tool registrations
+    github.ts                              GitHub REST API wrapper (no Octokit)
+    auth.ts                                JWT creation/verification + cookie helpers
+    responses.ts                           json + errorResponse + classifyError
 
-drizzle/                                   Migration SQL files
-scripts/archived/                          Blob migration scripts (historical)
+drizzle/                                   Migration SQL: 0000..0004
+scripts/archived/                          Historical Blob → Postgres migration scripts
 ```
 
 ---
 
 ## 4. Database Schema
 
-### Projects
+Five tables. All defined in [`netlify/functions/lib/db/schema.ts`](netlify/functions/lib/db/schema.ts) using Drizzle ORM against Neon Postgres. Timestamps are `timestamp with time zone`. Migrations live under [`drizzle/`](drizzle/) (0000..0004).
+
+### projects
 
 | Column | Type | Notes |
 |--------|------|-------|
-| id | uuid | PK, auto |
-| name | text | required |
-| description | text | default "" |
-| stack | text | default "" |
-| phase | text | idea / mvp / polish / deploy |
-| github_repo | text | "owner/repo" format |
-| netlify_site_url | text | |
-| data_sources | text[] | e.g., ["github"] |
-| dismissed_suggestions | text[] | |
-| last_session_id | uuid | |
-| last_synced_at | timestamptz | |
-| created_at | timestamptz | auto |
-| updated_at | timestamptz | auto |
+| `id` | uuid | PK, `defaultRandom()` |
+| `name` | text | NOT NULL |
+| `description` | text | NOT NULL, default `""` |
+| `stack` | text | NOT NULL, default `""` |
+| `phase` | text | NOT NULL — `idea` \| `mvp` \| `polish` \| `deploy` |
+| `github_repo` | text | `"owner/repo"` |
+| `netlify_site_url` | text | |
+| `data_sources` | text[] | NOT NULL, default `{}` (e.g. `["github"]`) |
+| `dismissed_suggestions` | text[] | NOT NULL, default `{}` |
+| `last_session_id` | uuid | |
+| `last_synced_at` | timestamptz | |
+| `created_at` | timestamptz | NOT NULL, `now()` |
+| `updated_at` | timestamptz | NOT NULL, `now()` |
 
-Index: `projects_updated_at_idx`
+Index: `projects_updated_at_idx` on `updated_at`.
 
-### Sessions
-
-| Column | Type | Notes |
-|--------|------|-------|
-| id | uuid | PK, auto |
-| project_id | uuid | FK -> projects, cascade delete |
-| goal | text | required |
-| what_changed | text[] | |
-| blockers | text | |
-| detected_intent | text | AI-detected, 2-5 words |
-| created_at | timestamptz | auto |
-
-Index: `sessions_project_id_created_at_idx`
-
-### Manual Actions
+### sessions
 
 | Column | Type | Notes |
 |--------|------|-------|
-| id | text | PK (manual-{timestamp} format) |
-| project_id | uuid | FK -> projects, cascade delete |
-| text | text | required |
-| done | boolean | default false |
-| position | integer | sort order |
-| spec_path | text | link to generated spec |
-| created_at | timestamptz | auto |
-| updated_at | timestamptz | auto |
+| `id` | uuid | PK |
+| `project_id` | uuid | FK → projects, `ON DELETE CASCADE` |
+| `goal` | text | NOT NULL |
+| `what_changed` | text[] | NOT NULL, default `{}` |
+| `blockers` | text | nullable |
+| `detected_intent` | text | AI-detected, 2–5 words |
+| `created_at` | timestamptz | NOT NULL, `now()` |
 
-Index: `manual_actions_project_id_position_idx`
+Index: `sessions_project_id_created_at_idx` on `(project_id, created_at)`.
 
-### Buffr Global
+### manual_actions
 
-| Column | Type | Notes |
-|--------|------|-------|
-| id | uuid | PK, auto |
-| filename | text | unique |
-| path | text | e.g., ".buffr/global/rules.md" |
-| category | text | identity / rules / stack / skills |
-| title | text | |
-| content | text | markdown |
-| created_at | timestamptz | auto |
-| updated_at | timestamptz | auto |
-
-### Buffr Context
+One row per action. PK is the **app-generated text id** (e.g. `manual-1717000000000`).
 
 | Column | Type | Notes |
 |--------|------|-------|
-| id | uuid | PK, auto |
-| project_id | uuid | FK -> projects, cascade delete |
-| filename | text | |
-| path | text | e.g., ".buffr/project/context.md" |
-| category | text | context / rules / stack / agents |
-| title | text | |
-| content | text | AI-generated markdown |
-| generated_at | timestamptz | auto |
-| updated_at | timestamptz | auto |
+| `id` | text | PK — app-generated id |
+| `project_id` | uuid | FK → projects, cascade delete |
+| `text` | text | NOT NULL |
+| `done` | boolean | NOT NULL, default `false` |
+| `position` | integer | NOT NULL — sort order |
+| `created_at` | timestamptz | NOT NULL, `now()` |
+| `updated_at` | timestamptz | NOT NULL, `now()` |
 
-Index: `buffr_context_project_id_idx`
+Index: `manual_actions_project_id_position_idx` on `(project_id, position)`. Storage layer rewrites the entire list on every mutation (delete-then-insert) to keep `position` contiguous.
 
-### Buffr Specs
+### tool_configs
 
 | Column | Type | Notes |
 |--------|------|-------|
-| id | uuid | PK, auto |
-| project_id | uuid | FK -> projects, cascade delete |
-| category | text | features / bugs / tests / phases / migrations / refactors / prompts / performance / integrations |
-| filename | text | |
-| path | text | e.g., ".buffr/specs/bugs/login-crash.md" |
-| title | text | |
-| content | text | markdown |
-| status | text | draft / ready / in-progress / done |
-| created_at | timestamptz | auto |
-| updated_at | timestamptz | auto |
+| `integration_id` | text | PK — e.g. `github` |
+| `values` | jsonb | NOT NULL, default `{}` — config key/values |
+| `enabled` | boolean | NOT NULL, default `false` |
+| `updated_at` | timestamptz | NOT NULL, `now()` |
 
-Unique: `(project_id, path)`. Index: `buffr_specs_project_id_category_idx`
-
-### Tool Configs
+### settings
 
 | Column | Type | Notes |
 |--------|------|-------|
-| integration_id | text | PK |
-| values | jsonb | config key-value pairs |
-| enabled | boolean | |
-| updated_at | timestamptz | auto |
+| `key` | text | PK |
+| `value` | jsonb | NOT NULL |
 
-### Settings
-
-| Column | Type | Notes |
-|--------|------|-------|
-| key | text | PK |
-| value | jsonb | |
-
-### Conversations
-
-| Column | Type | Notes |
-|--------|------|-------|
-| id | uuid | PK, auto |
-| project_id | uuid | FK -> projects, cascade delete |
-| title | text | |
-| created_at | timestamptz | auto |
-| updated_at | timestamptz | auto |
-
-Index: `conversations_project_id_idx`
-
-### Messages
-
-| Column | Type | Notes |
-|--------|------|-------|
-| id | uuid | PK, auto |
-| conversation_id | uuid | FK -> conversations, cascade delete |
-| role | text | user / assistant / tool / system |
-| content | text | |
-| tool_calls | jsonb | |
-| tool_results | jsonb | |
-| created_at | timestamptz | auto |
-
-Index: `messages_conversation_id_idx`
+Generic JSONB key/value for app-wide flags (currently used for `default-data-sources`).
 
 ---
 
 ## 5. Data Models (TypeScript)
+
+Source of truth: [`src/lib/types.ts`](src/lib/types.ts) (shared by client + functions). The `ManualActionData` wire type lives in [`src/lib/api.ts`](src/lib/api.ts).
 
 ```typescript
 interface Project {
@@ -295,48 +227,16 @@ interface ManualActionData {
   text: string;
   done: boolean;
   createdAt: string;
-  specPath?: string | null;
 }
 
-interface BuffrContextItem {
-  id: string;
-  projectId: string;
-  filename: string;
-  path: string;
-  category: "context" | "rules" | "stack" | "agents";
-  title: string;
-  content: string;
-  generatedAt: string;
-  updatedAt: string;
-}
-
-interface BuffrGlobalItem {
-  id: string;
-  filename: string;
-  path: string;
-  category: "identity" | "rules" | "stack" | "skills";
-  title: string;
-  content: string;
-  createdAt: string;
-  updatedAt: string;
-}
-
-interface BuffrSpecItem {
-  id: string;
-  category: "features" | "bugs" | "tests" | "phases" | "migrations"
-           | "refactors" | "prompts" | "performance" | "integrations";
-  filename: string;
-  path: string;
-  title: string;
-  content: string;
-  scope: string;
-  status: "draft" | "ready" | "in-progress" | "done";
-  createdAt: string;
-  updatedAt: string;
+interface ToolDefinition {
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
 }
 
 interface ToolIntegration {
-  id: string;
+  id: string;            // e.g. "github"
   name: string;
   description: string;
   status: "connected" | "error" | "not_configured";
@@ -352,7 +252,7 @@ interface ToolConfig {
 }
 
 interface LLMProvider {
-  name: string;
+  name: string;          // "anthropic" | "openai" | "google" | "ollama"
   label: string;
   model: string;
 }
@@ -360,274 +260,215 @@ interface LLMProvider {
 
 ---
 
-## 6. .buffr Directory Structure
+## 6. Features
 
-```
-.buffr/
-  global/              -- who you are -- global, all projects
-    identity.md
-    rules.md
-    stack.md
-    skills.md
-    adapters/          -- IDE-specific context files (symlinked to root)
-      CLAUDE.md
-      .cursorrules
-      copilot-instructions.md
-      .windsurfrules
-      .aider.conf.yml
-      .continuerules
+### 6.1 Authentication
 
-  project/             -- what this project is -- per-project, AI-generated
-    context.md
+- Single-user login. Credentials are read from `AUTH_USERNAME` / `AUTH_PASSWORD`.
+- JWT (HS256, 7-day expiry, subject `"buffr-user"`) signed with `AUTH_SECRET`.
+- Stored in HTTP-only, Secure, SameSite=Lax cookie named `buffr-token` (Max-Age 604800s).
+- [`src/middleware.ts`](src/middleware.ts) verifies the token and:
+  - Skips `/login`, `/_next/`, `/.netlify/`, `/favicon.ico`.
+  - Redirects unauthenticated users to `/login`.
+  - Bounces authenticated users away from `/login` to `/`.
+  - Falls back to `"fallback-dev-secret"` if `AUTH_SECRET` is unset (dev only).
+- `AppShell` re-checks auth client-side via `/auth-check` and gates the nav + provider context behind the result.
 
-  specs/               -- what you're doing now -- per task
-    features/
-    bugs/
-    tests/
-    phases/
-    migrations/
-    refactors/
-    prompts/
-    performance/
-    integrations/
-```
+### 6.2 Dashboard (`/`)
 
----
+- Lists all projects sorted by `updated_at` desc.
+- `ProjectCard` shows: name, phase badge, data-source icons, description, stack, "{n}m/h/d ago", up to 3 pending next actions, GitHub/Netlify link icons, delete button.
+- "Load Existing" opens [`ImportProjectModal`](src/components/dashboard/import-project-modal.tsx).
+- Delete with confirmation modal.
+- Newly created project is cached in `sessionStorage` (`buffr-project-{id}`) so the project page renders instantly on navigation.
+- Dashboard re-fetches projects on `window.focus`.
 
-## 7. Features
+### 6.3 GitHub Import
 
-### 7.1 Authentication
+- Accepts `owner/repo`, `https://github.com/owner/repo`, or `.git` URLs.
+- Calls `github_analyze_repo` which:
+  - Resolves the repo (follows GitHub renames/redirects via `getRepoInfo`).
+  - Lists the recursive tree.
+  - Reads `package.json` deps + devDeps.
+  - **Frameworks detected**: Next.js, React, Vue, Nuxt, Svelte, SvelteKit, Angular, Express, Fastify, Hono, Astro, Gatsby, Remix, Solid; plus TypeScript (deps or `.ts`/`.tsx`), Tailwind CSS, styled-components, Emotion.
+  - **Dev tools detected**: ESLint, Prettier, Jest, Vitest, Mocha, Testing Library, Cypress, Playwright, Storybook, Husky, lint-staged.
+  - **Maturity signals**: `hasTests` (test deps or `.test.`/`.spec.`/`__tests__` paths), `hasCI` (`.github/workflows/`, `.gitlab-ci.yml`, `.circleci/config.yml`, `Jenkinsfile`), `hasDeployConfig` (`netlify.toml`, `vercel.json`, `fly.toml`, `Dockerfile`, `docker-compose.yml`, `render.yaml`).
+  - **Phase auto-detect**: `idea` (`fileCount < 5`) → `mvp` (default) → `polish` (tests + CI or deploy) → `deploy` (all three).
+  - Stack string is deduplicated (Next.js implies React; Nuxt implies Vue; SvelteKit implies Svelte).
 
-- Single-user login (credentials from env vars)
-- JWT stored in HTTP-only cookie, 7-day expiry
-- Next.js middleware redirects unauthenticated users to `/login`
+### 6.4 Project Page (`/project/[id]`)
 
-### 7.2 Dashboard
-
-- Lists all projects sorted by `updatedAt` (most recent first)
-- Each project card shows: name, phase badge, stack, time since update, data source icons, pending next actions (up to 3)
-- "Load Existing" button opens GitHub import modal
-- Delete project with confirmation modal
-
-### 7.3 GitHub Import
-
-- Accepts `owner/repo`, full GitHub URLs, or `.git` URLs
-- Analyzes repository: detects frameworks, dev tools, test presence, CI, deploy config
-- Auto-detects project phase: idea (<5 files), mvp (default), polish (tests + CI/deploy), deploy (all three)
-- Handles GitHub repo renames/redirects transparently
-
-### 7.4 Project Page
-
-Tabbed interface with header showing project metadata, health, and actions.
+Tabbed workspace rendered by [`ResumeCard`](src/components/session/resume-card.tsx).
 
 **Header:**
-- Multi-project nav bar with health dots (green = active this week, yellow = needs attention)
-- Activity timestamps: last session, last commit, last sync
-- Project name, phase badge, stack, GitHub link, site link
-- Sync button (re-analyzes repo + regenerates project context) and End Session button
+- "← Dashboard" back link.
+- Multi-project nav bar with health dots (rendered only when there are >1 projects). Green = active this week; yellow = needs attention.
+- Activity timestamps: "Last session: Day, Mon DD (Xh ago)" and "Last commit: Day, Mon DD (Xh ago)".
+- Project name, phase badge, description, stack, GitHub link, Netlify link, "Last sync Xh ago".
+- **Sync** button (only when `githubRepo` is set) re-runs `github_analyze_repo` and updates `name`, `githubRepo` (handles renames), `stack`, `phase`, `description`, `lastSyncedAt`.
+- **End Session** button opens `EndSessionModal`.
 
-**Smart Suggestions:**
-- Up to 2 contextual suggestion cards (dismissable, persisted)
-- Rules: no data sources -> suggest connecting, no sessions -> suggest starting, idle >14 days -> suggest resuming
+**Smart Suggestions** (up to 2 cards, dismissable, persisted in `dismissed_suggestions`):
+- No data sources connected + integrations available → suggest connecting one (jumps to Tools tab).
+- No sessions yet → suggest starting a first session.
+- Idle > 14 days → suggest resuming.
 
-**Detected Intent:**
-- Shows AI-detected intent from last session (e.g., "authentication feature")
+**Detected Intent** banner shows the AI-detected intent of the previous session (e.g. "authentication feature") when present.
 
-**Tabs:**
+#### Tabs
 
-#### Next Actions Tab
-- Task list with add, edit, delete, reorder (drag-and-drop), mark done
-- AI rewrite: plain rewrite or persona-based (User Story, Backend Dev, Frontend Dev, Stakeholder, Project Manager)
-- "Spec" button on each action -> opens SpecBuilderModal to generate a spec from the todo
-- Purple "spec" badge on actions that have a linked spec -> navigates to .buffr/specs tab
-- Optimistic UI with rollback on server failure and toast notifications
-- Completed tasks feed into End Session summaries, then get cleaned up
-- Tasks persist across sessions
+Three tabs: `Next Actions` (default), `Last Session`, `Tools`.
 
-#### Last Session Tab
-- Displays goal, what changed (bulleted), blockers, timestamp
-- Read-only view of the most recent session
+##### Next Actions (`ActionsTab`)
+- Add new task via auto-resizing textarea (Enter submits, Shift+Enter newline).
+- "Rewrite" button (default paraphrase) and "Persona ▾" dropdown with: User Story, Backend Dev, Frontend Dev, Stakeholder, Project Manager.
+- Inline edit (click to edit, Enter commits, Esc cancels), delete, reorder via HTML5 drag-and-drop.
+- Each row: drag handle, position number, text, Done button, trash button.
+- Optimistic UI with rollback + toast notifications via `NotificationProvider` on server failure.
+- Tasks persist across sessions; completed ones feed `EndSessionModal` summaries and are removed via `cleanDoneManualActions` after a session is saved.
 
-#### .buffr/project Tab
-- AI-generated project context (context.md)
-- "Generate Context" / "Regenerate" button triggers AI analysis of project + sessions + repo
-- Inline edit mode for manual refinement
-- Push to GitHub at `.buffr/project/context.md`
-- Auto-regenerates when user clicks sync button
+##### Last Session (`SessionTab`)
+- Read-only view: Goal, What Changed (bulleted), Blockers (in red label), timestamp.
+- Empty state: "No sessions yet."
 
-#### .buffr/global Tab
-- CRUD for global context files (identity, rules, stack, skills)
-- Category filter with counts and color-coded badges
-- Search by title or filename
-- Inline expand to preview content
-- Push to GitHub with adapter selection:
-  - Claude Code -> `CLAUDE.md` (symlinked from `.buffr/global/adapters/`)
-  - Cursor -> `.cursorrules`
-  - Copilot -> `.github/copilot-instructions.md`
-  - Windsurf -> `.windsurfrules`
-  - Aider -> `.aider.conf.yml`
-  - Continue -> `.continuerules`
+##### Tools (`ToolsTab`)
+- **Default Data Sources for New Projects**: checkbox list (currently only `github`). Disabled if integration isn't connected. Persisted to `settings` key `default-data-sources`.
+- **Integrations** grid: status badge (`Connected` / `Error` / `Not Configured`), tool count, Configure / Test / Remove buttons. The built-in `github` integration cannot be removed.
+- **Tool Registry**: searchable, filterable table of every registered tool with name, description, parameter keys (first 4), and source icon.
+- `ConfigModal` saves integration tokens to `tool_configs.values`. `TestToolModal` runs `executeTool(name, JSON.parse(input))` and displays the result.
 
-#### .buffr/specs Tab
-- CRUD for spec files organized by 9 categories
-- Category filter + status filter (draft / ready / in-progress / done)
-- Inline status update buttons in expanded view
-- Directory group headers by category
-- Scoped to current project
-- Push to GitHub at `.buffr/specs/{category}/{filename}`
-- Wide modal for editing
+### 6.5 End Session Modal (`EndSessionModal`)
 
-#### Tools Tab
-- Integration management (currently: GitHub)
-- Default data sources for new projects
-- Configure integration tokens
-- Test tool execution with JSON input
-- Tool registry with search and filter
+Multi-phase flow (`fetching` → `summarizing` → `ready`):
 
-### 7.5 End Session Modal
+1. **Fetching** — for each `dataSource`, looks up the relevant capability tool (`list_commits` for `github`) and pulls activity from the last 24h, then appends completed `manual_actions`.
+2. **Summarizing** — calls `POST /session-ai?summarize` with the activity items and the selected provider; populates Goal + bulleted "What Changed".
+3. **Ready** — editable form:
+   - **Goal** (single sentence, required to enable Save).
+   - **What Changed** (textarea; AI Summarize button re-runs the summarizer over the current bullets; Clear button).
+   - **Blockers** (optional).
+   - "AI-generated from N items across M sources" caption when the auto-fill ran.
+4. **Save** — creates the `sessions` row, sets `project.lastSessionId`, calls `POST /session-ai?intent` to populate `detectedIntent`, then runs `cleanDoneManualActions` (best-effort).
 
-Multi-phase flow:
+If no LLM provider is configured (`providers.length === 0`), the modal skips fetch + summarize and goes straight to `ready` with an empty form.
 
-1. **Fetching** -- Pulls GitHub commits from last 24 hours + completed manual actions
-2. **Summarizing** -- Sends activity items to AI for summarization
-3. **Ready** -- Editable form:
-   - Goal (1 sentence, required)
-   - What Changed (multi-line, AI-summarizable)
-   - Blockers (optional)
-   - Save creates session, updates project's lastSessionId, detects intent, cleans completed manual actions
+### 6.6 AI Features
 
-### 7.6 Spec Builder Modal
-
-Multi-step flow triggered from any Next Actions item:
-
-1. **Type Selection** -- Auto-detected spec type with override dropdown (9 categories)
-2. **Generating** -- Loading state while agent runs
-3. **Preview** -- Full spec content in editable textarea, shows validation gaps
-4. **Saved** -- Confirmation with spec path
-
-### 7.7 AI Features
-
-All AI features use the selected LLM provider (switchable in nav).
+All AI features run through the currently selected LLM provider (switchable in the nav bar; persisted to `localStorage["buffr-provider"]` and restored on reload).
 
 | Feature | Chain | Input | Output |
 |---------|-------|-------|--------|
-| Session Summarize | `createSummarizeChain` | Activity items | `{ goal, bullets[] }` |
-| Intent Detection | `createIntentChain` | Goal, what changed, phase | `{ intent }` |
-| Task Paraphrase | `createParaphraseChain` | Text, optional persona | `{ text }` |
-| Context Generation | `createContextChain` | Project + sessions + repo | `{ title, content }` |
-| Spec Building | `runSpecAgent` | Intent + projectId | `{ spec, path, gaps }` |
+| Session summarize | `createSummarizeChain` | activity items | `{ goal, bullets[] }` |
+| Intent detection | `createIntentChain` | `goal`, `whatChanged`, `projectPhase` | `{ intent }` |
+| Task paraphrase | `createParaphraseChain` | `text`, optional `persona` | `{ text }` |
 
-Supported providers: Anthropic Claude, OpenAI GPT, Google Gemini, Ollama (local).
+**Provider factory** ([`netlify/functions/lib/ai/provider.ts`](netlify/functions/lib/ai/provider.ts)) instantiates models at temperature `0.7` via `require()`-style imports (Netlify-bundle-friendly):
 
-### 7.8 Agent System
+- `anthropic` → `ChatAnthropic` (`ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL` default `claude-sonnet-4-20250514`)
+- `openai` → `ChatOpenAI` (`OPENAI_API_KEY`, `OPENAI_MODEL` default `gpt-4o`)
+- `google` → `ChatGoogleGenerativeAI` (`GOOGLE_API_KEY`, `GOOGLE_MODEL` default `gemini-1.5-pro`)
+- `ollama` → `ChatOllama` (`OLLAMA_BASE_URL`, `OLLAMA_MODEL` default `llama3`)
 
-Tool-calling agent that builds specs from todo items:
+`getAvailableProviders()` filters to providers whose required env keys are set. The default provider is `DEFAULT_LLM_PROVIDER` (fallback `anthropic`). All chain output goes through `stripCodeBlock` to tolerate ` ```json ` fenced LLM responses, with a fallback to the raw string if JSON parsing fails.
 
+### 6.7 Tool System
+
+[`netlify/functions/lib/tools/registry.ts`](netlify/functions/lib/tools/registry.ts) exposes a small runtime registry:
+
+```typescript
+interface Tool {
+  name: string;
+  description: string;
+  integrationId: string;
+  inputSchema: Record<string, unknown>;
+  execute: (input: Record<string, unknown>) => Promise<unknown>;
+}
 ```
-loadContext -> selectTemplate -> buildSpec -> validateSpec -> saveSpec
-```
 
-- **loadContext** -- Reads project context from DB
-- **selectTemplate** -- Classifies intent into spec category via keyword matching
-- **buildSpec** -- LLM generates filled-in spec from template + context
-- **validateSpec** -- Checks required sections per category
-- **saveSpec** -- Creates BuffrSpecItem with unique filename (conflict resolution)
+- `registerTool(tool)` adds to a module-level `Map<name, Tool>`.
+- `listToolsByIntegration(integrationId)` — filtered view.
+- `executeTool(name, input)` → `{ ok, result?, error? }`. Catches thrown errors and returns them as `error`.
+- `register-all.ts` runs at module load on cold start via `tools.ts` and is idempotent (`registered` flag).
 
-All agent turns stored in `conversations` + `messages` tables for tracing.
+**Capability mapping** ([`src/lib/data-sources.ts`](src/lib/data-sources.ts)) maps abstract capabilities to concrete tool names per integration. Currently:
 
-### 7.9 Tool System
+| Integration | Capability | Tool |
+|---|---|---|
+| github | create_item | `github_create_issue` |
+| github | close_item | `github_close_issue` |
+| github | list_commits | `github_list_commits` |
+| github | get_diffs | `github_get_diffs` |
+| github | get_file | `github_get_file` |
 
-Extensible integration architecture:
+**Registered GitHub tools** ([`netlify/functions/lib/tools/github.ts`](netlify/functions/lib/tools/github.ts)): `github_get_repo`, `github_list_issues`, `github_list_repos`, `github_analyze_repo`, `github_create_repo`, `github_push_files`, `github_create_issue`, `github_close_issue`, `github_list_commits`, `github_get_diffs`, `github_get_file`.
 
-- **Registry**: Tools register with name, description, input schema, execute function
-- **Execution**: `POST /tools?execute` runs any registered tool by name
-- **Data Source Mapping**: `data-sources.ts` maps capabilities to tool names
+**Integration status** is auto-detected: `connected` if `tool_configs.enabled` is true and all non-`databaseId` config fields are filled, OR — for `github` — if `GITHUB_TOKEN` is set in the environment. Otherwise `error` (enabled but missing values) or `not_configured`.
 
-GitHub tools: `github_get_repo`, `github_list_issues`, `github_list_repos`, `github_analyze_repo`, `github_create_repo`, `github_push_files`, `github_create_issue`, `github_close_issue`, `github_list_commits`, `github_get_diffs`, `github_get_file`
+### 6.8 Project Health
 
-### 7.10 Project Health
+[`src/lib/project-health.ts`](src/lib/project-health.ts) computes per-project from session `createdAt`, `project.lastSyncedAt`, and the latest GitHub commit date. "Needs attention" = no activity inside the current calendar week (Sunday 00:00 → next Sunday 00:00). Rendered as colored dots in the multi-project nav bar.
 
-- Computed per-project based on sessions, last sync, last commit
-- "Needs attention" if no activity in the current calendar week
-- Displayed as colored dots in the multi-project nav
+### 6.9 Smart Suggestions Engine
+
+[`src/lib/suggestions.ts`](src/lib/suggestions.ts) returns up to 2 cards per project, filtered by `dismissed_suggestions`:
+
+1. `connect-source` — no data sources but at least one integration is connected → "Go to Tools".
+2. `first-session` — no last session → "Start working".
+3. `idle-project` — last session > 14 days ago → "Resume".
 
 ---
 
-## 8. API Reference
+## 7. API Reference
 
-All endpoints at `/.netlify/functions/`.
+All endpoints are under `/.netlify/functions/`. All responses are JSON; errors use `{ error: string }` with an HTTP status from `classifyError`.
 
 ### Auth
 
 | Method | Endpoint | Body | Response |
 |--------|----------|------|----------|
-| GET | `/auth-check` | -- | `{ authenticated }` |
-| POST | `/login` | `{ username, password }` | Sets cookie |
-| POST | `/logout` | -- | Clears cookie |
+| GET | `/auth-check` | — | `{ authenticated: boolean }` |
+| POST | `/login` | `{ username, password }` | `{ authenticated: true }` + Set-Cookie |
+| POST | `/logout` | — | `{ ok: true }` (clears cookie) |
+
+### Providers
+
+| Method | Endpoint | Response |
+|--------|----------|----------|
+| GET | `/providers` | `{ providers: LLMProvider[], defaultProvider: string }` |
 
 ### Projects
 
-| Method | Endpoint | Body/Params | Response |
-|--------|----------|-------------|----------|
-| GET | `/projects` | -- | `Project[]` |
-| GET | `/projects?id=X` | -- | `Project` |
+| Method | Endpoint | Body / Params | Response |
+|--------|----------|---------------|----------|
+| GET | `/projects` | — | `Project[]` |
+| GET | `/projects?id=X` | — | `Project` |
 | POST | `/projects` | `Partial<Project>` | `Project` (201) |
-| PUT | `/projects?id=X` | Allowed fields | `Project` |
-| DELETE | `/projects?id=X` | -- | `{ ok }` |
+| PUT | `/projects?id=X` | whitelisted fields | `Project` |
+| DELETE | `/projects?id=X` | — | `{ ok: true }` |
+
+PUT only writes fields in the whitelist: `name, description, stack, phase, githubRepo, netlifySiteUrl, dataSources, dismissedSuggestions, lastSessionId, lastSyncedAt`.
 
 ### Sessions
 
-| Method | Endpoint | Body/Params | Response |
-|--------|----------|-------------|----------|
-| GET | `/sessions?projectId=X` | -- | `Session[]` |
-| POST | `/sessions` | `{ projectId, goal, whatChanged[], blockers? }` | `Session` (201) |
-| DELETE | `/sessions?id=X` | -- | `{ ok }` |
+| Method | Endpoint | Body / Params | Response |
+|--------|----------|---------------|----------|
+| GET | `/sessions?id=X` | — | `Session` |
+| GET | `/sessions?projectId=X` | — | `Session[]` (DESC by createdAt) |
+| POST | `/sessions` | `{ projectId, goal, whatChanged[], blockers?, detectedIntent? }` | `Session` (201) |
+| DELETE | `/sessions?id=X` | — | `{ ok: true }` |
 
 ### Manual Actions
 
-| Method | Endpoint | Body | Response |
-|--------|----------|------|----------|
-| GET | `/manual-actions?projectId=X` | -- | `ManualAction[]` |
-| POST | `/manual-actions?projectId=X` | `{ id, text }` | `ManualAction[]` (201) |
-| PUT | `/manual-actions?projectId=X` | `{ id, done?, text? }` | `ManualAction[]` |
-| PATCH | `/manual-actions?projectId=X` | `{ orderedIds }` | `ManualAction[]` |
-| DELETE | `/manual-actions?projectId=X&actionId=Y` | -- | `ManualAction[]` |
-| DELETE | `/manual-actions?projectId=X&cleanDone` | -- | `ManualAction[]` |
-
-### Buffr Context
+`projectId=X` is required for every method. Mutations return the **full updated list**, not just `{ ok }`.
 
 | Method | Endpoint | Body | Response |
 |--------|----------|------|----------|
-| GET | `/buffr-context?projectId=X` | -- | `BuffrContextItem[]` |
-| POST | `/buffr-context?generate` | `{ projectId, provider? }` | `BuffrContextItem` (201) |
-| PUT | `/buffr-context?id=X` | `{ content?, title? }` | `BuffrContextItem` |
-| POST | `/buffr-context?push` | `{ projectId, repo }` | `{ sha }` |
-
-### Buffr Global
-
-| Method | Endpoint | Body | Response |
-|--------|----------|------|----------|
-| GET | `/buffr-global` | -- | `BuffrGlobalItem[]` |
-| POST | `/buffr-global` | `{ title, content, category, filename? }` | `BuffrGlobalItem` (201) |
-| POST | `/buffr-global?push` | `{ repo, adapterIds? }` | `{ sha }` |
-| PUT | `/buffr-global?id=X` | `{ title?, content?, category?, filename? }` | `BuffrGlobalItem` |
-| DELETE | `/buffr-global?id=X` | -- | `{ ok }` |
-
-### Buffr Specs
-
-| Method | Endpoint | Body | Response |
-|--------|----------|------|----------|
-| GET | `/buffr-specs?scope=projectId` | -- | `BuffrSpecItem[]` |
-| POST | `/buffr-specs` | `{ title, content, category, status?, filename?, scope }` | `BuffrSpecItem` (201) |
-| POST | `/buffr-specs?push` | `{ projectId, repo }` | `{ sha }` |
-| PUT | `/buffr-specs?id=X` | `{ title?, content?, category?, status?, filename? }` | `BuffrSpecItem` |
-| DELETE | `/buffr-specs?id=X` | -- | `{ ok }` |
-
-### Buffr Agent
-
-| Method | Endpoint | Body | Response |
-|--------|----------|------|----------|
-| POST | `/buffr-agent?buildSpec` | `{ intent, projectId, answers?, provider? }` | `{ spec, path, gaps[], conversationId }` |
+| GET | `/manual-actions?projectId=X` | — | `ManualActionData[]` |
+| POST | `/manual-actions?projectId=X` | `{ id, text }` | `ManualActionData[]` (201) |
+| PUT | `/manual-actions?projectId=X` | `{ id, done?, text? }` | `ManualActionData[]` |
+| PATCH | `/manual-actions?projectId=X` | `{ orderedIds: string[] }` | `ManualActionData[]` |
+| DELETE | `/manual-actions?projectId=X&actionId=Y` | — | `ManualActionData[]` |
+| DELETE | `/manual-actions?projectId=X&cleanDone` | — | `ManualActionData[]` (without `done`) |
 
 ### Session AI
 
@@ -635,42 +476,42 @@ All endpoints at `/.netlify/functions/`.
 |--------|----------|------|----------|
 | POST | `/session-ai?summarize` | `{ activityItems[], provider? }` | `{ goal, bullets[] }` |
 | POST | `/session-ai?intent` | `{ goal, whatChanged, projectPhase, provider? }` | `{ intent }` |
-| POST | `/session-ai?paraphrase` | `{ text, provider?, persona? }` | `{ text }` |
+| POST | `/session-ai?paraphrase` | `{ text, persona?, provider? }` | `{ text }` |
+
+> ⚠ `session-ai` currently lacks auth-middleware enforcement (TODO in source). Reverse proxy / Netlify access controls are the only gate today.
 
 ### Tools
 
 | Method | Endpoint | Body | Response |
 |--------|----------|------|----------|
-| GET | `/tools` | -- | `ToolIntegration[]` |
-| POST | `/tools?execute` | `{ toolName, input }` | `{ ok, result?, error? }` |
+| GET | `/tools` | — | `ToolIntegration[]` |
+| GET | `/tools?defaultSources` | — | `{ sources: string[] }` (default `["github"]`) |
+| POST | `/tools?execute` | `{ toolName, input }` | `{ ok, result?, error? }` (status 200 on ok, 400 on error) |
 | PUT | `/tools?integrationId=X` | `{ values, enabled }` | `ToolConfig` |
-| DELETE | `/tools?integrationId=X` | -- | `{ ok }` |
-| GET | `/tools?defaultSources` | -- | `{ sources }` |
-| PUT | `/tools?defaultSources` | `{ sources }` | `{ sources }` |
-
-### Providers
-
-| Method | Endpoint | Response |
-|--------|----------|----------|
-| GET | `/providers` | `{ providers: LLMProvider[], defaultProvider }` |
+| PUT | `/tools?defaultSources` | `{ sources: string[] }` | `{ sources }` |
+| DELETE | `/tools?integrationId=X` | — | `{ ok: true }` |
 
 ---
 
-## 9. Design System
+## 8. Design System
 
-### Palette
+### Palette ([`src/app/globals.css`](src/app/globals.css))
 
 | Token | Value | Usage |
 |-------|-------|-------|
-| Background | `#09090b` | Page background |
-| Foreground | `#e4e4e7` | Primary text |
-| Muted | `#a1a1aa` | Secondary text |
-| Border | `rgba(63, 63, 70, 0.6)` | Borders |
-| Card | `rgba(24, 24, 27, 0.3)` | Card backgrounds |
-| Accent | `#7c3aed` | Purple accent / primary actions |
-| Success | `#34d399` | Emerald green |
-| Warning | `#fbbf24` | Amber |
-| Error | `#ef4444` | Red |
+| `--color-background` | `#09090b` | Page background |
+| `--color-foreground` | `#e4e4e7` | Primary text |
+| `--color-muted` | `#a1a1aa` | Secondary text |
+| `--color-border` | `rgba(63, 63, 70, 0.6)` | Borders |
+| `--color-card` | `rgba(24, 24, 27, 0.3)` | Card background |
+| `--color-card-hover` | `rgba(24, 24, 27, 0.5)` | Card hover |
+| `--color-accent` | `#7c3aed` | Primary purple |
+| `--color-accent-hover` | `#6d28d9` | Darker purple |
+| `--color-success` | `#34d399` | Emerald |
+| `--color-warning` | `#fbbf24` | Amber |
+| `--color-error` | `#ef4444` | Red |
+
+Selection: `#7c3aed40`. Scrollbars: thin, `#333` on transparent. Dark theme only (`<html className="dark">`).
 
 ### Phase Colors
 
@@ -681,19 +522,14 @@ All endpoints at `/.netlify/functions/`.
 | polish | `#34d399` (emerald) |
 | deploy | `#f472b6` (pink) |
 
-### Spec Category Colors
+### Source Colors
 
-| Category | Color |
-|----------|-------|
-| features | `#34d399` |
-| bugs | `#ef4444` |
-| tests | `#fbbf24` |
-| phases | `#818cf8` |
-| migrations | `#f472b6` |
-| refactors | `#38bdf8` |
-| prompts | `#c084fc` |
-| performance | `#fb923c` |
-| integrations | `#22d3ee` |
+| Source | Color |
+|--------|-------|
+| github | `#8b949e` |
+| ai | `#c084fc` |
+| session | `#a78bfa` |
+| manual | `#71717a` |
 
 ### Typography
 
@@ -702,47 +538,84 @@ All endpoints at `/.netlify/functions/`.
 | Body | DM Sans (400, 500, 600, 700) |
 | Mono | JetBrains Mono |
 
+Loaded via `next/font/google` and exposed as `--font-dm-sans` / `--font-jetbrains-mono`.
+
 ### Conventions
 
-- BEM-like CSS class naming: `component__element--modifier`
-- CSS files per component using `@apply` (not inline Tailwind)
-- All icons are inline SVG components from `icons.tsx`
-- Animations: `fadeIn` (0.2s ease-out), `slideDown` (0.15s ease-out)
+- Tailwind CSS v4 with `@theme inline` tokens.
+- BEM-like CSS class naming: `component__element--modifier`.
+- Per-component CSS files (e.g. `actions-tab.css`) using `@apply` instead of inline Tailwind.
+- All icons are inline SVG components from [`src/components/icons.tsx`](src/components/icons.tsx).
+- Animations: `fadeIn` (0.2s ease-out), `slideDown` (0.15s ease-out).
 
 ---
 
-## 10. Environment Variables
+## 9. Environment Variables
 
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `ANTHROPIC_API_KEY` | At least one LLM | Anthropic Claude API key |
-| `ANTHROPIC_MODEL` | No | Model override (default: `claude-sonnet-4-20250514`) |
+| `ANTHROPIC_MODEL` | No | Default `claude-sonnet-4-20250514` |
 | `OPENAI_API_KEY` | At least one LLM | OpenAI API key |
-| `OPENAI_MODEL` | No | Model override (default: `gpt-4o`) |
+| `OPENAI_MODEL` | No | Default `gpt-4o` |
 | `GOOGLE_API_KEY` | At least one LLM | Google Gemini API key |
-| `GOOGLE_MODEL` | No | Model override (default: `gemini-1.5-pro`) |
+| `GOOGLE_MODEL` | No | Default `gemini-1.5-pro` |
 | `OLLAMA_BASE_URL` | At least one LLM | Ollama server URL |
-| `OLLAMA_MODEL` | No | Model override (default: `llama3`) |
-| `DEFAULT_LLM_PROVIDER` | No | Default provider (default: `anthropic`) |
-| `GITHUB_TOKEN` | For GitHub features | Personal Access Token with `repo` scope |
+| `OLLAMA_MODEL` | No | Default `llama3` |
+| `DEFAULT_LLM_PROVIDER` | No | Default `anthropic` |
+| `GITHUB_TOKEN` | For GitHub features | PAT with `repo` scope |
 | `AUTH_USERNAME` | Yes | Login username |
 | `AUTH_PASSWORD` | Yes | Login password |
-| `AUTH_SECRET` | Yes | JWT signing secret |
+| `AUTH_SECRET` | Yes (prod) | JWT signing secret (long random string); dev fallback `"fallback-dev-secret"` |
 | `NETLIFY_TOKEN` | For deploy features | Netlify Personal Access Token |
-| `NETLIFY_DATABASE_URL` | Yes | Neon Postgres connection string |
+| `NETLIFY_DATABASE_URL` | Yes | Neon Postgres connection string used by `postgres-js` |
+
+Only LLM providers whose keys are set appear in the UI.
 
 ---
 
-## 11. Error Handling
+## 10. Error Handling
 
-The `classifyError` utility maps provider errors to user-friendly messages:
+`classifyError` ([`netlify/functions/lib/responses.ts`](netlify/functions/lib/responses.ts)) maps provider and API errors to user-friendly messages:
 
-| Error Pattern | Status | Message |
-|---------------|--------|---------|
-| `credit balance is too low` | 402 | Insufficient credits |
-| `API key` / `authentication` | 401 | Invalid API key |
-| `rate limit` | 429 | Rate limited |
-| `already exists` | 422 | Name conflict |
-| `not configured` / missing token | 400 | Configuration missing |
+| Error pattern (substring) | Status | Message |
+|---|---|---|
+| `credit balance is too low`, `insufficient` | 402 | "Your LLM provider account has insufficient credits…" |
+| `authentication`, `API key`, `Incorrect API key` | 401 | "Invalid API key for the selected provider…" |
+| `rate limit`, `Rate limit` | 429 | "Rate limited by the LLM provider…" |
+| `already exists`, `name already exists`, `must be unique` | 422 | "Name conflict — that name already exists…" |
+| `not configured`, `GITHUB_TOKEN`, `NETLIFY_TOKEN` | 400 | passthrough message |
+| anything else | 500 | passthrough message |
 
-Manual action mutations use optimistic UI with rollback on failure and toast notifications via `NotificationProvider`.
+`responses.ts` also exposes `json(data, status?)` and `errorResponse(message, status?)`.
+
+Manual-action mutations use optimistic UI with rollback + a toast via `NotificationProvider` on failure (e.g. "Failed to mark done — reverted").
+
+---
+
+## 11. Scripts & Build
+
+| Command | Purpose |
+|---------|---------|
+| `npm run dev` | Next.js dev server (no Functions) |
+| `netlify dev` | Next.js + Functions locally (recommended) |
+| `npm run build` | `next build` |
+| `npm run start` | Next.js production server |
+| `npm run lint` | ESLint |
+| `npm run test` | `vitest run` |
+
+Netlify config ([`netlify.toml`](netlify.toml)): functions directory `netlify/functions`, `node_bundler = "esbuild"`, dev `timeout = 120` seconds, publish `.next`.
+
+Drizzle migrations ([`drizzle/`](drizzle/)):
+
+| File | Change |
+|------|--------|
+| `0000_sour_wolverine.sql` | Initial schema (`projects`, `sessions`, `manual_actions`, `buffr_global`, `buffr_specs`, `tool_configs`, `settings`, `conversations`, `messages`). |
+| `0001_clammy_thundra.sql` | `manual_actions.id`: uuid → text, drop default. |
+| `0002_keen_doctor_doom.sql` | Add `buffr_context` table + FK + index. |
+| `0003_flawless_mockingbird.sql` | Add `manual_actions.spec_path` (text, nullable). |
+| `0004_remove_buffr_tabs.sql` | Drop `messages`, `conversations`, `buffr_specs`, `buffr_context`, `buffr_global`, and `manual_actions.spec_path` (hand-written; regenerate `drizzle/meta/*` via `drizzle-kit generate` to sync snapshots). |
+
+Tests live alongside source (`src/lib/*.test.ts`). Two suites: `data-sources`, `suggestions`.
+
+Historical Blob-to-Postgres migration scripts are archived under [`scripts/archived/`](scripts/archived/) for reference and are not part of the runtime path.
