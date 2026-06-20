@@ -28,6 +28,8 @@ evals); buffr fills them with a Supabase-backed implementation.
 | Access path | **direct `pg` now**, Edge Functions later | single device has one client; HTTP API is YAGNI until phone/app #2 |
 | Schema shape | **forward-compat columns, no RLS** | `app_id`/`user_id`/`embedding_model` are cheap now, painful to retrofit; RLS unneeded for one user |
 | Scope | single-device persistence only | phone, sync, gateway, fine-tune stay deferred |
+| Database | **existing `reindb`** (not a new project) | already hosts per-app schemas; reuse it |
+| Schema home | **shared `agents` schema**, `app_id`-keyed | centralized agent layer (many apps); the agent service is its own "app" schema, existing per-app schemas untouched |
 
 ## Architecture & boundaries
 
@@ -39,8 +41,9 @@ evals); buffr fills them with a Supabase-backed implementation.
     │  PgVectorStore (NEW, buffr)    ← implements aptkit's VectorStore
     │  SupabaseTraceSink (NEW, buffr)← implements aptkit's CapabilityTraceSink
     ▼  node-postgres (pg)
-  Supabase Postgres  —  schema: agents  (pgvector + HNSW)
-    documents · chunks · conversations · messages · profiles
+  reindb (Supabase Postgres)  —  NEW schema: agents  (pgvector + HNSW)
+    documents · chunks · conversations · messages · profiles   (keyed by app_id)
+    [ existing app_* schemas untouched ]
 ```
 
 - **aptkit** — no changes. Provides the contracts and the agent; buffr imports them.
@@ -60,6 +63,12 @@ multi-app / phone phase, wrapping the same SQL. Building it now would add PostgR
 indirection and latency for the only client that exists.
 
 ## Supabase schema — `agents` (forward-compat, no RLS)
+
+A **new `agents` schema in the existing `reindb` database** (which already holds per-app
+schemas like `app_buffr`, left untouched). The agent layer is its own "app" — this schema
+is pointed to the agent service, and `app_id` distinguishes consumers
+(`laptop` / `buffr` / `blooming` / `contrl`). For this phase there is one writer
+(`app_id = 'laptop'`); the column exists so adding apps later needs no migration.
 
 ```sql
 create extension if not exists vector;
@@ -181,8 +190,9 @@ rework.
 
 ## Open questions (settle before implementation)
 
-- **Supabase project:** new dedicated project, or a new `agents` schema inside an existing
-  buffr Supabase project? (The original RAG plan assumed one project with per-app schemas.)
+- **RLS-later checkpoint:** the shared `agents` schema relies on `app_id` for isolation;
+  with RLS deferred, that isolation is by convention only until app #2. Adding RLS +
+  always-derive-`app_id`-from-token is a hard prerequisite before a second app writes.
 - **HNSW build params** (`m`, `ef_construction`) — defaults are fine for a small corpus;
   revisit past ~10k chunks (parent plan's batch-reindex threshold).
 
