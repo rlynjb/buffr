@@ -2,6 +2,8 @@
 
 **Date:** 2026-06-19
 **Status:** Design — approved to capture, implementation not started
+**Canonical:** this is the source of truth. Mirror (aptkit-scoped, pointer only):
+`aptkit/docs/personal-agent-organs.md` — edit here, not there.
 **Parent:** refines `agent-layer-plan.md` (buffr root)
 **Reader profile:** `aipe/specs/me.md`
 
