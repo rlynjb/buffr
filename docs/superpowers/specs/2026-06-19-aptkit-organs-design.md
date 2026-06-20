@@ -82,8 +82,11 @@ sync problem is the second thing you solve, not the first.
   (brain engine)     │   Ollama → Gemma, implements ModelProvider
                      │   ⚠ THE risk: Gemma has no tool-calling — must emulate
   ───────────────────┤
-  the hand           ├─ @aptkit/retrieval ───────── search_knowledge_base tool
-  (reach into data)  │   thin HTTP wrapper, ToolDefinition + handler
+  RAG pipeline       ├─ @aptkit/retrieval ───────── built from scratch, adaptable
+  (the hand)         │   EmbeddingProvider + VectorStore contracts;
+                     │   in-memory store NOW, pgvector deferred;
+                     │   chunk→embed→store→search→rank + search_knowledge_base tool
+                     │   ⚠ NOT ported from AdvntrCue (which welded in OpenAI)
   ───────────────────┤
   memory seam        ├─ @aptkit/context/profile-injector.ts
   (makes it YOURS)   │   load me.md → inject into system prompt
@@ -150,29 +153,67 @@ returns a single `text` block. No live Ollama needed for the unit test.
 
 ---
 
-### B — `@aptkit/retrieval` · the hand
+### B — `@aptkit/retrieval` · the RAG pipeline, built from scratch, adaptable
 
 **Path:** `packages/retrieval/`
-**Implements:** the tool contracts from `packages/tools/src/tool-registry.ts`:
+
+Rebuilt from the ground up — **nothing ported from AdvntrCue**. AdvntrCue welded OpenAI
+into the embedding path (vendor lock-in) and its architecture isn't a reliable base to
+inherit. The design driver here is **adaptability**: the embedding vendor *and* the vector
+store are swappable adapters behind contracts, the same way `ModelProvider` already has
+local/openai/anthropic side by side. This is the me.md *"pattern over vendor"* value made
+structural — *embedding + ANN + retrieval* is the pattern; nomic / OpenAI / pgvector /
+in-memory are incidental.
+
+**Two contracts — the adaptability seam:**
 
 ```ts
-type ToolDefinition = { name: string; description?: string; inputSchema: object };
-type ToolHandler = (args: Record<string, unknown>, opts?: ToolCallOptions) => Promise<unknown> | unknown;
+type EmbeddingProvider = {
+  id: string;
+  dimension: number;                  // 768 = nomic, 1536 = OpenAI, 1024 = Voyage
+  embed(texts: string[]): Promise<number[][]>;
+};
+
+type VectorStore = {
+  dimension: number;
+  upsert(chunks: { id: string; vector: number[]; meta: Record<string, unknown> }[]): Promise<void>;
+  search(vector: number[], k: number): Promise<{ id: string; score: number; meta: Record<string, unknown> }[]>;
+};
 ```
 
-Exports `searchKnowledgeBaseDefinition` (`name: 'search_knowledge_base'`) and a
-`createSearchKnowledgeBaseTool({ endpoint, apiKey? }) → ToolHandler` factory. The handler
-is a thin `fetch` to a vector-search endpoint returning ranked chunks. Honors
-`opts.signal`. Wired into agents via `filterToolsForPolicy(allTools, policy)`.
+**Concrete adapters:**
+- `EmbeddingProvider` → `OllamaEmbeddingProvider` (`nomic-embed-text`, 768-dim, local),
+  built now. OpenAI / Voyage are later drop-ins, no pipeline change.
+- `VectorStore` → `InMemoryVectorStore` (cosine over an array), **built and fully tested
+  now**. `PgVectorStore` is a second adapter, deferred to the body decision.
 
-**Build without Supabase.** Point the handler at a mock endpoint; test through
-`InMemoryToolRegistry([def], { search_knowledge_base: handler })`. The real endpoint is
-service-layer and deferred.
+**Two paths, both library logic over the contracts:**
+- indexing: `doc → chunk → embed → store.upsert`
+- query: `query → embed → store.search → rank → chunks`
+  The `search_knowledge_base` tool (the `ToolDefinition` / `ToolHandler` contracts from
+  `packages/tools/src/tool-registry.ts`) wraps the **query path** and is registered into
+  agents via `filterToolsForPolicy`.
 
-**Hand-test artifact:** registry test — mock returns ranked docs; assert the tool
-definition shape and that `callTool` returns the ranked result with a `durationMs`.
+**The honest constraint — embedding dimension is a one-way door for *data*, not code.**
+Adapters make the *code* swappable any time; but a corpus embedded at nomic's 768 can't be
+searched by a 1536-dim OpenAI query. Swapping the embedder *after* indexing means
+**re-embedding the whole corpus**. So: the store carries its `dimension`, a provider/store
+dimension mismatch throws loudly, and **re-index is a first-class operation** (the parent
+plan already flags batch reindex past ~10k chunks). Adaptable interfaces, dimension-locked
+data — named, not hidden.
 
-**Depends on:** `@aptkit/runtime`, `@aptkit/tools`. Independent of A — parallel.
+**Build without Supabase, end to end.** Index a few markdown files into
+`InMemoryVectorStore`, query, rank, return chunks — the whole RAG pipeline, hand-tested,
+zero cloud. pgvector becomes the production `VectorStore` adapter once the body is decided.
+
+**Hand-test artifacts:** (1) embed → upsert → search round-trip over the in-memory store
+returns the planted relevant chunk on top; (2) a provider/store dimension mismatch throws;
+(3) `search_knowledge_base`, through `InMemoryToolRegistry`, returns ranked results with a
+`durationMs`.
+
+**Depends on:** `@aptkit/runtime`, `@aptkit/tools`. Independent of A — parallel. **Now a
+real organ, not an afternoon — a co-lead with A**, since it owns the whole from-scratch
+pipeline, not just a tool.
 
 ---
 
@@ -247,13 +288,15 @@ Wires the four organs through `runAgentLoop`:
 - **C** `me.md` injected into the system prompt before `renderPromptTemplate`
 - **D** used in its eval to measure retrieval quality + faithfulness
 
-Runs in the **terminal, one shot, against a mock retrieval endpoint**. No Supabase, no
-phone, no sync, no gateway. This is the smallest *living* thing — and it is exactly the
-deferred body's **v1a (laptop brain)**, reachable later without rework.
+Runs in the **terminal, one shot, against the real in-memory RAG pipeline** (organ B with
+`InMemoryVectorStore` — no mock needed). No Supabase, no phone, no sync, no gateway. This
+is the smallest *living* thing — and it is exactly the deferred body's **v1a (laptop
+brain)**, reachable later by swapping in `PgVectorStore`, no rework.
 
-**Hand-test artifact:** ask it a question; observe it emit a `tool_use` for
-`search_knowledge_base`, receive mock chunks, and answer grounded + in your voice
-(profile visibly shaping tone). An eval run reports precision@k and a faithfulness score.
+**Hand-test artifact:** index a handful of your real markdown into the in-memory store; ask
+a question; observe it emit a `tool_use` for `search_knowledge_base`, retrieve real ranked
+chunks, and answer grounded + in your voice (profile visibly shaping tone). An eval run
+reports precision@k and a faithfulness score.
 
 **Depends on:** A, B, C (and D for its eval). Build last.
 
@@ -262,17 +305,18 @@ deferred body's **v1a (laptop brain)**, reachable later without rework.
 ## Build order
 
 ```
-  A  provider-gemma   ████████████  long pole — start now, riskiest
-  B  retrieval        ███           ┐
-  C  profile-injector ██            ├ independent, parallel, easy wins
-  D  precision-at-k   ██            ┘
-                          ↓ once A done + B,C present
+  A  provider-gemma   ████████████  long pole — riskiest (tool-call emulation)
+  B  retrieval (RAG)  ██████████    co-long-pole — from-scratch adaptable pipeline
+  C  profile-injector ██            ┐ easy, parallel
+  D  precision-at-k   ██            ┘ (D is how you measure B)
+                          ↓ once A + B done, C present
   E  capstone agent       ████      wires A+B+C, measured by D
 ```
 
-De-risk first: A alone proves tool-call emulation works at all; everything downstream
-assumes it. B/C/D are afternoon-sized and parallel. E is the payoff and yields a living
-laptop-only brain with every body decision still open.
+Two long poles now: **A** de-risks tool-call emulation (everything downstream assumes it);
+**B** is the from-scratch adaptable RAG pipeline you want to build. They're independent —
+run in parallel. C and D are afternoon-sized; D is also the ruler you measure B with. E is
+the payoff and yields a living laptop-only brain with every body decision still open.
 
 Each organ is built test-first (`node:test`) and ends in a hand-testable artifact, per
 the parent plan's "each phase ends in a hand-testable artifact" discipline.
@@ -283,9 +327,10 @@ the parent plan's "each phase ends in a hand-testable artifact" discipline.
 
 Not in this spec; depends on the architecture you're thinking through:
 
-- Supabase `agents` schema (documents / chunks / conversations / messages / tool_runs), pgvector + HNSW, RLS
+- The **`PgVectorStore` adapter** — the production `VectorStore` binding (organ B's interface
+  stays; only this adapter waits). pgvector + HNSW index, dimension fixed at index time.
+- Supabase `agents` schema (documents / chunks / conversations / messages / tool_runs), RLS
 - Edge Functions (embed + vector search + the always-on data plane)
-- The embedding pipeline (`nomic-embed-text`, 768-dim — a one-way door per the parent plan)
 - The phone RN brain (on-device model) and its agent loop
 - Memory **sync/merge** between laptop and phone (the buffr local-first pattern)
 - The multi-platform **gateway** (terminal + Telegram, "start on one, continue on another")
@@ -305,3 +350,8 @@ Not in this spec; depends on the architecture you're thinking through:
 4. **Model is a provider, not a pinned choice.** "Self-hosted" = data/memory/skills are
    yours; the model is swappable (`aptkit/packages/providers` is why). Keeps the Gemma
    thesis while letting an API model do reliable *acting* when needed.
+5. **RAG is rebuilt from scratch and vendor-adaptable — not ported from AdvntrCue.**
+   AdvntrCue welded OpenAI into the embedding path; the rebuild puts `EmbeddingProvider`
+   and `VectorStore` behind contracts (in-memory now, pgvector later) so the embedder and
+   store are swappable. The one-way door is the embedding *dimension* on already-indexed
+   data — re-index is a first-class operation, not an afterthought.
