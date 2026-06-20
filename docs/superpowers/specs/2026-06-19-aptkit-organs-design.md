@@ -31,7 +31,7 @@ You already have most of its organs scattered across repos:
 | skills framework        | `aipe/` (markdown specs = SKILL.md; slash commands)  |
 | model integration       | `aptkit/packages/providers` (anthropic/openai/local/fallback) |
 | execution + sub-agents  | Claude Code (terminal, Agent tool, workflows)        |
-| RAG / data              | AdvntrCue (shipped) + `agent-layer-plan.md` (specced)|
+| RAG / data              | AdvntrCue shipped it (rebuilding fresh — see organ B) |
 | trajectory → fine-tune  | named as the ceiling in `agent-layer-plan.md`        |
 | **multi-platform gateway** | **❌ nothing**                                     |
 | **the spine / body**    | **❌ nothing — organs exist, no body**               |
@@ -125,6 +125,12 @@ blocks) + `usage`. Wrap the instance in the `ContextWindowGuardedProvider` patte
 by explicit instantiation (there is no global registry); composes under
 `@aptkit/provider-fallback` for an API fallback chain.
 
+Because the model sits behind the `ModelProvider` contract, it is **swappable, not
+pinned**. "Self-hosted" means your data, memory, and skills are yours — *not* that one
+model is welded in. A `provider-fallback` chain can put an API model (Claude) behind local
+Gemma, so reliable *acting* is available when Gemma's tool-calling falls short, without
+giving up the local-first default.
+
 **⚠ The hard part — the whole reason this organ is risky.**
 The runtime expects the provider to surface `tool_use` blocks so `run-agent-loop` can
 dispatch tools. **Gemma2:9b emits none** — Ollama has no tool template for it. So the
@@ -142,6 +148,12 @@ agent loop stalls if it's flaky. This is the riskiest piece in the project — `
 first` from the parent plan points exactly here. Try Ollama-native tool support first in
 case a model template lands; assume emulation is required for Gemma2.
 
+These are **two different failure surfaces**, and they must not be conflated: structured
+*output* (the final answer's JSON) is one thing; tool-call *decoding* (did the model ask
+to call a tool, and with what args) is another, and harder. A flaky answer degrades one
+response; a flaky tool-call decode stalls the whole loop. The hard part of this organ is
+the second surface.
+
 **Separation of concerns:** the provider only returns raw text + parsed blocks. It does
 **not** validate JSON schemas — `generateStructured` (runtime) owns retry-with-strict-suffix.
 
@@ -149,7 +161,8 @@ case a model template lands; assume emulation is required for Gemma2.
 deliberately messy Gemma blob parses into a clean `tool_use` block, and that plain text
 returns a single `text` block. No live Ollama needed for the unit test.
 
-**Depends on:** `@aptkit/runtime` only. **Long pole — build first, alone.**
+**Depends on:** `@aptkit/runtime` only. **Long pole — start now; independent of B, so the
+two run in parallel.**
 
 ---
 
@@ -335,23 +348,3 @@ Not in this spec; depends on the architecture you're thinking through:
 - Memory **sync/merge** between laptop and phone (the buffr local-first pattern)
 - The multi-platform **gateway** (terminal + Telegram, "start on one, continue on another")
 - Trajectory capture → fine-tune (the ceiling)
-
----
-
-## Corrections this spec makes to `agent-layer-plan.md`
-
-1. **No `eval-harness` / precision@k exists in aptkit.** They are net-new (organ D). The
-   parent plan treats them as turnkey; they are not. `rubric-judge` (faithfulness) is real.
-2. **Gemma2:9b has no native tool-calling.** Organ A's core work is emulation + parsing,
-   not just "tame the JSON." The parent plan's Phase-1 risk line conflates structured
-   *output* with tool-call *decoding* — they are different failure surfaces.
-3. **Judge with Claude, not Gemma.** Faithfulness scored by the same model being graded
-   is circular. `providers/anthropic` already exists for this.
-4. **Model is a provider, not a pinned choice.** "Self-hosted" = data/memory/skills are
-   yours; the model is swappable (`aptkit/packages/providers` is why). Keeps the Gemma
-   thesis while letting an API model do reliable *acting* when needed.
-5. **RAG is rebuilt from scratch and vendor-adaptable — not ported from AdvntrCue.**
-   AdvntrCue welded OpenAI into the embedding path; the rebuild puts `EmbeddingProvider`
-   and `VectorStore` behind contracts (in-memory now, pgvector later) so the embedder and
-   store are swappable. The one-way door is the embedding *dimension* on already-indexed
-   data — re-index is a first-class operation, not an afterthought.
