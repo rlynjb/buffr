@@ -1,0 +1,5 @@
+[
+  { "query": "what does the author do for work", "relevant": ["work.md"] },
+  { "query": "what programming stack and tools are used", "relevant": ["stack.md"] },
+  { "query": "how does the author take their coffee", "relevant": ["coffee.md"] }
+]
