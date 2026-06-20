@@ -1,5 +1,5 @@
 import pg from 'pg';
-import type { CapabilityTraceSink, CapabilityEvent } from '@aptkit/runtime';
+import type { CapabilityTraceSink, CapabilityEvent } from '@rlynjb/aptkit-core';
 
 export async function startConversation(pool: pg.Pool, appId: string, agentName = 'rag-query-agent'): Promise<string> {
   const { rows } = await pool.query(

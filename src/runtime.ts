@@ -1,5 +1,5 @@
 import pg from 'pg';
-import type { RetrievalPipeline } from '@aptkit/retrieval';
+import type { RetrievalPipeline } from '@rlynjb/aptkit-core';
 
 /** Writes the source-of-truth documents row, then indexes its chunks. */
 export async function indexDocumentRow(

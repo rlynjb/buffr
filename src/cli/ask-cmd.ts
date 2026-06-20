@@ -1,9 +1,9 @@
 import { config as loadEnv } from 'dotenv';
-import { OllamaEmbeddingProvider, createRetrievalPipeline, createSearchKnowledgeBaseTool } from '@aptkit/retrieval';
-import { InMemoryToolRegistry } from '@aptkit/tools';
-import { GemmaModelProvider } from '@aptkit/provider-gemma';
-import { ContextWindowGuardedProvider } from '@aptkit/provider-local';
-import { RagQueryAgent } from '@aptkit/agent-rag-query';
+import { OllamaEmbeddingProvider, createRetrievalPipeline, createSearchKnowledgeBaseTool } from '@rlynjb/aptkit-core';
+import { InMemoryToolRegistry } from '@rlynjb/aptkit-core';
+import { GemmaModelProvider } from '@rlynjb/aptkit-core';
+import { ContextWindowGuardedProvider } from '@rlynjb/aptkit-core';
+import { RagQueryAgent } from '@rlynjb/aptkit-core';
 import { loadConfig } from '../config.js';
 import { createPool } from '../db.js';
 import { PgVectorStore } from '../pg-vector-store.js';

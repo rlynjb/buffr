@@ -12,15 +12,7 @@
     "eval": "npm run build && node dist/src/cli/eval-cmd.js"
   },
   "dependencies": {
-    "@aptkit/agent-rag-query": "file:../aptkit/packages/agents/rag-query",
-    "@aptkit/context": "file:../aptkit/packages/context",
-    "@aptkit/evals": "file:../aptkit/packages/evals",
-    "@aptkit/prompts": "file:../aptkit/packages/prompts",
-    "@aptkit/provider-gemma": "file:../aptkit/packages/providers/gemma",
-    "@aptkit/provider-local": "file:../aptkit/packages/providers/local",
-    "@aptkit/retrieval": "file:../aptkit/packages/retrieval",
-    "@aptkit/runtime": "file:../aptkit/packages/runtime",
-    "@aptkit/tools": "file:../aptkit/packages/tools",
+    "@rlynjb/aptkit-core": "^0.4.0",
     "dotenv": "^16.4.0",
     "pg": "^8.11.0"
   },

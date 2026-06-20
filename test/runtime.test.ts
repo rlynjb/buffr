@@ -6,7 +6,7 @@ import { createPool } from '../src/db.js';
 import { runMigration } from '../src/migrate.js';
 import { indexDocumentRow } from '../src/runtime.js';
 import { PgVectorStore } from '../src/pg-vector-store.js';
-import { createRetrievalPipeline, type EmbeddingProvider } from '@aptkit/retrieval';
+import { createRetrievalPipeline, type EmbeddingProvider } from '@rlynjb/aptkit-core';
 
 loadEnv();
 const url = process.env.DATABASE_URL;

@@ -1,5 +1,5 @@
 import pg from 'pg';
-import type { VectorStore } from '@aptkit/retrieval';
+import type { VectorStore } from '@rlynjb/aptkit-core';
 
 type Chunk = { id: string; vector: number[]; meta: Record<string, unknown> };
 type Hit = { id: string; score: number; meta: Record<string, unknown> };
