@@ -1,0 +1,8 @@
+# secrets — never commit
+.env
+.env.local
+
+# node
+node_modules/
+dist/
+*.tsbuildinfo
