@@ -49,7 +49,7 @@ Set `DATABASE_URL` in your shell (or `.env`) before doing the DB tasks' TDD.
   "private": true,
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "npm run build && node --test dist/test/*.test.js",
+    "test": "npm run build && node --test --test-concurrency=1 dist/test/*.test.js",
     "migrate": "npm run build && node dist/src/migrate.js",
     "index": "npm run build && node dist/src/cli/index-cmd.js",
     "ask": "npm run build && node dist/src/cli/ask-cmd.js",
@@ -86,6 +86,7 @@ Set `DATABASE_URL` in your shell (or `.env`) before doing the DB tasks' TDD.
     "moduleResolution": "NodeNext",
     "strict": true,
     "declaration": true,
+    "esModuleInterop": true,
     "outDir": "dist",
     "rootDir": ".",
     "resolveJsonModule": true,
@@ -203,7 +204,9 @@ create table if not exists agents.documents (
 
 create table if not exists agents.chunks (
   id text primary key,
-  document_id text references agents.documents(id) on delete cascade,
+  -- Soft link to documents.id (no FK): the VectorStore contract upserts chunks
+  -- with no notion of a documents row, so a hard FK would break drop-in parity.
+  document_id text,
   app_id text not null default 'laptop',
   chunk_index int not null,
   content text not null,
@@ -211,6 +214,8 @@ create table if not exists agents.chunks (
   embedding_model text not null default 'nomic-embed-text:v1.5',
   meta jsonb not null default '{}'
 );
+-- Drop the FK on databases migrated before this change (idempotent).
+alter table agents.chunks drop constraint if exists chunks_document_id_fkey;
 create index if not exists chunks_embedding_hnsw
   on agents.chunks using hnsw (embedding vector_cosine_ops);
 create index if not exists chunks_app_id on agents.chunks (app_id);
@@ -885,7 +890,7 @@ const store = new PgVectorStore({ pool, appId: cfg.appId, dimension: embedder.di
 const pipeline = createRetrievalPipeline({ embedder, store });
 
 const queries: { query: string; relevant: string[] }[] = JSON.parse(
-  await readFile(new URL('../../eval/queries.json', import.meta.url), 'utf8'));
+  await readFile(new URL('../../../eval/queries.json', import.meta.url), 'utf8'));
 
 const K = 3;
 let p1 = 0, rk = 0;
@@ -938,3 +943,5 @@ git commit -m "Add eval CLI: precision@k over the pg corpus"
 **Placeholder scan:** no TBD/TODO; every code step is complete. The only intentionally editable content is `eval/queries.json` (user data).
 
 **Note on reindex:** the spec calls reindex "first-class." It's omitted from the done-criteria tasks because nothing swaps the embedder in this phase. Flagging rather than hiding — add a `reindex(embedder)` task when changing `embedding_model`.
+
+**As-built notes (this plan reflects them inline):** the chunks→documents FK was dropped (it broke `VectorStore` parity); `esModuleInterop` and `--test-concurrency=1` were required; `eval-cmd` reads `../../../eval/...`. Two aptkit-side fixes were also needed for the live run with Gemma — a `minTopK` floor and `search_knowledge_base` ignoring hallucinated filter keys (both in `@aptkit/retrieval`). See the spec's "As-built deviations".

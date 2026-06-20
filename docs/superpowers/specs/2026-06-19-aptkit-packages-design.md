@@ -1,9 +1,9 @@
-# AptKit Organs — Design Spec
+# AptKit Packages — Design Spec
 
 **Date:** 2026-06-19
 **Status:** Design — approved to capture, implementation not started
 **Canonical:** this is the source of truth. Mirror (aptkit-scoped, pointer only):
-`aptkit/docs/personal-agent-organs.md` — edit here, not there.
+`aptkit/docs/personal-agent-packages.md` — edit here, not there.
 **Parent:** refines `agent-layer-plan.md` (buffr root)
 **Reader profile:** `aipe/specs/me.md`
 
@@ -11,9 +11,9 @@
 
 ## What this is
 
-A plan for the **missing parts** — the "organs" — of a Hermes-shaped personal agent,
+A plan for the **missing parts** — the "packages" — of a Hermes-shaped personal agent,
 each specced to fit **aptkit's actual conventions** (verified against the repo, not
-assumed). This is deliberately *not* the integrated system. The body — how the organs
+assumed). This is deliberately *not* the integrated system. The body — how the packages
 assemble into a running agent across laptop + phone — is a separate decision, parked on
 purpose (see [Deferred](#deferred--waits-on-the-body-decision)).
 
@@ -25,7 +25,7 @@ topology) while the buildable, decision-independent pieces move now.
 
 The north star is an agent that **lives across your surfaces, owns a model of you, and
 acts** — Hermes' *"not a chatbot; an agent that lives on your machine and gets smarter."*
-You already have most of its organs scattered across repos:
+You already have most of its packages scattered across repos:
 
 | Hermes layer            | What already exists                                  |
 | ----------------------- | ---------------------------------------------------- |
@@ -33,12 +33,12 @@ You already have most of its organs scattered across repos:
 | skills framework        | `aipe/` (markdown specs = SKILL.md; slash commands)  |
 | model integration       | `aptkit/packages/providers` (anthropic/openai/local/fallback) |
 | execution + sub-agents  | Claude Code (terminal, Agent tool, workflows)        |
-| RAG / data              | AdvntrCue shipped it (rebuilding fresh — see organ B) |
+| RAG / data              | AdvntrCue shipped it (rebuilding fresh — see package B) |
 | trajectory → fine-tune  | named as the ceiling in `agent-layer-plan.md`        |
 | **multi-platform gateway** | **❌ nothing**                                     |
-| **the spine / body**    | **❌ nothing — organs exist, no body**               |
+| **the spine / body**    | **❌ nothing — packages exist, no body**               |
 
-This spec builds the *aptkit-resident* organs that are still missing or unbuilt. It does
+This spec builds the *aptkit-resident* packages that are still missing or unbuilt. It does
 **not** build the body.
 
 ### The body decision (deferred — you are thinking about this)
@@ -77,7 +77,7 @@ sync problem is the second thing you solve, not the first.
 
 ---
 
-## The organs
+## The packages
 
 ```
   reasoning          ┌─ @aptkit/provider-gemma ──── the local brain engine
@@ -133,7 +133,7 @@ model is welded in. A `provider-fallback` chain can put an API model (Claude) be
 Gemma, so reliable *acting* is available when Gemma's tool-calling falls short, without
 giving up the local-first default.
 
-**⚠ The hard part — the whole reason this organ is risky.**
+**⚠ The hard part — the whole reason this package is risky.**
 The runtime expects the provider to surface `tool_use` blocks so `run-agent-loop` can
 dispatch tools. **Gemma2:9b emits none** — Ollama has no tool template for it. So the
 provider must:
@@ -142,7 +142,7 @@ provider must:
    native `tools` array meaningfully).
 2. **Inbound:** prompt Gemma to print any tool call as JSON, then **parse that text back
    into `ModelToolUseBlock`** using `parseAgentJson` from
-   `packages/runtime/src/structured-generation.ts` (already strips ``` fences and
+   `packages/runtime/src/json-output.ts` (already strips ``` fences and
    scavenges the first balanced `{…}`/`[…]` out of messy output).
 
 Outbound is trivial; **inbound text→`tool_use` is the engineering**, and it's where the
@@ -153,7 +153,7 @@ case a model template lands; assume emulation is required for Gemma2.
 These are **two different failure surfaces**, and they must not be conflated: structured
 *output* (the final answer's JSON) is one thing; tool-call *decoding* (did the model ask
 to call a tool, and with what args) is another, and harder. A flaky answer degrades one
-response; a flaky tool-call decode stalls the whole loop. The hard part of this organ is
+response; a flaky tool-call decode stalls the whole loop. The hard part of this package is
 the second surface.
 
 **Separation of concerns:** the provider only returns raw text + parsed blocks. It does
@@ -227,7 +227,7 @@ returns the planted relevant chunk on top; (2) a provider/store dimension mismat
 `durationMs`.
 
 **Depends on:** `@aptkit/runtime`, `@aptkit/tools`. Independent of A — parallel. **Now a
-real organ, not an afternoon — a co-lead with A**, since it owns the whole from-scratch
+real package, not an afternoon — a co-lead with A**, since it owns the whole from-scratch
 pipeline, not just a tool.
 
 ---
@@ -249,7 +249,7 @@ the function takes the profile *string*, not a file path — the caller reads th
 function, no `fs` inside the package: easier to test, matches aptkit's pure-function
 style, and ESM-safe (no `require`).
 
-This is the organ that turns "a RAG box" into "*your* assistant" — it's where `me.md`
+This is the package that turns "a RAG box" into "*your* assistant" — it's where `me.md`
 becomes live system context instead of a doc only `aipe` reads.
 
 **Hand-test artifact:** unit test — given a template with `{schema}` and a fake `me.md`,
@@ -276,7 +276,7 @@ for precision@k.
 function scorePrecisionAtK(retrievedIds: readonly string[], relevantIds: ReadonlySet<string>, k: number): { ok: boolean; score: number; matched: number; total: number };
 ```
 
-Pure function. Smallest organ, highest portfolio leverage — it's the "numbers" the
+Pure function. Smallest package, highest portfolio leverage — it's the "numbers" the
 parent plan's thesis sells. Add a sibling `scoreRecallAtK` for free.
 
 **Faithfulness comes free** from the existing `RubricJudge`
@@ -291,19 +291,19 @@ precision@k value; edge cases (k > list length, no relevant docs).
 
 ---
 
-### E — capstone: profile-aware RAG agent · proves the organs compose
+### E — capstone: profile-aware RAG agent · proves the packages compose
 
 **Path:** mirror `packages/agents/query/` (new agent package, e.g.
 `packages/agents/rag-query/`).
 
-Wires the four organs through `runAgentLoop`:
+Wires the four packages through `runAgentLoop`:
 
 - **A** Gemma provider (guarded) as `model`
 - **B** retrieval tool registered, surfaced via `filterToolsForPolicy`
 - **C** `me.md` injected into the system prompt before `renderPromptTemplate`
 - **D** used in its eval to measure retrieval quality + faithfulness
 
-Runs in the **terminal, one shot, against the real in-memory RAG pipeline** (organ B with
+Runs in the **terminal, one shot, against the real in-memory RAG pipeline** (package B with
 `InMemoryVectorStore` — no mock needed). No Supabase, no phone, no sync, no gateway. This
 is the smallest *living* thing — and it is exactly the deferred body's **v1a (laptop
 brain)**, reachable later by swapping in `PgVectorStore`, no rework.
@@ -333,7 +333,7 @@ Two long poles now: **A** de-risks tool-call emulation (everything downstream as
 run in parallel. C and D are afternoon-sized; D is also the ruler you measure B with. E is
 the payoff and yields a living laptop-only brain with every body decision still open.
 
-Each organ is built test-first (`node:test`) and ends in a hand-testable artifact, per
+Each package is built test-first (`node:test`) and ends in a hand-testable artifact, per
 the parent plan's "each phase ends in a hand-testable artifact" discipline.
 
 ---
@@ -342,7 +342,7 @@ the parent plan's "each phase ends in a hand-testable artifact" discipline.
 
 Not in this spec; depends on the architecture you're thinking through:
 
-- The **`PgVectorStore` adapter** — the production `VectorStore` binding (organ B's interface
+- The **`PgVectorStore` adapter** — the production `VectorStore` binding (package B's interface
   stays; only this adapter waits). pgvector + HNSW index, dimension fixed at index time.
 - Supabase `agents` schema (documents / chunks / conversations / messages / tool_runs), RLS
 - Edge Functions (embed + vector search + the always-on data plane)

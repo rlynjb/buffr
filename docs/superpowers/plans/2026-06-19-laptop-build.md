@@ -2,13 +2,13 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build the laptop brain — a terminal-driven, profile-aware RAG agent running locally on Gemma — by implementing the five aptkit organs (A–E) test-first.
+**Goal:** Build the laptop brain — a terminal-driven, profile-aware RAG agent running locally on Gemma — by implementing the five aptkit packages (A–E) test-first.
 
 **Architecture:** Five aptkit packages: a Gemma `ModelProvider` (Ollama) with emulated tool-calling, a from-scratch adaptable RAG pipeline (`EmbeddingProvider` + `VectorStore` behind contracts, in-memory store now), a profile-injection helper, a precision@k scorer, and a capstone agent wiring them through aptkit's `runAgentLoop`. Reasoning + data stay local; nothing requires Supabase, phone, or sync.
 
 **Tech Stack:** TypeScript (ESM, NodeNext), aptkit packages (`@aptkit/runtime`, `@aptkit/tools`, `@aptkit/context`, `@aptkit/evals`, `@aptkit/provider-local`), Ollama (`gemma2:9b`, `nomic-embed-text`), `node:test` + `node:assert/strict`.
 
-**Canonical spec:** `docs/superpowers/specs/2026-06-19-aptkit-organs-design.md` (this repo). Code lands in the aptkit repo at `/Users/rein/Public/aptkit`.
+**Canonical spec:** `docs/superpowers/specs/2026-06-19-aptkit-packages-design.md` (this repo). Code lands in the aptkit repo at `/Users/rein/Public/aptkit`.
 
 ## Global Constraints
 
@@ -1460,9 +1460,9 @@ git commit -m "feat(agent-rag-query): capstone profile-aware local RAG agent"
 
 ## Self-Review
 
-- **Spec coverage:** Organ A → Tasks 2–4; Organ B → Tasks 5–9; Organ C → Task 10; Organ D → Task 11; Organ E → Task 12; local env → Task 1. The deferred body (pgvector, Supabase, phone, sync, gateway) is intentionally absent — out of scope per the spec.
+- **Spec coverage:** Package A → Tasks 2–4; Package B → Tasks 5–9; Package C → Task 10; Package D → Task 11; Package E → Task 12; local env → Task 1. The deferred body (pgvector, Supabase, phone, sync, gateway) is intentionally absent — out of scope per the spec.
 - **Adaptability requirement (spec's core driver):** met via the `EmbeddingProvider`/`VectorStore` contracts (Tasks 6–7); `OllamaEmbeddingProvider` and `InMemoryVectorStore` are adapters; the dimension one-way door is enforced in Tasks 7–8.
-- **Tool-calling risk (spec organ A):** isolated in Task 3 with its own test; the two failure surfaces (output vs tool-call decoding) are exercised separately (Task 2 text, Task 3 tool parse).
+- **Tool-calling risk (spec package A):** isolated in Task 3 with its own test; the two failure surfaces (output vs tool-call decoding) are exercised separately (Task 2 text, Task 3 tool parse).
 - **Judge-with-Claude / faithfulness:** precision@k is built (Task 11); the `RubricJudge` faithfulness path reuses the existing `@aptkit/evals` class and is a follow-on eval, not a build task here.
 - **Type consistency:** `EmbeddingProvider.dimension`, `VectorStore.dimension`, `StoredChunk`/`SearchHit`, `searchKnowledgeBaseDefinition`/`createSearchKnowledgeBaseHandler`, and `RagQueryAgentOptions` are used identically across Tasks 6–12.
 - **Open risk flagged, not hidden:** live Gemma tool-calling reliability (Task 12 Step 7) — the smoke step calls out prompt iteration if Gemma doesn't emit the tool call. That's the project's known long-pole risk.

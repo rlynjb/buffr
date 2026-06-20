@@ -86,7 +86,7 @@ create table agents.documents (
 
 create table agents.chunks (
   id text primary key,                  -- "<doc>#<index>" (matches aptkit chunk ids)
-  document_id text references agents.documents(id) on delete cascade,
+  document_id text,                     -- soft link to documents.id; see "As-built deviations"
   app_id text not null default 'laptop',
   chunk_index int not null,
   content text not null,
@@ -195,6 +195,24 @@ rework.
   always-derive-`app_id`-from-token is a hard prerequisite before a second app writes.
 - **HNSW build params** (`m`, `ef_construction`) — defaults are fine for a small corpus;
   revisit past ~10k chunks (parent plan's batch-reindex threshold).
+
+## As-built deviations (discovered during implementation)
+
+Built and verified live against reindb on 2026-06-19. Changes from the design above:
+
+- **`agents.chunks.document_id` has no foreign key.** A hard FK to `documents` gave the
+  store a hidden precondition (a documents row must exist first), which broke drop-in parity
+  with aptkit's `VectorStore` contract (`indexDocument` upserts chunks with no documents
+  row). `document_id` stays as a soft link; the migration drops the constraint idempotently
+  for already-migrated DBs.
+- **Two aptkit tool-robustness fixes were needed for a weak local model.** Gemma (a) passed
+  `top_k: 1`, starving multi-part questions — the agent now wires a `minTopK` floor; and
+  (b) passed a *hallucinated* `filter` key (`{textContains: …}`) that the exact-match filter
+  used to zero out, so retrieval silently returned nothing — `search_knowledge_base` now
+  ignores filter keys absent from chunk metadata. Both fixes live in `@aptkit/retrieval`.
+- **Build/test specifics:** `esModuleInterop` is required (the `pg` default import under
+  NodeNext); integration tests run with `--test-concurrency=1` because they share one
+  database and `app_id='test'`, so parallel files would clobber each other.
 
 ## Done means
 
