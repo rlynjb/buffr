@@ -13,7 +13,9 @@ create table if not exists agents.documents (
 
 create table if not exists agents.chunks (
   id text primary key,
-  document_id text references agents.documents(id) on delete cascade,
+  -- Soft link to documents.id (no FK): the VectorStore contract upserts chunks
+  -- with no notion of a documents row, so a hard FK would break drop-in parity.
+  document_id text,
   app_id text not null default 'laptop',
   chunk_index int not null,
   content text not null,
@@ -21,6 +23,8 @@ create table if not exists agents.chunks (
   embedding_model text not null default 'nomic-embed-text:v1.5',
   meta jsonb not null default '{}'
 );
+-- Drop the FK on databases migrated before this change (idempotent).
+alter table agents.chunks drop constraint if exists chunks_document_id_fkey;
 create index if not exists chunks_embedding_hnsw
   on agents.chunks using hnsw (embedding vector_cosine_ops);
 create index if not exists chunks_app_id on agents.chunks (app_id);
