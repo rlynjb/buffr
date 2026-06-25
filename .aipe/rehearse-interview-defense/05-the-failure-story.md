@@ -25,6 +25,10 @@
   │                         (two txns, not one)               │
   │  trace write fails   → surfaces only at flush(), after    │
   │                         the answer already printed         │
+  │  memory write fails  → swallowed by design — the answer   │
+  │                         the user already has must survive  │
+  │  trace = full signal → all 6 events persisted, ordered by  │
+  │                         event.timestamp (was: 2 of 6) ✓   │
   └───────────────────────────────────────────────────────────┘
   ┌─ MODEL / AGENT LAYER ─────────────────────────────────────┐
   │  Gemma returns bad JSON → emulation retries once, capped  │
@@ -34,7 +38,7 @@
   └───────────────────────────────────────────────────────────┘
 ```
 
-Read the map for the ⚠ marks. The unmarked lines are handled well — atomic transactions, fail-loud assertions, forced abstention. The marked ones are the honest gaps, and each one is a question you should be ready to own rather than dodge.
+Read the map for the ⚠ marks. The unmarked lines are handled well — atomic transactions, fail-loud assertions, forced abstention, best-effort memory that never costs the user their answer, and a trace sink that now captures the full six-event signal (the ✓ line — it used to drop four of the six, and fixing that is a story you tell in this chapter). The marked ones are the honest gaps, and each one is a question you should be ready to own rather than dodge.
 
 ## The big one: external hops with no timeout
 
@@ -117,7 +121,9 @@ Not every failure surface is a gap. Several are handled well, and you should cla
 
 **The agent can't loop forever.** Covered in Chapter 2 — the forced synthesis turn. Say: *"The loop can't hang on the model's indecision; it's bounded and the final turn removes the tools."*
 
-These four are your confidence anchors in this chapter. When the interviewer is probing failure, lead with one of these to establish that you *did* think about failure, then be honest about the ⚠ gaps.
+**Best-effort memory.** The per-turn memory write — embedding the exchange back into the store — is wrapped in a try/catch that swallows the error on purpose. The answer the user already has must never be lost because a *follow-on* write failed. Say: *"Remembering the exchange is best-effort. If that write fails, I swallow it — the turn already succeeded and the user has their answer; a failed memory write must not retroactively fail a turn that worked. It's a deliberate ordering: serve the answer, then try to remember it."*
+
+These five are your confidence anchors in this chapter. When the interviewer is probing failure, lead with one of these to establish that you *did* think about failure, then be honest about the ⚠ gaps.
 
 ## The partial-write gap
 
@@ -177,21 +183,26 @@ In the failure chapter, you can get pushed into operational territory you've nev
   ║   Say:                                                   ║
   ║   "I haven't run this as a production service, so I       ║
   ║    don't have real incident-response experience to       ║
-  ║    point to. What I can tell you is what observability   ║
-  ║    I have and what's missing: the system captures the    ║
-  ║    full agent trajectory to Postgres — every turn, every ║
-  ║    tool call — so I can replay what happened after the    ║
-  ║    fact. What it doesn't do yet is capture error and     ║
-  ║    warning events, so a run that hit an error looks       ║
-  ║    identical in the store to a clean one. That's a false ║
-  ║    negative, and it's the first observability gap I'd     ║
-  ║    close — capture errors before I worry about alerting." ║
+  ║    point to. What I can tell you is the observability     ║
+  ║    I built — and a gap I found and closed. The system     ║
+  ║    captures the full agent trajectory to Postgres: all    ║
+  ║    six event types now, including warning and error,      ║
+  ║    each row ordered by the event's own timestamp. It      ║
+  ║    didn't used to — the sink originally persisted only    ║
+  ║    two of the six, so a failed run looked identical in    ║
+  ║    the store to a clean one. I caught that, and fixed it  ║
+  ║    in one focused change. What's still missing is the     ║
+  ║    layer above replay: nothing reads those error rows     ║
+  ║    back to alert me. So I have the record; I don't have   ║
+  ║    the trigger. That's the next thing — alerting on top   ║
+  ║    of a trace that's now complete." ║
   ║                                                          ║
   ║   What this signals: you don't claim ops experience you  ║
   ║   lack, you pivot to the observability you DID build,     ║
-  ║   and you name a specific, real gap in it. Pivoting to    ║
-  ║   the true thing is stronger than guessing at the         ║
-  ║   unknown thing.                                         ║
+  ║   AND you tell a real found-and-fixed story about it.    ║
+  ║   "I noticed my own blind spot and closed it" is a        ║
+  ║   stronger signal than either a clean record or an        ║
+  ║   unowned gap.                                           ║
   ║                                                          ║
   ║   Do NOT say:                                            ║
   ║   "I'd set up PagerDuty and Prometheus and SLOs and       ║
@@ -202,7 +213,7 @@ In the failure chapter, you can get pushed into operational territory you've nev
 
 ## What you'd change
 
-The failure-handling change you'd make first is the trace sink's blind spot. The sink captures the agent's trajectory, but it only handles two of the six event types — it drops error and warning events entirely. So the worst case, a run that failed, is invisible: it looks identical in the store to a clean run. That's worse than no logging, because a scrambled or incomplete trace reads as authoritative. You'd add branches for the error and warning events first — before timeouts, before retries — because the ability to *see* a failure is the prerequisite for handling it. Observability before resilience.
+The trace sink's blind spot used to be the change you'd lead with — and it's now a *shipped fix*, which makes it a better story than a regret. The sink originally handled only two of the six `CapabilityEvent` types: it captured assistant steps and tool results, but dropped tool-call arguments, `durationMs`, token usage, and the warning and error events entirely. So a failed run looked identical in the store to a clean one — worse than no logging, because an incomplete trace reads as authoritative — and the `tokens_used` column sat orphaned, defined but never written. You found all three problems — the dropped events, the discarded signal, and a replay-ordering race where rows were ordered by the server's `now()` at insert time rather than when the event actually happened — and fixed them in one focused change: all six events now persist, `created_at` comes from `event.timestamp`, and the orphaned column is filled. You verified it live. The change you'd make *next*, now that the record is complete, is the layer above it: read those error rows back to alert, and aggregate the `durationMs` values into a latency breakdown. Observability before resilience — and the observability is now real, not aspirational.
 
 ## One-page summary
 
@@ -213,10 +224,16 @@ The failure-handling change you'd make first is the trace sink's blind spot. The
 - *Wrong tool arg key* → emulation doesn't validate args; searches empty string silently. Fix in my wrapper.
 - *Crash mid-index* → document row without chunks (two transactions, not one). Tolerable because re-derivable + idempotent; fix is one transaction.
 - *Trace write fails* → surfaces only at flush, after the answer prints. Trajectory loss is non-fatal to the answer.
-- *Handled well* → atomic chunk upsert (rollback), dimension mismatch throws, forced abstention, bounded loop.
+- *Memory write fails* → swallowed by design; the answer the user already has must survive a failed follow-on write.
+- *Handled well* → atomic chunk upsert (rollback), dimension mismatch throws, forced abstention, bounded loop, best-effort memory, full 6-event trace capture.
 
 **Pull quotes:**
 - "Fail-fast is the right default for a CLI. The bug is the one path that's actually fail-forever."
 - "Emulated tool-calling moves the schema guarantee from generation-time to parse-time."
+- "Serve the answer, then try to remember it — a failed memory write must not fail a turn that worked."
 
-**What you'd change:** Capture error and warning events in the trace sink first — a failure you can't see is worse than no logging. Observability before resilience.
+**What you'd change:** The trace-sink blind spot is fixed — all six events now persist, ordered by event timestamp. The *next* change is the layer above it: alert on the error rows and aggregate the captured `durationMs` into a latency breakdown. Observability before resilience, and the observability is now real.
+
+---
+
+Updated: 2026-06-24 — reframed the trace-sink gap from a regret into a shipped found-and-fixed story (it captured 2 of 6 events, replay-ordered by server `now()`, and orphaned the `tokens_used` column; all three fixed in one change, verified live); added the best-effort memory write as a handled failure surface (swallowed so a failed follow-on write never costs the user their answer).

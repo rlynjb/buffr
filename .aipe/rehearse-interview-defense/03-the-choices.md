@@ -2,10 +2,10 @@
 
 "Why this stack?" is where interviewers find out whether you make decisions or just accept defaults. The weak answer to every "why X" is "it's good for this kind of thing." The strong answer names the alternatives, names the actual criterion you decided on, and names the cost you're paying for the choice. Every real decision has a cost; pretending yours don't is the tell that you didn't really decide.
 
-This chapter defends the seven load-bearing choices in `buffr-laptop`. Not the trivial ones — nobody cares which test runner you picked. The seven that an interviewer will actually probe, each with the alternatives, the criterion, and the cost. Some of these you decided deliberately. Some an AI tool suggested and you evaluated and accepted. One or two you defaulted to. The strong move is being honest about which is which, and this chapter marks each one.
+This chapter defends the eight load-bearing choices in `buffr-laptop`. Not the trivial ones — nobody cares which test runner you picked. The eight that an interviewer will actually probe, each with the alternatives, the criterion, and the cost. Some of these you decided deliberately. Some an AI tool suggested and you evaluated and accepted. One or two you defaulted to. The strong move is being honest about which is which, and this chapter marks each one.
 
 ```
-  THE DECISION TREE — seven load-bearing choices
+  THE DECISION TREE — eight load-bearing choices
 
   Vector store?
    ├─ dedicated DB (Pinecone/Qdrant/Weaviate)
@@ -25,7 +25,7 @@ This chapter defends the seven load-bearing choices in `buffr-laptop`. Not the t
          │
   documents→chunks integrity?
    ├─ hard FK (rejects orphan chunks)
-   └─ ★ soft link, FK dropped ★           ← preserve VectorStore drop-in parity
+   └─ ★ soft link, FK dropped ★           ← parity + lets memory rows ride chunks
          │
   Embedding dimension?
    └─ ★ 768, committed everywhere ★       ← one-way door on indexed data
@@ -33,6 +33,10 @@ This chapter defends the seven load-bearing choices in `buffr-laptop`. Not the t
   The agent loop itself?
    ├─ build it from scratch
    └─ ★ consume aptkit as a library ★     ← build the glue, not the loop
+         │
+  Conversation memory?
+   ├─ build a bespoke memory store in buffr
+   └─ ★ inject store into @aptkit/memory ★ ← engine up, store down; same contract
 ```
 
 The starred path is what's in the repo. Every fork is a place the interviewer can stop and ask "why not the other branch?" — so let's defend each one.
@@ -155,7 +159,7 @@ This is the one that looks like a bug and isn't. Interviewers love finding it, b
   │   up and how you'd get it back if you needed it?        │
   └─────────────────────────────────────────────────────────┘
 
-> "That's deliberate, and the schema comments say why. My pgvector store implements aptkit's VectorStore contract, and that contract upserts chunks with no notion of a documents row — it's just `id`, `vector`, `meta`. A hard foreign key would reject any chunk written before its parent document existed, which would break drop-in parity with the in-memory store the contract is built around. The FK and the contract are mutually exclusive, and I chose the contract — the migration even actively drops the constraint if a previous version of the schema had it. What I gave up is the database enforcing parent-exists and cascade-delete; integrity relocated to my application's call order, where `indexDocumentRow` writes the document first, then the chunks. If I needed integrity back, the fix isn't re-adding the FK — that re-breaks parity — it's wrapping both writes in one transaction plus an orphan-sweep keyed on document_id."
+> "That's deliberate, and the schema comments say why. My pgvector store implements aptkit's VectorStore contract, and that contract upserts chunks with no notion of a documents row — it's just `id`, `vector`, `meta`. A hard foreign key would reject any chunk written before its parent document existed, which would break drop-in parity with the in-memory store the contract is built around. The FK and the contract are mutually exclusive, and I chose the contract — the migration even actively drops the constraint if a previous version of the schema had it. What I gave up is the database enforcing parent-exists and cascade-delete; integrity relocated to my application's call order, where `indexDocumentRow` writes the document first, then the chunks. And here's where the decision pays off twice: when I added conversation memory, the memory rows ride the same `chunks` table tagged `meta.kind='memory'` — and they have *no* parent document at all. A hard FK would have rejected every one of them. The dropped constraint is exactly what lets a second kind of vector (an embedded exchange) share the table with corpus chunks. If I needed integrity back, the fix isn't re-adding the FK — that re-breaks both parity and memory — it's wrapping the index writes in one transaction plus an orphan-sweep keyed on document_id, scoped to corpus chunks only."
 
 Decision mode: **deliberate** — and a strong one to volunteer. Notice the proof it's principled, not lazy: the schema *keeps* a real foreign key elsewhere — `messages.conversation_id` references `conversations` with cascade delete — because the trace sink writes through your own code with no external contract forbidding it. The presence or absence of the FK marks exactly where an external contract crosses the boundary. That's the answer that turns a "gotcha" into a signal of depth.
 
@@ -197,12 +201,40 @@ This one is about honesty as much as architecture. The agent loop, the tool emul
   │   decision to NOT build the loop?                        │
   └─────────────────────────────────────────────────────────┘
 
-> "The loop is the library — I consume aptkit and never edit it. That was a deliberate scope decision: reinventing the agent loop and vector search would have cost me the time and hidden the interesting parts. What I built is the glue and the judgment layer — the pgvector store implementing the library's VectorStore contract, the Postgres persistence, the three CLIs, the trajectory trace sink, and the wiring choices like flooring the tool's result count so a model asking for one chunk still gets four. I can point at the exact seam: imports and interface implementations cross the npm boundary; everything below `src/` is mine. If there were a bug in the loop, the fix goes upstream into aptkit, not a node_modules edit."
+> "The loop is the library — I consume aptkit and never edit it. That was a deliberate scope decision: reinventing the agent loop and vector search would have cost me the time and hidden the interesting parts. What I built is the glue and the judgment layer — the pgvector store implementing the library's VectorStore contract, the Postgres persistence, the Ink chat REPL and the long-lived chat session, the index and eval CLIs, the trajectory trace sink, the memory wiring (injecting my store into aptkit's engine), and choices like flooring the tool's result count so a model asking for one chunk still gets four. I can point at the exact seam: imports and interface implementations cross the npm boundary; everything below `src/` is mine. If there were a bug in the loop, the fix goes upstream into aptkit, not a node_modules edit."
 
 Decision mode: **deliberate.** The senior move is the precision of the seam. You're not claiming the loop. You're claiming the integration, and you can draw the exact line. That precision is worth more than pretending you wrote everything.
 
   ┃ "I don't claim what I wired. I claim the integration,
   ┃  and I can draw the exact line where my code ends."
+
+## Choice 8 — conversation memory as an injected capability
+
+This one is new, and it's the cleanest demonstration of the seam discipline from Choice 7 — because the memory capability was literally *extracted out of buffr and up into the library*, then re-consumed.
+
+  ┌─────────────────────────────────────────────────────────┐
+  │ THEY ASK                                                 │
+  │   "How does it remember anything? Did you build the      │
+  │    memory system?"                                      │
+  │                                                         │
+  │ WHAT THEY'RE TESTING                                     │
+  │   Do you understand what kind of memory this is — and    │
+  │   the difference between persisting a chat log and       │
+  │   making past turns retrievable? Do you know where the   │
+  │   engine ends and your store begins?                    │
+  └─────────────────────────────────────────────────────────┘
+
+> "It's retrieval-based episodic memory — RAG applied to conversation history instead of documents. After each turn, the question and answer get embedded and written back into the same vector store, tagged `meta.kind='memory'`, so a later turn — even in a future session — can pull a relevant past exchange back by similarity, through the exact same `search_knowledge_base` tool that retrieves corpus chunks. The important honesty: I didn't build the memory *engine* — `createConversationMemory` is aptkit's, in the published `@aptkit/memory` package. What I did was draw the seam. The engine speaks only the `EmbeddingProvider` and `VectorStore` contracts, so I inject my `PgVectorStore` and it has no idea it's talking to Postgres. The interesting history is that this engine was extracted *up* out of buffr into aptkit and then re-consumed here — a clean round-trip across the npm boundary. That's the proof the contract holds: the same capability can move out of my app and into the toolkit without my persistence layer changing a line. The cost I'm accepting is that this is relevance-based recall, not sequential in-prompt turn history — each `answer()` still treats its question independently; I get memory by similarity, not a running transcript in the prompt."
+
+Decision mode: **deliberate** on the seam, **evaluated-and-accepted** on the engine. You chose to inject a store into a library capability rather than hand-roll a memory table, and you can name exactly what that buys (store-agnostic engine, testable against the in-memory store) and what it costs (no sequential history). For a 7-year frontend engineer, the move that lands here is the contract-as-seam reasoning — the same instinct as a well-designed React boundary, where the consumer injects state and the component stays ignorant of where it came from.
+
+  ┃ "The memory engine moved up into the library and came
+  ┃  back down — and my persistence layer never changed.
+  ┃  That round-trip is the contract proving itself."
+
+## A note on the Ink chat surface — a genuine frontend
+
+Worth naming when the conversation touches the interface: the chat REPL is built in **Ink — React in the terminal**. `chat.tsx` is a real React component tree (`useState` for the turn list and the busy flag, `TextInput` and `Spinner` from the Ink ecosystem, the same render/state/effect model as a browser app). That's not incidental for you — it's a terminal *frontend surface*, and it plays directly to seven years of React. When an interviewer asks "what did you build," the chat UI is a place where your existing strength and this new AI-engineering work meet: same mental model (declarative components, state-driven render), different runtime. Claim it as the part of the system you were *most* equipped to build, not the least.
 
 ## Strong vs. weak — defending any choice
 
@@ -272,14 +304,15 @@ The choice you'd most reconsider is leaving `ef_search` at its default. It's the
 
 **Core claim:** Every choice defense has three parts — the criterion, the tradeoff, the cost. Missing any one is the weak version.
 
-**The seven choices, one line each:**
+**The eight choices, one line each:**
 - *pgvector vs dedicated DB* → operational simplicity, one source of truth; cost: throughput at billions of rows I don't have. (deliberate)
 - *HNSW vs IVFFlat* → no training, incremental insert; cost: approximate, `ef_search` untuned. (evaluated)
 - *local Gemma vs cloud* → privacy + zero per-query cost; cost: weaker model, no native tool-calling. (deliberate)
 - *one Postgres* → one pool, one commit point; split when scaling axes diverge. (deliberate)
-- *dropped FK* → preserves VectorStore drop-in parity; cost: integrity moves to call order. (deliberate)
+- *dropped FK* → preserves VectorStore parity AND lets memory rows ride chunks; cost: integrity moves to call order. (deliberate)
 - *768 committed* → one-way door, fail loud, never truncate. (deliberate)
 - *consume aptkit* → build the glue, not the loop; I can draw the exact seam. (deliberate)
+- *injected memory* → inject store into `@aptkit/memory`; engine-up/store-down; cost: relevance recall, not sequential history. (deliberate seam, evaluated engine)
 
 **Pull quotes:**
 - "Colocate until you have a scaling axis that splits them."
@@ -287,3 +320,7 @@ The choice you'd most reconsider is leaving `ef_search` at its default. It's the
 - "I don't claim what I wired. I claim the integration."
 
 **What you'd change:** Wire the recall harness to sweep `ef_search` — the highest-leverage knob I defaulted on instead of deciding.
+
+---
+
+Updated: 2026-06-24 — added an eighth choice (conversation memory injected into `@aptkit/memory` — the engine-up/store-down round-trip) and an Ink/React chat-surface note that plays to the reader's frontend strength; strengthened the dropped-FK defense to show it now also enables parent-less memory rows to ride the `chunks` table.

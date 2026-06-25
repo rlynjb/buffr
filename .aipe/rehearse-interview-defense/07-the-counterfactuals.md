@@ -166,7 +166,7 @@ In counterfactuals, the interviewer can push into "how would you redesign this f
 
 ## What you'd change
 
-The meta-lesson of this chapter is the change you'd make to *how you decide*, not to the code: you'd build the measurement before the feature. The through-line in every genuine counterfactual here — faithfulness eval, ef_search tuning, even the atomicity fix's verification — is that you shipped the capability before you shipped the way to know whether it works. The senior counterfactual isn't "I'd write better code"; it's "I'd build the feedback loop first, so every later decision is measured instead of guessed." That's the habit you'd carry into the next project, and saying it that way shows you learned the right lesson from this one.
+The meta-lesson of this chapter is the change you'd make to *how you decide*, not to the code: you'd build the measurement before the feature. The through-line in the genuine counterfactuals here — faithfulness eval, ef_search tuning — is that you shipped the capability before you shipped the way to know whether it works. But there's evidence you're already turning the corner on this: the trace sink is the one place you went back and *did* close the observability gap — found that it captured only two of six events and ordered replay by the wrong clock, and fixed it so the trajectory is now a complete, correctly-ordered record. So the honest framing of the meta-lesson is "I've started building the feedback loop, and I can show you where — the trace fix — but I haven't finished; faithfulness and ef_search are still measured-after-the-fact or not at all." The senior counterfactual isn't "I'd write better code"; it's "I'd build the feedback loop first, so every later decision is measured instead of guessed" — and pointing at the trace fix as the place you already practiced that is stronger than claiming the lesson in the abstract.
 
 ## One-page summary
 
@@ -183,4 +183,8 @@ The meta-lesson of this chapter is the change you'd make to *how you decide*, no
 - "Your top counterfactual and your weakest spot should be the same decision."
 - "Fabricating a regret for a decision that was right proves you didn't understand the decision."
 
-**What you'd change:** The habit, not the code — build the measurement before the feature, so every later decision is measured instead of guessed.
+**What you'd change:** The habit, not the code — build the measurement before the feature, so every later decision is measured instead of guessed. The trace-sink fix is where I already started practicing it.
+
+---
+
+Updated: 2026-06-24 — the four "yes" counterfactuals (faithfulness, atomicity, arg-validation, ef_search) and the three defended "no" rows all still hold and are unchanged; updated only the closing meta-lesson to cite the shipped trace-sink fix as evidence the "measure before you build" habit is already being practiced, not just aspired to.

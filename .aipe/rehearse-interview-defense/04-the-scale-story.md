@@ -189,7 +189,7 @@ That box is the most important one in the book for you specifically. The scale q
 
 ## What you'd change
 
-If you were building for scale from the start, the change you'd make first is instrumentation, not architecture. Right now you have almost no measurement: the tool layer computes a `durationMs` for every tool call, but the trace sink never reads it, and the eval scores retrieval against approximate results with no exact baseline. Before optimizing anything, you'd capture the latency breakdown — embed time, generate time, query time — and build the exact-scan recall baseline. You can't optimize what you can't measure, and the honest version of "what breaks first at 10x" is "I'd find out by measuring, because I haven't run it under load." That sentence, said calmly, beats any list of scaling technologies.
+If you were building for scale from the start, the change you'd make first is instrumentation, not architecture. The trace sink now *captures* the right signals — `durationMs` on every tool call, token usage per model call, all six event types persisted with the event timestamp — so the raw material for a latency breakdown is finally landing in `agents.messages` instead of getting dropped on the floor. What's still missing is the *aggregation*: nothing reads those rows back to produce an embed-vs-generate-vs-query split, and the eval still scores retrieval against approximate results with no exact baseline. So the change shifted from "capture the signal" to "build the readout and the recall baseline on top of the signal I now keep." You can't optimize what you can't measure, and the honest version of "what breaks first at 10x" is "I'd find out by measuring — and I now keep the per-call timings to measure *from*, I just haven't built the report." That sentence, said calmly, beats any list of scaling technologies.
 
 ## One-page summary
 
@@ -206,4 +206,8 @@ If you were building for scale from the start, the change you'd make first is in
 - "Find the real ceiling before you optimize the fixable bottleneck."
 - "I know the exact edge of my experience, and I'd rather name it than bluff across it."
 
-**What you'd change:** Add instrumentation first — the latency breakdown and the exact-scan recall baseline — because you can't optimize what you can't measure.
+**What you'd change:** Build the readout, not the capture — the trace sink now persists per-call `durationMs` and token counts, so the next step is aggregating them into an embed-vs-generate-vs-query latency breakdown, plus the exact-scan recall baseline. You can't optimize what you can't measure, but now you're at least keeping the measurements.
+
+---
+
+Updated: 2026-06-24 — reconciled the instrumentation story: the trace sink now persists `durationMs`, token usage, and all six event types (it previously dropped them), so the "what you'd change" shifted from "capture the latency signal" to "build the readout on top of the signal I now keep."

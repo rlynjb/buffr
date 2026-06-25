@@ -2,16 +2,16 @@
 
 After the pitch, someone stands up and says "walk me through the architecture." This is the whiteboard moment, and it's where a lot of candidates fall apart — not because they don't understand their system, but because they try to *talk* it instead of *draw* it. The rule for this chapter: draw first, talk while you draw, and have the diagram fully in your head so you can reproduce it from scratch in ninety seconds without hesitating.
 
-`buffr-laptop` has two flows worth drawing: the index path (how a document becomes searchable) and the query path (how a question becomes an answer). They share the storage and the models. If you can draw those two flows and name what crosses each boundary, you've defended the architecture. This chapter teaches you to draw them and tells you exactly where the interviewer will interrupt.
+`buffr-laptop` has two flows worth drawing: the index path (how a document becomes searchable) and the query path (how a question becomes an answer). They share the storage and the models. The query path now lives inside a long-lived chat session — one warm pool, one conversation held in-process across every turn, driven by an Ink (React-in-terminal) REPL — and each turn ends by writing the exchange back as memory. If you can draw those two flows and name what crosses each boundary, you've defended the architecture. This chapter teaches you to draw them and tells you exactly where the interviewer will interrupt.
 
 ```
   buffr — the architecture, both flows on one board
 
   ┌─ CLI ──────────────────────────────────────────────────────┐
-  │  index-cmd            ask-cmd                               │
-  │  (a .md file)         (a question string)                  │
+  │  index-cmd            chat.tsx  (Ink REPL → createChatSession)│
+  │  (a .md file)         one live conversation, turn after turn │
   └──────┬──────────────────────┬──────────────────────────────┘
-         │ INDEX PATH            │ QUERY PATH
+         │ INDEX PATH            │ QUERY PATH (per turn)
          ▼                       ▼
   ┌─ aptkit-core (library) ─────────────────────────────────────┐
   │                                                            │
@@ -21,6 +21,8 @@ After the pitch, someone stands up and says "walk me through the architecture." 
   │     ├ embed all chunks ─┐   ├─ wants tool? → search ──┐    │
   │     └ store.upsert()    │   ├─ ≤4 tool calls, ≤6 turns │    │
   │                         │   └─ forced final synthesis  │    │
+  │  createConversationMemory  └─ after answer: remember() ┐   │
+  │   (embed exchange → upsert kind=memory)               │   │
   └─────────────────────────┼───────────────────────────────┼───┘
          │ embed             │ embed query        │ generate │
          ▼                   ▼                   ▼          │
@@ -31,11 +33,12 @@ After the pitch, someone stands up and says "walk me through the architecture." 
          ▼                   ▼
   ┌─ Postgres + pgvector (reindb / schema agents) ─────────────┐
   │  documents ──soft link── chunks(vector(768), HNSW cosine)  │
-  │  conversations ─FK→ messages(trajectory)   profiles        │
+  │    └ memory rows ride chunks (meta.kind='memory')          │
+  │  conversations ─FK→ messages(6-event trajectory)  profiles │
   └─────────────────────────────────────────────────────────────┘
 ```
 
-That's the whole system. The index path goes top-left down; the query path goes top-right down and the answer comes back up. Everything below the CLI is either the library you consume or infrastructure you run.
+That's the whole system. The index path goes top-left down; the query path goes top-right down and the answer comes back up — then loops back to write the exchange as memory. Everything below the CLI is either the library you consume or infrastructure you run.
 
 ## The big question: walk me through the system
 
@@ -54,11 +57,11 @@ That's the whole system. The index path goes top-left down; the query path goes 
 
 Draw the query path as you say this, in your voice:
 
-> "When I run `ask` with a question, the CLI wires up the pieces — a Postgres pool, the local embedder, my pgvector store, the retrieval pipeline — and constructs the agent. Before anything else it loads my profile from the database, a `me.md`-style document, and injects it at the front of the system prompt so the model knows who 'the author' is.
+> "The interface is a chat REPL — an Ink terminal app. When it starts, `createChatSession` wires the pieces *once*: a warm Postgres pool, the local embedder, my pgvector store, the retrieval pipeline, the conversation-memory engine, and one conversation row that lives for the whole session. The agent is built once and reused across every turn. Before anything else it loads my profile from the database — a `me.md`-style document — and injects it at the front of the system prompt so the model knows who 'the author' is.
 >
-> Then it hands the question to the agent loop. The agent decides whether to search. When it wants to, it calls the one tool it has — `search_knowledge_base` — which embeds the question into the same 768-dimension space as the corpus and runs a cosine nearest-neighbor query against pgvector's HNSW index. That comes back as the top chunks with their source ids, and the agent reads them.
+> Each turn, `ask` persists my question, then hands it to the agent loop. The agent decides whether to search. When it wants to, it calls the one tool it has — `search_knowledge_base` — which embeds the question into the same 768-dimension space as the corpus and runs a cosine nearest-neighbor query against pgvector's HNSW index. That comes back as the top chunks with their source ids, and the agent reads them.
 >
-> The loop is bounded: at most four tool calls and six turns. On the final turn the loop physically removes the tools and tells the model it has none left, so it must stop searching and synthesize an answer from what it retrieved. The answer comes back, I persist the whole trajectory — every turn — into Postgres, and print the answer. Nothing in that path leaves the laptop."
+> The loop is bounded: at most four tool calls and six turns. On the final turn the loop physically removes the tools and tells the model it has none left, so it must stop searching and synthesize an answer from what it retrieved. The answer comes back, I flush the whole trajectory — every turn — into Postgres, then embed the question-and-answer pair back into the store as a memory row so a later session can recall it. The answer prints. Nothing in that path leaves the laptop."
 
 Then, if they want the index path, draw the left side:
 
@@ -122,13 +125,25 @@ Whiteboard walks get interrupted. Here's the map.
         │       SHAPE is there, but there's no RLS yet —
         │       deliberately deferred. (Ch 3 + Ch 7.)
         │
-        └─► THEY INTERRUPT: "What's the soft link between
-            documents and chunks?"
-              → The FK was deliberately dropped. The
-                VectorStore contract upserts chunks with no
-                notion of a documents row, so a hard FK
-                would break drop-in parity. Looks like a
-                bug; it's a contract decision. (Ch 6.)
+        ├─► THEY INTERRUPT: "What's the soft link between
+        │   documents and chunks?"
+        │     → The FK was deliberately dropped. The
+        │       VectorStore contract upserts chunks with no
+        │       notion of a documents row, so a hard FK
+        │       would break drop-in parity. Looks like a
+        │       bug; it's a contract decision — and it's
+        │       what lets memory rows (no parent document)
+        │       live in the same table. (Ch 3, Ch 6.)
+        │
+        └─► THEY INTERRUPT: "How does it remember across
+            sessions?"
+              → After each turn I embed the question+answer
+                into the same store, tagged meta.kind=
+                'memory'. A later turn's search surfaces a
+                relevant past exchange through the exact same
+                search_knowledge_base tool. It's retrieval-
+                based episodic memory — RAG over chat history.
+                The engine is aptkit's; I inject the store.
 ```
 
 Every one of those is a question you welcome, because each one lets you show a decision rather than recite a feature.
@@ -203,7 +218,8 @@ If you were drawing this architecture fresh today, the one structural thing you'
 **Core claim:** Draw before you talk. Name what crosses every boundary. Know exactly where control flips from your code to the model.
 
 **The questions, with one-line answers:**
-- *"Walk me through a question."* → Load profile into prompt → agent decides to search → embed query → cosine NN over HNSW → read chunks → forced synthesis within a 4-call budget → answer → persist trajectory.
+- *"Walk me through a question."* → Chat session built once (warm pool, one conversation) → per turn: persist question → agent decides to search → embed query → cosine NN over HNSW → read chunks → forced synthesis within a 4-call budget → answer → flush trajectory → remember the exchange as a memory row.
+- *"How does it remember across sessions?"* → After each turn the question+answer is embedded into the same store, tagged `kind=memory`; a later search surfaces it via `search_knowledge_base`. Engine is aptkit's; I inject the store.
 - *"What stops it looping forever?"* → 6 turns, 4 tool calls, and a forced final turn that removes the tools entirely.
 - *"How does it match with no keywords?"* → Semantic: query embedded into the same 768-dim space, ranked by cosine `<=>` over HNSW.
 - *"Why is the store its own class?"* → It implements aptkit's VectorStore contract; the agent never knows it's Postgres.
@@ -213,3 +229,7 @@ If you were drawing this architecture fresh today, the one structural thing you'
 - "Taking the tools away is the teeth; just asking nicely isn't enough."
 
 **What you'd change:** Make the index path atomic — thread one transaction through the document write and the chunk upsert so they commit together.
+
+---
+
+Updated: 2026-06-24 — redrew the query path as a long-lived Ink chat session (`chat.tsx` → `createChatSession`, one warm pool + one conversation across turns), replacing the removed one-shot `ask`; added the per-turn `remember()` memory write (`@aptkit/memory`, rides the `chunks` table as `kind=memory`) to the diagram, the walk, and the interrupt tree; messages now hold the full 6-event trajectory.

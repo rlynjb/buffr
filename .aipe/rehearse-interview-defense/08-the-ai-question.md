@@ -45,7 +45,7 @@ The three modes are the whole chapter. Every decision in your project sits in on
   │   is the only wrong answer.                              │
   └─────────────────────────────────────────────────────────┘
 
-> "Yes, heavily — it's how I work now. The honest division: AI helped me assemble a lot of the code, and a big share of the cleverness lives in aptkit, the library I consume and never edit — the agent loop, the tool-call emulation, the eval scorers. What I brought is the judgment and the integration. I decided local-first, I decided to colocate vectors and relational data in one Postgres, I implemented the pgvector store against the library's contract, and I made the wiring calls. I can tell you for any decision in the project whether it was my call, something AI suggested that I evaluated and accepted, or something I took as a default and didn't dig into. That last category is the one I'm most careful to be honest about, because that's where the real risk lives."
+> "Yes, heavily — it's how I work now. The honest division: AI helped me assemble a lot of the code, and a big share of the cleverness lives in aptkit, the library I consume and never edit — the agent loop, the tool-call emulation, the eval scorers, the conversation-memory engine. What I brought is the judgment and the integration. I decided local-first, I decided to colocate vectors and relational data in one Postgres, I implemented the pgvector store against the library's contract, I built the Ink chat REPL — React in the terminal, which is squarely my background — and I made the wiring calls, like injecting my store into the memory engine. I can tell you for any decision in the project whether it was my call, something AI suggested that I evaluated and accepted, or something I took as a default and didn't dig into. That last category is the one I'm most careful to be honest about, because that's where the real risk lives."
 
 That answer does everything: it's immediate and unembarrassed, it draws the exact seam between what you wrote and what you consumed, and it introduces the three modes — which signals you think about AI assistance with more nuance than the interviewer expected. You've turned a yes/no question into a demonstration of judgment.
 
@@ -119,7 +119,7 @@ That's a line-by-line walk of a file you own, with the *why* attached to each pa
   │   difference between using AI and being used by it.      │
   └─────────────────────────────────────────────────────────┘
 
-> "The clearest place is the defaulted-to decisions, where I have to be honest that I *didn't* push back enough. The `ef_search` index parameter is at the library and pgvector default — I didn't evaluate whether it was right for my corpus, and there's a recall risk hiding there I can't currently measure. Same with the connection pool having no acquire timeout, and the serial indexing loop. Those weren't decisions I made; they were defaults I accepted, and the senior version of this answer is admitting that rather than dressing them up as choices. Where I *did* push back: the silent failure modes. The dimension assertion throws instead of coercing because I wanted it loud — that was a deliberate override of the more 'helpful' default of padding or truncating. So it's a mix: I overrode the tool where silence would hide a bug, and I'm honest about the places I took its defaults without checking."
+> "The clearest place is the defaulted-to decisions, where I have to be honest that I *didn't* push back enough. The `ef_search` index parameter is at the library and pgvector default — I didn't evaluate whether it was right for my corpus, and there's a recall risk hiding there I can't currently measure. Same with the connection pool having no acquire timeout, and the serial indexing loop. Those weren't decisions I made; they were defaults I accepted, and the senior version of this answer is admitting that rather than dressing them up as choices. Where I *did* push back — and this is the more interesting half — is the trace sink. The first version persisted only two of the six event types the agent emits and ordered replay by the database's insert-time clock. That's the kind of thing AI-assembled code does: it handles the obvious cases and leaves a column orphaned. I caught it by reading the schema against the writer — a `tokens_used` column with no code path writing it — and rewrote it to capture all six events with the event's own timestamp. The dimension assertion is a smaller override of the same kind: it throws instead of coercing because I wanted it loud, not 'helpfully' padded. So it's a mix: I overrode the tool where silence would hide a bug — and the trace sink is the clearest case of me not trusting AI-generated observability code until I'd read it against the schema — and I'm honest about the places I took its defaults without checking."
 
 This is the most senior answer in the chapter, because it owns the third mode — defaulted-to — head on. Most candidates try to make every decision sound deliberate. Admitting "these were defaults I didn't evaluate, and here's the risk that creates" is rarer and reads as far more honest. The interviewer has heard a hundred people claim they evaluated everything. They've heard very few admit, precisely, where they didn't.
 
@@ -141,8 +141,9 @@ This is the most senior answer in the chapter, because it owns the third mode �
         ├─► IF THEY ASK "WHAT DID AI GET WRONG?"
         │     The defaulted-to decisions (ef_search, pool
         │     timeout). Own them as defaults, not choices.
-        │     And name where you overrode it (fail-loud dim
-        │     check).
+        │     And name where you overrode it: the trace sink
+        │     (caught it dropping 4 of 6 events + an orphaned
+        │     column) and the fail-loud dimension check.
         │
         └─► IF THEY ASK "WHAT HAS AI TAUGHT YOU?"
               The judgment layer is the job now. The tools
@@ -198,7 +199,7 @@ The AI-honesty change you'd make is to keep a decision log as you build — a ru
 **The questions, one line each:**
 - *"Did you use AI?"* → Yes, heavily. AI assembled the code, the cleverness is largely in the library I consume; I brought the judgment and integration, and I can name the mode of every decision.
 - *"Explain a file line by line."* → Pick pg-vector-store.ts — mine, deep, known cold. Name the boundary at library files; don't fake authorship.
-- *"What did AI get wrong?"* → The defaulted-to decisions (ef_search, pool timeout) I didn't evaluate; and where I overrode it (fail-loud dimension check).
+- *"What did AI get wrong?"* → The defaulted-to decisions (ef_search, pool timeout) I didn't evaluate; and where I overrode it — caught the trace sink dropping 4 of 6 events + an orphaned column and rewrote it, plus the fail-loud dimension check.
 - *"What did it teach you?"* → The bottleneck moved from writing to judgment. Knowing what I understand versus what I accepted is the skill.
 
 **The three modes:** deliberate (own it), evaluated-and-accepted ("AI suggested, I checked it"), defaulted-to (riskiest to admit, strongest when owned).
@@ -208,3 +209,7 @@ The AI-honesty change you'd make is to keep a decision log as you build — a ru
 - "Owning a defaulted-to decision honestly is the riskiest mode to admit and the strongest signal when you do."
 
 **What you'd change:** Keep a decision log in real time — track which mode each decision was made in as you build, not reconstructed for the interview.
+
+---
+
+Updated: 2026-06-24 — folded the Ink/React chat REPL and the injected memory engine into the "what I built vs wired" division; made the trace-sink fix the concrete "where I overrode AI's default" story (read the schema against the writer, caught the orphaned column and the dropped events). The three-mode framework itself is unchanged.
