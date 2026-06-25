@@ -42,6 +42,10 @@ instance (`reindb`).
   │ embedding_model text not null           │
   │ meta          jsonb not null '{}'        │  ← contains text AGAIN
   └──────────────────────────────────────────┘
+     two populations share this table:
+       corpus chunks   id="<docId>#<idx>"   document_id set
+       memory  chunks  id="memory:<conv>:<n>"  document_id NULL
+                       (meta.kind='memory', via @aptkit/memory)
 
   ┌──────────── conversations ──────────────┐
   │ id          uuid PK gen_random_uuid()   │  trajectory capture
@@ -109,3 +113,7 @@ rest — when a finding crosses one of these seams, it goes there, not here.
   token-derivation; the trust-boundary analysis lives there.
 - `study-system-design` — single-instance Postgres, no replication/sharding,
   why `app_id` is a future seam not a current one.
+
+---
+Updated: 2026-06-24 — `chunks` now carries a second (episodic-memory) population
+via `@aptkit/memory`; driver is `npm run chat` (the `ask` CLI was removed).

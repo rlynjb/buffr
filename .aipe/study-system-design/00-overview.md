@@ -17,14 +17,16 @@ forgotten.
   Full system — buffr-laptop, single device
 
   ┌─ CLI layer (buffr — entrypoints) ───────────────────────────────────┐
-  │  index-cmd.ts      ask-cmd.ts          eval-cmd.ts                   │
-  │  load corpus       answer a question   score retrieval (P@1 / R@k)   │
+  │  index-cmd.ts      chat.tsx → session.ts   eval-cmd.ts               │
+  │  load corpus       interactive chat        score retrieval (P@1/R@k) │
+  │  (one-shot)        (long-lived session)    (one-shot)                │
   └────────┬───────────────┬───────────────────┬────────────────────────┘
            │               │                   │
-  ┌─ Toolkit layer (@rlynjb/aptkit-core — imported, never edited) ───────┐
+  ┌─ Toolkit layer (@rlynjb/aptkit-core 0.4.1 — imported, never edited) ──┐
   │  createRetrievalPipeline   RagQueryAgent      scorePrecisionAtK      │
   │  OllamaEmbeddingProvider   GemmaModelProvider createSearchKB Tool    │
-  │  ContextWindowGuardedProvider   InMemoryToolRegistry                 │
+  │  ContextWindowGuardedProvider  InMemoryToolRegistry                  │
+  │  createConversationMemory (engine; bundles @aptkit/memory)          │
   └────────┬───────────────┬───────────────────┬────────────────────────┘
            │ implements     │ uses             │ implements
            │ VectorStore    │ ModelProvider    │ CapabilityTraceSink
@@ -44,17 +46,23 @@ forgotten.
 
 ## Legend — what each box owns and talks to
 
-**CLI layer** (`src/cli/*`, buffr) — the three process entrypoints. Each
-loads `.env`, builds the same wiring (pool → embedder → store → pipeline),
-and exits. `index` writes corpus; `ask` runs the agent; `eval` scores
-retrieval. No long-running server — a process per invocation.
+**CLI layer** (`src/cli/*` + `src/session.ts`, buffr) — the entrypoints, in
+two shapes. The one-shots (`index`, `eval`, `migrate`) load `.env`, build the
+wiring (pool → embedder → store → pipeline), do one job, and exit. `chat`
+(`chat.tsx` → `createChatSession`) is long-lived: it wires once and holds ONE
+warm pool and ONE conversation across every turn until `/exit`. (The old
+one-shot `ask` CLI is removed.) No long-running server — a process per
+invocation, or one held session.
 → deep walk: `05-cli-as-entrypoints.md`
 
-**Toolkit layer** (`@rlynjb/aptkit-core`) — everything reusable across apps.
-The agent loop, the model/embedding provider contracts, the retrieval
-pipeline, the `search_knowledge_base` tool, the eval scorers. buffr imports
-these and **never edits them** — the dependency direction is the architecture.
-→ deep walk: `04-library-as-dependency-boundary.md`
+**Toolkit layer** (`@rlynjb/aptkit-core@0.4.1`) — everything reusable across
+apps. The agent loop, the model/embedding provider contracts, the retrieval
+pipeline, the `search_knowledge_base` tool, the eval scorers, and now the
+conversation-memory engine (`createConversationMemory`, bundling
+`@aptkit/memory`). buffr imports these and **never edits them** — the
+dependency direction is the architecture. The memory engine is itself a
+round-trip: extracted UP from buffr, re-consumed DOWN with `PgVectorStore`
+injected. → deep walk: `04-library-as-dependency-boundary.md`
 
 **Adapter layer** (buffr) — the code that fills aptkit's seams with a
 Postgres-backed implementation. `PgVectorStore` implements aptkit's
@@ -96,8 +104,9 @@ rework. → deep walk: `07-deferred-body.md`
 3. `01-vector-store-adapter.md` — the seam that makes pg drop in.
 4. `02-retrieval-pipeline.md` — index and query, end to end.
 5. `03-trajectory-capture.md` — sync emit, async flush, conversation rows.
-6. `04-library-as-dependency-boundary.md` — aptkit consumed, never edited.
-7. `05-cli-as-entrypoints.md` — three processes, one wiring.
+6. `04-library-as-dependency-boundary.md` — aptkit consumed, never edited; the
+   memory-engine round-trip.
+7. `05-cli-as-entrypoints.md` — one-shot processes + the long-lived chat session.
 8. `06-profile-injection-as-context.md` — me.md as a row in the prompt.
 9. `07-deferred-body.md` — single-device now, two-brain/edge later.
 
@@ -118,3 +127,10 @@ rework. → deep walk: `07-deferred-body.md`
   pipeline, the ReAct-style agent loop inside `RagQueryAgent`, eval scoring.
 - **`study-software-design`** — the deep-module / info-hiding read of the
   adapter layer (the seam contracts, the pure `loadConfig`).
+
+---
+
+Updated: 2026-06-24 — CLI layer reframed (one-shot `index`/`eval`/`migrate` +
+long-lived `chat` session; `ask` removed); aptkit bumped to 0.4.1 (bundles
+`@aptkit/memory`); added `createConversationMemory` engine + its round-trip to
+the toolkit legend.

@@ -15,14 +15,14 @@ so." Where a finding earns a deep walk, it cross-links to a Pass 2 pattern file.
 There is no budget anywhere in the repo — no target latency, no "index N files
 in under M seconds," no cost ceiling, no token budget enforced for perf reasons.
 The one thing that *looks* like a budget is `ContextWindowGuardedProvider(...,
-{ maxTokens: 8192 })` (`src/cli/ask-cmd.ts:26`), but that's a correctness guard
+{ maxTokens: 8192 })` (`src/session.ts:46`), but that's a correctness guard
 (don't overflow gemma2's context), not a performance budget.
 
-Why correct here: one user runs `index` and `ask` at the terminal when they feel
+Why correct here: one user runs `index` and `chat` at the terminal when they feel
 like it. A budget is a promise you make to *someone else* — a caller waiting on
 a p95, a cost owner watching egress. buffr has neither.
 
-When it becomes relevant: the moment `ask` is fronted by an HTTP handler serving
+When it becomes relevant: the moment `chat` is fronted by an HTTP handler serving
 more than one caller, "answer in under X ms" becomes a real budget — and the
 gemma2:9b generation on a laptop GPU is the part that blows it.
 
@@ -30,7 +30,8 @@ gemma2:9b generation on a laptop GPU is the part that blows it.
 
 ## measurement-baselines-and-profiling
 
-**Partially exercised — one instrument exists upstream, buffr discards it.**
+**Partially exercised — the instrument now lands in the DB, but nothing reads it
+back.**
 
 aptkit's tool registry wraps every tool handler in a wall-clock measurement:
 
@@ -43,22 +44,24 @@ aptkit's tool registry wraps every tool handler in a wall-clock measurement:
 
 That `durationMs` rides out on the `tool_call_end` event
 (`@aptkit/runtime/.../events.d.ts:14-19`). buffr's trace sink receives that exact
-event — `src/supabase-trace-sink.ts` `emit()` branches on
-`event.type === 'tool_call_end'` — but persists only `event.toolName` and
-`event.result`. The `durationMs` field is dropped. So the one latency number the
-system produces is thrown away before it reaches the `agents.messages` table
-(which even has a `tokens_used` column ready for it,
-`sql/001_agents_schema.sql:48`).
+event and **now persists it**: the `tool_call_end` handler writes
+`{ result, error, durationMs }` into the message's `tool_results` jsonb
+(`src/supabase-trace-sink.ts:67-71`), and a sibling `model_usage` handler fills
+the formerly-orphaned `tokens_used` column from input+output tokens
+(`src/supabase-trace-sink.ts:73-78`, schema `sql/001_agents_schema.sql:48`). So
+the latency number is no longer dropped on the floor — it reaches
+`agents.messages`. The remaining gap is *consumption*: nothing queries those
+durations back into a baseline or aggregate.
 
-Beyond that: no baselines (nothing has been timed and recorded), no profiler, no
-flamegraphs, no representative-workload harness for *speed*. The closest thing to
-a measurement harness is `src/cli/eval-cmd.ts`, but it measures *quality*
-(precision@1, recall@k over `eval/queries.json`), not latency — it never times
-the `pipeline.query` call it makes on line 25.
+Beyond that: no baselines (nothing has been timed, recorded, and *compared*), no
+profiler, no flamegraphs, no representative-workload harness for *speed*. The
+closest thing to a measurement harness is `src/cli/eval-cmd.ts`, but it measures
+*quality* (precision@1, recall@k over `eval/queries.json`), not latency — it
+never times the `pipeline.query` call it makes on line 25.
 
-When it becomes relevant: the cheapest possible win is to stop dropping
-`durationMs` — persist it into `agents.messages.tokens_used`'s sibling, and
-`ask` gains a free per-tool-call baseline with zero new instrumentation.
+When it becomes relevant: the cheap win is no longer "stop dropping `durationMs`"
+(done) — it's "read the persisted `tool_results.durationMs` / `tokens_used` back"
+into a per-tool-call baseline; the instrumentation is already in the table.
 
 → see `00-overview.md` finding 6.
 
@@ -76,11 +79,12 @@ iteration, `await`ed), so "throughput" is just `1 / mean-file-time` and nobody
 measures it.
 
 Where the per-call latency actually lives, ranked:
-1. **gemma2:9b generation** during `ask` — the agent loop calls the LLM over
-   HTTP; on a laptop this dominates everything else by an order of magnitude.
-   (Inside aptkit's `RagQueryAgent.answer`, `src/cli/ask-cmd.ts:32`.)
-2. **nomic-embed-text embedding** — one `/api/embed` HTTP call per `query`, one
-   per indexed *document*.
+1. **gemma2:9b generation** during a `chat` turn — the agent loop calls the LLM
+   over HTTP; on a laptop this dominates everything else by an order of magnitude.
+   (Inside aptkit's `RagQueryAgent.answer`, `src/session.ts:62`.)
+2. **nomic-embed-text embedding** — now *two* `/api/embed` HTTP calls per chat
+   turn (the query embed, plus the post-answer memory embed via
+   `memory.remember`, `src/session.ts:66`), and one per indexed *document*.
 3. **HNSW vector search** — sub-linear, fast, the part that was deliberately
    engineered to *not* be the bottleneck (`src/pg-vector-store.ts:67-85`).
 
@@ -134,9 +138,20 @@ the `chunks_embedding_hnsw` index (`sql/001_agents_schema.sql:30-31`). Sub-linea
 instead of scanning every chunk. The `where app_id = $2` filter is backed by its
 own btree (`chunks_app_id`, line 32). → `01-hnsw-approximate-search.md`
 
-The database connection itself is reused across an operation's many queries via
-one `pg.Pool` (`src/db.ts:4-5`), so none of the above pays a per-statement
-connect/handshake. → `04-connection-pool-reuse.md`
+**4. New per-turn writes in `chat`.** Each turn now also (a) embeds + upserts the
+exchange into the same vector store for episodic memory
+(`memory.remember`, `src/session.ts:53,66`) — one extra Ollama embed + one extra
+pg upsert per turn; and (b) flushes a trace that writes *several* INSERTs per turn
+— the sink persists all six CapabilityEvent variants (step, tool_call_start/end,
+model_usage, warning, error; `src/supabase-trace-sink.ts:56-84`) instead of the
+~2 it used to. Minor write amplification, dominated by the gemma2 generation, but
+it scales with turn count.
+
+The database connection itself is reused across the whole `chat` session's many
+queries via one long-lived `pg.Pool` (`src/db.ts:4-5`, held in `src/session.ts:39`
+until `close()`), so none of the above — including the per-turn memory upsert and
+the larger trace flush — pays a per-statement connect/handshake.
+→ `04-connection-pool-reuse.md`
 
 ---
 
@@ -150,10 +165,13 @@ write (per-chunk INSERT). So buffr batches the expensive thing (embedding) at th
 granularity it happens to receive it, and leaves the two cross-unit batchings
 (documents, INSERTs) on the table.
 
-**Caching: none.** Run `npm run ask -- "same question"` twice and you pay the
-embed HTTP call and the HNSW search both times — there is no query-vector cache,
-no result cache, no memoization of `pipeline.query`. The `profiles` read
-(`src/profile.ts:5-6`) re-runs on every ask too. → `05-no-caching.md`
+**Caching: none.** Ask the same question twice in `chat` and you pay the embed
+HTTP call and the HNSW search both times (plus the per-turn memory embed) — there
+is no query-vector cache, no result cache, no memoization of `pipeline.query`. The
+`profiles` read (`src/profile.ts:5-6`) is the one thing the session *does* cache
+de-facto: `loadProfile` now runs once at session setup (`src/session.ts:47`), not
+per turn — so within a session the profile is read once, a small improvement over
+the old per-ask re-read. → `05-no-caching.md`
 
 **Backpressure: not yet exercised.** No queue, no concurrency limit, no overload
 mode, no debounce/throttle. There's no fan-in to apply backpressure *to* — one
@@ -161,7 +179,7 @@ CLI process, one operation at a time. The `pg.Pool` has an implicit default max
 (10 connections) that would queue excess checkouts, but buffr never checks out
 concurrently, so that ceiling is never approached.
 
-When it becomes relevant: caching is the first lever to pull if `ask` ever serves
+When it becomes relevant: caching is the first lever to pull if `chat` ever serves
 repeat queries from multiple users; a query-vector LRU keyed on the question
 string would cut the embed HTTP call and the HNSW search to a hash lookup.
 
@@ -169,10 +187,15 @@ string would cut the embed HTTP call and the HNSW search to a hash lookup.
 
 ## rendering-client-and-mobile-performance
 
-**not yet exercised.** `buffr-laptop` is a Node CLI (`src/cli/*-cmd.ts`,
-`process.stdout.write`). No browser, no bundle, no main thread, no paint, no
-mobile target. (The *parent* `buffr` is React Native per the project vision, but
-this laptop repo has no client surface.)
+**not yet exercised** — though `chat` now has a terminal UI. `chat` renders an
+Ink (React-in-the-terminal) interface (`src/cli/chat.tsx`): `useState` turn list,
+a `TextInput`, a busy `Spinner`. No browser, no bundle, no DOM paint, no mobile
+target — Ink reconciles to ANSI writes on stdout, and the render cost is trivial
+against the gemma2 generation each turn waits on. The one perf-shaped property:
+the UI stays responsive because `session.ask()` is awaited off the render path
+with a `busy` guard (`src/cli/chat.tsx:13-35`), so a slow turn shows a spinner
+rather than blocking input handling. (The *parent* `buffr` is React Native per the
+project vision; this laptop repo's only client surface is the Ink TUI.)
 
 ---
 
@@ -189,12 +212,14 @@ highest retrieval-quality-per-millisecond leverage in the whole system is
 untouched and nobody has the baseline to tune it.* The recall@k harness exists
 (`src/cli/eval-cmd.ts:24-33`) — wiring `ef_search` against it is the move.
 
-**2. The one latency number the system produces is discarded.**
-*Evidence: code path.* `durationMs` is computed (`tool-registry.js:21-23`),
-emitted (`events.d.ts:19`), received (`src/supabase-trace-sink.ts` `emit`), and
-dropped. The `agents.messages` table has a `tokens_used` column sitting empty
-(`sql/001_agents_schema.sql:48`). Persisting `durationMs` is a near-zero-cost
-baseline the repo declines to keep.
+**2. The one latency number the system produces is persisted but never read
+back.** *Evidence: code path.* `durationMs` is computed (`tool-registry.js:21-23`),
+emitted (`events.d.ts:19`), received, and now *written* into
+`agents.messages.tool_results` (`src/supabase-trace-sink.ts:67-71`); the
+formerly-empty `tokens_used` column is filled from `model_usage`
+(`src/supabase-trace-sink.ts:73-78`, `sql/001_agents_schema.sql:48`). The flag
+downgraded: the data lands in the table, but no query or harness reads it back
+into a baseline — instrumentation without consumption.
 
 **3. Indexing serializes across documents.**
 *Evidence: code path, no baseline.* `src/cli/index-cmd.ts:22-26` `await`s each
@@ -209,6 +234,17 @@ per document where one multi-row INSERT would do. Lowest-consequence flag on the
 list — it's strictly dominated by the embed call it sits behind.
 
 **5. No caching of identical queries.**
-*Evidence: missing mechanism.* Every `ask` re-embeds and re-searches from scratch
-(`src/cli/ask-cmd.ts` via `pipeline.query`). Correct for one user; the first real
-gap if buffr ever serves repeat traffic.
+*Evidence: missing mechanism.* Every `chat` turn re-embeds and re-searches from
+scratch (`src/session.ts:62` via `pipeline.query`). Correct for one user; the
+first real gap if buffr ever serves repeat traffic.
+
+---
+
+Updated: 2026-06-24 — `ask`/`ask-cmd.ts` → `chat` (`session.ts`, `chat.tsx`).
+Corrected measurement lens + red-flag #2: the trace sink now PERSISTS `durationMs`
+and `tokens_used` (`supabase-trace-sink.ts:67-78`) — the gap downgraded from
+"dropped" to "written but not read back." Added per-turn memory embed+upsert and
+trace write-amplification to the I/O lens (sub-finding 4) and latency ranking.
+Rendering lens updated for the new Ink TUI (`chat.tsx`). Caching lens notes
+`loadProfile` now runs once per session, not per turn. HNSW / serial-files /
+per-chunk-insert / no-caching findings re-verified unchanged.

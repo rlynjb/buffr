@@ -44,7 +44,8 @@ when the use throws.
   ────────────────  ────────────────  ─────────────────  ─────────────────
   file descriptor   readFile (opens)  readFile (closes)  one read, auto
   pooled client     pool.connect      client.release()   one transaction
-  the pool itself   createPool        pool.end()         whole process
+  the pool itself   createPool        pool.end()         batch: whole run
+                                       (session.close())  chat: whole session
 ```
 
 **Axis traced — "who guarantees this gets released?"**
@@ -62,13 +63,16 @@ when the use throws.
       └──────────────────────────────────────────┘
           ┌──────────────────────────────────────┐
           │ the pool   → YOU own it; pool.end() is│  ← NOT guaranteed on the
-          │                the LAST line, no finally│     error path (gap!)
+          │   batch: last line · chat: in close()  │     error path OR on SIGINT
+          │   neither wrapped in finally/handler    │     (gap!)
           └──────────────────────────────────────┘
 ```
 
 The answer flips from "library guarantees it" (files) to "your `finally`
 guarantees it" (clients) to "nothing guarantees it on error" (the pool itself).
-That last flip is a real finding — `pool.end()` has no `finally`.
+That last flip is a real finding — `pool.end()` has no `finally`, and in chat it
+lives in `session.close()` (`session.ts:73`) which only `/exit` reaches: a
+SIGINT (Ctrl-C) mid-session skips it entirely.
 
 **Seams:**
 
@@ -76,9 +80,11 @@ That last flip is a real finding — `pool.end()` has no `finally`.
   must pair up. The `finally` block is the contract that makes them pair even
   when the body throws. This seam is implemented correctly in `upsert` and
   `runMigration`.
-- **last-line cleanup ↔ error path (the `pool.end` seam).** `pool.end()` sits as
-  the final statement of each CLI with no protection. A throw before it skips
-  cleanup. The seam is "happy path vs error path," and the error path leaks.
+- **normal cleanup ↔ abnormal exit (the `pool.end` seam).** In batch CLIs
+  `pool.end()` is the final statement with no `try/finally`; a throw before it
+  skips cleanup. In chat it's inside `session.close()` reached only on `/exit`; a
+  throw, a crash, or a SIGINT all skip it. The seam is "graceful exit vs anything
+  else," and everything-else leaks.
 
 ---
 
@@ -153,34 +159,42 @@ in `upsert` and `runMigration`. Note that `search` (`pg-vector-store.ts:67`) and
 the trace writes use `pool.query` directly, which borrows-and-returns a client
 in one call — no manual release needed, no leak risk.
 
-**The pool itself — closed once, on the happy path only.** `pool.end()`
-(`ask-cmd.ts:38`, `index-cmd.ts:27`, `eval-cmd.ts:34`, `migrate.ts:30`) drains
-all idle clients and closes their sockets. It sits as the *last line* of each
-CLI. Here's the gap: it's **not** in a `finally`. If any `await` above it throws
-— a failed query, an Ollama timeout, a dimension mismatch
-(`pg-vector-store.ts:33`) — execution jumps past `pool.end()` and the process
-exits with the pool's sockets still open. The OS reaps them on exit, so it's not
-a *leak* in the classic sense, but it's not a graceful drain either.
+**The pool itself — closed once, on the graceful path only.** `pool.end()` drains
+all idle clients and closes their sockets. In batch CLIs it's the *last line*
+(`index-cmd.ts:27`, `eval-cmd.ts:34`, `migrate.ts:30`); in chat it's inside
+`session.close()` (`session.ts:72-73`), called only when the user types `/exit`
+(`chat.tsx:18-20`). Here's the gap, now wider: it's **not** in a `finally`, and in
+chat it's behind a user action. A throw above the last line (batch), an
+unhandled error mid-session, or a **SIGINT** (Ctrl-C) all jump past it and the
+process exits with the pool's sockets still open. The OS reaps them on exit, so
+it's not a *leak* in the classic sense — but for the long-lived chat process,
+"close only on `/exit`" means any abnormal exit skips the graceful drain.
 
 ```
-  pool.end() — last line, no finally → skipped on error
+  pool.end() — only the graceful path reaches it
 
-  createPool ──► await work ──► pool.end() ──► exit   ← happy path: clean drain
-                     │
-                     └─ throws ──► (jumps past pool.end) ──► exit
-                                    sockets torn down by process death,
-                                    not by graceful drain  ← the gap (see 07, 08)
+  BATCH:  createPool ──► await work ──► pool.end() ──► exit   ← clean drain
+                             │ throws ──► (jumps past) ──► exit  ← gap
+
+  CHAT:   createChatSession ──► [turns]ⁿ ──► /exit ──► session.close()
+                                    │                      │
+                                    │                      └─ pool.end() ✓
+                                    └─ SIGINT / crash ──► process dies, close()
+                                       SKIPPED, no drain  ← the gap (see 07, 08)
 ```
 
 ### Move 2.5 — current vs future state
 
 Two clean lifecycles, one leaky one. What *doesn't* have to change: the client
-release in `upsert`/`runMigration` is already correct — `finally` guarantees it.
-What *would* change to close the gap: wrap each CLI's body in
-`try { ... } finally { await pool.end(); }`, or register a
-`process.on('SIGINT'/'SIGTERM')` handler. Neither exists today. The cost of the
-gap at laptop scale is near zero (process exit cleans up); the cost grows the
-moment a CLI is invoked in a loop by another process that *doesn't* exit between
+release in `upsert`/`runMigration` is already correct — `finally` guarantees it,
+and `session.close()` → `pool.end()` is the right *normal-exit* drain for chat.
+What *would* change to close the gap: wrap each batch CLI body in
+`try { ... } finally { await pool.end(); }`, and for chat register a
+`process.on('SIGINT'/'SIGTERM')` handler that calls `session.close()`. Neither
+exists today. The cost at laptop scale is near zero (process exit cleans up); for
+chat the cost is real the moment Ctrl-C is the *normal* way users quit, since it
+skips the drain entirely. The cost also grows the moment a batch CLI is invoked
+in a loop by another process that *doesn't* exit between
 calls. → `07` owns the graceful-shutdown treatment.
 
 ### Move 3 — the principle
@@ -245,23 +259,29 @@ files, eval queries, the SQL script). Pool lifecycle once per CLI run.
           forever (no timeout, see 07). finally is the only correct place.
 ```
 
-**The leaky pool close** (`src/cli/ask-cmd.ts`, lines 19, 33–38):
+**The graceful-only pool close** (`src/session.ts` + `src/cli/chat.tsx`):
 
 ```
-  src/cli/ask-cmd.ts  (lines 19, 33-38)
+  src/session.ts  (lines 39, 72-73)
 
-  const pool = createPool(cfg.databaseUrl);     ← acquire (line 19)
+  const pool = createPool(cfg.databaseUrl);     ← acquire — held for the SESSION
   ...
-  const agent = new RagQueryAgent({ ... });
-  const answer = await agent.answer(question);  ← ANY throw here ...
-  await trace.flush();                          ← ... or here ...
-  process.stdout.write(`\n${answer}\n`);
-  await pool.end();                             ← ... skips this release entirely
+  async close(): Promise<void> {
+    await pool.end();                            ← drain — only via session.close()
+  }
+
+  src/cli/chat.tsx  (lines 18-20)
+
+  if (q === '/exit' || q === '/quit') {
+    await session.close();                       ← ★ the ONLY caller of close() ★
+    exit();
+  }
        │
-       └─ pool.end() is the last line, not in a finally. agent.answer throwing
-          (Ollama down, context overflow) jumps past it. Process exit reaps the
-          sockets, so no classic leak — but it's not a graceful drain. To fix:
-          try { ...all of it... } finally { await pool.end(); }  (see 07, 08)
+       └─ pool.end() runs only when the user types /exit. A SIGINT (Ctrl-C), a
+          crash, or an unhandled error all bypass close() — the process dies with
+          the pool's sockets open, no graceful drain. OS reaps them, so no classic
+          leak. To fix: process.on('SIGINT', () => session.close().then(...)).
+          (see 07, 08)
 ```
 
 ---
@@ -279,10 +299,11 @@ Connection pools are where this bites hardest in practice, because the failure
 is *delayed and silent*: a leaked client doesn't error, it just shrinks the
 available pool until a later, unrelated request hangs waiting for a connection
 that's gone. The diagnosis is hard precisely because the symptom is far from the
-cause. buffr avoids this in its transactional paths with `finally`; the only
-residual gap is the pool-level close on the error path. → `04` for why those
-clients carry transactions, `07` for the missing timeout that turns a leak into
-a *forever* hang, `05` for the whole-file buffering tradeoff of `readFile`.
+cause. buffr avoids this in its transactional paths with `finally`; the residual
+gap is the pool-level close, now wider because the chat process only closes on
+`/exit` — a SIGINT skips the drain. → `04` for why those clients carry
+transactions, `07` for the missing timeout *and* signal handler, `05` for the
+whole-file buffering tradeoff of `readFile`.
 
 **Not yet exercised:** read/write streams, `pipeline()`, `createReadStream`,
 file watching, descriptor limits, temp-file cleanup. Every file op is a single
@@ -309,11 +330,14 @@ returns — silent, not an error. buffr puts `release()` in a `finally`
 (`pg-vector-store.ts:64`), so it runs even when the transaction throws. *Anchor:*
 the release must be in `finally`; the error path is where leaks are born.
 
-**Q: Is `pool.end()` safe in these CLIs?** On the happy path, yes. On the error
-path, no — it's the last line, not in a `finally`, so a throw above it skips the
-graceful drain (`ask-cmd.ts:38`). Process exit reaps the sockets so it's not a
-classic leak, but the fix is one `try/finally` around the CLI body. *Anchor:*
-correct for the happy path, skipped on error — name it honestly.
+**Q: Is `pool.end()` safe?** On the graceful path, yes. Batch: it's the last
+line, not in a `finally`, so a throw above it skips the drain — fix is one
+`try/finally`. Chat: it lives in `session.close()` (`session.ts:73`) reached only
+on `/exit` (`chat.tsx:18-20`), so a SIGINT or crash skips it — fix is a
+`process.on('SIGINT')` handler that calls `session.close()`. Process exit reaps
+sockets either way, so no classic leak, but no graceful drain on abnormal exit.
+*Anchor:* correct on the graceful path, skipped on everything else — name it
+honestly.
 
 ---
 
@@ -325,9 +349,9 @@ correct for the happy path, skipped on error — name it honestly.
    `release()` while `upsert` (`:40`) does?
 3. **Apply:** an exception fires inside `upsert`'s insert loop. Trace the exact
    path — does the client return to the pool? Why?
-4. **Defend:** argue whether `pool.end()` not being in a `finally`
-   (`ask-cmd.ts:38`) is a real bug for a laptop CLI, then name the change that
-   makes it correct.
+4. **Defend:** argue whether `pool.end()` living only in `session.close()`
+   (`session.ts:73`, reached on `/exit`) is a real bug for the long-lived chat
+   process, then name the change (a SIGINT handler) that makes it correct.
 
 ---
 
@@ -335,5 +359,9 @@ correct for the happy path, skipped on error — name it honestly.
 
 - `04-shared-state-races-and-synchronization.md` — why pooled clients carry transactions
 - `05-memory-stack-heap-gc-and-lifetimes.md` — the whole-file buffering tradeoff of `readFile`
-- `07-backpressure-bounded-work-and-cancellation.md` — the missing timeout behind a forever-hang
-- `08-runtime-systems-red-flags-audit.md` — the `pool.end()`-on-error gap ranked
+- `07-backpressure-bounded-work-and-cancellation.md` — the missing timeout + SIGINT handler
+- `08-runtime-systems-red-flags-audit.md` — the `pool.end()`-on-abnormal-exit gap ranked
+
+---
+
+Updated: 2026-06-24 — pool close re-grounded on `session.close()`→`pool.end()` (`session.ts:73`), reached only via `/exit` (`chat.tsx:18-20`); widened the cleanup gap to cover SIGINT/crash on the long-lived chat process; purged ask-cmd close snippet.

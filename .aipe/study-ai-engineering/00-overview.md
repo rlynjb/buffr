@@ -1,24 +1,28 @@
 # buffr — AI Engineering Study Guide
 
+> Updated: 2026-06-24 — `ask-cmd.ts` retired for the interactive `chat`/`session.ts` surface; added retrieval-based episodic memory (file 08) to the seams list and diagram; trace now captures all 6 events incl. tokens.
+
 > One-page orientation. Read this first, then `audit.md`, then the pattern files in order.
 
 ## The whole system in one diagram
 
-buffr is the laptop "brain" of a self-hosted personal RAG agent. It consumes `@rlynjb/aptkit-core` as a library and adds the Postgres persistence layer plus three CLIs. Everything runs locally — Ollama serves both models, Postgres+pgvector stores the corpus, no cloud in the hot path.
+buffr is the laptop "brain" of a self-hosted personal RAG agent. It consumes `@rlynjb/aptkit-core` (0.4.1) as a library and adds the Postgres persistence layer, an interactive chat surface, plus the index/eval CLIs. Everything runs locally — Ollama serves both models, Postgres+pgvector stores the corpus *and* the conversation memory, no cloud in the hot path.
 
 ```
-  buffr — index → retrieve → generate → eval, all local
+  buffr — index → (chat: retrieve → generate → remember) → eval, all local
 
-  ┌─ CLI layer (buffr's entrypoints) ──────────────────────────────┐
-  │  index-cmd.ts      ask-cmd.ts          eval-cmd.ts             │
-  │  (build corpus)    (ask the agent)     (score precision@k)     │
+  ┌─ CLI / surface layer (buffr's entrypoints) ────────────────────┐
+  │  index-cmd.ts      chat.tsx → session.ts     eval-cmd.ts       │
+  │  (build corpus)    (Ink REPL, one warm       (score           │
+  │                     conversation, remembers)  precision@k)     │
   └────────┬───────────────┬────────────────────┬─────────────────┘
            │               │                     │
-  ┌─ Library layer (@rlynjb/aptkit-core — consumed, never edited) ─┐
+  ┌─ Library layer (@rlynjb/aptkit-core 0.4.1 — consumed, never edited) ─┐
   │  RetrievalPipeline   RagQueryAgent         scorePrecisionAtK   │
   │  createSearchKB...   runAgentLoop          scoreRecallAtK      │
-  │  OllamaEmbedding     GemmaModelProvider    (RubricJudge — not  │
-  │                      ContextWindowGuarded   consumed yet)      │
+  │  OllamaEmbedding     GemmaModelProvider    createConversation- │
+  │                      ContextWindowGuarded   Memory (@aptkit/    │
+  │                      (RubricJudge — unused)  memory, episodic)  │
   └────────┬───────────────┬────────────────────┬─────────────────┘
            │               │                     │
   ┌─ Provider layer (Ollama, localhost:11434) ────────────────────┐
@@ -27,23 +31,24 @@ buffr is the laptop "brain" of a self-hosted personal RAG agent. It consumes `@r
            │
   ┌─ Storage layer (Postgres "reindb", schema "agents") ──────────┐
   │  documents   chunks(embedding vector(768), HNSW cosine)        │
-  │  conversations   messages   profiles                           │
+  │     ▲ memory exchanges live HERE too, tagged kind=memory       │
+  │  conversations   messages(tokens_used filled)   profiles       │
   └────────────────────────────────────────────────────────────────┘
 ```
 
 ## Which shape is this codebase?
 
-The AI-engineering spec names three shapes of AI work. buffr is squarely **LLM application engineering** — single-purpose retrieval over a personal corpus, a bounded agent loop with one tool, and offline retrieval evals. It is not classical ML (no trained model, no feature engineering, no labeled-data pipeline). So SECTION 04 (Machine Learning) and the ML system-design templates are covered honestly as **not exercised** — they're future ground, not refreshers, and the guide does not invent ML features buffr doesn't have.
+The AI-engineering spec names three shapes of AI work. buffr is squarely **LLM application engineering** — single-purpose retrieval over a personal corpus, a bounded agent loop with one tool, retrieval-based episodic memory over chat history, and offline retrieval evals. It is not classical ML (no trained model, no feature engineering, no labeled-data pipeline). So SECTION 04 (Machine Learning) and the ML system-design templates are covered honestly as **not exercised** — they're future ground, not refreshers, and the guide does not invent ML features buffr doesn't have.
 
 The one wrinkle that makes buffr richer than a stock RAG demo: the generation model is **stock Gemma2:9b, which has no native tool-calling**. aptkit emulates tool calls by rendering tool schemas into the system prompt and parsing a JSON object back out. That emulation is the single highest-risk seam in the whole system, and it gets its own pattern file.
 
-## The seven seams worth studying
+## The eight seams worth studying
 
-The guide is two passes. `audit.md` walks every lens in the spec and says, per lens, what buffr does (with `file:line`) or `not yet exercised`. Then the pattern files go deep on the seven things that are actually load-bearing here:
+The guide is two passes. `audit.md` walks every lens in the spec and says, per lens, what buffr does (with `file:line`) or `not yet exercised`. Then the pattern files go deep on the eight things that are actually load-bearing here:
 
 ```
   Pass 1: audit.md            — every lens, honestly, with file:line
-  Pass 2: pattern files       — the seven load-bearing patterns:
+  Pass 2: pattern files       — the eight load-bearing patterns:
 
    01-rag-index-path                chunk → embed → pgvector upsert
    02-rag-query-path                embed → ANN cosine → rank → ground
@@ -52,6 +57,7 @@ The guide is two passes. `audit.md` walks every lens in the spec and says, per l
    05-embedding-model-choice        nomic 768-dim as a one-way door
    06-evals-precision-and-recall    offline retrieval scoring (no judge yet)
    07-profile-as-context            me.md injected into the system prompt
+   08-conversation-memory           RAG over chat history — episodic recall
 ```
 
 ## Reading order
@@ -61,7 +67,8 @@ The guide is two passes. `audit.md` walks every lens in the spec and says, per l
 3. `05-embedding-model-choice` — the one-way door that constrains both paths.
 4. `03-agent-loop-with-tool-calling` → `04-gemma-tool-call-emulation` — the generation half, outer loop then the risky inner seam.
 5. `07-profile-as-context` — how `me.md` gets into the prompt.
-6. `06-evals-precision-and-recall` — how you know retrieval works, and what's not measured.
+6. `08-conversation-memory` — how past exchanges get recalled via the same search tool (RAG over chat history).
+7. `06-evals-precision-and-recall` — how you know retrieval works, and what's not measured.
 
 ## Cross-links to sibling guides
 

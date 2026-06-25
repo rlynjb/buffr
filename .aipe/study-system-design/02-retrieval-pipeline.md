@@ -15,7 +15,7 @@ and the documents row beside it.
   Zoom out — where the pipeline sits
 
   ┌─ CLI layer (buffr) ──────────────────────────────────────────┐
-  │  index-cmd        ask-cmd / eval-cmd                          │
+  │  index-cmd        chat session / eval-cmd                     │
   └────────┬──────────────────┬──────────────────────────────────┘
            │ index()          │ query()
   ┌─ Toolkit layer (aptkit) ──▼──────────────────────────────────┐
@@ -154,7 +154,7 @@ calls `store.search(vector, k)`, which runs the cosine ANN query.
 
 The boundary condition the design hit live: a weak local Gemma asked for
 `top_k: 1`, starving multi-part questions. The fix is a `minTopK` floor wired
-where the tool is built (`ask-cmd.ts:23`) — the pipeline always retrieves at
+where the tool is built (`session.ts:43`) — the pipeline always retrieves at
 least 4 regardless of what the model requested. That floor is the difference
 between "answered half the question" and "answered all of it."
 
@@ -181,7 +181,7 @@ The full pipeline, both directions, every hop labeled.
 
   ┌─ CLI (buffr) ───────────────────────────────────────────────────┐
   │  index-cmd ──► indexDocumentRow ──► INSERT documents (buffr)     │
-  │  ask/eval ──► pipeline.query(q, k)                               │
+  │  chat/eval ──► pipeline.query(q, k)                              │
   └───────────────┬───────────────────────────────┬────────────────┘
                   │ pipeline.index                 │ pipeline.query
   ┌─ Pipeline (aptkit) ──────────────────────────────────────────────┐
@@ -198,10 +198,11 @@ The full pipeline, both directions, every hop labeled.
 ## Implementation in codebase
 
 **Use cases.** Index runs once per corpus file (`index`); query runs on every
-`ask` (through the tool) and every `eval` row. The pipeline object is rebuilt
-per CLI process — there's no shared server.
+chat turn (through the tool) and every `eval` row. The pipeline is rebuilt per
+one-shot process, but in `chat` it's built ONCE at `createChatSession` and
+reused for every turn — there's no shared server.
 
-**Pipeline construction (identical in all three CLIs)** —
+**Pipeline construction (identical in all three entrypoints)** —
 `src/cli/index-cmd.ts:18-20`
 
 ```
@@ -224,7 +225,7 @@ per CLI process — there's no shared server.
            The store never writes documents — that keeps VectorStore drop-in.
 ```
 
-**The minTopK floor (the weak-model fix)** — `src/cli/ask-cmd.ts:23`
+**The minTopK floor (the weak-model fix)** — `src/session.ts:43`
 
 ```
   const tool = createSearchKnowledgeBaseTool(pipeline, { minTopK: 4 });
@@ -280,7 +281,7 @@ Anchor: `src/runtime.ts:11-17`.
 
 First, is it retrieval or synthesis? Run `eval` — it scores the retrieve half
 in isolation. If retrieval missed, check `k`: the live bug was Gemma asking
-for `top_k:1`, fixed with a `minTopK:4` floor (`ask-cmd.ts:23`). The decoupled
+for `top_k:1`, fixed with a `minTopK:4` floor (`session.ts:43`). The decoupled
 pipeline is what makes this diagnosable.
 
 ```
@@ -288,7 +289,7 @@ pipeline is what makes this diagnosable.
                       └─ high → synthesis problem (model, prompt)
 ```
 
-Anchor: `src/cli/ask-cmd.ts:23`, `src/cli/eval-cmd.ts:24-33`.
+Anchor: `src/session.ts:43`, `src/cli/eval-cmd.ts:24-33`.
 
 ## Validate
 
@@ -299,13 +300,20 @@ Anchor: `src/cli/ask-cmd.ts:23`, `src/cli/eval-cmd.ts:24-33`.
 3. **Apply.** `eval` reports mean P@1 = 0.33 on three queries. Is that a
    retrieval problem or a synthesis problem, and how do you know?
    (`eval-cmd.ts`.)
-4. **Defend.** Justify the `minTopK: 4` floor (`ask-cmd.ts:23`) — what does it
+4. **Defend.** Justify the `minTopK: 4` floor (`session.ts:43`) — what does it
    cost, and what does it buy?
 
 ## See also
 
 - `01-vector-store-adapter.md` — the `upsert`/`search` underneath the pipeline.
 - `03-trajectory-capture.md` — the generate half that consumes the hits.
-- `05-cli-as-entrypoints.md` — where the pipeline is built per process.
+- `05-cli-as-entrypoints.md` — where the pipeline is built (once, in the chat
+  session; per-process for one-shots).
 - `study-ai-engineering` / `study-agent-architecture` — RAG and the agent loop.
 - `study-database-systems` — embedding + ANN execution.
+
+---
+
+Updated: 2026-06-24 — re-anchored the `minTopK:4` floor and query path from
+`ask-cmd.ts:23` to `session.ts:43`; `ask` CLI replaced by the long-lived `chat`
+session (pipeline built once per session, not per call).

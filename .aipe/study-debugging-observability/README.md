@@ -18,11 +18,13 @@ This is an **audit-style** guide. Two passes:
 3. Pattern files, in order of consequence:
    - `01-trajectory-capture-as-observability.md` — the `messages` table **is** the
      trace store. This is the repo's one real observability mechanism.
-   - `02-discarded-trace-signal.md` — `durationMs`, `timestamp`, and `model_usage`
-     arrive on every event and the sink throws them away. The biggest gap.
-   - `03-created-at-replay-ordering-gap.md` — replay-by-`created_at` can scramble
-     turn order under concurrent flush. A real correctness bug in the trace store.
-   - `04-stdout-as-only-log.md` — `process.stdout.write` is the entire logging story.
+   - `02-discarded-trace-signal.md` — full-signal capture. `durationMs`, tool args,
+     `model_usage` tokens, and warning/error all reach the store (reframed 2026-06-24
+     from the original drop-everything bug, which is now fixed; history kept inside).
+   - `03-created-at-replay-ordering-gap.md` — client-timestamp ordering. Replay sorts
+     by `event.timestamp`, surviving the concurrent flush (reframed 2026-06-24; the old
+     server-`now()` scramble is fixed, with a residual same-millisecond tie noted).
+   - `04-stdout-as-only-log.md` — `process.stdout.write` / Ink render is the logging story.
    - `05-eval-numbers-as-quality-signal.md` — P@1 / R@3 are the only quality signal,
      and they measure retrieval, not the answer.
 

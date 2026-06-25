@@ -200,22 +200,25 @@ read-only floor.
 
 ## Implementation in codebase
 
-**Use cases.** Reached on every `npm run ask`. The agent is constructed with
-a one-tool registry and runs under the policy + budget on every question.
-There's no code path where the agent gets a broader tool set — the scope is
-uniform.
+**Use cases.** Reached on every `npm run chat` turn. The agent is built once
+per session (`session.ts:34-57`) with a one-tool registry and runs under the
+policy + budget on every question. There's no code path where the agent gets
+a broader tool set — the scope is uniform, even now that conversation memory
+adds a second *retrievable source* (it does not add a tool: memory surfaces
+through the same `search_knowledge_base`, so the allowlist is unchanged).
 
 **Code side by side.**
 
 ```
-  src/cli/ask-cmd.ts  (lines 23–24)
+  src/session.ts  (lines 43–44)
 
   const tool = createSearchKnowledgeBaseTool(pipeline, { minTopK: 4 });
   const tools = new InMemoryToolRegistry([tool.definition], {...});
         │
         └─ only ONE tool is ever registered. Even before the policy filter,
            the registry holds a single read-only search tool. The blast-radius
-           floor starts here.
+           floor starts here. createConversationMemory (:53) adds NO tool —
+           it reuses this same search path to recall past turns.
 ```
 
 ```
@@ -343,3 +346,5 @@ agent loop in anger, not just read about ReAct.
   in code. Same "advisory vs enforced" axis, opposite verdict.
 - `study-agent-architecture` — the ReAct loop, the tool registry, the
   capability-policy model these controls live inside.
+
+Updated: 2026-06-24 — purged `ask-cmd.ts` ref → `session.ts:43-44`; noted conversation memory adds a retrievable source, not a tool — the one-tool allowlist (and the blast radius) is unchanged.

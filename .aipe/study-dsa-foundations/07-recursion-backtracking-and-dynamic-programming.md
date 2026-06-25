@@ -168,7 +168,7 @@ not a repo quirk.
 #### Move 2.5 — the agent loop: bounded iteration, not recursion
 
 One thing that *looks* like it might recurse but deliberately doesn't: the
-aptkit agent loop (consumed by `RagQueryAgent` in `src/cli/ask-cmd.ts`). An agent
+aptkit agent loop (consumed by `RagQueryAgent`, built in `src/session.ts`). An agent
 that reasons → calls a tool → reasons again is naturally expressible as
 recursion, but the library implements it as a *bounded iterative loop* with a hard
 step budget — flat state machine, not a growing stack.
@@ -218,11 +218,11 @@ The four state-space techniques, mapped to presence/absence in buffr.
 
 **Use cases.** Recursion is reached for implicitly on every nested data
 structure walk (serializing `meta` jsonb, mapping chunks). The bounded iteration
-is reached for on every `npm run ask` — the agent reasons and calls tools in a
-capped loop. Backtracking and DP are reached for *nowhere*.
+is reached for on every `npm run chat` turn — the agent reasons and calls tools
+in a capped loop. Backtracking and DP are reached for *nowhere*.
 
 ```
-  src/cli/ask-cmd.ts  (lines 33–35) — the bounded agent loop, not recursion
+  src/session.ts  (lines 57, 62) — the bounded agent loop, not recursion
 
   const agent = new RagQueryAgent({ model, tools, profile, trace });
   const answer = await agent.answer(question);
@@ -291,7 +291,7 @@ Answer: "An agent that reasons → calls a tool → reasons again is naturally
 recursive, but recursion has no natural ceiling — it can grow the stack or the
 token budget unbounded. The library implements it as a bounded iterative loop
 with a hard step cap, making the budget a first-class control. The decision was
-to *not* recurse." Anchor: `src/cli/ask-cmd.ts:34`.
+to *not* recurse." Anchor: `src/session.ts:62`.
 
 **Q: You built the river-crossing puzzle. Is that backtracking?**
 
@@ -306,7 +306,7 @@ vs the N-queens un-choose pattern.
 1. **Reconstruct.** Write the three-line difference between recursion,
    backtracking, and DP from memory (forgets / undoes / remembers).
 2. **Explain.** Why does buffr's agent loop use bounded iteration instead of
-   recursion? (`src/cli/ask-cmd.ts:34` — no unbounded stack/budget.)
+   recursion? (`src/session.ts:62` — no unbounded stack/budget.)
 3. **Apply.** Name one feature you could add to buffr that *would* justify DP, and
    say why. (E.g. fuzzy chunk-text matching via edit distance — overlapping
    subproblems on substrings.)
@@ -321,3 +321,6 @@ vs the N-queens un-choose pattern.
 - `03-stacks-queues-deques-and-heaps.md` — the call stack recursion rides on.
 - `08-dsa-foundations-practice-map.md` — where DP and backtracking rank in your
   practice plan (high — absent from both repo and portfolio).
+
+
+Updated: 2026-06-24 — purged `npm run ask` / `src/cli/ask-cmd.ts` references; re-grounded the agent loop on `src/session.ts` (built `:57`, invoked `:62`) and the chat entrypoint `src/cli/chat.tsx`; noted `@aptkit/memory` reuses the same HNSW walk (no new DSA).

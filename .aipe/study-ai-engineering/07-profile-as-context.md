@@ -1,5 +1,7 @@
 # Profile as context — me.md injected into the system prompt
 
+> Updated: 2026-06-24 — `ask-cmd.ts` references retargeted to `src/session.ts` (the `chat` surface); cross-linked the new `08-conversation-memory.md` as the other durable-context form.
+
 **Industry name(s):** Persona / profile injection / system-prompt context grounding · Project-specific pattern.
 
 ## Zoom out, then zoom in
@@ -9,8 +11,8 @@ A personal RAG agent should answer *for you* — knowing who "the author" is, wh
 ```
   Zoom out — where the profile enters
 
-  ┌─ CLI layer ──────────────────────────────────────────────┐
-  │  ask-cmd.ts → loadProfile(pool, appId)                    │
+  ┌─ Session layer ──────────────────────────────────────────┐
+  │  session.ts → loadProfile(pool, appId)                    │
   └───────────────────────────┬──────────────────────────────┘
                               │  profile text
   ┌─ Agent construction ──────▼──────────────────────────────┐
@@ -47,7 +49,7 @@ Three layers, one axis: **where does the profile live, and when does it bind to 
   └──────────────────────────────────────┘
 ```
 
-The two seams mark the profile's journey from editable data to frozen prompt. **Seam ①**: the profile is *data* in the database — you can edit it (a new row, latest wins) without redeploying. **Seam ②**: at agent construction, `injectProfile` freezes it into the system string for the run's duration. The load-bearing point: the profile is context the user controls *as data*, not a hardcoded persona — and it binds once per run, so editing it mid-conversation has no effect until the next `ask`.
+The two seams mark the profile's journey from editable data to frozen prompt. **Seam ①**: the profile is *data* in the database — you can edit it (a new row, latest wins) without redeploying. **Seam ②**: at agent construction, `injectProfile` freezes it into the system string for the run's duration. The load-bearing point: the profile is context the user controls *as data*, not a hardcoded persona — and it binds once per session, so editing it mid-conversation has no effect until the next `chat` session.
 
 ## How it works
 
@@ -84,7 +86,7 @@ Mental model: you know how a system prompt sets the assistant's standing instruc
 
 ### Step 3 — render and freeze
 
-`renderPromptTemplate(withProfile, {})` resolves any template placeholders and produces the final immutable `system` string stored on the agent. From here, every `model.complete` call in the loop passes this same system string. Boundary condition: it's frozen at construction — `loadProfile` runs once in `ask-cmd.ts` before the agent is built, so the profile is a per-run snapshot. A profile edit takes effect on the *next* `ask`, never mid-run.
+`renderPromptTemplate(withProfile, {})` resolves any template placeholders and produces the final immutable `system` string stored on the agent. From here, every `model.complete` call in the loop passes this same system string. Boundary condition: it's frozen at construction — `loadProfile` runs once in `session.ts` before the agent is built, so the profile is a per-session snapshot. A profile edit takes effect on the *next* `chat` session, never mid-session.
 
 ### Move 2.5 — current state vs the lost-in-the-middle cost
 
@@ -119,7 +121,7 @@ The full profile path, data to frozen prompt.
   │  select content order by updated_at desc limit 1          │
   └───────────────────────────┬───────────────────────────────┘
                               │ loadProfile → string | ''
-  ┌─ ask-cmd.ts ──────────────▼───────────────────────────────┐
+  ┌─ session.ts ──────────────▼───────────────────────────────┐
   │  const profile = await loadProfile(pool, cfg.appId)       │
   │  new RagQueryAgent({ model, tools, profile, trace })      │
   └───────────────────────────┬───────────────────────────────┘
@@ -134,7 +136,7 @@ The full profile path, data to frozen prompt.
 
 ## Implementation in codebase
 
-**Use cases.** Runs on every `ask`. The profile makes "what's my stack?" resolvable — without it, the model has no idea who "my" refers to. It's how buffr turns a generic RAG agent into *your* personal knowledge agent. The profile is editable as data (insert a new `profiles` row), so you update your persona without touching code.
+**Use cases.** Loaded once when the `chat` session starts. The profile makes "what's my stack?" resolvable — without it, the model has no idea who "my" refers to. It's how buffr turns a generic RAG agent into *your* personal knowledge agent. The profile is editable as data (insert a new `profiles` row), so you update your persona without touching code. (Profile is the always-injected, hand-authored form of durable context; conversation memory, `08-conversation-memory.md`, is the earned-and-recalled-by-relevance form.)
 
 **Code side by side.**
 
@@ -153,14 +155,14 @@ The full profile path, data to frozen prompt.
 ```
 
 ```
-  src/cli/ask-cmd.ts  (lines 27, 33)
+  src/session.ts  (lines 47, 57)
 
-  const profile = await loadProfile(pool, cfg.appId);   ← load ONCE, per run
+  const profile = await loadProfile(pool, cfg.appId);   ← load ONCE, per session
   ...
   const agent = new RagQueryAgent({ model, tools, profile, trace });
        │
-       └─ loaded before the agent is constructed → frozen for the whole run.
-          edit the profile mid-conversation? no effect until the next ask
+       └─ loaded before the agent is constructed → frozen for the whole session.
+          edit the profile mid-conversation? no effect until the next chat session
 ```
 
 ```
@@ -192,7 +194,7 @@ What to read next: `03-agent-loop-with-tool-calling.md` (the loop that carries t
 
 - **What to build:** Cap the injected profile to a token budget (e.g. truncate or summarize when it exceeds N tokens) so it can't crowd out retrieved chunks in the 8192-token window.
 - **Why it earns its place:** Shows you understand the profile and the corpus compete for context — "I budget my persona against my retrieval so neither starves" is a real context-management story.
-- **Files to touch:** `src/profile.ts` (truncate/summarize), `src/cli/ask-cmd.ts` (pass the budget).
+- **Files to touch:** `src/profile.ts` (truncate/summarize), `src/session.ts` (pass the budget).
 - **Done when:** a test with an oversized profile proves it's capped before injection.
 - **Estimated effort:** 1–4hr.
 
@@ -201,7 +203,7 @@ What to read next: `03-agent-loop-with-tool-calling.md` (the loop that carries t
 - **What to build:** A `profile-cmd.ts` that reads a local `me.md` and inserts it as a new `agents.profiles` row, making the latest-wins behavior usable from the command line.
 - **Why it earns its place:** Completes the "profile as editable data" story end to end — the read path exists, the write path is manual SQL today.
 - **Files to touch:** new `src/cli/profile-cmd.ts`, `package.json` (script).
-- **Done when:** `npm run profile -- me.md` updates the active profile and the next `ask` reflects it.
+- **Done when:** `npm run profile -- me.md` updates the active profile and the next `chat` session reflects it.
 - **Estimated effort:** <1hr.
 
 ## Interview defense
@@ -217,18 +219,19 @@ What to read next: `03-agent-loop-with-tool-calling.md` (the loop that carries t
 
 **Q: Why the front, and when does an edit take effect?**
 
-"Front because of lost-in-the-middle — start and end are attended-to most, so persona context buried mid-prompt gets under-weighted. And it's loaded once before the agent is built, so it's a per-run snapshot; editing the profile takes effect on the next `ask`, never mid-conversation." Anchor: bound once per run, placed at the high-attention edge.
+"Front because of lost-in-the-middle — start and end are attended-to most, so persona context buried mid-prompt gets under-weighted. And it's loaded once before the agent is built, so it's a per-session snapshot; editing the profile takes effect on the next `chat` session, never mid-conversation." Anchor: bound once per session, placed at the high-attention edge.
 
 ## Validate
 
 - **Reconstruct:** Trace the profile from `agents.profiles` to the frozen system string, naming the heading and position. (`src/profile.ts:6`, library `injectProfile`)
 - **Explain:** Why does `loadProfile` return `''` instead of `null` on a miss? (`src/profile.ts:7`)
-- **Apply:** A user edits their profile while an `ask` is mid-loop. Does the running answer change? Why or why not? (`src/cli/ask-cmd.ts:27` — loaded before construction)
+- **Apply:** A user edits their profile while a `chat` turn is mid-loop. Does the running answer change? Why or why not? (`src/session.ts:47` — loaded before construction)
 - **Defend:** The profile injects at `position: 'start'`. Defend that over `'end'`, citing the context-window behavior. (library `injectProfile` call in `RagQueryAgent`)
 
 ## See also
 
 - `03-agent-loop-with-tool-calling.md` — carries this system prompt every turn.
 - `02-rag-query-path.md` — the corpus the profile contextualizes.
+- `08-conversation-memory.md` — the other durable-context form: earned per-exchange and recalled by relevance, vs profile's hand-authored always-injected.
 - `06-evals-precision-and-recall.md` — note: the eval path skips the agent, so it doesn't exercise the profile.
 - `.aipe/study-system-design/06-profile-injection-as-context.md` — the architectural view of the same injection.

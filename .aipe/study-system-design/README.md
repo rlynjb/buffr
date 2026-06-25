@@ -8,10 +8,12 @@ load-bearing pattern the repo really exercises.
 
 ## What this repo is, in one line
 
-The **body** of a self-hosted RAG agent: TS ESM, three CLIs (`index` / `ask`
-/ `eval`) over Postgres + pgvector, consuming `@rlynjb/aptkit-core` (the
-toolkit) for the agent loop, providers, retrieval pipeline, and evals.
-Single device, single user, no HTTP API — and precise about what it defers.
+The **body** of a self-hosted RAG agent: TS ESM, one-shot CLIs (`index` /
+`eval` / `migrate`) plus a long-lived interactive `chat` session over
+Postgres + pgvector, consuming `@rlynjb/aptkit-core` (the toolkit) for the
+agent loop, providers, retrieval pipeline, evals, and the conversation-memory
+engine. Single device, single user, no HTTP API — and precise about what it
+defers.
 
 ## Reading order
 
@@ -25,11 +27,13 @@ Single device, single user, no HTTP API — and precise about what it defers.
 4. **`02-retrieval-pipeline.md`** — index and query end to end; the RAG
    retrieve half and the eval that measures it.
 5. **`03-trajectory-capture.md`** — the trace sink; sync `emit()` /
-   async `flush()` bridging aptkit's contract to async pg writes.
+   async `flush()` bridging aptkit's contract to async pg writes; full-signal
+   (all six events, ordered by `event.timestamp`).
 6. **`04-library-as-dependency-boundary.md`** — aptkit consumed, never edited;
-   the repo-split that defines the whole architecture.
-7. **`05-cli-as-entrypoints.md`** — three run-on-import processes, one shared
-   wiring, ordered teardown.
+   the repo-split that defines the architecture, now a bidirectional round-trip
+   (memory engine promoted up, store injected down).
+7. **`05-cli-as-entrypoints.md`** — one-shot run-on-import processes + the
+   long-lived `chat` session; one shared wiring, ordered teardown.
 8. **`06-profile-injection-as-context.md`** — me.md as a DB row, injected into
    the system prompt.
 9. **`07-deferred-body.md`** — single-device now, two-brain / edge / RLS
@@ -41,9 +45,9 @@ Single device, single user, no HTTP API — and precise about what it defers.
 | --- | --- |
 | `01-vector-store-adapter` | persistence that drops into the agent unchanged |
 | `02-retrieval-pipeline` | grounding + citations (it'd be a chatbot, not RAG) |
-| `03-trajectory-capture` | conversation history + the fine-tune dataset seam |
-| `04-library-as-dependency-boundary` | aptkit's reuse across apps |
-| `05-cli-as-entrypoints` | any way to drive the system |
+| `03-trajectory-capture` | full-signal conversation history + the fine-tune dataset seam |
+| `04-library-as-dependency-boundary` | aptkit's reuse across apps (engine up, store down) |
+| `05-cli-as-entrypoints` | any way to drive the system (one-shot + chat session) |
 | `06-profile-injection-as-context` | the agent's persona (generic voice) |
 | `07-deferred-body` | free future phases (no-rework scale path) |
 
@@ -82,3 +86,9 @@ no gateway, no horizontal scale. That's not a gap to paper over; it's the
 design. `audit.md` names each one plainly, and `07-deferred-body.md` shows why
 deferring them is the correct call and which seam each deferred phase attaches
 to when it arrives.
+
+---
+
+Updated: 2026-06-24 — `ask` CLI removed → long-lived `chat` session; aptkit
+0.4.1 (bundles `@aptkit/memory`); trajectory capture now full-signal (6/6
+events); library boundary strengthened to a bidirectional round-trip.

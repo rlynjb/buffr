@@ -17,12 +17,14 @@ keeps buffr's concerns (pg, Ollama, the CLI) out of the toolkit.
   Zoom out — the boundary that defines the whole repo
 
   ┌─ buffr (the body — this repo) ───────────────────────────────┐
-  │  CLIs · PgVectorStore · SupabaseTraceSink · agents schema     │
+  │  CLIs · chat session · PgVectorStore · SupabaseTraceSink      │
+  │  agents schema                                                │
   │           │  imports (one direction only)                     │
-  │           ▼                                                    │
-  │  ┌─ @rlynjb/aptkit-core (the toolkit — npm dep) ────────────┐ │
+  │           ▼          ▲ injects PgVectorStore into the engine   │
+  │  ┌─ @rlynjb/aptkit-core (the toolkit — npm dep, 0.4.1) ─────┐ │
   │  │  RagQueryAgent · RetrievalPipeline · VectorStore (port)  │ │
   │  │  GemmaModelProvider · OllamaEmbeddingProvider · evals    │ │
+  │  │  createConversationMemory (engine, bundles @aptkit/memory)│ │
   │  └──────────────────────────────────────────────────────────┘ │
   │           ▲  NEVER imports buffr · NEVER edited here          │
   └───────────────────────────────────────────────────────────────┘
@@ -34,6 +36,18 @@ nothing app-specific, and both meet at interfaces the library owns. Strip
 this discipline and aptkit absorbs Supabase migrations and Ollama deploy
 config, turning "the toolkit" into "the Gemma+Supabase app" and killing reuse
 across blooming_insights, contrl, etc. The boundary is the product decision.
+
+What sharpens the read since the last pass: the boundary just survived a
+*round-trip*. buffr had grown its own conversation-memory logic; rather than
+keep it app-side, the reusable *engine* (embed an exchange, tag it, recall it)
+was extracted UP into aptkit and now ships in the published bundle as
+`createConversationMemory` (imported, like everything else, from
+`@rlynjb/aptkit-core`, not `@aptkit/memory` directly). buffr re-consumes that
+engine and injects its `PgVectorStore` *down* into it (`session.ts:53`). So the
+arrow stayed one-directional, but the seam now carries traffic both ways: a
+reusable engine moved up, a deployment-specific store plugs down. That's a
+worked example of the boundary doing its actual job — promoting the general,
+keeping the specific local — not just a one-time consumption.
 
 ## Structure pass
 
@@ -63,7 +77,11 @@ The contracts that cross it are aptkit's interfaces — `VectorStore`,
 `CapabilityTraceSink`, `ModelProvider`, `EmbeddingProvider`. buffr fills them;
 aptkit consumes the filled versions through dependency inversion. The trust
 property that flips across the seam: **buffr can change freely; aptkit changes
-are off-limits here** (must-not-change rule).
+are off-limits here** (must-not-change rule). The newest traffic across this
+seam is `createConversationMemory`: a reusable engine that crossed UP (buffr →
+aptkit, as a published feature in 0.4.1) and is now consumed back DOWN with
+buffr's `PgVectorStore` injected into it — both directions, same one-way
+dependency arrow.
 
 ## How it works
 
@@ -99,8 +117,8 @@ Nothing else crosses.
 ```
   layers-and-hops — what travels across the npm seam
 
-  ┌─ buffr ──────────────────┐ hop 1: import { RagQueryAgent, ... }
-  │ ask-cmd, index-cmd, ...   │ ───────────────────────────────────►┐
+  ┌─ buffr ──────────────────┐ hop 1: import { RagQueryAgent, createConversationMemory, ... }
+  │ session.ts, index-cmd, ...│ ───────────────────────────────────►┐
   └──────────────────────────┘                                      │
                                                                     │
   ┌─ buffr adapters ─────────┐ hop 2: class PgVectorStore           │
@@ -133,7 +151,9 @@ the CLI entrypoints. aptkit holds none of it.
   VectorStore interface          PgVectorStore (pg body)
   CapabilityTraceSink interface  SupabaseTraceSink (pg body)
   Gemma/Ollama providers*        pool, DATABASE_URL, OLLAMA_HOST config
-  eval scorers                   index/ask/eval CLIs, the corpus
+  eval scorers                   index/eval CLIs + chat session, the corpus
+  conversation-memory engine     the store the engine writes to (PgVectorStore)
+  (createConversationMemory)
 ```
 
 (*The Ollama *provider* is reusable and lives in aptkit; the Ollama *host
@@ -149,7 +169,7 @@ The design hit two real cases where the *fix belonged in aptkit*: Gemma's
 `top_k:1` starvation and a hallucinated filter key. The discipline held — both
 fixes landed in `@aptkit/retrieval`, not as edits inside buffr's
 `node_modules` (`laptop-supabase-graduation-design.md:209-212`). buffr only
-*wired* the fix (`minTopK:4` at `ask-cmd.ts:23`).
+*wired* the fix (`minTopK:4` at `session.ts:43`).
 
 ```
   decision rule — where does a fix go?
@@ -160,6 +180,35 @@ fixes landed in `@aptkit/retrieval`, not as edits inside buffr's
                                                      ▼
   buffr only ever WIRES upstream fixes (minTopK:4), never patches the dep
 ```
+
+#### The round-trip — a feature promoted UP, re-consumed DOWN
+
+The same decision rule, run on a whole *feature* instead of a one-line fix.
+buffr needed retrievable conversation memory: after each turn, embed the
+exchange and tag it so future turns can recall it. The reusable part of that —
+the embed/tag/recall *engine* — isn't buffr-specific, so it went UP into aptkit
+(published as `createConversationMemory` in `@rlynjb/aptkit-core@0.4.1`, which
+bundles `@aptkit/memory`). The buffr-specific part — *where* those memory
+chunks are stored — stays down: buffr injects its `PgVectorStore`. The arrow
+never reversed; the seam just carried a feature both ways.
+
+```
+  the round-trip — engine up, store down (one arrow, two payloads)
+
+  buffr memory logic ──promote──► aptkit createConversationMemory (0.4.1)
+                                          │  import back down
+  buffr: createConversationMemory({ embedder, store: PgVectorStore }) ◄──┘
+       │
+       └─ engine is aptkit's (reusable); store is buffr's (this deployment).
+          Memory chunks share the SAME store as documents — so they surface
+          through the existing search_knowledge_base tool, no new port needed.
+```
+
+What breaks if buffr had kept the engine local instead of promoting it: every
+other app wanting conversation memory re-implements embed/tag/recall, and the
+logic drifts per app. What breaks if aptkit had absorbed the *store* too:
+every consumer inherits Postgres. Promoting the engine and injecting the store
+is the boundary working exactly as designed.
 
 ### Move 3 — the principle
 
@@ -177,15 +226,18 @@ The full boundary, both hop types, the must-not-change rule marked.
   aptkit ↔ buffr — the dependency boundary
 
   ┌─ buffr (volatile, concrete, this deployment) ───────────────────┐
-  │  CLIs ──import──► aptkit classes                                 │
+  │  CLIs + chat session ──import──► aptkit classes                  │
   │  PgVectorStore ──implements──► VectorStore                       │
   │  SupabaseTraceSink ──implements──► CapabilityTraceSink           │
+  │  PgVectorStore ──injected into──► createConversationMemory       │
   │  schema · pool · config · corpus  (all buffr-only)               │
   └───────────────────────────┬─────────────────────────────────────┘
                               │ npm seam · arrow points UP only
                               │ aptkit NEVER edited here
-  ┌─ @rlynjb/aptkit-core (stable, abstract, reusable) ──────────────┐
+                              │ (memory engine promoted UP, re-consumed DOWN)
+  ┌─ @rlynjb/aptkit-core 0.4.1 (stable, abstract, reusable) ────────┐
   │  RagQueryAgent · RetrievalPipeline · evals · providers          │
+  │  createConversationMemory (bundles @aptkit/memory)              │
   │  owns: VectorStore, CapabilityTraceSink, ModelProvider ports     │
   │  depends on: nothing in buffr                                    │
   └──────────────────────────────────────────────────────────────────┘
@@ -198,18 +250,20 @@ CLIs import the agent and pipeline; the adapters implement the ports. The
 boundary is also a *constraint* — it's in the must-not-change list, so it
 governs every change to the repo.
 
-**Pure imports, no edits** — `src/cli/ask-cmd.ts:2-6`
+**Pure imports, no edits** — `src/session.ts:2-6`
 
 ```
-  import { OllamaEmbeddingProvider, createRetrievalPipeline,
-           createSearchKnowledgeBaseTool } from '@rlynjb/aptkit-core';   ← 2
-  import { InMemoryToolRegistry } from '@rlynjb/aptkit-core';            ← 3
-  import { GemmaModelProvider } from '@rlynjb/aptkit-core';              ← 4
-  import { ContextWindowGuardedProvider } from '@rlynjb/aptkit-core';    ← 5
-  import { RagQueryAgent } from '@rlynjb/aptkit-core';                   ← 6
+  import {
+    OllamaEmbeddingProvider, createRetrievalPipeline, createSearchKnowledgeBaseTool,
+    InMemoryToolRegistry, GemmaModelProvider, ContextWindowGuardedProvider, RagQueryAgent,
+    createConversationMemory,                                            ← 5: the memory engine
+  } from '@rlynjb/aptkit-core';                                          ← 6: ONE package
         │
         └─ everything reusable is imported from the package — the agent, the
-           providers, the guard, the tool factory. buffr composes, never forks.
+           providers, the guard, the tool factory, AND createConversationMemory.
+           Note: imported from '@rlynjb/aptkit-core', NOT '@aptkit/memory'
+           directly — 0.4.1 bundles memory into the published core. buffr
+           composes, never forks.
 ```
 
 **Implementing a port (the other hop)** — `src/pg-vector-store.ts:1-2, 19`
@@ -220,23 +274,30 @@ governs every change to the repo.
         │
         └─ buffr's app-specific body (Postgres) plugs into aptkit's reusable
            interface. Same pattern for SupabaseTraceSink implements
-           CapabilityTraceSink (supabase-trace-sink.ts:23).
+           CapabilityTraceSink (supabase-trace-sink.ts:49). And the SAME store
+           instance is injected into aptkit's memory engine (session.ts:53).
 ```
 
-**The wiring composes imports + implementations** — `src/cli/ask-cmd.ts:33`
+**The wiring composes imports + implementations** — `src/session.ts:53, 57`
 
 ```
-  const agent = new RagQueryAgent({ model, tools, profile, trace });
+  const memory = createConversationMemory({ embedder, store });  ← 53: engine + injected store
+  const agent  = new RagQueryAgent({ model, tools, profile, trace }); ← 57
         │
-        └─ RagQueryAgent (imported from aptkit) receives `trace`
-           (SupabaseTraceSink, buffr's implementation). The seam meets here:
-           aptkit's class consuming buffr's port-implementation.
+        └─ TWO seam crossings in two lines. RagQueryAgent (aptkit) receives
+           `trace` (SupabaseTraceSink, buffr's port body). createConversationMemory
+           (aptkit's engine) receives `store` (PgVectorStore, buffr's port body).
+           Same shape both times: aptkit's reusable code consuming buffr's
+           deployment-specific implementation.
 ```
 
 **The rule, stated** — `context.md` must-not-change + design doc line 6: "it
 depends on aptkit as a library, which stays untouched." This isn't just style
-— it's why the package is a versioned dependency (`@rlynjb/aptkit-core@^0.4.0`
-in `package.json`) and not vendored source.
+— it's why the package is a versioned dependency (`@rlynjb/aptkit-core@^0.4.1`
+in `package.json`, bumped from 0.4.0 to pick up the bundled memory engine) and
+not vendored source. The version bump is the *mechanism* of the round-trip: a
+feature promoted up arrives back down as a published version, wired in, never
+edited in `node_modules`.
 
 ## Elaborate
 
@@ -248,10 +309,15 @@ anthropic/openai/local side by side — push one deployment's Supabase config in
 and that symmetry dies (`agent-layer-plan.md`). The reader has lived the
 other side of this: aipe (the meta-tooling project) is itself a
 markdown-as-source library consumed by slash commands — same "build the
-reusable core, consume it from the edge" instinct. The honest tension: heavy
-co-evolution through early phases tempts a monorepo (`agent-layer-plan.md`
+reusable core, consume it from the edge" instinct. The memory round-trip is
+the clearest proof the boundary pays off: a feature that grew in the body got
+*promoted* to the toolkit (published in 0.4.1) and re-consumed with the
+deployment-specific store injected back in — the textbook lifecycle of "extract
+the reusable core upward, keep the specific downward." The honest tension:
+heavy co-evolution through early phases tempts a monorepo (`agent-layer-plan.md`
 names this as the open consumption-seam question), but the published-package
-boundary is what enforces the discipline that a monorepo would let slide.
+boundary is what forced the engine/store split to be clean enough to publish —
+discipline a monorepo would have let slide.
 
 ## Interview defense
 
@@ -284,8 +350,26 @@ assumptions into the shared toolkit.
   app-specific fix → buffr code
 ```
 
-Anchor: `src/cli/ask-cmd.ts:23`;
+Anchor: `src/session.ts:43`;
 `laptop-supabase-graduation-design.md:209-212`.
+
+**Q: buffr grew its own conversation-memory logic. Why move the engine into
+aptkit instead of keeping it local — and how does the store stay buffr's?**
+
+Because the engine (embed an exchange, tag it, recall it) is reusable across
+any app, but *where* memories are stored is deployment-specific. So the engine
+was promoted up and published (`createConversationMemory` in 0.4.1), and buffr
+re-consumes it injecting its `PgVectorStore`. The dependency arrow never
+reversed — aptkit still depends on nothing in buffr — it's the same
+port-injection shape as `VectorStore`, applied to a whole feature. Engine up,
+store down.
+
+```
+  buffr engine ──promote──► aptkit createConversationMemory (published 0.4.1)
+  aptkit engine ◄──import + inject PgVectorStore── buffr (session.ts:53)
+```
+
+Anchor: `src/session.ts:53`; `package.json` (`@rlynjb/aptkit-core@^0.4.1`).
 
 ## Validate
 
@@ -300,8 +384,20 @@ Anchor: `src/cli/ask-cmd.ts:23`;
 
 ## See also
 
-- `01-vector-store-adapter.md` — one of the two ports buffr fills.
+- `01-vector-store-adapter.md` — one of the two ports buffr fills (and the
+  store injected into the memory engine).
 - `03-trajectory-capture.md` — the other port (`CapabilityTraceSink`).
-- `05-cli-as-entrypoints.md` — where buffr's imports get composed.
+- `05-cli-as-entrypoints.md` — where buffr's imports get composed (the chat
+  session wires the memory engine).
 - `07-deferred-body.md` — swapping the body without touching the toolkit.
 - `study-software-design` — deep-module / info-hiding read of the seam.
+
+---
+
+Updated: 2026-06-24 — STRENGTHENED to a bidirectional round-trip: the
+conversation-memory engine was promoted UP into aptkit (published as
+`createConversationMemory` in 0.4.1, bundling `@aptkit/memory`) and re-consumed
+DOWN with `PgVectorStore` injected; arrow stays one-directional. Bumped
+`@rlynjb/aptkit-core` 0.4.0→0.4.1; re-anchored imports/wiring from `ask-cmd.ts`
+to `session.ts`; noted imports come from `@rlynjb/aptkit-core`, not
+`@aptkit/memory` directly.

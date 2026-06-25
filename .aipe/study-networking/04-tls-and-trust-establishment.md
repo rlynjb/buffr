@@ -172,7 +172,10 @@ Both wires, trust posture side by side, with where the decision is made.
 
 **Use cases.** TLS is reached for implicitly on every DB connection *if* the
 connection string asks for it. There is no explicit TLS code, no cert loading,
-no `ssl: { ... }` block anywhere in the repo.
+no `ssl: { ... }` block anywhere in the repo. Cadence note: because `chat` holds
+one warm pool across the whole session, the TLS handshake (like the TCP one) is
+paid once on the first connection and amortized over every later turn — the
+cost lives at session start, not per query.
 
 **Code side by side.** The absence is the finding:
 
@@ -252,3 +255,5 @@ moved off-box, at which point the `http://` scheme would need to become
   posture rides on.
 - `03-tcp-udp-connections-and-sockets.md` — TLS sits between TCP and the app data.
 - `study-security` — credential handling and the full trust-boundary analysis.
+
+Updated: 2026-06-24 — Re-verified the TLS-by-string finding against current `src/` (still `src/db.ts:5`, no `ssl:` option, no explicit TLS code) and added the warm-session cadence note: under `chat` the TLS handshake is paid once on the session pool's first connection and amortized across every turn. No stale `ask-cmd` refs in this file.

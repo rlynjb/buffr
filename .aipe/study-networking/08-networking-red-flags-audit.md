@@ -18,7 +18,7 @@ that aren't are concentrated in one place — the unguarded, untimed calls.
   └──────┬──────────────────────────────────┬──────────────────────┘
   ┌─ Risk surface ──────────────────────────────────────────────────┐
   │   ● hangs (no timeout)   ● TLS-by-string   ○ no retry (ok-ish)   │ ★ THIS FILE ★
-  │   ● pool no connTimeout  ○ uncaught throw  ○ streaming absent(ok)│
+  │   ● pool no connTimeout  ○ /exit-cleanup   ○ streaming absent(ok)│
   └──────┬──────────────────────────────────┬──────────────────────┘
   ┌─ Service layer ─────────────────────────────────────────────────┐
   │   src/db.ts · src/config.ts · src/cli/*                          │
@@ -84,10 +84,12 @@ one-line fix ranks low; a likely, user-facing, structural gap ranks high.
 
 *No call-site timeout.* `await agent.answer()` and every DB query run with no
 `AbortSignal`. A hung Ollama (loading a 9B model) or a stalled connection freezes
-the CLI for minutes with no feedback. **Likelihood: moderate** (model load,
-flaky network). **Impact: high** (frozen process, no signal). **Fix: one
-`AbortSignal.timeout(ms)` threaded through** — the seam already exists. Evidence:
-`src/cli/ask-cmd.ts:34`. → `07`.
+the CLI for minutes with no feedback — and because `chat` is a long-lived session,
+the hang freezes the *whole session*: `session.ask()` never resolves, so Ink never
+restores the input and you can't even type `/exit`. **Likelihood: moderate**
+(model load, flaky network). **Impact: high** (frozen session, no signal). **Fix:
+one `AbortSignal.timeout(ms)` threaded through** — the seam already exists.
+Evidence: `src/session.ts:62`. → `07`.
 
 *Pool has no `connectionTimeoutMillis`.* A dead Supabase host makes the first
 query hang on the OS connect timeout instead of failing fast. **Likelihood: low**
@@ -125,11 +127,17 @@ and document it; or set `ssl` explicitly on the Pool.** Evidence: `src/db.ts:5`,
 *No network retry.* Transient failures throw and exit; re-running is the retry.
 Fine for a human; the first thing to add if buffr goes unattended. → `07`.
 
-*Uncaught throws unwind past `pool.end()`.* If `agent.answer()` throws,
-`pool.end()` (`ask-cmd.ts:38`) never runs — the process exits and the OS reclaims
-the socket anyway, so the leak is harmless *for a short-lived CLI*. In a
-long-lived process this would matter. **Fix later: try/finally around the run.**
-Evidence: `src/cli/ask-cmd.ts:34-38`.
+*A thrown turn no longer leaks the pool — but the pool is now genuinely
+long-lived.* Under the old one-shot `ask`, an `agent.answer()` throw unwound past
+`pool.end()` and the OS reclaimed the socket on exit. Under `chat` that's flipped:
+the throw is *caught* by the Ink handler (`src/cli/chat.tsx:30-34`) and rendered
+as an `error:` line, so the session — and its warm pool — survive the bad turn.
+That's better for resilience, but it means the pool genuinely lives for the whole
+session, so the "OS reclaims on exit" safety net no longer applies *during* a run.
+Pool cleanup now hinges on the user actually typing `/exit` to reach
+`session.close()` (`src/session.ts:73`); a hard kill (Ctrl-C, crash) skips it and
+leans on the OS. **Acceptable for a supervised CLI; revisit if unattended.**
+Evidence: `src/cli/chat.tsx:18-21,30-34`, `src/session.ts:72-74`.
 
 *No streaming.* Request/response only; a UX choice, not a risk. → `06`.
 
@@ -141,8 +149,8 @@ Evidence: `src/cli/ask-cmd.ts:34-38`.
 ```
   Tier 3 — why these are fine
 
-  no retry ........ human re-runs the command
-  uncaught throw .. process exits, OS reclaims socket (short-lived)
+  no retry ........ human re-asks on the next turn
+  thrown turn ..... caught by Ink, rendered as error; session survives
   no streaming .... one final answer, no UX need
   no backpressure . sequential for-loop is the flow control
   ollama plaintext  loopback ⇒ no path attacker
@@ -165,14 +173,14 @@ The full ranked audit, one frame.
   buffr networking red-flags — ranked
 
   TIER 1 (fix first) ─────────────────────────────────────────────
-   ● no call-site timeout        src/cli/ask-cmd.ts:34   → AbortSignal
-   ● pool no connectionTimeout   src/db.ts:5             → set it
+   ● no call-site timeout        src/session.ts:62      → AbortSignal
+   ● pool no connectionTimeout   src/db.ts:5            → set it
   TIER 2 (config discipline) ─────────────────────────────────────
    ● TLS via string, not code    src/db.ts:5 + .env       → pin sslmode
                                                             (study-security)
   TIER 3 (acceptable today) ──────────────────────────────────────
-   ○ no network retry            → add if unattended
-   ○ uncaught throw vs pool.end  src/cli/ask-cmd.ts:38    → try/finally later
+   ○ no network retry            → re-ask next turn; add if unattended
+   ○ pool cleanup needs /exit    src/cli/chat.tsx:18-21  → ok (supervised)
    ○ no streaming                → UX choice, not a risk
    ○ no backpressure             → structurally unnecessary
    ○ ollama plaintext            → correct (loopback)
@@ -195,9 +203,9 @@ anywhere a human isn't watching it.
         │   └─ Tier 2: no ssl: option → TLS is whatever the string says
         └───── Tier 1: no connectionTimeoutMillis → dead host hangs
 
-  src/cli/ask-cmd.ts:34
+  src/session.ts:62
     const answer = await agent.answer(question);
-        └─ Tier 1: no AbortSignal → hung Ollama freezes the CLI
+        └─ Tier 1: no AbortSignal → hung Ollama freezes the whole session
 
   one controller + one pool option + one pinned sslmode = all three closed
 ```
@@ -224,16 +232,20 @@ a function of deployment, not just code — the same insight that drives `07`.
 Answer: "Timeouts. No call has an `AbortSignal`, so a hung Ollama or dead DB host
 freezes the CLI for minutes. One `AbortSignal.timeout()` threaded through the
 calls and a `connectionTimeoutMillis` on the pool turns indefinite hangs into
-fast, catchable errors. The whole worst tier collapses behind that one seam."
-Anchor: `src/cli/ask-cmd.ts:34`, `src/db.ts:5`.
+fast, catchable errors — and since `chat` is long-lived, a hang today freezes the
+whole session, not one command, which makes the fix more urgent. The whole worst
+tier collapses behind that one seam." Anchor: `src/session.ts:62`, `src/db.ts:5`.
 
 **Q: What network risks did you decide NOT to fix, and why?**
 
-Answer: "Retries, streaming, backpressure, and the uncaught-throw-vs-pool.end.
-They're all demoted by context — a human runs the CLI and watches it. Re-running
-is the retry, the OS reclaims the socket on exit, there's no queue to apply
-backpressure to. I'd revisit every one of them the day buffr runs unattended."
-Anchor: `src/cli/index-cmd.ts:22-26`, `src/cli/ask-cmd.ts:38`.
+Answer: "Retries, streaming, backpressure, and pool-cleanup-needs-`/exit`.
+They're all demoted by context — a human runs the CLI and watches it. Re-asking
+on the next turn is the retry; a thrown turn is caught by Ink and the session
+survives; there's no queue to apply backpressure to. The one that shifted is pool
+cleanup: `chat`'s pool is genuinely long-lived, so it relies on `/exit` reaching
+`session.close()` rather than process-exit. I'd revisit every one of them the day
+buffr runs unattended." Anchor: `src/cli/index-cmd.ts:22-26`, `src/cli/chat.tsx:18-21`,
+`src/session.ts:72-74`.
 
 ## Validate
 
@@ -241,9 +253,10 @@ Anchor: `src/cli/index-cmd.ts:22-26`, `src/cli/ask-cmd.ts:38`.
 2. **Explain:** why does TLS rank Tier 2 (high severity) below hangs (Tier 1)?
    (likelihood — Supabase defaults to TLS; hangs are more probable.)
 3. **Apply:** buffr becomes a cron job. Which Tier-3 items move up? (retry and
-   uncaught-throw both rise — the human backstop is gone.)
+   pool-cleanup both rise — the human who re-asks and types `/exit` is gone.)
 4. **Defend:** justify the single highest-priority fix. (`AbortSignal` timeout —
-   collapses the entire hang tier; `src/cli/ask-cmd.ts:34`.)
+   collapses the entire hang tier, and a hang now freezes a whole session;
+   `src/session.ts:62`.)
 
 ## See also
 
@@ -253,3 +266,5 @@ Anchor: `src/cli/index-cmd.ts:22-26`, `src/cli/ask-cmd.ts:38`.
   findings are absences of.
 - `study-security` — owns the credential-exposure half of the TLS finding.
 - `study-system-design` — where re-running this audit on a new deployment lands.
+
+Updated: 2026-06-24 — Repointed all Tier-1 timeout findings off the deleted `ask-cmd.ts` onto `src/session.ts:62`, and sharpened the consequence: a hang now freezes the whole long-lived `chat` session (input never returns), making the AbortSignal fix more urgent. Reworked the old "uncaught throw unwinds past pool.end()" Tier-3 finding: under `chat` a thrown turn is *caught* by Ink (`src/cli/chat.tsx:30-34`) and the session survives, but the pool is now genuinely long-lived so cleanup hinges on the user typing `/exit` → `session.close()` (`src/session.ts:73`) rather than process-exit.

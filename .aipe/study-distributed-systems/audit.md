@@ -22,14 +22,16 @@ lenses: transactions, and the deferred two-brain problem.
 
 **Verdict: one node, two remote dependencies. No peer coordination.**
 
-There is exactly one process — a CLI invocation (`src/cli/ask-cmd.ts:19-38`,
-`index-cmd.ts`, `eval-cmd.ts`). It crosses two boundaries:
+There is exactly one process — a CLI invocation (`src/session.ts` driven by
+`src/cli/chat.tsx`, plus `index-cmd.ts`, `eval-cmd.ts`). It crosses two
+boundaries:
 
 - **process → Postgres**, over a `pg.Pool` created in `src/db.ts:4-6`. Every
   `pool.query` / `client.query` is a message across this boundary.
 - **process → Ollama**, over HTTP (localhost), inside aptkit's
-  `OllamaEmbeddingProvider` and `GemmaModelProvider` (wired at
-  `ask-cmd.ts:20,26`). buffr does not own this code; it owns the call site.
+  `OllamaEmbeddingProvider` and `GemmaModelProvider` (wired in
+  `session.ts:createChatSession`). buffr does not own this code; it owns the
+  call site.
 
 State ownership is unambiguous: **Postgres owns all durable state** (corpus,
 chunks, conversations, messages, profile). The process owns only transient
@@ -43,15 +45,16 @@ nodes because there is only one. → walked in `01-app-to-postgres-boundary.md`.
 **Verdict: fail-fast, no retries, no explicit timeouts. Correct for a CLI.**
 
 When Postgres or Ollama is unavailable, the awaited promise rejects and the
-command throws — e.g. `ask-cmd.ts:15` throws on missing `DATABASE_URL`, and any
-`pool.query` rejection propagates straight out of `await agent.answer(...)`
-(`ask-cmd.ts:34`) to an unhandled process exit. There is **no retry loop, no
+command throws — e.g. `session.ts:createChatSession` throws on missing
+`DATABASE_URL`, and any `pool.query` rejection propagates straight out of
+`await agent.answer(...)` inside `ChatSession.ask` to the REPL's catch
+(`cli/chat.tsx` renders it as an `error:` turn). There is **no retry loop, no
 backoff, no jitter, no circuit breaker, and no application-level timeout** on
 either boundary. The `pg.Pool` carries node-postgres defaults
 (`src/db.ts:4-6`); no `connectionTimeoutMillis` / `statement_timeout` is set.
 
-This is the right call for a single-user, human-in-the-loop CLI: a failed
-`ask` just prints an error and the user re-runs. Retries would matter the
+This is the right call for a single-user, human-in-the-loop CLI: a failed turn
+just prints an error and the user re-asks. Retries would matter the
 moment this becomes a server handling concurrent callers. → the failure
 semantics of the boundary are walked in `01-app-to-postgres-boundary.md`.
 
@@ -70,10 +73,12 @@ Two writes are idempotent by construction:
   documents row (`src/runtime.ts:11-16`).
 
 The trace writes are **not** idempotent and **not** keyed: `persistMessage`
-does a bare `insert into agents.messages` (`src/supabase-trace-sink.ts:14-18`)
+does a bare `insert into agents.messages` (`src/supabase-trace-sink.ts:27-36`)
 with a server-generated UUID. If the same event were emitted twice it would
 insert twice. That's fine *today* because nothing retries the sink — but it's
-the at-least-once seam to watch. → walked in `02-trace-sink-write-buffering.md`.
+the at-least-once seam to watch. (The same write now carries a client-assigned
+`created_at` for ordering, but ordering and idempotency are separate concerns —
+`created_at` is not a dedup key.) → walked in `02-trace-sink-write-buffering.md`.
 
 No at-most-once / exactly-once machinery exists because there is no delivery
 layer (no queue, no message broker, no retrying caller).
@@ -116,23 +121,27 @@ design spec's open questions.
 
 ## Lens 6 — Queues, streams, ordering, backpressure
 
-**Verdict: `not yet exercised` as infrastructure; one in-memory buffer with a
-real ordering quirk.**
+**Verdict: `not yet exercised` as infrastructure; one in-memory buffer, ordering
+bug now RESOLVED.**
 
 There is no queue, no stream, no broker, no consumer, no poison-message
 handling, no backpressure. The closest thing is `SupabaseTraceSink.pending`
-(`src/supabase-trace-sink.ts:24`) — an in-memory array of in-flight write
-promises drained by `flush()`'s `Promise.all` (`:37-39`). That is a *buffer*,
+(`src/supabase-trace-sink.ts:50`) — an in-memory array of in-flight write
+promises drained by `flush()`'s `Promise.all` (`:91-93`). That is a *buffer*,
 not a queue: no consumer loop, no bound, no spillover.
 
-It does carry one honest **ordering bug**: each `emit` fires its
-`persistMessage` immediately and independently (`:30,32-33`), and `flush` awaits
-them with an unordered `Promise.all`. The `agents.messages.created_at` default
-is `now()` evaluated *server-side at insert time* — so two events emitted in
-order A-then-B can land with B's `created_at` ≤ A's if B's insert wins the race.
-Replaying the trajectory by `created_at` can scramble turn order under
-concurrency. → walked in `02-trace-sink-write-buffering.md`, including the
-one-line fix (sequence column or `await` per emit).
+It previously carried an honest **ordering bug**, now **fixed**. Each `emit`
+still fires its `persistMessage` immediately and independently, and `flush`
+still awaits them with an unordered `Promise.all` — but each insert now writes
+`created_at` from the client-assigned `event.timestamp`
+(`coalesce($8::timestamptz, now())`, `:30`; `at = event.timestamp` at `:55`,
+passed as `createdAt: at` on every push). The earlier default was a server-side
+`now()` at insert, which let the write race decide order; now order is carried in
+the row, so two events emitted A@t1-then-B@t2 replay in emit order regardless of
+which insert commits first. The residual edge is a same-millisecond tie (a wall
+clock is a coarse sequence, not a strict counter). → walked in
+`02-trace-sink-write-buffering.md`, including the fix and the `seq`-column upgrade
+if ties ever matter.
 
 ---
 
@@ -140,13 +149,17 @@ one-line fix (sequence column or `await` per emit).
 
 **Verdict: `not yet exercised`.**
 
-Time comes from one source: Postgres `now()` on insert
-(`sql/001_agents_schema.sql:11,37,49,57`). With a single DB there is no clock
+Time now comes from two near-identical sources, both on one device: the client's
+`event.timestamp` written into `agents.messages.created_at` for trajectory order
+(`supabase-trace-sink.ts:30,55`), and the table-default `now()` for everything
+else (`sql/001_agents_schema.sql:11,37,49,57`). With one device there is no clock
 skew across nodes, no logical clocks, no leases, no leader election, no
-split-brain risk — there is nothing to elect a leader *of*. **Trigger:** two
-writers (laptop + phone) sharing state would introduce cross-node ordering, and
-*then* you'd need either a logical clock or last-writer-wins on a trusted clock.
-Named in `03-deferred-two-brain-shared-memory.md`.
+split-brain risk — there is nothing to elect a leader *of*, and the client clock
+and the DB clock are the same wall. **Trigger:** two writers (laptop + phone)
+sharing state would introduce cross-node ordering, and *then* the single-client
+timestamp stops being a safe sequence — you'd need a logical clock or
+last-writer-wins on a *trusted* clock. Named in
+`03-deferred-two-brain-shared-memory.md`.
 
 ---
 
@@ -186,3 +199,11 @@ clean. Worth knowing; not worth a saga.
 - Architecture, boundaries, the local-first shape → `.aipe/study-system-design/`
 - Trajectory rows as observability evidence → `.aipe/study-debugging-observability/`
   (not yet generated; named for where it will live)
+
+---
+
+Updated: 2026-06-24 — Lens 6 ordering bug reframed open → RESOLVED (`created_at`
+from client `event.timestamp`); Lens 7 clocks note the client-timestamp source;
+Lens 1/2 entry point `ask-cmd.ts` → `session.ts` / `cli/chat.tsx`; trace-write
+anchors re-pointed (`:27-36`, `:50`, `:91-93`). Single-device verdict and the
+`not yet exercised` lenses unchanged.

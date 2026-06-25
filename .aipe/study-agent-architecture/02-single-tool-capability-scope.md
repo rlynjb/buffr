@@ -138,7 +138,7 @@ the worst case is a wasted search, not a mutation.
 ```
   Single-tool scope — full recap
 
-  ┌─ buffr wiring (ask-cmd.ts:24) ─────────────────────────────┐
+  ┌─ buffr wiring (session.ts:44) ─────────────────────────────┐
   │  registry = InMemoryToolRegistry([ search_kb.definition ]) │
   └───────────────────────────┬───────────────────────────────┘
                               │ listTools()
@@ -194,7 +194,7 @@ export function filterToolsForPolicy(allTools, policy) {
            the prompt, so the model can't even hallucinate calling one usefully.
 ```
 
-The grant in buffr (`src/cli/ask-cmd.ts:23-24`):
+The grant in buffr (`src/session.ts:43-44`):
 
 ```
 const tool = createSearchKnowledgeBaseTool(pipeline, { minTopK: 4 });
@@ -264,3 +264,9 @@ Anchor: "The allowlist is the gate; the registry is just inventory."
 - `audit.md` — Lens 6 (capability scoping)
 - `.aipe/study-security/04-least-privilege-tool-scope.md` — the threat model
 - Tool-calling mechanics (sibling generator): `.aipe/study-ai-engineering/04-agents-and-tool-use/02-tool-calling.md`
+
+---
+
+Updated: 2026-06-24 — Pattern unchanged; re-pointed tool-registry wiring refs
+from the deleted `ask-cmd.ts` to `src/session.ts:43-44` (the long-lived chat
+session). Allowlist policy and one-read-only-tool scope are identical.

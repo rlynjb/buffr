@@ -121,7 +121,7 @@ Zoom in: ranked by *consequence if it fires*, not by likelihood. R1–R3 can los
 
 **Evidence:** No `EXPLAIN`/`EXPLAIN ANALYZE` anywhere; no `ANALYZE` cron; eval measures retrieval quality but never query plans or latency.
 
-**Consequence if it fires:** The repo trusts the planner blind. R2 (silent seq scan) and R4 (recall regression) are both invisible without a plan/latency check. You'd find out from a slow `ask`, not from a metric.
+**Consequence if it fires:** The repo trusts the planner blind. R2 (silent seq scan) and R4 (recall regression) are both invisible without a plan/latency check. You'd find out from a slow `chat` turn, not from a metric.
 
 **The move:** One `EXPLAIN ANALYZE` on `search()` against a realistic corpus, captured as a test assertion. Confirms the Index Scan is chosen and pins the latency. → `04`
 
@@ -133,7 +133,7 @@ Zoom in: ranked by *consequence if it fires*, not by likelihood. R1–R3 can los
 
 **Consequence if it fires:** A chunk can carry a `document_id` pointing at a non-existent `documents` row, and the engine never rejects it. Orphans and dangling links are possible.
 
-**Why it's a deliberate tradeoff:** A hard FK would reject chunks upserted before their document row exists, breaking the `VectorStore` drop-in contract (the pipeline upserts chunks with no notion of a documents row). The FK was removed *on purpose* to preserve parity with an in-memory store that has no documents table. Correct call. → `05`, cross-link `study-data-modeling`
+**Why it's a deliberate tradeoff:** A hard FK would reject chunks upserted before their document row exists, breaking the `VectorStore` drop-in contract (the pipeline upserts chunks with no notion of a documents row). The FK was removed *on purpose* to preserve parity with an in-memory store that has no documents table. The dropped FK now does double duty: episodic **memory chunks** written via `createConversationMemory` (`src/session.ts:53,67`) land in the same `chunks` table with *no* documents row at all (ids namespaced `memory:<conv>:<n>`, `meta.kind='memory'` — set inside aptkit's memory engine, not buffr) — a hard FK would reject every one. Correct call. → `05`, cross-link `study-data-modeling`
 
 **The move (only if integrity becomes a requirement):** Either re-add the FK and change the indexing order to insert the document first within one transaction (also fixes R1), or add a periodic orphan-check query. Not needed at current scale.
 
@@ -253,3 +253,7 @@ Anchor: *"Operator/opclass mismatch is the silent killer — assert the plan, do
 - `07-wal-durability-and-recovery.md` — R3, R9 in depth
 - `study-data-modeling` — the integrity side of R8
 - `study-performance-engineering` — the measurement side of R4–R7
+
+---
+
+Updated: 2026-06-24 — `slow ask` → `slow chat turn`; R8 now notes episodic-memory chunks (`createConversationMemory`, `src/session.ts:53,67`) also live in `chunks` with no documents row, reinforcing the deliberate-FK-drop verdict. R1 cross-transaction finding re-verified against `src/runtime.ts:11-17` — unchanged, still stands.

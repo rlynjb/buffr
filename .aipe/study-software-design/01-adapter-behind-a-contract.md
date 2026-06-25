@@ -1,5 +1,12 @@
 # Adapter behind a contract — `PgVectorStore` ⊳ `VectorStore`
 
+> Updated: 2026-06-24 — `PgVectorStore` is unchanged, but it now backs a *second*
+> consumer: aptkit's `createConversationMemory({ embedder, store })`
+> (`src/session.ts:53`) writes memory chunks through the same `upsert`/`search`
+> meta round-trip. The store is now built in `src/session.ts:41` (chat),
+> `cli/index-cmd.ts:19`, and `cli/eval-cmd.ts:15` — the deleted `ask-cmd.ts` no
+> longer builds it. Constructor now takes `appId`. The adapter's body is the same.
+
 **Subtitle:** Adapter / Ports-and-Adapters port implementation — *Industry standard*.
 The deep module of the repo: aptkit defines the `VectorStore` port; buffr writes
 the pgvector adapter behind it.
@@ -200,13 +207,16 @@ The whole adapter in one frame.
 
 ## Implementation in codebase
 
-**Use cases.** Reached for in exactly two flows: `cli/index-cmd.ts` builds a
+**Use cases.** Reached for in three flows now: `cli/index-cmd.ts` builds a
 `PgVectorStore` and hands it to `createRetrievalPipeline`, which calls `upsert`
-when indexing markdown (`src/cli/index-cmd.ts:19-20`); `cli/ask-cmd.ts` and
-`cli/eval-cmd.ts` build the same store so the pipeline's `query`/`search` runs
-KNN against stored chunks (`src/cli/ask-cmd.ts:21-22`,
-`src/cli/eval-cmd.ts:15-16`). The store is constructed once per CLI invocation and
-the embedder's `dimension` is threaded in so store and embedder agree.
+when indexing markdown (`src/cli/index-cmd.ts:19-20`); `src/session.ts` (chat) and
+`cli/eval-cmd.ts` build the same store so the pipeline's `query`/`search` runs KNN
+against stored chunks (`src/session.ts:41-42`, `src/cli/eval-cmd.ts:15-16`). And
+new: in the chat path the *same store instance* is also injected into aptkit's
+`createConversationMemory` (`src/session.ts:53`), so conversation memory `upsert`s
+and `search`es through this exact adapter — one store, two aptkit consumers
+(retrieval + memory). The store is constructed once per process and the embedder's
+`dimension` is threaded in so store and embedder agree.
 
 **Code side by side.**
 
@@ -285,7 +295,10 @@ documents row — that's aptkit's model, not buffr's. A hard FK would mean
 with aptkit's in-memory store (it has no documents table at all). So the link is
 *soft*: `document_id` is a column, not a constraint (`sql/001_agents_schema.sql:15-17`).
 The cost: a chunk can reference a document that doesn't exist. The buy: the adapter
-honors the contract exactly. Right call.
+honors the contract exactly. Right call — and as of 2026-06-24 it pays off twice:
+aptkit's `createConversationMemory` writes *memory* chunks with no documents row at
+all (`src/session.ts:53`), which only works because the FK was dropped. A hard FK
+would have blocked conversation memory from sharing this store.
 
 ```
   hard FK                          soft link (chosen)

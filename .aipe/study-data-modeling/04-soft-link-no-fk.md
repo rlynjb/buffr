@@ -108,6 +108,14 @@ orphan-sweep job, no `document_id not null`, no application-side existence
 check before chunk upsert. The integrity is genuinely unenforced, not
 enforced-elsewhere.
 
+**The drop is now load-bearing, not just defensive.** Episodic memory
+(`@aptkit/memory`) writes `memory:<conv>:<n>` chunks through the same store with
+**`document_id = null` by design** — a chat exchange has no source document
+(`src/session.ts:53,67`). A hard FK would reject every one of these rows. So the
+dropped FK isn't only about insert-order parity for the corpus path; it's what
+lets a second, document-less use of `chunks` exist at all. `document_id not
+null` was never an option *because* of memory.
+
 ### Move 2.5 — current state vs the path back
 
 ```
@@ -255,3 +263,8 @@ where the DB *does* — that table has no contract forbidding the FK.
 - `06-trajectory-tables.md` — the FK that *was* kept (the contrast).
 - `audit.md` §4, §6 — integrity gap + the deliberate schema bend.
 - `study-system-design` — the aptkit VectorStore contract boundary.
+
+---
+Updated: 2026-06-24 — noted the dropped FK is now load-bearing: `@aptkit/memory`
+writes `memory:<conv>:<n>` chunks with `document_id = null` (no source document)
+into the same store (`src/session.ts:53,67`), which a hard FK would reject.

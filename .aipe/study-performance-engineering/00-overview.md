@@ -3,7 +3,7 @@
 `buffr-laptop` is a single-device RAG agent. There's no traffic, no SLA, no
 second user. That changes what "performance" even means here: nothing is
 contended, nothing is hot, and the only clock that runs is *your* patience
-waiting for an `index` or an `ask` to finish at the terminal. So this guide is
+waiting for an `index` to finish or a `chat` turn to answer at the terminal. So this guide is
 honest about scale. Most of the lenses a server-side perf audit would light up
 (p95 budgets, backpressure, queue depth, GC pressure) are `not yet exercised` —
 and that's the correct verdict, not a gap to apologize for.
@@ -15,21 +15,23 @@ where the actual time goes: **embeddings over HTTP** and **Postgres round-trips*
   Where the wall-clock time actually goes — buffr at laptop scale
 
   ┌─ CLI layer ─────────────────────────────────────────────────┐
-  │  npm run index -- *.md        npm run ask -- "..."           │
+  │  npm run index -- *.md        npm run chat  (interactive)    │
   └─────────┬───────────────────────────────┬────────────────────┘
-            │ one file at a time            │ one question
+            │ one file at a time            │ many turns, one session
   ┌─ Pipeline (aptkit) ───────────▼─────────▼────────────────────┐
-  │  chunk → embed → upsert       embed → search → LLM loop       │
+  │  chunk → embed → upsert       per turn: embed → search →      │
+  │                               LLM loop → memory embed+upsert  │
   └─────────┬───────────────────────────────┬────────────────────┘
-            │ HTTP  ◄── DOMINANT COST ──►    │ HTTP
+            │ HTTP  ◄── DOMINANT COST ──►    │ HTTP (×2 embeds/turn)
   ┌─ Ollama (localhost:11434) ────▼──────────▼───────────────────┐
   │  nomic-embed-text (embed)     gemma2:9b (generate, the slow   │
   │                               one on a laptop GPU/CPU)        │
   └──────────────────────────────────────────────────────────────┘
-            │ SQL (warm pool)
+            │ SQL (one warm pool, held across the whole session)
   ┌─ Postgres + pgvector ─────────▼──────────────────────────────┐
   │  HNSW index on chunks.embedding  ←── the main perf WIN        │
   │  per-chunk INSERT loop inside a txn  ←── a small perf cost    │
+  │  per-turn: memory upsert + ×n trace INSERTs  ←── added writes │
   └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -59,27 +61,39 @@ where the actual time goes: **embeddings over HTTP** and **Postgres round-trips*
    it's N statements where one multi-row INSERT (or `COPY`) would do. At a
    handful of 512-char chunks per doc it's noise next to the embed call. → `03-per-chunk-insert-loop.md`
 
-4. **One warm connection carries an ask's whole burst of queries.** A single
-   `ask` fires `loadProfile` + `startConversation` + `persistMessage`
-   (`src/cli/ask-cmd.ts:27-30`) plus the vector `search` during the agent loop
-   plus the trace `flush`, all over one `pg.Pool` (`src/db.ts:4-5`). No
-   per-query reconnect, no TLS handshake per statement. This is a quiet win, not
-   a problem. → `04-connection-pool-reuse.md`
+4. **One warm pool carries an entire chat session's query stream — the win
+   strengthened.** `chat` (`src/session.ts`) holds *one* `pg.Pool`
+   (`src/db.ts:4-5`, created at `session.ts:39`) and *one* conversation across
+   every turn, until `close()` (`session.ts:73`). Setup (`loadProfile` +
+   `startConversation`, `session.ts:47,55`) pays once; then *each turn* fires
+   `persistMessage` + vector `search` + the trace `flush` + a new per-turn
+   `memory.remember` upsert (`session.ts:61-66`) over that same pool — no
+   per-query reconnect, no TLS handshake per statement, for the life of the
+   session. The old one-shot `ask` amortized the handshake over a single burst;
+   the long-lived session amortizes it over a whole conversation. Two added
+   per-turn costs ride along: the memory embed+upsert (finding below) and a
+   trace `flush` that now writes *several* INSERTs per turn (all 6 event types,
+   `src/supabase-trace-sink.ts:56-84`) instead of ~2 — minor write
+   amplification, all on the warm pool. A quiet win, not a problem.
+   → `04-connection-pool-reuse.md`
 
 5. **No caching anywhere — identical queries re-embed and re-search every
-   time.** Ask the same question twice and you pay the embed HTTP call and the
-   HNSW search twice. There is no query-vector cache, no result cache, no
-   memoization. At single-user laptop scale this is fine; named here because
-   it's the first thing that becomes wrong the moment this serves more than one
-   caller. → `05-no-caching.md`
+   time.** Ask the same question twice in `chat` and you pay the embed HTTP call
+   and the HNSW search twice (now also a second memory embed per turn). There is
+   no query-vector cache, no result cache, no memoization. At single-user laptop
+   scale this is fine; named here because it's the first thing that becomes wrong
+   the moment this serves more than one caller. → `05-no-caching.md`
 
-6. **`durationMs` is the only latency instrument, and buffr never reads it.**
-   aptkit's tool registry wraps every tool call in `performance.now()`
-   (`tool-registry.js:21-23`) and emits `durationMs` on the `tool_call_end`
-   event. buffr's trace sink catches that event
-   (`src/supabase-trace-sink.ts` `emit`) but persists only `toolName` and
-   `result` — it drops the duration on the floor. There is no other timing in
-   the repo. → see `audit.md` § measurement-baselines-and-profiling.
+6. **`durationMs` is the only latency instrument — and the trace sink now
+   PERSISTS it.** aptkit's tool registry wraps every tool call in
+   `performance.now()` (`tool-registry.js:21-23`) and emits `durationMs` on the
+   `tool_call_end` event. The trace sink now captures it — the
+   `tool_call_end` handler writes `durationMs` (and `error`) into the message's
+   `tool_results` jsonb (`src/supabase-trace-sink.ts:67-71`), and the
+   `model_usage` handler fills the previously-orphaned `tokens_used` column
+   (`src/supabase-trace-sink.ts:73-78`). The latency number is no longer dropped
+   on the floor — though buffr still has no harness that *reads it back* to form
+   a baseline. → see `audit.md` § measurement-baselines-and-profiling.
 
 ## Not yet exercised — and why that's correct here
 
@@ -108,7 +122,7 @@ stops being single-device. The audit names exactly when.
 2. `01-hnsw-approximate-search.md` — the one real win.
 3. `02-embedding-http-roundtrip.md` — where indexing time goes.
 4. `03-per-chunk-insert-loop.md` — the write path.
-5. `04-connection-pool-reuse.md` — why the SQL burst is cheap.
+5. `04-connection-pool-reuse.md` — why the SQL stream is cheap across a session.
 6. `05-no-caching.md` — the lever not yet pulled.
 
 ## Cross-links
@@ -122,3 +136,14 @@ stops being single-device. The audit names exactly when.
 - **`study-runtime-systems`** — the `for…await` serialization in `index-cmd`,
   the event loop, `Promise.all` in the trace flush. This guide says the loop is
   serial; that guide explains why and how to overlap it.
+
+---
+
+Updated: 2026-06-24 — `npm run ask`/`ask-cmd.ts` → `npm run chat` (`chat.tsx` +
+`session.ts`). Diagram and findings reframed to the long-lived chat session: one
+pool/conversation across many turns (finding 4 strengthened). Added the per-turn
+memory embed+upsert (`session.ts:53,66`) and trace write-amplification (all 6
+event types → ×n INSERTs/turn). Finding 6 corrected: the trace sink now PERSISTS
+`durationMs` + `tokens_used` (`supabase-trace-sink.ts:67-78`) rather than dropping
+them. HNSW / per-chunk-insert / no-caching / serial-across-files findings
+re-verified unchanged.

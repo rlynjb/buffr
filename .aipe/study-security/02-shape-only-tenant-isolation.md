@@ -219,8 +219,11 @@ enforcement exists at none.
 
 **Use cases.** The `app_id` scoping is reached for on every read and write:
 filtering search results to the current app, loading the right profile,
-tagging trajectory rows. The intent is multi-tenant; the enforcement is
-single-tenant.
+tagging trajectory rows. Conversation memory inherits the same scoping for
+free — `memory.remember` (`session.ts:66`) writes through `PgVectorStore`,
+which stamps `this.appId` on every chunk (`pg-vector-store.ts:55`), so
+recalled memory is `app_id`-scoped exactly like indexed documents. The
+intent is multi-tenant; the enforcement is single-tenant.
 
 **Code side by side.**
 
@@ -344,3 +347,5 @@ will.
   *isolates*).
 - `study-system-design` — the centralized-Supabase boundary and the
   phone/edge phase that turns this gap load-bearing.
+
+Updated: 2026-06-24 — noted conversation-memory chunks inherit the same `app_id` scoping via `PgVectorStore` (`session.ts:66` → `pg-vector-store.ts:55`); core findings (env-default app_id, no RLS, advisory filter) unchanged.

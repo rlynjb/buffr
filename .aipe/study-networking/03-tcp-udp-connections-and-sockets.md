@@ -112,9 +112,14 @@ handshake (SYN/SYN-ACK/ACK) to `HOST:5432`, then the pg startup message + auth
 ```
 
 **Reuse (warm path).** The second query (the vector `search`) finds `conn1`
-idle and skips the entire handshake+auth. This is the whole point of the pool:
-in one `ask` run, hops 2, 4, and 6 (`01-network-map.md`) share one TCP
-connection. One handshake amortized across three queries.
+idle and skips the entire handshake+auth. This is the whole point of the pool —
+and `chat` is where it pays off hardest. In a one-shot batch run (`index`,
+`eval`) the pool amortizes one handshake across that run's queries. In `chat`,
+`createChatSession()` opens the pool *once* (`src/session.ts:39`) and every
+`session.ask()` turn — `persistMessage`, the agent's profile/search/insert
+queries, `trace.flush()`, the memory write — rides that *same* warm pool. Ten
+turns of a conversation, dozens of queries, **one TCP handshake** for the whole
+session. The pool's lifetime now ≈ the *session's* lifetime, not one command's.
 
 **Transaction checkout (explicit).** `migrate.ts` and `PgVectorStore.upsert`
 need *several* statements on the *same* connection (`begin` ... `commit` only
@@ -134,9 +139,13 @@ pin a connection, run the transaction, and `release()` in a `finally`.
            failed upsert leaks the connection and the pool shrinks by one
 ```
 
-**Close.** Every CLI ends with `await pool.end()` — sends FIN on each pooled
-socket, drains, and lets the process exit cleanly. Because these are
-short-lived CLI processes, the pool's lifetime ≈ the process's lifetime.
+**Close.** The batch CLIs (`index`, `eval`) end with `await pool.end()` —
+sends FIN on each pooled socket, drains, and lets the process exit cleanly.
+`chat` defers that close until you `/exit` or `/quit`: the Ink handler calls
+`session.close()` (`src/cli/chat.tsx:19`), which runs `pool.end()`
+(`src/session.ts:73`). So for a batch CLI the pool's lifetime ≈ the process's;
+for `chat` it ≈ the *interactive session's* — which can be minutes of idle
+between turns with the warm socket held open the whole time.
 
 ### Move 2 variant — the load-bearing skeleton
 
@@ -168,20 +177,23 @@ for everything else.
 
 ## Primary diagram
 
-The pool across one CLI lifetime — open lazy, reuse warm, close on end.
+The pool across a whole `chat` session — open lazy on turn 1, reuse warm across
+every turn, close only on `/exit`.
 
 ```
-  pg.Pool lifecycle over one `npm run ask`
+  pg.Pool lifecycle over one `npm run chat` session
 
-  construct          first query        reuse           reuse        end
-  ┌────────┐        ┌──────────┐      ┌──────────┐    ┌──────────┐  ┌──────┐
-  │ Pool   │  ───►  │ TCP open │ ───► │ same conn│──► │ same conn│─►│ FIN  │
-  │ idle=0 │        │ +auth    │      │ (search) │    │ (insert) │  │ close│
-  └────────┘        └──────────┘      └──────────┘    └──────────┘  └──────┘
-   src/db.ts:5       loadProfile        PgVectorStore   trace-sink    pool.end()
-   no socket yet     ask-cmd.ts:27      .search          .flush()     ask-cmd.ts:38
+  construct      turn 1 (cold)      turn 1..N (warm)      ...        /exit
+  ┌────────┐    ┌──────────┐      ┌──────────────┐    ┌────────┐   ┌──────┐
+  │ Pool   │─►  │ TCP open │ ───► │ same conn,    │─►  │ same   │─► │ FIN  │
+  │ idle=0 │    │ +auth    │      │ many queries  │    │ conn   │   │ close│
+  └────────┘    └──────────┘      │ per turn      │    └────────┘   └──────┘
+   db.ts:5       turn 1's first   └──────────────┘     turn N       close():
+   no socket     query forces it   profile/search/      session.ask  pool.end()
+   yet           (session.ts:39)   insert/memory        (session.ts) chat.tsx:19
 
-  one handshake, three queries, one close — pooling earns its keep here
+  ONE handshake, MANY turns, one close — the warm session pool is the
+  strongest version of "pooling earns its keep"
 ```
 
 ## Implementation in codebase
@@ -246,9 +258,10 @@ systems`; this file stops at the socket.
   q3 ─► reuse warm socket ──┘
 ```
 
-Answer: "One. The pool opens lazily on the first query, then queries two and
-three reuse the same warm connection. The handshake is amortized — that's the
-pool's entire reason to exist." Anchor: `src/cli/ask-cmd.ts:27,33`,
+Answer: "One — and in `chat` it's one per *session*, not per request. The pool
+opens lazily on the first query, then every later query (this turn and every
+future turn) reuses the same warm connection. The handshake is amortized — that's
+the pool's entire reason to exist." Anchor: `src/session.ts:55,61-63`,
 `src/db.ts:5`.
 
 **Q: What's the load-bearing part of your pool usage?**
@@ -286,3 +299,5 @@ process forever — there's no `connectionTimeoutMillis`." Anchor: `src/db.ts:5`
 - `04-tls-and-trust-establishment.md` — what rides on top of the TCP stream.
 - `07-timeouts-retries-pooling-and-backpressure.md` — the pool tuning that's absent.
 - `study-database-systems` — the pg protocol *above* the socket.
+
+Updated: 2026-06-24 — Repointed the lone stale interview-defense anchor off the deleted `ask-cmd.ts` onto `src/session.ts:55,61-63`, and sharpened the answer to "one handshake per *session*, not per request" (the warm session-pool story). The Move 2 reuse/close walkthrough and primary diagram were already reconciled to the long-lived `src/session.ts` pool.

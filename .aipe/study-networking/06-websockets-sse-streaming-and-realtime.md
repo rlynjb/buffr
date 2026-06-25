@@ -165,31 +165,37 @@ marked but closed.
   │ agent.answer │ ───────────────────────────► │ generate ALL │
   │   awaits     │  ◄─── [entire answer] ─────── │ then respond │
   └──────┬───────┘                               └──────────────┘
-         │ print once
+         │ return once
          ▼
-   stdout (ask-cmd.ts:37)
+   Ink renders the turn (session.ask → chat.tsx:28-29)
 
   ✗ no WebSocket   ✗ no SSE   ✗ no token stream   ✗ no reconnect
   seam for streaming = the await in aptkit's transport (closed)
+  NB: chat IS long-lived — but in-process (one session), not a streamed socket
 ```
 
 ## Implementation in codebase
 
 **Use cases.** None — this is the empty-set file. The closest thing is the
-single blocking await in `ask-cmd.ts` that waits for the whole answer.
+single blocking await in `session.ask()` that waits for the whole answer, which
+the Ink UI then renders as one turn. Note the *session* is long-lived (one pg
+pool, one conversation held across turns) but nothing on the *wire* is — each
+`fetch` is still a short request/response.
 
 **Code side by side.** The non-streaming shape is right here:
 
 ```
-  src/cli/ask-cmd.ts  (lines 34–37)
+  src/session.ts  (lines 62-63)  +  src/cli/chat.tsx  (lines 28-29)
 
   const answer = await agent.answer(question);   ← ONE await, whole answer
-  await trace.flush();
-  process.stdout.write(`\n${answer}\n`);         ← printed once, at the end
+  await trace.flush();                            ← (session.ts)
+  ...
+  const answer = await session.ask(q);            ← (chat.tsx) one string back
+  setTurns((t) => [...t, { role: 'buffr', text: answer }]);  ← rendered once
             │
             └─ `answer` is a complete string. there is no chunk loop, no
-               for-await, no partial output. if buffr streamed, this line
-               would become a loop and answer() would return an iterable.
+               for-await, no partial output. if buffr streamed, ask() would
+               return an iterable and chat.tsx would append tokens as they land.
 ```
 
 For contrast, aptkit *has* the streaming primitive buffr doesn't call (shown to
@@ -227,7 +233,9 @@ Answer: "No. `agent.answer()` awaits one complete string and the CLI prints it
 once. Ollama supports `stream:true` and aptkit even ships an NDJSON reader, but
 my path uses the non-streaming transport. For a CLI that emits one final answer,
 streaming is a UX nicety that buys time-to-first-token at the cost of reconnect
-and partial-state handling — not worth it here." Anchor: `src/cli/ask-cmd.ts:34-37`.
+and partial-state handling — not worth it here. And note `chat` being long-lived
+doesn't change this: the session persists in-process, but each LLM call is still
+a one-shot request/response." Anchor: `src/session.ts:62`, `src/cli/chat.tsx:28-29`.
 
 **Q: What's the hardest part of streaming you avoided?**
 
@@ -243,8 +251,8 @@ thing buffr's simplicity buys."
 2. **Explain:** why is there no reconnect logic in buffr? (no long-lived
    connection; each `fetch` is short — `05`.)
 3. **Apply:** you want token-by-token output. Name every layer that changes.
-   (transport await→loop, `answer()` return type, CLI print loop —
-   `src/cli/ask-cmd.ts:34-37`.)
+   (transport await→loop, `answer()` / `session.ask()` return type, Ink render
+   loop — `src/session.ts:62`, `src/cli/chat.tsx:28-29`.)
 4. **Defend:** justify request/response over streaming for this CLI. (single
    final answer; streaming adds reconnect/partial-state cost for UX-only gain.)
 
@@ -252,6 +260,8 @@ thing buffr's simplicity buys."
 
 - `05-http-semantics-caching-and-cors.md` — the request/response calls this
   file says aren't streamed.
+
+Updated: 2026-06-24 — Repointed the non-streaming-shape code off the deleted `ask-cmd.ts` onto `src/session.ts:62` + `src/cli/chat.tsx:28-29` (Ink renders the whole answer once). Added the key distinction: `chat` is now long-lived, but in-process (one session, one pool, one conversation) — NOT a streamed socket; every LLM `fetch` is still one-shot request/response, so this file stays the empty-set file.
 - `07-timeouts-retries-pooling-and-backpressure.md` — the blocking await with no
   timeout is its own risk.
 - `study-agent-architecture` — the multi-turn loop that runs inside blocking calls.

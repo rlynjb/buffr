@@ -18,18 +18,18 @@ model's context.
   buffr-laptop — where untrusted input enters
 
   ┌─ Operator (you, the laptop user) ───────────────────────────┐
-  │  argv: "your question"   ·   .md files you choose to index   │  TRUSTED
+  │  prompt: "your question"  ·  .md files you choose to index   │  TRUSTED
   └───────────────────────────┬─────────────────────────────────┘
                               │  no auth — single device
   ┌─ Node process ───────────▼─────────────────────────────────┐
-  │  CLI (ask/index/eval)  →  PgVectorStore  →  RagQueryAgent    │
+  │  CLI (chat/index/eval)  →  PgVectorStore  →  RagQueryAgent   │
   └──────┬───────────────────────────┬──────────────────┬───────┘
          │ parameterized SQL         │ HTTP             │ prompt + tool results
          ▼                           ▼                  ▼
   ┌─ Postgres (reindb) ┐   ┌─ Ollama :11434 ┐   ┌─ Gemma 2 (LLM) ───────────┐
   │  agents.* tables   │   │  local models   │   │  reads indexed doc text   │ ← real
-  │  full-privilege    │   │  no secret      │   │  as data (injection       │   surface
-  │  DATABASE_URL      │   │                 │   │  surface)                 │
+  │  full-privilege    │   │  no secret      │   │  AND recalled memory as   │   surface
+  │  DATABASE_URL      │   │                 │   │  data (injection surface) │
   └────────────────────┘   └─────────────────┘   └───────────────────────────┘
 ```
 
@@ -50,9 +50,12 @@ exercised` because the single-device shape hasn't built the boundary yet.
    schema and every query, but it's a default constant, not a token-derived
    identity, and there's no RLS. The isolation is shaped but not enforced.
    The most important deferred finding.
-4. **`03-indirect-prompt-injection-surface.md`** — indexed documents flow
-   back into the model's context as tool results. The classic RAG injection
-   surface. Low blast radius today because the only tool is read-only search.
+4. **`03-indirect-prompt-injection-surface.md`** — indexed documents *and*
+   recalled conversation memory flow back into the model's context as tool
+   results. The classic RAG injection surface, now slightly widened: past
+   turns are embedded into the same store (`session.ts:53,66`) and become
+   retrievable. Low blast radius today because the only tool is read-only
+   search.
 5. **`04-least-privilege-tool-scope.md`** — the agent can call exactly one
    tool, enforced by an allowlist policy and a hard call budget. The control
    that keeps the prompt-injection blast radius small.
@@ -73,3 +76,5 @@ The trust axis touches three other guides. Where a finding is really about
   trajectory-capture sink. The audit here asks what the agent is *allowed*
   to do and what its tool output is *trusted* to be.
   → `03-` and `04-` cross-link here.
+
+Updated: 2026-06-24 — purged `ask` refs (now `chat` via `session.ts` + `cli/chat.tsx`); noted conversation memory widens the injection surface (`03-`).

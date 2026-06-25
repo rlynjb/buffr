@@ -1,12 +1,14 @@
 # AI Engineering Study Guide — buffr
 
-Audit-style, two-pass guide for buffr's AI engineering. buffr is a TypeScript laptop RAG agent: Ollama `gemma2:9b` generation + `nomic-embed-text` embeddings, Postgres+pgvector retrieval, a bounded agent loop with tool-calling, and offline retrieval evals — all via `@rlynjb/aptkit-core`, with buffr adding the pg persistence + CLIs.
+> Updated: 2026-06-24 — reconciled to the `chat`/`session.ts` surface (`ask` retired); added `08-conversation-memory.md` (retrieval-based episodic memory via `@aptkit/memory`); noted `tokens_used` now persisted and the full 6-event trace.
+
+Audit-style, two-pass guide for buffr's AI engineering. buffr is a TypeScript laptop RAG agent: Ollama `gemma2:9b` generation + `nomic-embed-text` embeddings, Postgres+pgvector retrieval, a bounded agent loop with tool-calling, retrieval-based episodic memory over chat history, and offline retrieval evals — all via `@rlynjb/aptkit-core` (0.4.1), with buffr adding the pg persistence + an interactive `chat` surface.
 
 Shape: **LLM application engineering** (not classical ML). The guide audits buffr's *use* of the toolkit, not the toolkit itself.
 
 ## Reading order
 
-1. **`00-overview.md`** — the whole system in one diagram, the seven seams, which shape this is.
+1. **`00-overview.md`** — the whole system in one diagram, the eight seams, which shape this is.
 2. **`audit.md`** — Pass 1. Every lens from the AI-eng spec, with `file:line` or `not yet exercised`. Start here for "where is X and is it even here."
 3. **Pattern files** — Pass 2, the load-bearing patterns, in this order:
    - `01-rag-index-path.md` — chunk → embed → pgvector upsert (write side).
@@ -15,6 +17,7 @@ Shape: **LLM application engineering** (not classical ML). The guide audits buff
    - `03-agent-loop-with-tool-calling.md` — bounded turns, forced synthesis (generation outer loop).
    - `04-gemma-tool-call-emulation.md` — stock Gemma has no native tools; THE risk (generation inner seam).
    - `07-profile-as-context.md` — `me.md` injected into the system prompt.
+   - `08-conversation-memory.md` — RAG over chat history; retrieval-based episodic memory (`@aptkit/memory`).
    - `06-evals-precision-and-recall.md` — offline retrieval scoring, and the faithfulness gap.
 4. **`07-system-design-templates/`** — interview reframes (search-ranking, tech-support-chatbot), 9-bullet shape, both `partially` for buffr.
 5. **`ai-features-in-this-codebase.md`** / **`ml-features-in-this-codebase.md`** — the per-feature tables (ML file: honestly empty, buffr has no classical ML).
@@ -32,7 +35,8 @@ Shape: **LLM application engineering** (not classical ML). The guide audits buff
     04-gemma-tool-call-emulation.md        │ load-bearing
     05-embedding-model-choice.md           │ pattern files
     06-evals-precision-and-recall.md       │
-    07-profile-as-context.md               ┘
+    07-profile-as-context.md               │
+    08-conversation-memory.md              ┘ ← episodic memory (RAG over chat)
     07-system-design-templates/
       01-search-ranking.md                 ← interview reframe (partially)
       02-tech-support-chatbot.md           ← interview reframe (partially)
@@ -42,13 +46,13 @@ Shape: **LLM application engineering** (not classical ML). The guide audits buff
 
 ## The "not yet exercised" ceiling
 
-Named honestly so the gaps are a map: no fine-tuning (the literal ceiling — both models stock), no reranking, no hybrid/sparse search, no streaming, no caching, no chunking-strategy tuning, no faithfulness/LLM-as-judge eval (despite a `RubricJudge` in the library), no token/cost logging (the column and event both exist, unused), no prompt-injection defense / rate limiting / circuit breaker, no classical ML. Full grounding in `audit.md`.
+Named honestly so the gaps are a map: no fine-tuning (the literal ceiling — both models stock; the now-full-signal trajectories are the FT corpus), no reranking, no hybrid/sparse search, no streaming, no caching, no chunking-strategy tuning, no faithfulness/LLM-as-judge eval (despite a `RubricJudge` in the library — still the live evals gap), no token/cost *action* (tokens are now logged via `model_usage`→`tokens_used`, but nothing reads them), no memory *management* (summarization/decay — episodic memory now exists, but its management half is out of scope in `@aptkit/memory`), no prompt-injection defense / rate limiting / circuit breaker, no classical ML. Full grounding in `audit.md`.
 
 ## Cross-links to sibling guides
 
 - `.aipe/study-database-systems/` — HNSW, cosine `<=>`, the storage engine under pgvector.
 - `.aipe/study-dsa-foundations/` — ANN-vs-exact search, graph-traversal cost (HNSW is a navigable graph).
-- `.aipe/study-system-design/` — the architecture view: vector-store adapter, CLI entrypoints, trajectory capture, library-as-dependency boundary, profile injection.
+- `.aipe/study-system-design/` — the architecture view: vector-store adapter, CLI entrypoints, trajectory capture, library-as-dependency boundary, profile injection. Note: the `@aptkit/memory` engine extracted *up* into the toolkit is the architectural counterpart to `08-conversation-memory.md`.
 - `.aipe/study-testing/` — the eval seam as testing: fake-embedder injection, env-gated DB tests, contract-parity.
 - `.aipe/study-prompt-engineering/` — system-template wording and synthesis instruction (if that generator is run).
 

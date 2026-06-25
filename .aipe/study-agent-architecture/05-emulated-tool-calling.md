@@ -196,7 +196,7 @@ defensively.
 ### Use cases
 
 Reached on every model turn of every run. buffr constructs the provider in
-`ask-cmd.ts:26` (wrapped in a context-window guard) and the loop calls
+`session.ts:46` (wrapped in a context-window guard) and the loop calls
 `complete()` each turn. Emulation is invisible to buffr's code — buffr wrote no
 parsing; it gets `tool_use` blocks for free because the aptkit Gemma provider
 fakes the protocol. This is the de-risked-first piece of the plan
@@ -259,7 +259,7 @@ you need the tolerant parser and the retry nudge. buffr accepts that cost
 deliberately — the portfolio thesis (`agent-layer-plan.md:28`) is precisely
 *"tame Gemma's messy JSON via structured-generation"* as the visible
 engineering. The provider-adapter boundary also means buffr could swap to a
-native-tool model by changing one line in `ask-cmd.ts:26` — the loop and tools
+native-tool model by changing one line in `session.ts:46` — the loop and tools
 are untouched.
 
 The prompt-craft of *reliably* getting JSON out of a weak model (delimiters,
@@ -308,3 +308,9 @@ Anchor: "Parse defensively, retry once, cap the attempts."
 - `audit.md` — Lens 7 (tool calling, EMULATED)
 - Structured output / JSON validity (sibling generator): `.aipe/study-ai-engineering/02-llm-foundations/04-structured-outputs.md`
 - Prompt craft for tool JSON (sibling generator): `.aipe/study-prompt-engineering/` (structured-output / self-critique concepts)
+
+---
+
+Updated: 2026-06-24 — Emulation mechanics unchanged; re-pointed provider-construction
+refs from the deleted `ask-cmd.ts:26` to `session.ts:46` (the long-lived chat session).
+The one-line model-swap seam now lives there.

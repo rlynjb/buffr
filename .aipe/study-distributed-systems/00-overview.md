@@ -26,8 +26,8 @@ endpoints, no peers.
 
   ┌─ Local device (one Node process) ───────────────────────────┐
   │                                                              │
-  │   src/cli/ask-cmd.ts   ── the only "orchestrator"            │
-  │        │                                                     │
+  │   src/session.ts (ChatSession) ── the only "orchestrator"   │
+  │        │  (driven by src/cli/chat.tsx, an Ink REPL)          │
   │        ├─► RagQueryAgent (aptkit, in-process)               │
   │        │      │                                              │
   │        │      ├─► PgVectorStore.search ──┐                   │
@@ -65,10 +65,12 @@ What's actually here, most consequential first:
 
 2. **The trace sink buffers async writes and flushes them with an unordered
    `Promise.all`.** `src/supabase-trace-sink.ts` queues a `persistMessage`
-   promise per event, then awaits them all together after the run. This is the
-   one place in the repo with at-least-once / ordering semantics worth naming —
-   and it has a real, mild ordering bug: `created_at` order is not guaranteed
-   to match emit order. → `02-trace-sink-write-buffering.md`
+   promise per event, then awaits them all together after the turn. This is the
+   one place in the repo with at-least-once / ordering semantics worth naming.
+   It *used to* carry a mild ordering bug; that's now **fixed** — `created_at`
+   is written from the client-assigned `event.timestamp`
+   (`coalesce($8::timestamptz, now())`, `:27-36`), so replay order matches emit
+   order. Residual edge: same-millisecond ties. → `02-trace-sink-write-buffering.md`
 
 3. **The two-brain shared-memory consistency problem is designed, not built.**
    `agent-layer-plan.md` and the graduation design spec describe a laptop + a
@@ -100,8 +102,10 @@ in `audit.md` with the trigger that would make it real:
   in-memory array is a buffer, not a queue with a consumer.
 - **Idempotency keys / dedup** — partial. `upsert ON CONFLICT` is idempotent at
   the storage layer; there is no request-level dedup because there are no retries.
-- **Clocks / ordering across nodes** — `not yet exercised`. Single `created_at`
-  clock from one Postgres; no cross-node time reasoning.
+- **Clocks / ordering across nodes** — `not yet exercised`. Trajectory order now
+  comes from the single client's `event.timestamp` (one wall clock, one writer);
+  no cross-node time reasoning — which is exactly what the deferred two-brain
+  phase would force.
 - **Sagas / transactional outbox / reconciliation** — `not yet exercised`.
 
 ---
@@ -136,3 +140,12 @@ This generator owns **correctness across coordination boundaries**. It does
   `.aipe/study-debugging-observability/` (the `agents.messages` trace as the
   primary observability artifact). *Note: this neighbor guide is not yet
   generated; the cross-link names where the material will live.*
+
+---
+
+Updated: 2026-06-24 — finding #2 reframed (trace-sink ordering bug now RESOLVED
+via client `event.timestamp` → `created_at`); orchestrator is now `session.ts`
+(`ChatSession`) driven by `cli/chat.tsx` (the `ask` CLI was deleted, `npm run
+ask` → `npm run chat`); aptkit-core 0.4.1; retrievable memory via
+`createConversationMemory`. Single-device shape and the deferred two-brain
+problem unchanged.

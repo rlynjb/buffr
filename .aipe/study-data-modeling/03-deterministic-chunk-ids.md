@@ -173,6 +173,13 @@ changes (rename the doc → all chunk ids change → orphans). Here `docId` is
 a real edge the deterministic scheme doesn't cover (and with no FK, nothing
 cleans them; see `04`). Worth knowing the seam.
 
+The same encoded-id discipline now appears on a second writer: `@aptkit/memory`
+keys its rows `memory:<conversationId>:<n>` (`conversation-memory.ts:82`) and
+upserts through the *same* `on conflict (id) do update` path. It's the identical
+move — identity encoded into the key so re-`remember` is idempotent — just with
+a per-conversation counter `n` instead of `<docId>#<index>`. One upsert, two
+deterministic-id schemes sharing it.
+
 ## Interview defense
 
 **Q: Why deterministic chunk ids instead of uuids?**
@@ -210,3 +217,7 @@ belt-and-suspenders, not a fix. **Anchor:** no such constraint in
 - `04-soft-link-no-fk.md` — why orphaned chunks aren't cleaned (no FK).
 - `02-text-stored-twice.md` — `docId`/`chunkIndex` column + meta redundancy.
 - `audit.md` §4 — integrity, the upsert as idempotency mechanism.
+
+---
+Updated: 2026-06-24 — noted `@aptkit/memory` reuses the same `on conflict (id)`
+upsert with its own deterministic key `memory:<conv>:<n>` (`conversation-memory.ts:82`).

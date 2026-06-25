@@ -15,7 +15,7 @@ performance choice.
   Zoom out — where the search sits
 
   ┌─ CLI / Agent layer ─────────────────────────────────────────┐
-  │  ask → search_knowledge_base tool → pipeline.query           │
+  │  chat turn → search_knowledge_base tool → pipeline.query     │
   └─────────────────────────┬────────────────────────────────────┘
                             │  embed(query) → 768-dim vector
   ┌─ VectorStore (buffr) ───▼────────────────────────────────────┐
@@ -198,10 +198,13 @@ The full retrieval path, every layer and hop labelled.
 
 ## Implementation in codebase
 
-**Use cases.** Reached for on every `ask` (the `search_knowledge_base` tool calls
-`pipeline.query`, which calls `store.search`) and on every eval query
+**Use cases.** Reached for on every `chat` turn (the `search_knowledge_base` tool
+calls `pipeline.query`, which calls `store.search`) and on every eval query
 (`src/cli/eval-cmd.ts:25`). It's the read side of the entire RAG loop — every
-answer buffr gives starts here.
+answer buffr gives starts here. New as of `chat`: the per-turn episodic-memory
+upsert (`memory.remember`, `src/session.ts:66`) writes *into* this same HNSW index,
+so the corpus the search walks now grows by one memory chunk per turn — still tiny,
+but no longer write-only-at-index-time.
 
 **The query — `src/pg-vector-store.ts:67-85`:**
 
@@ -300,3 +303,12 @@ that holds recall above your bar. buffr has both halves and never connects them.
 - `04-connection-pool-reuse.md` — the warm connection this search rides on
 - `05-no-caching.md` — the cache that would skip this search on repeat queries
 - `study-database-systems` — index types, query planning, the `<=>` operator
+
+---
+
+Updated: 2026-06-24 — Re-verified UNCHANGED: the search query
+(`pg-vector-store.ts:67-85`) and the untuned HNSW index
+(`sql/001_agents_schema.sql:30-31`) are byte-for-byte the same; the
+approximate-search finding stands. Reframed the read-path entry from `ask` to a
+`chat` turn, and noted the new per-turn memory upsert (`session.ts:66`) now writes
+into this same index, so the searched corpus grows per turn.

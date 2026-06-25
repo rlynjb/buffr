@@ -16,6 +16,16 @@ heard of a `documents` row. The schema bends in two visible places to honor
 that contract, and both bends are the kind of decision you defend in an
 interview.
 
+Two things changed since the first pass and are now true of the live data:
+(1) `chunks` holds a **second population** — episodic-memory rows
+(`memory:<conv>:<n>`, `meta.kind='memory'`, `document_id=null`) written by
+`@aptkit/memory` through the same store (`src/session.ts:53,67`); this is the
+dropped FK earning its keep. (2) The trajectory table is now **fully written** —
+the fixed trace sink populates `tool_calls`/`tool_results`/`model`/`tokens_used`
+and sets `created_at` from the event timestamp (previously those columns sat
+null). The driver is now `npm run chat` (a long-lived session), not the
+deleted one-shot `ask` CLI.
+
 ## The map: which axis flips where
 
 Trace one axis — *who guarantees this fact is correct?* — across the schema,
@@ -69,9 +79,17 @@ from a real cascade FK down to no enforcement at all — is the lesson.
    shape only: no RLS, not token-derived. The future seam, not a current
    boundary.
 
-6. **`06-trajectory-tables`** — conversations/messages, append-only turn
-   capture, and the one genuine FK with `on delete cascade`. The counter-example
-   to the soft link: here the schema *does* enforce integrity.
+6. **`06-trajectory-tables`** — conversations/messages, append-only event
+   capture across a chat session, and the one genuine FK with `on delete
+   cascade`. The counter-example to the soft link: here the schema *does*
+   enforce integrity. Now also the place to see a *fully populated* event log —
+   all six `CapabilityEvent` types written, `tool_calls`/`tool_results`/`model`/
+   `tokens_used` filled, `created_at` from the event timestamp.
 
 Start with `audit.md` for the full lens sweep; come here for the shortlist;
 open the numbered files for the deep walks.
+
+---
+Updated: 2026-06-24 — `chunks` now has a second (memory) population; trajectory
+columns now populated by the fixed trace sink; driver is `npm run chat` not the
+deleted `ask` CLI.

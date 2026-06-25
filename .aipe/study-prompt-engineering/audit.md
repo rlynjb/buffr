@@ -12,10 +12,12 @@ Paths below abbreviate that prefix to `@aptkit/<pkg>/…`. buffr **does
 not edit aptkit** (a hard constraint, `context.md`), so the audit
 distinguishes *what buffr wires up* from *what the library does*.
 
-The setup under audit (`src/cli/ask-cmd.ts:19-34`): Ollama-served
+The setup under audit (`src/session.ts:34-57`, the `createChatSession`
+assembly driven by the chat TUI `src/cli/chat.tsx`): Ollama-served
 `gemma2:9b` for generation, `nomic-embed-text:v1.5` (768-dim) for
 embeddings, pgvector store, one tool (`search_knowledge_base`), the
-`RagQueryAgent`, a profile loaded from Postgres.
+`RagQueryAgent`, a profile loaded from Postgres, and a retrievable
+conversation memory over the same store (`session.ts:53,66`).
 
 ---
 
@@ -26,7 +28,7 @@ embeddings, pgvector store, one tool (`search_knowledge_base`), the
 (`DEFAULT_SYSTEM_TEMPLATE`). Four sentences: identity ("You are a
 personal knowledge assistant"), a tool-first directive, a grounding +
 citation rule, and an abstain rule. buffr passes **no** custom `prompt`
-in `ask-cmd.ts:33` (`new RagQueryAgent({ model, tools, profile, trace })`
+in `session.ts:57` (`new RagQueryAgent({ model, tools, profile, trace })`
 — no `prompt` key), so the default template is what ships.
 
 The design is sound on the anatomy axis: identity + instruction in the
@@ -57,7 +59,7 @@ model that's a real risk (see lens 6).
 
 **Exercised.** The `me.md`-style profile is prepended to the system
 prompt under a heading. `src/profile.ts:4` reads it from
-`agents.profiles` (most-recent row). `ask-cmd.ts:27` loads it;
+`agents.profiles` (most-recent row). `session.ts:47` loads it;
 `rag-query-agent.js:29-31` injects it via
 `@aptkit/context/profile-injector.js:15-22` with
 `{ position: 'start', heading: '# About the person you are assisting' }`
@@ -69,6 +71,17 @@ Note this is **standing context**, not retrieved context — the profile
 is injected unconditionally every call, not fetched by the search tool.
 Two different context-injection mechanisms in one system; this lens is
 the unconditional one, lens 2 is the retrieved one.
+
+A third context source now feeds the retrieved channel:
+**conversation memory**. `session.ts:53` builds a `createConversationMemory`
+over buffr's *same* PgVectorStore; after each turn, `session.ts:66`
+embeds the exchange tagged `kind=memory`
+(`@aptkit/memory/conversation-memory.js:36-42`). Because memory shares the
+document store, a later turn's `search_knowledge_base` call surfaces
+relevant *past exchanges alongside document chunks* — so recalled memory
+lands in the prompt through the **same retrieved-context path as lens 2**,
+as a tool result, not as standing context. The engine is aptkit's; buffr
+only injects the store (`session.ts:53`).
 
 ## 4. Tool-use prompting
 
@@ -103,8 +116,8 @@ distinct things here:
   generate → `parseValidatedJson` → on fail, retry once with a strict
   "Return ONLY valid JSON - no prose, no markdown fences" suffix
   (`:3`, `appendStrictSuffix:58-69`). This is a real, shipped retry
-  loop — but **buffr's `ask-cmd.ts` never calls it.** The RAG agent
-  returns free prose, not a validated schema. → walked in
+  loop — but **buffr's `session.ts` ask path never calls it.** The RAG
+  agent returns free prose, not a validated schema. → walked in
   [`04-structured-output-reprompt.md`](04-structured-output-reprompt.md),
   flagged as library-present / buffr-not-yet-wired.
 
@@ -144,7 +157,7 @@ the local model gives you none of it."
 ## 7. Token budgeting and context window
 
 **Exercised (guard only), no allocation strategy.**
-`ask-cmd.ts:26` wraps the model in
+`session.ts:46` wraps the model in
 `ContextWindowGuardedProvider(..., { maxTokens: 8192 })`. The guard
 (`@aptkit/provider-local/context-window-guard.js:42-68`) estimates input
 tokens at ~3 chars/token, reserves 768 for output, and **throws**

@@ -4,18 +4,21 @@
 
 ## Zoom out, then zoom in
 
-Every query an `ask` fires — the profile read, the conversation insert, the
-vector search, the trace writes — has to reach Postgres over a connection.
-Opening a fresh Postgres connection is *expensive*: a TCP handshake, a startup
-packet, auth. The box below is the thing that means you pay that cost once and
-reuse it for the whole burst.
+Every query the chat session fires — the profile read, the conversation insert,
+the per-turn user message, the vector search, the trace writes, the memory
+upsert — has to reach Postgres over a connection. Opening a fresh Postgres
+connection is *expensive*: a TCP handshake, a startup packet, auth. The box below
+is the thing that means you pay that cost once and reuse it — not for a single
+burst, but for the *entire interactive session*: one warm pool (`session.ts:39`),
+held open across every turn until `close()` ends it (`session.ts:73`).
 
 ```
   Zoom out — where the pool sits
 
-  ┌─ CLI layer (ask-cmd.ts) ────────────────────────────────────┐
-  │  loadProfile · startConversation · persistMessage · search  │
-  │  · trace flush   — many queries, one operation               │
+  ┌─ CLI / session layer (chat.tsx → session.ts) ───────────────┐
+  │  loadProfile (once) · startConversation (once) ·            │
+  │  per turn: persistMessage · search · trace flush · memory   │
+  │  upsert   — many queries, ONE long-lived session             │
   └─────────────────────────┬────────────────────────────────────┘
                             │  all go through…
   ┌─ Connection layer (db.ts) ──▼───────────────────────────────┐
@@ -31,13 +34,16 @@ reuse it for the whole burst.
 Zoom in: a `pg.Pool` keeps a set of already-open connections alive. Ask for one,
 run a query, give it back — the next query grabs the same warm connection instead
 of dialing Postgres again. This is the one place buffr gets a performance property
-*for free* by reaching for the right primitive. The pattern is connection pooling;
-the finding is that it's quietly doing the right thing.
+*for free* by reaching for the right primitive — and the win **strengthened** when
+`ask`'s one-shot CLI became `chat`'s long-lived session: the same pool now carries
+many turns' worth of queries, so the single handshake amortizes across a whole
+conversation instead of a single ask. The pattern is connection pooling; the
+finding is that it's quietly doing the right thing, harder than before.
 
 ## Structure pass
 
 **Layers.** Two: the *pool* (`pg.Pool`, owns the connections) and the *callers*
-(every `pool.query` / `pool.connect` across `ask-cmd`, `profile`,
+(every `pool.query` / `pool.connect` across `session.ts`, `profile`,
 `supabase-trace-sink`, `pg-vector-store`).
 
 **Axis — cost (what's paid once vs per-query).** Trace it:
@@ -96,11 +102,15 @@ it doesn't open connections until the first query asks for one. So the first que
 of a process pays the handshake; every one after rides a warm connection.
 
 **`pool.query` — auto lease/return.** Bridge: like `fetch` where you don't manage
-the socket. `loadProfile`, `startConversation`, `persistMessage`, and `search` all
-call `pool.query(sql, params)` — each one transparently leases a connection, runs,
-returns it. Boundary condition: each `pool.query` is its *own* checkout, so two
-`pool.query` calls aren't guaranteed the same physical connection or the same
-transaction — fine here because each is a standalone statement.
+the socket. `loadProfile`, `startConversation`, `persistMessage`, `search`, and
+the trace flush all call `pool.query(sql, params)` — each one transparently leases
+a connection, runs, returns it. Boundary condition: each `pool.query` is its *own*
+checkout, so two `pool.query` calls aren't guaranteed the same physical connection
+or the same transaction — fine here because each is a standalone statement. Note
+the trace sink now emits *more* of these per turn — every CapabilityEvent variant
+(step, tool_call_start/end, model_usage, warning, error) becomes its own
+`persistMessage` insert (`supabase-trace-sink.ts:56-84`), so a turn's flush is
+several `pool.query` checkouts, not ~2. All still ride the one warm pool.
 
 **`pool.connect` — manual hold.** Bridge: like opening a file you must `close`.
 `PgVectorStore.upsert` calls `pool.connect()` because it needs *one* connection to
@@ -110,15 +120,21 @@ connection leaks out of the pool permanently. buffr does (`pg-vector-store.ts`
 `finally { client.release() }`).
 
 ```
-  An ask's query burst — one process, one pool, warm reuse
+  A chat session's query stream — one process, one pool, warm reuse
 
-  loadProfile        → pool.query  ┐
-  startConversation  → pool.query  │  each leases a warm conn,
-  persistMessage     → pool.query  ├─ runs, returns it.
-  search (in loop)   → pool.query  │  handshake paid once, at the first.
-  trace flush (×n)   → pool.query  ┘
+  SESSION SETUP (once):
+  loadProfile        → pool.query  ┐  paid once at session start
+  startConversation  → pool.query  ┘  (session.ts:47, 55)
+
+  PER TURN (repeats every question):
+  persistMessage     → pool.query  ┐  user turn (session.ts:61)
+  search (in loop)   → pool.query  │  each leases a warm conn,
+  trace flush (×n)   → pool.query  ├─ runs, returns it.
+  memory upsert      → pool.connect│  per-turn memory write (session.ts:66)
+                                   ┘  handshake paid once, at the very first.
         │
-        └─ ~5+ queries, ZERO extra handshakes after the first
+        └─ MANY turns × several queries each, ZERO extra handshakes
+           after the first. The longer the session, the bigger the win.
 ```
 
 ### Move 2 variant — the load-bearing skeleton
@@ -161,8 +177,10 @@ The full connection lifecycle across an ask.
   │  profile.ts        loadProfile      → pool.query  ┐           │
   │  trace-sink.ts     startConversation→ pool.query  │ auto      │
   │  trace-sink.ts     persistMessage   → pool.query  │ lease/    │
-  │  pg-vector-store   search           → pool.query  ┘ return    │
+  │  trace-sink.ts     flush (×n events)→ pool.query  │ return    │
+  │  pg-vector-store   search           → pool.query  ┘           │
   │  pg-vector-store   upsert           → pool.connect ─ manual   │
+  │  (search + memory) memory.remember  → embed + upsert (per turn)│
   │                                       (held for txn, released)│
   └─────────────────────────┬────────────────────────────────────┘
                             │ TCP handshake: paid ONCE at first query
@@ -173,10 +191,13 @@ The full connection lifecycle across an ask.
 
 ## Implementation in codebase
 
-**Use cases.** Every CLI command (`index`, `ask`, `eval`) creates one pool at
-startup and tears it down with `pool.end()` at exit. Within an `ask`, the pool
-carries the whole query burst; within `index`, it carries every document's
-upsert transaction.
+**Use cases.** Every CLI command (`index`, `chat`, `eval`) creates one pool at
+startup and tears it down with `pool.end()` at exit. Within a `chat` session, one
+pool carries the *entire* multi-turn conversation's query stream — setup queries
+once, then several queries per turn (user message, search, the now-larger trace
+flush, and the per-turn memory upsert) — until `session.close()` ends it
+(`session.ts:72-74`). Within `index`, it carries every document's upsert
+transaction.
 
 **The pool factory — `src/db.ts:4-5`:**
 
@@ -192,18 +213,25 @@ upsert transaction.
            leases them. Lazy — first query pays the handshake, rest reuse.
 ```
 
-**Auto lease/return — `src/cli/ask-cmd.ts:27-30`:**
+**Auto lease/return — `src/session.ts:47, 55, 60-66`:**
 
 ```
-  src/cli/ask-cmd.ts  (lines 27-30)
+  src/session.ts  (session setup + per-turn ask)
 
-  const profile = await loadProfile(pool, cfg.appId);        ← pool.query
-  const conversationId = await startConversation(pool, …);   ← pool.query
-  await persistMessage(pool, conversationId, 'user', question); ← pool.query
+  // setup, once per session:
+  const profile = await loadProfile(pool, cfg.appId);        ← pool.query  (47)
+  const conversationId = await startConversation(pool, …);   ← pool.query  (55)
+
+  // per turn, repeated for every question:
+  await persistMessage(pool, conversationId, 'user', question); ← pool.query (61)
+  const answer = await agent.answer(question);   ← search() rides pool.query
+  await trace.flush();                            ← pool.query ×n events  (63)
+  await memory.remember({ conversationId, … });   ← embed + pool upsert   (66)
         │
-        └─ three statements, three checkouts, ZERO new handshakes after the
-           first. Then search() (pool.query, in the agent loop) and the trace
-           flush (pool.query ×n) ride the same warm pool.
+        └─ setup pays its checkouts once; every turn after reuses the SAME
+           warm pool — ZERO new handshakes for the life of the session.
+           The trace flush is now ×n inserts (one per event variant) and the
+           memory upsert is an added per-turn write, all on the one pool.
 ```
 
 **Manual hold for the transaction — `src/pg-vector-store.ts:40-64`:**
@@ -233,27 +261,31 @@ without change.
 The subtlety worth carrying forward: `query` vs `connect`. Most queries should be
 `pool.query` (auto-managed). Reach for `pool.connect` *only* when you need
 multiple statements on one connection — a transaction — and then the `finally {
-release() }` is non-negotiable. buffr gets both right. What to read next:
-`study-networking` for the TCP/TLS handshake the pool amortizes;
+release() }` is non-negotiable. buffr gets both right. The long-lived `chat`
+session sharpens the value: a pool that lives for one interactive conversation
+amortizes its single handshake across dozens of turns, not a single ask. What to
+read next: `study-networking` for the TCP/TLS handshake the pool amortizes;
 `study-database-systems` for why a transaction can't span connections.
 
 ## Interview defense
 
-**Q: An ask makes five-plus Postgres queries. Is that a connection-per-query
-cost?**
-No — they all ride one `pg.Pool` (`src/db.ts:4`). The TCP handshake is paid once,
-at the first query of the process; every query after leases an already-warm
-connection. That's the difference between `pg.Pool` and `pg.Client` — Pool keeps
-connections alive and leases them.
+**Q: A chat session makes dozens of Postgres queries across its turns. Is that a
+connection-per-query cost?**
+No — they all ride one `pg.Pool` (`src/db.ts:4`), held open for the whole session
+(`session.ts:39`, closed at `session.ts:73`). The TCP handshake is paid once, at
+the first query of the process; every query after — across *every turn* — leases
+an already-warm connection. That's the difference between `pg.Pool` and
+`pg.Client`, and it matters more now than under the old one-shot `ask`: the
+amortization spreads over a whole conversation.
 
 ```
-  Client: handshake per query   → 5 queries = 5 handshakes
-  Pool:   handshake per process → 5 queries = 1 handshake
-  buffr uses Pool
+  Client: handshake per query   → 30 queries = 30 handshakes
+  Pool:   handshake per process → 30 queries = 1 handshake
+  buffr uses Pool; a long session makes the win bigger, not smaller
 ```
 
-Anchor: `src/db.ts:4-5` is the pool; `src/cli/ask-cmd.ts:27-30` is the burst that
-reuses it.
+Anchor: `src/db.ts:4-5` is the pool; `src/session.ts:60-66` is the per-turn query
+stream (user message, search, ×n trace flush, memory upsert) that reuses it.
 
 **Q: The part people forget?**
 The `release()` in the `connect` path. `pool.query` returns the connection
@@ -269,10 +301,11 @@ leaks one connection per call until it's exhausted. buffr releases in `finally`
 2. **Explain:** why does `upsert` use `pool.connect` while `search` uses
    `pool.query`?
 3. **Apply:** what happens to the pool if `client.release()` in
-   `src/pg-vector-store.ts:64` is removed, after indexing 11 documents (pool
-   default max 10)?
+   `src/pg-vector-store.ts:63` is removed, after the per-turn `memory.remember`
+   upsert runs 11 times in a long chat session (pool default max 10)?
 4. **Defend:** argue why pooling is a "free" win here yet would be a
-   *load-bearing* requirement the moment `ask` is fronted by an HTTP server.
+   *load-bearing* requirement the moment `chat` is fronted by an HTTP server —
+   and why the long-lived session already makes the amortization concrete.
 
 ## See also
 
@@ -281,3 +314,12 @@ leaks one connection per call until it's exhausted. buffr releases in `finally`
 - `01-hnsw-approximate-search.md` — the search that rides `pool.query`
 - `study-networking` — the TCP/TLS handshake the pool amortizes
 - `study-database-systems` — why a transaction is bound to one connection
+
+---
+
+Updated: 2026-06-24 — Reframed from one-shot `ask` to long-lived `chat` session
+(`session.ts`): one pool now amortizes its handshake across an entire multi-turn
+conversation, strengthening the win. Added the per-turn memory upsert
+(`session.ts:66`) and the trace flush write-amplification (now ×n event inserts,
+`supabase-trace-sink.ts:56-84`) to the query stream. Purged `ask-cmd.ts` refs;
+re-grounded line anchors against current code.

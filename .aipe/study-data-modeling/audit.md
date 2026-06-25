@@ -37,6 +37,14 @@ under vector search; trajectory is append-only per run; profile is a
 single-row lookup. → full diagram + the deep walk in `00-overview.md` and the
 pattern files.
 
+One refinement worth naming: `chunks` now holds **two populations** —
+corpus chunks (`id = "<docId>#<index>"`) and episodic-memory chunks
+(`id = "memory:<conv>:<n>"`, `meta.kind = 'memory'`) written by `@aptkit/memory`
+through the same `PgVectorStore` (`src/session.ts:53,67`). Memory rows carry no
+`documents` parent — which the dropped FK (lens 6) is exactly what permits.
+They're distinguished by `meta.kind` at read time (the recall path over-fetches
+then filters on `kind='memory'`), not by a column or a separate table.
+
 No red flag here. The data has real structure and the schema reflects it.
 
 ## 2. Normalization and duplication
@@ -64,7 +72,10 @@ and `meta` exists because the `VectorStore` contract hands back an opaque
 Second instance, milder: `chunk_index` is a column (`:21`) *and* lives in
 `meta.chunkIndex` (`src/pg-vector-store.ts:45`). `document_id` is a column
 (`:16`) *and* lives in `meta.docId` (`src/pg-vector-store.ts:44`). Same
-sidecar-redundancy pattern, smaller payload.
+sidecar-redundancy pattern, smaller payload. The `content`/`meta.text`
+duplication now also applies to **memory rows**: `@aptkit/memory` sets
+`meta.text` (`conversation-memory.ts:84`) and the upsert derives `content` from
+it (`pg-vector-store.ts:46`) — same finding, second writer.
 
 ## 3. Indexing vs query patterns
 
@@ -181,6 +192,13 @@ absorb the schemaless aptkit payload without forcing a column per field —
 document-shaped data in a jsonb sidecar, relational data in real columns.
 That's the correct hybrid for this access pattern.
 
+The dropped FK is no longer hypothetical: episodic memory (`@aptkit/memory`)
+writes `memory:<conv>:<n>` chunks with **no `documents` parent at all**
+(`src/session.ts:53,67`) into the shared store. A hard FK would have rejected
+every memory row. So the contract-driven FK drop (lens 6) is what makes the
+"memory shares the corpus store" design possible — the soft link is load-bearing
+for a live, second use of `chunks`, not just a theoretical concession.
+
 ## 7. Data-modeling red-flags audit (capstone)
 
 | Red flag | This repo | Where |
@@ -215,3 +233,11 @@ That's the correct hybrid for this access pattern.
   `(document_id, chunk_index)` — the deterministic id is the only thing
   preventing duplicate chunks, and it works because the id *encodes*
   `(docId, index)`. → `03`.
+
+---
+Updated: 2026-06-24 — §1/§2/§6: `chunks` now holds a second live population,
+episodic-memory rows (`memory:<conv>:<n>`, `meta.kind='memory'`) written via
+`@aptkit/memory` with no `documents` parent — making the dropped FK (§6)
+load-bearing, and extending the `content`/`meta.text` duplication (§2) to those
+rows. Trajectory columns (`tool_calls`/`tool_results`/`model`/`tokens_used`,
+`created_at`) are now populated by the fixed trace sink → `06`.

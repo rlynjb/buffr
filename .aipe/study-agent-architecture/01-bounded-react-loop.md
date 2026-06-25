@@ -15,7 +15,7 @@ the outputs; the loop itself is the agent.
   Zoom out — where the loop lives
 
   ┌─ CLI layer (buffr) ───────────────────────────────────────┐
-  │  src/cli/ask-cmd.ts  →  new RagQueryAgent(...).answer(q)   │
+  │  src/session.ts (chat session)  →  agent.answer(q) per turn│
   └───────────────────────────────┬───────────────────────────┘
                                   │  agent.answer(question)
   ┌─ Agent layer (aptkit) ────────▼───────────────────────────┐
@@ -47,8 +47,8 @@ Three nested control levels, one axis traced across all three.
   "who decides the next move?" — traced down the stack
 
   ┌──────────────────────────────────────────┐
-  │ outer: ask-cmd.ts (CLI)                   │  → CODE decides
-  │   one question in, one answer out, once   │    (no loop here)
+  │ outer: session.ts (CLI)                   │  → CODE decides
+  │   one question in, one answer out per turn│    (no loop here)
   └──────────────────────────────────────────┘
       ┌──────────────────────────────────────┐
       │ middle: runAgentLoop (the loop)       │  → the BUDGET decides
@@ -229,7 +229,8 @@ The full loop buffr runs, every box and the layer it sits in.
 
 ### Use cases
 
-Every `npm run ask -- "..."` invocation. The user asks a free-form question;
+Every turn of `npm run chat` — each question typed into the long-lived session
+(`src/session.ts`) runs this loop once. The user asks a free-form question;
 the agent decides whether to search the knowledge base, possibly refines the
 query across up to 4 searches, then synthesizes a grounded answer. The loop is
 reached for exactly when the answer depends on what the model finds in the
@@ -243,7 +244,7 @@ The budget and exits, from `RagQueryAgent.answer`
 ```
 const { finalText } = await runAgentLoop({
   capabilityId: RAG_QUERY_CAPABILITY_ID,
-  model: this.options.model,        ← Gemma, context-guarded (ask-cmd.ts:26)
+  model: this.options.model,        ← Gemma, context-guarded (session.ts:46)
   tools: this.options.tools,        ← registry with one tool
   system: this.system,              ← profile + RAG instructions
   userPrompt: question,
@@ -362,3 +363,10 @@ Anchor: "The model writes the steps at runtime; that's what makes it an agent."
 - `audit.md` — Lens 5 (control loop & termination)
 - ReAct mechanics (sibling generator): `.aipe/study-ai-engineering/04-agents-and-tool-use/03-react-pattern.md`
 - `.aipe/study-system-design/03-trajectory-capture.md`
+
+---
+
+Updated: 2026-06-24 — Loop unchanged; re-pointed CLI refs from the deleted
+`ask-cmd.ts` to the long-lived chat session (`src/session.ts`, `npm run chat`),
+which calls `agent.answer()` once per turn. Context-guarded model now wired at
+`session.ts:46`.

@@ -120,7 +120,7 @@ post-filter excludes everything, the agent "finds nothing" and gives up — a
 silent retrieval failure caused by the model, not the corpus.
 
 **`minTopK` floors the result count.** buffr constructs the tool with
-`minTopK: 4` (`ask-cmd.ts:23`), so even if the model asks for `top_k: 1` it
+`minTopK: 4` (`session.ts:43`), so even if the model asks for `top_k: 1` it
 gets at least 4 chunks. Bridge: it's a `Math.max` clamp on a user-supplied
 limit — the model doesn't get to starve its own context.
 
@@ -197,7 +197,7 @@ const handler = async (args) => {
   const query = typeof args.query === 'string' ? args.query : '';
   const requestedTopK = typeof args.top_k === 'number' && args.top_k > 0
     ? args.top_k : defaultTopK;
-  const topK = Math.max(requestedTopK, minTopK);     ← floor at minTopK=4 (ask-cmd.ts:23)
+  const topK = Math.max(requestedTopK, minTopK);     ← floor at minTopK=4 (session.ts:43)
   const filter = args.filter && typeof args.filter === 'object'
     && !Array.isArray(args.filter) ? args.filter : undefined;
   const fetchK = filter ? topK * 4 : topK;            ← over-fetch so post-filter can fill topK
@@ -284,6 +284,14 @@ Anchor: "Absent key is ignored, not a mismatch — hallucinated filters can't wi
 
 - `01-bounded-react-loop.md` — the loop retrieval runs inside
 - `02-single-tool-capability-scope.md` — search is the *only* tool
+- `04-trajectory-as-memory.md` — past exchanges (kind=memory) now ride THIS tool: memory rows share the store, so `search_knowledge_base` surfaces them by relevance
 - `06-orchestration-templates.md` — self-RAG and decomposition as refactors
 - `.aipe/study-system-design/02-retrieval-pipeline.md` — the embed/ANN mechanics
 - RAG mechanics (sibling generator): `.aipe/study-ai-engineering/03-retrieval-and-rag/`
+
+---
+
+Updated: 2026-06-24 — Agentic-retrieval mechanics unchanged; re-pointed `minTopK`
+refs from the deleted `ask-cmd.ts` to `session.ts:43`. Added cross-link: this
+tool now also surfaces conversation-memory rows (`kind=memory`) that share the
+store, giving the agent relevance recall — see `04-trajectory-as-memory.md`.

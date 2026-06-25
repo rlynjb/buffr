@@ -49,14 +49,23 @@ deterministic fake embedder in so the indexing path can be asserted with
      `chunks.document_id` exists *because of* this contract.
    - **`04-idempotent-migration-test.md`** — `migrate.test.ts` runs the schema
      twice and asserts no error. The test that pins `create ... if not exists`.
+   - **`05-full-signal-trace-capture.md`** — `supabase-trace-sink.test.ts` grew
+     a second `it` that emits one of every `CapabilityEvent` type and asserts
+     the *whole* payload survives (tool args, `durationMs` + error, token sum,
+     warning/error rows, `created_at` ordering). The test that pins "no signal
+     dropped on the floor."
 
 ## The honest gaps (named in full in `audit.md`)
 
 - **No CI.** The DB tests only run on a laptop with `DATABASE_URL` set and
   Postgres+pgvector reachable. On any other machine the suite is green by
   *skipping*, not by passing. A green run proves nothing unless you check it ran.
-- **The agent end-to-end is not tested.** `src/cli/ask-cmd.ts` against live
-  Gemma is exercised by hand, never asserted.
+- **The chat session is not tested.** `src/cli/ask-cmd.ts` is gone; the repo's
+  main path is now `createChatSession` (`src/session.ts`) behind an Ink TUI
+  (`src/cli/chat.tsx`), run via `npm run chat` against live Gemma by hand. The
+  deterministic per-turn `ask()` wrapper — user-turn persistence, trace flush,
+  the swallowed memory-write failure — has no assertion. This is the new
+  highest-leverage gap.
 - **`config.test.ts` is the only pure unit test.** Everything else needs a
   database.
 
@@ -70,4 +79,11 @@ deterministic fake embedder in so the indexing path can be asserted with
   faithfulness, the labeled `eval/queries.json` set) is audited there, not here.
 - **debugging-observability** — `SupabaseTraceSink` persists the agent's
   trajectory to `agents.messages`; the trace it writes is both the
-  observability surface and the thing `supabase-trace-sink.test.ts` asserts on.
+  observability surface and the thing `supabase-trace-sink.test.ts` asserts on
+  — now the *full* event signal (see `05-full-signal-trace-capture.md`).
+
+---
+
+Updated: 2026-06-24 — purged `ask-cmd.ts` (deleted) → `session.ts`/`chat.tsx`
+`npm run chat` named as the new highest-leverage gap; added the
+`05-full-signal-trace-capture.md` pattern to the reading order.

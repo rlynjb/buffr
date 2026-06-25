@@ -264,15 +264,18 @@ captures with no consumer yet.
            This is seam 2, shared with 01-vector-store-adapter.md.
 ```
 
-**Capture with no consumer yet** — `src/supabase-trace-sink.ts:29-33`
+**Capture with no consumer yet** — `src/supabase-trace-sink.ts:53-85`
 
 ```
-  this.pending.push(persistMessage(pool, conversationId, 'assistant', event.content)); ← 30
-  ... persistMessage(... 'tool', event.toolName, { toolResults: event.result }));      ← 32-33
+  emit switches on all 6 event types → persistMessage(..., createdAt: event.timestamp) ← 53-85
+  // step, tool_call_start (args), tool_call_end (result/error/durationMs),
+  // model_usage (tokens), warning, error — every variant lands a row
         │
-        └─ these rows are written every run for history/debugging. The fine-tune
-           consumer doesn't exist and may never — but the data must exist NOW
-           to ever be usable. Seam 4.
+        └─ these rows are written every turn for history/debugging — now a
+           FULL-signal trajectory (args, timings, token usage), ordered by
+           event.timestamp. The fine-tune consumer doesn't exist and may never —
+           but the data must exist NOW to ever be usable, and the richer it is
+           the better a future dataset. Seam 4.
 ```
 
 **The deferral, stated and gated** — design doc out-of-scope list +
@@ -336,7 +339,7 @@ deferred; the capture can't be.
   defer capture ──► no data the day you need it ──► dead end
 ```
 
-Anchor: `src/supabase-trace-sink.ts:29-33`; `agent-layer-plan.md` Phase 4.
+Anchor: `src/supabase-trace-sink.ts:53-85`; `agent-layer-plan.md` Phase 4.
 
 ## Validate
 
@@ -348,13 +351,14 @@ Anchor: `src/supabase-trace-sink.ts:29-33`; `agent-layer-plan.md` Phase 4.
    does the phone reuse unchanged, and which seam does its store attach to?
    (`VectorStore` contract; `agents` schema.)
 4. **Defend.** Argue that capturing trajectories with no consumer
-   (`supabase-trace-sink.ts:29-33`) is not dead code — name what it would cost
+   (`supabase-trace-sink.ts:53-85`) is not dead code — name what it would cost
    to add this capture *after* deciding to fine-tune.
 
 ## See also
 
-- `01-vector-store-adapter.md` — the contract that is seam 2.
-- `03-trajectory-capture.md` — the capture that is seam 4.
+- `01-vector-store-adapter.md` — the contract that is seam 2 (also the store
+  injected into the new memory engine).
+- `03-trajectory-capture.md` — the capture that is seam 4 (now full-signal).
 - `04-library-as-dependency-boundary.md` — why swapping the body leaves the
   toolkit untouched.
 - `06-profile-injection-as-context.md` — `app_id` scoping as another forward-
@@ -362,3 +366,11 @@ Anchor: `src/supabase-trace-sink.ts:29-33`; `agent-layer-plan.md` Phase 4.
 - `study-distributed-systems` — the coordination the deferred sync/edge phases
   introduce.
 - `study-data-modeling` — the forward-compat column shapes in detail.
+
+---
+
+Updated: 2026-06-24 — seam 4 (trajectory capture) re-anchored to
+`supabase-trace-sink.ts:53-85` and described as full-signal (all six events +
+`event.timestamp` ordering), strengthening the fine-tune-dataset argument. Note:
+episodic conversation memory (`createConversationMemory`) is now also written
+every turn — a relevance-based recall seam adjacent to the fine-tune one.

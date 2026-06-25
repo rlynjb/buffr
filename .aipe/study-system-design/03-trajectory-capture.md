@@ -17,7 +17,7 @@ plan's thesis: *capture trajectories now so fine-tuning is answerable later*.
   Zoom out — where the trace sink sits
 
   ┌─ CLI layer (buffr) ──────────────────────────────────────────┐
-  │  ask-cmd: startConversation → persist user → agent.answer     │
+  │  chat session: startConversation → persist user → agent.answer│
   └──────────────────────────┬───────────────────────────────────┘
   ┌─ Toolkit layer (aptkit) ──▼──────────────────────────────────┐
   │  RagQueryAgent ── emits CapabilityEvent ──► trace.emit()      │
@@ -38,10 +38,20 @@ mismatch is the whole interesting part. Strip this out and the agent still
 answers, but every conversation evaporates when the process exits — no history,
 no trajectory dataset, no MLOps story.
 
+Two things sharpened since the last pass. First, the sink now persists **all
+six** `CapabilityEvent` variants — `step`, `tool_call_start`, `tool_call_end`,
+`model_usage`, `warning`, `error` — not just assistant steps and tool results.
+Tool-call *args* (the cause), `durationMs` + `error` on the result, token usage,
+and warning/error events used to be dropped; capturing them turns
+`agents.messages` into a complete, replayable trajectory and fills the
+previously-orphaned `tokens_used` column. Second, each event's `timestamp` is
+persisted into `created_at`, so replay order matches *emit* order rather than
+the race between concurrent flush inserts.
+
 ## Structure pass
 
-**Layers** — CLI (opens conversation, writes the user turn) → agent (emits
-events) → sink (queues writes) → pg.
+**Layers** — chat session (opens the conversation once, writes the user turn
+per turn) → agent (emits events) → sink (queues writes) → pg.
 
 **Axis: synchronous or asynchronous?** Trace it across the seam — this is the
 axis that flips and makes the boundary load-bearing.
@@ -112,20 +122,25 @@ nothing to point at.
 
 #### Part 2 — emit() queues, never awaits (the sync bridge)
 
-`emit()` receives a `CapabilityEvent`, decides which events are worth a row
-(assistant steps, tool-call ends), builds the write *promise*, and pushes it
-onto `pending`. It returns `void` immediately — honoring aptkit's sync
-contract.
+`emit()` receives a `CapabilityEvent`, switches on its `type` to map *every*
+variant to a row (with the event's `timestamp` carried into `created_at`),
+builds the write *promise*, and pushes it onto `pending`. It returns `void`
+immediately — honoring aptkit's sync contract.
 
 ```
-  pseudocode — emit, the sync bridge
+  pseudocode — emit, the sync bridge (full-signal, 6/6 variants)
 
   emit(event):
-    if event is assistant step with content:
-      pending.push( persistMessage(convId, 'assistant', event.content) )
-    else if event is tool_call_end:
-      pending.push( persistMessage(convId, 'tool', event.toolName,
-                                   { toolResults: event.result }) )
+    at = event.timestamp                       // carried into created_at for ordering
+    switch event.type:
+      'step':            if content → push persistMessage(role, content, {at})
+      'tool_call_start': push persistMessage('tool_call', toolName,
+                              { toolCalls: {toolName, args}, at })   // the CAUSE
+      'tool_call_end':   push persistMessage('tool', toolName,
+                              { toolResults: {result, error, durationMs}, at })
+      'model_usage':     push persistMessage('model_usage', '',
+                              { model, tokensUsed: in+out, at })     // fills tokens_used
+      'warning'|'error': push persistMessage(type, message, {at})
     return                              // SYNC — never await here
 ```
 
@@ -133,12 +148,17 @@ What breaks if you `await` inside `emit()`: you can't — aptkit's signature is
 `emit(event): void`, so an await would either be dropped (floating promise) or
 force you to change aptkit, which the must-not-change rule forbids. Queueing
 is the *only* way to bridge sync-in to async-out without editing the library.
+What breaks if you *don't* carry `event.timestamp`: the rows land in whatever
+order `Promise.all` happens to resolve the concurrent inserts, so a replay can
+show a tool result before the tool call. Persisting the emit-time timestamp
+into `created_at` is what makes replay order deterministic.
 
 #### Part 3 — flush() joins (the part people forget)
 
-After `agent.answer()` returns, the CLI calls `trace.flush()`, which awaits
-every queued write. This is the load-bearing line: skip it and the process
-exits while inserts are still in flight, and trajectory rows are silently lost.
+After `agent.answer()` returns, `session.ask()` calls `trace.flush()`, which
+awaits every queued write — each turn. This is the load-bearing line: skip it
+and the next turn proceeds (or the process exits on `/exit`) while inserts are
+still in flight, and trajectory rows are silently lost.
 
 ```
   flush — the join that makes the writes real
@@ -186,83 +206,95 @@ The full capture path, both message sources, the sync/async flip marked.
 ```
   Trajectory capture — full path
 
-  ┌─ CLI (ask-cmd) ─────────────────────────────────────────────────┐
-  │ startConversation ─► convId                                      │
-  │ persistMessage(convId,'user', question)   ← user turn (CLI)      │
+  ┌─ Session (session.ask, per turn) ───────────────────────────────┐
+  │ startConversation ─► convId  (ONCE, at createChatSession)        │
+  │ persistMessage(convId,'user', question)   ← user turn (session)  │
   │ agent.answer(question) ───────────────────────────────────┐     │
   │ await trace.flush()  ◄────────────────────────────────┐   │     │
   └──────────────────────────────────────────────────────┼───┼─────┘
   ┌─ Agent (aptkit) ──────────────────────────────────────┼───▼─────┐
-  │ per step: trace.emit(event)  (SYNC, void) ─────────────┼─────────│
+  │ per step: trace.emit(event)  (SYNC, void, 6/6 types) ──┼─────────│
   └───────────────────────────────────────────────────────┼─────────┘
   ┌─ SupabaseTraceSink (buffr) ───────────────────────────▼─────────┐
-  │ emit: push persistMessage(...) onto pending  (no await)         │
+  │ emit: push persistMessage(..., createdAt:event.timestamp) (no await)│
   │ flush: await Promise.all(pending)   ← the join                  │
   └──────────────────────────┬──────────────────────────────────────┘
                              │ pg INSERT (async)
   ┌─ Storage ────────────────▼──────────────────────────────────────┐
   │ conversations(id, app_id, agent_name)                           │
-  │ messages(conversation_id, role, content, tool_results, model)   │
+  │ messages(conversation_id, role, content, tool_calls,            │
+  │          tool_results, model, tokens_used, created_at)          │
   └──────────────────────────────────────────────────────────────────┘
 ```
 
 ## Implementation in codebase
 
-**Use cases.** Reached on every `ask`. The user turn is written by the CLI;
-assistant and tool turns are written by the sink as the agent loop runs;
-`flush()` runs once after the answer.
+**Use cases.** Reached on every chat turn. The user turn is written by the
+session; all other turns (assistant steps, tool-call start/end, model usage,
+warnings/errors) are written by the sink as the agent loop runs; `flush()` runs
+once after each answer.
 
-**Conversation + message writers** — `src/supabase-trace-sink.ts:4-19`
+**Conversation + message writers** — `src/supabase-trace-sink.ts:4-37`
 
 ```
-  startConversation: INSERT conversations (app_id, agent_name) RETURNING id  ← 5-6
-  persistMessage: INSERT messages (conversation_id, role, content,
-                                   tool_results, model)                       ← 14-18
+  startConversation: INSERT conversations (app_id, agent_name) RETURNING id  ← 5-7
+  persistMessage: INSERT messages (conversation_id, role, content, tool_calls,
+                  tool_results, model, tokens_used,
+                  created_at = coalesce($8::timestamptz, now()))             ← 27-36
         │
-        └─ conversation is the parent key; persistMessage is reused by both
-           the CLI (user turn) and the sink (assistant/tool turns).
+        └─ conversation is the parent key; persistMessage is reused by the
+           session (user turn) and the sink (every other turn). created_at takes
+           the event timestamp when present, falling back to server now().
 ```
 
-**The sync bridge — emit queues** — `src/supabase-trace-sink.ts:23-35`
+**The sync bridge — emit queues, full-signal** — `src/supabase-trace-sink.ts:53-85`
 
 ```
-  export class SupabaseTraceSink implements CapabilityTraceSink {   ← 23: the seam
-    private readonly pending: Promise<void>[] = [];                 ← 24: the queue
-    emit(event: CapabilityEvent): void {                            ← 27: SYNC, void
-      if (event.type === 'step' && event.role === 'assistant' && event.content)
-        this.pending.push(persistMessage(pool, conversationId, 'assistant', event.content)); ← 30
-      else if (event.type === 'tool_call_end')
-        this.pending.push(persistMessage(pool, conversationId, 'tool',
-                          event.toolName, { toolResults: event.result }));     ← 32-33
+  emit(event: CapabilityEvent): void {                  ← 53: SYNC, void
+    const at = event.timestamp;                         ← 55: carried into created_at
+    switch (event.type) {                               ← 56: all 6 variants
+      case 'step':            if content → push persistMessage(role, content, {createdAt:at}) ← 57-60
+      case 'tool_call_start': push 'tool_call' { toolCalls:{toolName,args}, createdAt:at }    ← 62-65
+      case 'tool_call_end':   push 'tool' { toolResults:{result,error,durationMs}, createdAt:at } ← 67-71
+      case 'model_usage':     push 'model_usage' { model, tokensUsed:in+out, createdAt:at }   ← 73-78
+      case 'warning'|'error': push event.type, event.message, { createdAt:at }                ← 80-83
     }
+  }
         │
         └─ pushes the write promise, never awaits — the only way to satisfy a
-           void-returning emit() without editing aptkit.
+           void-returning emit() without editing aptkit. Every variant now lands
+           a row (was just step + tool_call_end); tool_call_start captures the
+           args (the cause), model_usage fills tokens_used.
 ```
 
-**The join — flush** — `src/supabase-trace-sink.ts:37-39`
+**The join — flush** — `src/supabase-trace-sink.ts:91-93`
 
 ```
   async flush(): Promise<void> {
-    await Promise.all(this.pending);     ← 38: await every queued write
+    await Promise.all(this.pending);     ← 92: await every queued write
   }
         │
-        └─ called at ask-cmd.ts:35 after agent.answer. Without this line the
-           process can exit mid-insert and lose trajectory rows.
+        └─ called at session.ts:63 after agent.answer, each turn. Without this
+           line the process can exit (or the next turn proceed) mid-insert and
+           lose trajectory rows.
 ```
 
-**The wiring** — `src/cli/ask-cmd.ts:29-35`
+**The wiring** — `src/session.ts:55-71` (built once at `createChatSession`,
+re-entered per turn)
 
 ```
-  const conversationId = await startConversation(pool, cfg.appId);  ← 29
-  await persistMessage(pool, conversationId, 'user', question);     ← 30: user turn
-  const trace = new SupabaseTraceSink({ pool, conversationId });    ← 31
-  const agent = new RagQueryAgent({ model, tools, profile, trace });← 33: trace injected
-  const answer = await agent.answer(question);                      ← 34
-  await trace.flush();                                              ← 35: THE JOIN
+  // built once:
+  const conversationId = await startConversation(pool, cfg.appId);  ← 55
+  const trace = new SupabaseTraceSink({ pool, conversationId });    ← 56
+  const agent = new RagQueryAgent({ model, tools, profile, trace });← 57: trace injected
+  // per turn (ask):
+  await persistMessage(pool, conversationId, 'user', question);     ← 61: user turn
+  const answer = await agent.answer(question);                      ← 62
+  await trace.flush();                                              ← 63: THE JOIN
         │
-        └─ user turn written by CLI before the agent runs; assistant/tool
-           turns written by the sink during the run; flush joins after.
+        └─ ONE conversation spans every turn (started once, not per call). User
+           turn written by the session before the agent runs; all other turns
+           written by the sink during the run; flush joins after, each turn.
 ```
 
 ## Elaborate
@@ -294,41 +326,66 @@ untouched; the writes still land.
   emit (sync) ─push─► [pending]  ─flush (async)─► Promise.all → all landed
 ```
 
-Anchor: `src/supabase-trace-sink.ts:27` (emit) and `:38` (flush).
+Anchor: `src/supabase-trace-sink.ts:53` (emit) and `:91` (flush).
 
 **Q: What's the bug if you forget `flush()`?**
 
-The process exits — or `pool.end()` runs — while inserts are still in flight,
-so you lose trajectory rows. The answer prints fine, which is what makes it
-sneaky: it's a floating-promise race, and the explicit join is the fix.
+The next turn proceeds — or `pool.end()` runs on `/exit` — while inserts are
+still in flight, so you lose trajectory rows. The answer prints fine, which is
+what makes it sneaky: it's a floating-promise race, and the explicit join is
+the fix.
 
 ```
-  no flush:  answer printed ──► pool.end() ──X──► inserts dropped
-  flush:     answer printed ──► await pending ──► pool.end() (safe)
+  no flush:  answer printed ──► next turn / close() ──X──► inserts dropped
+  flush:     answer printed ──► await pending ──► safe to proceed
 ```
 
-Anchor: `src/cli/ask-cmd.ts:35`.
+Anchor: `src/session.ts:63`.
+
+**Q: All six events land rows now — what does persisting `event.timestamp`
+into `created_at` buy you?**
+
+Deterministic replay order. The writes fire concurrently and `Promise.all`
+resolves them in arbitrary order, so ordering by insert time could show a tool
+result before its call. Carrying the emit-time `timestamp` into `created_at`
+makes `order by created_at` reproduce the actual trajectory.
+
+```
+  emit order:  call → result → usage
+  insert race: result, usage, call   (Promise.all arbitrary)
+  created_at = event.timestamp ──► order by created_at = call → result → usage ✓
+```
+
+Anchor: `src/supabase-trace-sink.ts:55, 26-30`.
 
 ## Validate
 
 1. **Reconstruct.** From memory, write the three-line kernel: the queue, the
    sync push, the async join.
 2. **Explain.** Why can't `emit()` simply `await` the insert?
-   (`supabase-trace-sink.ts:27`, aptkit's `emit(event): void` signature.)
+   (`supabase-trace-sink.ts:53`, aptkit's `emit(event): void` signature.)
 3. **Apply.** A conversation's assistant turns are missing but the answer was
-   correct. Which line would you check first? (`ask-cmd.ts:35` — was `flush`
+   correct. Which line would you check first? (`session.ts:63` — was `flush`
    called and awaited.)
-4. **Defend.** Argue why writing the `user` turn from the CLI
-   (`ask-cmd.ts:30`) but the `assistant`/`tool` turns from the sink
-   (`supabase-trace-sink.ts:30-33`) is a reasonable split.
+4. **Defend.** Argue why writing the `user` turn from the session
+   (`session.ts:61`) but every other turn from the sink
+   (`supabase-trace-sink.ts:53-85`) is a reasonable split.
 
 ## See also
 
-- `02-retrieval-pipeline.md` — the tool whose `tool_call_end` events get
-  captured.
+- `02-retrieval-pipeline.md` — the tool whose `tool_call_start`/`tool_call_end`
+  events get captured.
 - `06-profile-injection-as-context.md` — the other thing injected into the
   agent.
 - `07-deferred-body.md` — why trajectories are written before there's a
   consumer.
 - `study-runtime-systems` — the floating-promise / queue-and-join mechanics.
 - `study-agent-architecture` — the agent loop that emits these events.
+
+---
+
+Updated: 2026-06-24 — full-signal capture: sink now persists all six
+`CapabilityEvent` variants (was step + tool_call_end), with `event.timestamp`
+carried into `created_at` for deterministic replay order; re-anchored the
+wiring/flush from `ask-cmd.ts` to the long-lived `session.ts` (one conversation
+across turns, flush each turn).

@@ -176,7 +176,8 @@ change, because the contracts were chosen to absorb it.
   │ app_id = trusted filter   │   →    │ app_id = RLS from JWT claim   │
   │ read-your-writes (trivial)│        │ caches + convergence + staleness│
   │ no conflict policy needed │        │ concurrent-write conflict policy│
-  │ ordering bug is mild      │        │ ordering bug now cross-device  │
+  │ order = 1 client's clock  │        │ 2 clocks skew → order breaks   │
+  │ (fixed: event.timestamp)  │        │ (need logical clock / LWW)     │
   └──────────────────────────┘        └──────────────────────────────┘
   what DOESN'T change: the VectorStore contract. PgVectorStore swaps its
   transport (pg → HTTP) without the agent noticing. The schema's app_id /
@@ -333,8 +334,13 @@ client to pass its own tenant key — fine for one writer, a confused-deputy hol
 the instant a second untrusted client writes. The design names this as a hard
 prerequisite: RLS on every `agents.*` table with `app_id` always derived from
 the JWT claim, never the request body. The *second* thing is a same-row conflict
-policy and a real cross-device message ordering — which is when the mild
-ordering bug from file 02 stops being mild.
+policy and a real cross-device message ordering. File 02's single-device ordering
+*is* fixed — `created_at` comes from the client's `event.timestamp` — but that
+fix is exactly what stops holding here: with two devices there are two wall
+clocks, and clock skew means one brain's "later" timestamp can be an earlier
+real-world event. The single-client timestamp that solved ordering on the laptop
+becomes the *cause* of cross-device disorder, which is when you need a logical
+clock (or last-writer-wins on a trusted server clock) instead.
 
 *Anchor: `pg-vector-store.ts:74` (the convention-only filter) and the graduation spec's open question on RLS.*
 
@@ -349,8 +355,9 @@ ordering bug from file 02 stops being mild.
    multi-writer problem? What single assumption breaks that (offline writes)?
 3. **Apply.** A phone is about to ship. Sequence the changes: (a) RLS +
    token-derived `app_id` at `pg-vector-store.ts:74`, (b) a same-row conflict
-   policy, (c) the `seq`-column ordering fix from file 02 — and say why that
-   order.
+   policy, (c) a cross-device ordering scheme that survives clock skew (logical
+   clock or LWW on a server clock — the single-client `event.timestamp` from file
+   02 no longer suffices) — and say why that order.
 4. **Defend.** Argue that deferring all of this was the right call for a
    single-device portfolio project, citing the design spec's "Out of scope"
    list and the forward-compat columns that make the deferral reversible.
@@ -363,9 +370,19 @@ ordering bug from file 02 stops being mild.
   all point here as the phase that would activate them.
 - `01-app-to-postgres-boundary.md` — Move 2.5 shows the direct-pg → HTTP-gateway
   transition from the boundary's side.
-- `02-trace-sink-write-buffering.md` — the ordering bug that becomes critical
-  once two devices write `agents.messages`.
+- `02-trace-sink-write-buffering.md` — the single-device ordering fix
+  (client `event.timestamp` → `created_at`) that stops being sufficient once two
+  devices with two clocks write `agents.messages`.
 - `.aipe/study-system-design/` — the local-first / cloud-mirror architecture and
   scale tradeoffs in depth.
 - `agent-layer-plan.md` and `docs/superpowers/specs/2026-06-19-laptop-supabase-graduation-design.md`
   — the source design docs for everything in this file.
+
+---
+
+Updated: 2026-06-24 — reframed the ordering cross-link: file 02's single-device
+ordering bug is now FIXED (client `event.timestamp` → `created_at`), but that fix
+is precisely what breaks across two devices (two wall clocks, skew), so the
+cross-device ordering work becomes "replace the single-client timestamp with a
+logical clock / server-clock LWW." Comparison diagram, conflict-policy prose,
+Validate step 3, and See-also updated. Design remains design-only / NOT BUILT.

@@ -134,7 +134,7 @@ copying the `[coffee.md]` tag into its answer, not inventing a citation
 format. The snippet cap at 160 chars (`:57`) keeps each citation small
 enough that top-k of them fits the budget.
 
-**The minTopK floor.** `ask-cmd.ts:23` creates the tool with
+**The minTopK floor.** `session.ts:43` creates the tool with
 `{ minTopK: 4 }`, and the tool clamps up
 (`search-knowledge-base-tool.js:32`, `Math.max(requestedTopK, minTopK)`).
 Even if the weak model asks for `top_k: 1`, it gets at least 4 chunks.
@@ -163,7 +163,7 @@ the rule; the payload makes the rule cheap to follow.
   └───────────────────────────┬──────────────────────────────────┘
                               │ turn 1 → tool call
   ┌─ search_knowledge_base (tool) ───────────────────────────────┐
-  │  pgvector top-k (≥ minTopK 4, ask-cmd.ts:23)                 │
+  │  pgvector top-k (≥ minTopK 4, session.ts:43)                 │
   │  toResult: citation = `[${docId}] ${snippet}`  (:54-63)      │
   └───────────────────────────┬──────────────────────────────────┘
                               │ tool result: ranked [docId] citations
@@ -194,7 +194,7 @@ coffee from Gemma's pre-training.
   `If the knowledge base does not contain the answer, say so plainly      ← abstention
    rather than guessing.`
        │
-       └─ buffr passes NO custom prompt (ask-cmd.ts:33), so this default
+       └─ buffr passes NO custom prompt (session.ts:57), so this default
           ships verbatim — it IS buffr's grounding contract
 ```
 
@@ -202,9 +202,21 @@ coffee from Gemma's pre-training.
 builds `` citation: `[${docId}] ${snippet}` `` for every hit — the
 citable shape the instruction's "cite their sources" depends on.
 
-**The floor — `ask-cmd.ts:23`:**
+**The floor — `session.ts:43`:**
 `createSearchKnowledgeBaseTool(pipeline, { minTopK: 4 })` — guarantees
 at least 4 chunks reach the model so grounding has material to stand on.
+
+**What the tool retrieves now includes memory.** Since `session.ts:53`
+builds a conversation memory over the *same* PgVectorStore and
+`session.ts:66` writes each exchange back tagged `kind=memory`, the
+`search_knowledge_base` tool's top-k can surface a **recalled past
+exchange** sitting right next to document chunks. It enters the prompt
+through this exact grounding path — as a tool result the model is told to
+ground in and cite. Worth naming because it shifts what "retrieved
+context" means here: not just indexed documents, but the conversation's
+own history, recalled by relevance. The citation shape is whatever
+`toResult` (`search-knowledge-base-tool.js:54-63`) emits for a memory
+chunk's `docId`.
 
 **The honest gap.** Nothing checks the answer *contains* a citation.
 `run-agent-loop.js:54-56` takes the model's final text as-is. The
@@ -295,3 +307,10 @@ pre-training and grounding silently fails.
   — the final turn where the model answers and cites
 - [`study-security/03-indirect-prompt-injection-surface.md`](../study-security/03-indirect-prompt-injection-surface.md)
   — why ungrounded chunk text is a trust boundary
+
+---
+
+Updated: 2026-06-24 — Re-pointed tool/agent wiring from the deleted
+`ask-cmd.ts` to `session.ts` (`minTopK` tool at :43, no-custom-prompt at
+:57); added that recalled conversation memory now enters the prompt
+through this same retrieval/grounding path as a tool result.

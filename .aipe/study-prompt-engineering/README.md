@@ -56,7 +56,7 @@ pattern buffr actually runs. Read after the audit.
 
 | File | Pattern | Anchor |
 |------|---------|--------|
-| `00-overview.md` | The full assembled prompt | `rag-query-agent.js`, `ask-cmd.ts` |
+| `00-overview.md` | The full assembled prompt | `rag-query-agent.js`, `session.ts` |
 | `01-profile-injection-as-personalization.md` | Profile prepended to system prompt | `profile-injector.js:15`, `profile.ts:4` |
 | `02-grounding-and-citation-instruction.md` | BASE_SYSTEM grounding contract | `rag-query-agent.js:12` |
 | `03-tool-call-emulation-prompt.md` | Tools rendered as text + JSON demand | `gemma-provider.js:82` |
@@ -83,3 +83,9 @@ Follow them when the boundary is the interesting part.
 - **`study-ai-engineering/`** (sibling generator) — the production-serving
   and eval discipline that wraps these prompts. When present, cross-link
   its grounding/eval sections; this guide stays on *prompt text*.
+
+---
+
+Updated: 2026-06-24 — Re-pointed `00-overview.md`'s anchor from the
+deleted `ask-cmd.ts` to `session.ts` (the agent is now assembled in
+`createChatSession`, driven by `chat.tsx`).

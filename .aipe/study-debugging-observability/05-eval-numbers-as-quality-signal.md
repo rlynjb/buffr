@@ -3,6 +3,10 @@
 **Industry names:** retrieval eval / precision@k / recall@k / the offline eval
 harness. **Type:** Industry standard (offline IR metrics), applied to one repo.
 
+> Updated: 2026-06-24 — eval (`eval-cmd.ts`, `npm run eval`) is unchanged; only the
+> cross-links to `02` were corrected (the latency/cost signal it points at is now
+> *captured*, not dropped). The retrieval-vs-answer seam this file teaches is intact.
+
 ## Zoom out, then zoom in
 
 You know how a test suite gives you a green/red signal that the code does what you
@@ -234,7 +238,7 @@ generated answer — which aptkit ships (`scoreRubric`/judge utilities exist in 
 package), and which buffr hasn't wired up. That extension is owned by `../study-testing/`
 as the AI-eval seam; here it's named as the gap above the retrieval eval. What to read
 next: `../study-testing/` (the eval-as-correctness-harness view) and `02` (the *other*
-signal — `model_usage`/latency — that exists but isn't captured).
+signal — `model_usage`/latency — now captured per turn, though not yet metric-shaped).
 
 ## Interview defense
 
@@ -275,7 +279,7 @@ Reading the two metrics together is what localizes the fix.
 
 ## See also
 
-- `02-discarded-trace-signal.md` — the latency/cost signal that exists but isn't kept.
+- `02-discarded-trace-signal.md` — the latency/cost signal, now captured per turn.
 - `04-stdout-as-only-log.md` — the eval scores are stdout-only, never persisted.
 - `01-trajectory-capture-as-observability.md` — the answer the eval doesn't score is
   the one persisted as an assistant row.

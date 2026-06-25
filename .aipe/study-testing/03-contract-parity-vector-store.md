@@ -210,10 +210,12 @@ interchangeable.
 
 ## Implementation in codebase
 
-**Use cases.** `PgVectorStore` is the production store in every CLI
-(`ask-cmd.ts:21`, `index-cmd.ts:19`, `eval-cmd.ts:15`). The contract test exists
-to prove that swapping it in for aptkit's in-memory store changes nothing the
-pipeline can observe.
+**Use cases.** `PgVectorStore` is the production store everywhere a pipeline is
+built — `session.ts:41`, `index-cmd.ts:19`, `eval-cmd.ts:15`. The contract test
+exists to prove that swapping it in for aptkit's in-memory store changes nothing
+the pipeline can observe. (It also backs aptkit's episodic memory in
+`session.ts:53` — the memory engine writes chunks to this same store, which is
+only legal because of the dropped FK below.)
 
 The plant-and-rank test, annotated:
 
@@ -351,3 +353,10 @@ just type parity."
   test depends on.
 - `.aipe/study-software-design/` — the parity-over-integrity tradeoff as a
   design decision; data-modeling consequences of the soft link.
+
+---
+
+Updated: 2026-06-24 — production-store use-case refs moved off the deleted
+`ask-cmd.ts` to `session.ts:41` / `index-cmd.ts:19` / `eval-cmd.ts:15`; noted
+the dropped FK now also legalizes aptkit episodic-memory chunks written to this
+store via `session.ts:53` (memory chunks have no documents row).

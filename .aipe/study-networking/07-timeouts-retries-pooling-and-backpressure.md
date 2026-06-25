@@ -29,9 +29,13 @@ doesn't matter.
 ```
 
 Zoom in: this layer answers "*what happens when the network is slow, flaky, or
-overloaded?*" buffr's answer today is "it blocks, and if it errors it crashes."
-For a human running `npm run ask` and watching the terminal, that's livable. For
-anything unattended, it's the first thing you'd add.
+overloaded?*" buffr's answer today is "it blocks, and if it errors the turn shows
+the error." For a human running `npm run chat` and watching the terminal, that's
+livable — and `chat` softens it slightly: a thrown turn is caught by the Ink
+handler and rendered as `error: ...` instead of killing the process
+(`src/cli/chat.tsx:30-34`), so the session survives a bad turn. But a *hang* (no
+throw) still freezes the whole session, because there's still no timeout. For
+anything unattended, a timeout is the first thing you'd add.
 
 ## Structure pass
 
@@ -45,9 +49,9 @@ where does a slow/failed call get contained — down.
 
   "where is a hang or failure contained?"
 
-  ┌─ call-site (ask-cmd.ts) ────────────┐  → NOWHERE. no try/timeout around
-  │  await agent.answer(question)        │     the call; a hang blocks forever
-  └──────────────────────────────────────┘
+  ┌─ call-site (session.ask) ───────────┐  → no TIMEOUT. a try/catch exists
+  │  await agent.answer(question)        │     (Ink renders the throw) but a
+  └──────────────────────────────────────┘     hang has no throw → blocks forever
       ┌─ provider / pool ───────────────┐  → providers ACCEPT a signal but
       │  GemmaProvider / pg.Pool         │     buffr passes none; pool has no
       └──────────────────────────────────┘     connectionTimeout
@@ -97,28 +101,34 @@ wrapper.
 `AbortController` after N ms so a hung call returns control. aptkit's transports
 accept a `signal`; buffr never creates one. Concretely: if Ollama hangs loading
 a 9B model, the `fetch` in `/api/chat` waits on the OS's default socket timeout
-(minutes), and `npm run ask` sits frozen. The fix is one `AbortSignal.timeout(ms)`
-passed through — the seam is ready; the call isn't using it.
+(minutes), and the whole `chat` session sits frozen — the Ink input never comes
+back because `session.ask()` never resolves, so you can't even type `/exit`. The
+fix is one `AbortSignal.timeout(ms)` passed through `agent.answer()` — the seam
+is ready; the call isn't using it.
 
 ```
   Timeout — the guard buffr doesn't set
 
-  ┌─ buffr ─┐  await answer()  ┌─ Ollama (hung) ─┐
-  │ blocks  │ ───────────────► │ model loading...│
-  │ forever │  (no signal)     │ ...still...     │
-  └─────────┘                  └─────────────────┘
+  ┌─ session ─┐ await answer()  ┌─ Ollama (hung) ─┐
+  │ turn never│ ───────────────► │ model loading...│
+  │ resolves  │  (no signal)     │ ...still...     │
+  └─────────┘                    └─────────────────┘
        ▲
-       └─ with AbortSignal.timeout(30_000) this would throw after 30s.
-          without it, the OS socket timeout (minutes) is the only backstop.
+       └─ with AbortSignal.timeout(30_000) this would throw after 30s (and Ink
+          would render it as an error turn). without it, the OS socket timeout
+          (minutes) is the only backstop and the whole session is frozen.
 ```
 
 **Retry — try again on transient failure. Status: absent (don't confuse with
 Gemma's nudge).** There's a thing in aptkit's Gemma provider called a "retry" —
 but it re-prompts the model when it returns *malformed JSON for a tool call*. It
 is **not** a network retry; a dropped connection or a 503 is not retried, it
-throws. buffr adds no retry of its own. For a single human-driven invocation,
-re-running the command *is* the retry — acceptable, but worth naming as a
-deliberate non-choice.
+throws. buffr adds no retry of its own. In `chat`, a thrown turn surfaces as an
+`error:` line and the human just re-asks on the next turn — *that* is the retry.
+The one try/catch buffr does add is around the *memory* write (`src/session.ts:65-69`):
+it's failure *isolation*, not retry — a memory-embed failure is swallowed so the
+turn still returns the answer the user already has. Worth naming both as
+deliberate non-choices.
 
 ```
   Two things called "retry" — only one exists, and it's not network
@@ -223,19 +233,24 @@ awaits in a timeout, retry, or try/catch. The pool is built bare in `src/db.ts`.
                           this is the whole resilience config: empty.
 ```
 
-The unguarded call-site:
+The unguarded call-site — now a per-turn `ask()`:
 
 ```
-  src/cli/ask-cmd.ts  (lines 34–38)
+  src/session.ts  (lines 60–70, the ask() turn)
 
-  const answer = await agent.answer(question);   ← no timeout, no try/catch
-  await trace.flush();                            ← if this throws, uncaught
-  process.stdout.write(`\n${answer}\n`);
-  await pool.end();                               ← never reached if above throws
+  await persistMessage(pool, conversationId, 'user', question);
+  const answer = await agent.answer(question);   ← no timeout, no AbortSignal
+  await trace.flush();                            ← no timeout either
+  try { await memory.remember(...); }             ← the ONE guard: best-effort
+  catch { /* swallow */ }                          ← memory failure ≠ lost answer
+  return answer;
           │
-          └─ no AbortSignal anywhere in this chain. aptkit's providers would
-             honor one (their transports take `signal`) — buffr just never
-             makes a controller to pass. the seam is open; nothing's plugged in.
+          └─ no AbortSignal anywhere on agent.answer / flush. aptkit's providers
+             would honor one (their transports take `signal`) — buffr just never
+             makes a controller to pass. the only try/catch isolates the memory
+             write, NOT the network calls. the timeout seam is open; nothing's
+             plugged in. (a thrown turn is caught one layer up, in chat.tsx:30-34,
+             and rendered as an error line — but a hang never throws.)
 ```
 
 The one *real* "retry" — and why it's not a network retry:
@@ -273,16 +288,18 @@ Answer — honest: "It hangs. There's no `AbortSignal` on the call, so the `fetc
 waits on the OS socket timeout — minutes. For an interactive CLI the human
 Ctrl-Cs; for anything unattended it's a real gap. The fix is one
 `AbortSignal.timeout()` passed through — aptkit's transport already accepts a
-signal, buffr just never makes one." Anchor: `src/cli/ask-cmd.ts:34`, `src/db.ts:5`.
+signal, buffr just never makes one. And because `chat` is long-lived, that hang
+freezes the whole session, not just one command." Anchor: `src/session.ts:62`,
+`src/db.ts:5`.
 
 **Q: Do you retry failed network calls?**
 
 Answer: "No network retries. There's a thing in the Gemma provider called retry,
 but it re-prompts on malformed tool-call JSON — application correctness, not
 transport. A dropped connection or a 503 throws and exits. Re-running the command
-is the retry. If this went unattended, network retry-with-backoff is the second
-thing I'd add, after timeouts." Anchor: aptkit Gemma provider behind
-`src/cli/ask-cmd.ts:26`.
+is the retry — in `chat`, just re-asking on the next turn. If this went
+unattended, network retry-with-backoff is the second thing I'd add, after
+timeouts." Anchor: aptkit Gemma provider behind `src/session.ts:46`.
 
 **Q: Why no backpressure?**
 
@@ -301,7 +318,8 @@ overflow. The loop is the flow control." Anchor: `src/cli/index-cmd.ts:22-26`.
    fail fast — `src/db.ts:5`.)
 4. **Defend:** is "no resilience guards" the right call today, and what's the
    first one you'd add? (right for human-supervised CLI; add `AbortSignal`
-   timeout first — `src/cli/ask-cmd.ts:34`.)
+   timeout first — `src/session.ts:62`. A hang now freezes the long-lived
+   session, not just one command.)
 
 ## See also
 
@@ -310,3 +328,5 @@ overflow. The loop is the flow control." Anchor: `src/cli/index-cmd.ts:22-26`.
 - `06-websockets-sse-streaming-and-realtime.md` — the blocking await with no timeout.
 - `08-networking-red-flags-audit.md` — these absences ranked by consequence.
 - `study-distributed-systems` — resilience when the operator-as-backstop disappears.
+
+Updated: 2026-06-24 — Repointed the unguarded call-site off the deleted `ask-cmd.ts` onto the per-turn `src/session.ts` `ask()` (lines 60-70, 62), re-verified the still-true no-timeout/no-retry/no-AbortSignal verdict against current `src/`, and sharpened the failure mode for the long-lived session (a hang now freezes the whole `chat` session, not one command). Noted the two guards that DO exist and aren't network resilience: the Ink-level try/catch that renders a thrown turn as an error line (`src/cli/chat.tsx:30-34`), and the best-effort memory-write try/catch (`src/session.ts:65-69`).

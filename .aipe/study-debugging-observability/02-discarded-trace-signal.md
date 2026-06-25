@@ -1,45 +1,52 @@
-# Discarded trace signal
+# Full-signal trajectory capture
 
-**Industry names:** dropped telemetry / lossy instrumentation / the observability
-leak. **Type:** Project-specific (the rich-source / lossy-sink shape).
+**Industry names:** complete telemetry / lossless instrumentation / capturing the
+whole event stream. **Type:** Project-specific (the rich-source / faithful-sink shape).
+
+> Updated: 2026-06-24 — reframed from a bug ("the sink drops durationMs / tokens /
+> warning / error") to the fix. The sink was rewritten on 2026-06-24 to persist all
+> six `CapabilityEvent` types; the signal that used to vanish is now in the database.
+> History of the original gap is kept below so the lesson survives.
 
 ## Zoom out, then zoom in
 
 You know how a `fetch()` response has a body *and* headers — and if your code only
-reads `res.json()` and never looks at `res.status` or timing, you've thrown away
-half the evidence the response handed you? That's what buffr's sink does. The agent
-loop hands it six event types carrying latency, token cost, warnings, and errors.
-The sink reads two fields off two of them and drops the rest on the floor.
+reads `res.json()` and never looks at `res.status` or timing, you've thrown away half
+the evidence the response handed you? buffr's sink used to do exactly that. The agent
+loop hands it six event types carrying latency, token cost, warnings, and errors, and
+the old sink read two fields off two of them and dropped the rest on the floor. The
+current sink reads all six. This file walks what good looks like when the source is
+rich and the sink keeps faith with it — and notes the one real gap this used to be.
 
 ```
-  Zoom out — where the signal is lost
+  Zoom out — where the signal is preserved
 
   ┌─ Agent loop (aptkit-core) ───────────────────────────────────┐
   │  emits 6 event types, each rich:                             │
-  │    tool_call_end { durationMs, timestamp }                   │
-  │    model_usage   { inputTokens, outputTokens }               │
-  │    warning / error { message }                               │
+  │    step / tool_call_start{args} / tool_call_end{durationMs}  │
+  │    model_usage{inputTokens,outputTokens} / warning / error   │
   └───────────────────────────┬──────────────────────────────────┘
-                              │ emit()
+                              │ emit()  (sync)
   ┌─ SupabaseTraceSink ───────▼──────────────────────────────────┐
-  │  ★ THE LEAK ★  keeps step.content + tool_end.{name,result}   │ ← we are here
-  │  drops durationMs · timestamp · tokens · warning · error     │
+  │  ★ THE FAITHFUL HOP ★  switch over event.type, one row each  │ ← we are here
+  │  keeps args · durationMs · error · tokens · warning · error  │
   └───────────────────────────┬──────────────────────────────────┘
-                              │ insert (timing/cost columns left null)
+                              │ insert (tool_calls, tool_results, tokens_used set)
   ┌─ agents.messages ─────────▼──────────────────────────────────┐
-  │  tokens_used column exists, always null                      │
+  │  tokens_used column now filled by model_usage rows           │
   └──────────────────────────────────────────────────────────────┘
 ```
 
-Zoom in: the pattern is **lossy instrumentation** — the evidence exists upstream and
-is destroyed at the recording boundary, not at the source. This matters because the
-fix is cheap (the data already arrives) and the diagnosis is invisible (nothing
-errors when you drop an event; the row just isn't there).
+Zoom in: the pattern is **lossless instrumentation** — every property the source
+emits survives the recording boundary into a queryable row. This matters because the
+diagnosis the data enables is only as complete as the recording, and dropping a field
+is invisible (nothing errors when you drop an event; the row just isn't there). The
+sink's discipline is to default to recording everything and let the *reader* narrow.
 
 ## Structure pass
 
-**Layers.** Source (the loop, emits everything) → sink (selects) → store (holds what
-survived). Same three layers as `01`, viewed through a different axis.
+**Layers.** Source (the loop, emits everything) → sink (records faithfully) → store
+(holds what was recorded). Same three layers as `01`, viewed through a different axis.
 
 **Axis — trace `is the evidence available here?` down the layers.**
 
@@ -50,273 +57,315 @@ survived). Same three layers as `01`, viewed through a different axis.
   │ loop: emits tool_call_end.durationMs│   → AVAILABLE (typed, populated)
   └──────────────────┬──────────────────┘
         ┌─────────────────────────────────┐
-        │ sink: reads .toolName, .result  │   → DISCARDED (no branch reads it)
+        │ sink: writes it into tool_results│   → RECORDED (tool_call_end branch)
         └─────────────┬───────────────────┘
               ┌──────────────────────────┐
-              │ store: no durationMs col  │   → GONE (unrecoverable)
+              │ store: tool_results jsonb │   → DURABLE (queryable later)
         └──────────────────────────┘
 
-  available → discarded → gone.  the loss is total and it's at the sink.
+  available → recorded → durable.  the chain holds at every hop now.
 ```
 
 **Seam.** Same seam as `01` (loop → sink), read for a different property. In `01` the
 seam decides *which events* become rows. Here it decides *which fields* of those
-events survive — and for `tool_call_end`, the answer is "name and result, nothing
-else." The `durationMs` on that very event is right there in the same object and
-never read.
+events survive — and the answer is now "all of them." The axis no longer flips at the
+sink: completeness is guaranteed upstream *and* preserved downstream. The whole point
+of this file is that the seam is no longer the leak.
 
 ## How it works
 
 ### Move 1 — the mental model
 
-The shape is a **field-narrowing projection at a recording boundary** — a `SELECT`
-that picks two columns from a six-column feed and silently discards the other four.
+The shape is a **type-dispatched faithful projection at a recording boundary** — a
+`switch` on `event.type` that builds one row per event, carrying that event's payload
+into the columns that fit it.
 
 ```
-  the projection — wide event in, narrow row out
+  the dispatch — wide event in, full row out
 
   tool_call_end {
-    toolName,        ──┐
-    result,          ──┤──► row { content: toolName, tool_results: result }
-    durationMs,      ──┐
-    timestamp,       ──┤──► (dropped)
-    error,           ──┤
-    capabilityId,    ──┘
+    toolName,        ──► content
+    result,          ──┐
+    error,           ──┤──► tool_results jsonb { result, error, durationMs }
+    durationMs,      ──┘
+    timestamp,       ──► created_at
   }
 ```
 
-The kernel: for each event the sink *does* handle, it reads a fixed subset of fields.
-What breaks if the subset is too narrow: every property you didn't read becomes a
-question you can't answer later, with no error to warn you it happened.
+The kernel: for each event the sink builds a row whose columns carry that event's
+distinguishing payload, then stamps `created_at` from the event's own `timestamp`.
+What breaks if a branch is too narrow: every property you didn't read becomes a
+question you can't answer later, with no error to warn you it happened. The old sink
+*was* that narrow; the rewrite is what removed the gap.
 
 ### Move 2 — the walkthrough
 
-**`durationMs` — the latency you can't recover.** The aptkit `tool_call_end` event is
-typed with `durationMs: number` (non-optional). The loop populates it from the actual
-tool execution (`tools.callTool` returns `{ result, durationMs }`) and emits it. The
-sink's `tool_call_end` branch reads `event.toolName` and `event.result` and stops.
+**`durationMs` — the latency you can now recover.** The aptkit `tool_call_end` event
+is typed with `durationMs: number` (non-optional). The loop populates it from the
+actual tool execution and emits it. The sink's `tool_call_end` branch now writes it
+into the `tool_results` jsonb alongside `result` and `error`.
 
 ```
-  durationMs path — full life and death
+  durationMs path — full life, now preserved
 
   callTool() ──► { result, durationMs: 312 }
                     │
   loop emits ──► tool_call_end { toolName, result, durationMs: 312, timestamp }
                     │
-  sink reads ──► persistMessage(..., 'tool', toolName, { toolResults: result })
-                    │                                    └─ 312 not passed
-  store ──────► messages row with no timing field
+  sink reads ──► persistMessage(..., 'tool', toolName,
+                   { toolResults: { result, error, durationMs: 312 } })
+                    │
+  store ──────► messages row, tool_results.durationMs = 312
 ```
 
-Boundary condition: there's nowhere for it to *go* even if the sink read it.
-`messages` has no `duration_ms` column. So recovering latency is a two-part fix —
-read the field *and* add the column. → cross-link `../study-performance-engineering/`
-for what you'd do with the histogram once you had it.
+Boundary condition: it lands in the `tool_results` jsonb, not a dedicated
+`duration_ms` column — so you query it as `tool_results->>'durationMs'`, and you can't
+build a SQL histogram off an indexed numeric column without promoting it. That's the
+residual shape: the evidence is *captured* but not yet *first-class*. → cross-link
+`../study-performance-engineering/` for what you'd do with the histogram once you
+promoted it.
 
-**`model_usage` — the cost you never count.** Every model call emits a `model_usage`
-event with `inputTokens` / `outputTokens`. The sink has *no branch* for
-`model_usage` at all — it falls through both `if`s and returns. Meanwhile the schema
-*has* a `tokens_used int` column sitting empty on every row. The schema designer
-anticipated cost tracking; the sink never wired it up.
+**`model_usage` — the cost you now count.** Every model call emits a `model_usage`
+event with `inputTokens` / `outputTokens`. The sink now has a branch for it: it writes
+a `model_usage`-role row, fills `model` with `provider/model`, and sets `tokens_used`
+to the summed input+output. The previously-orphaned `tokens_used int` column is now
+written on every run.
 
 ```
-  the orphaned column
+  the column, now connected
 
   schema:   messages.tokens_used int      ← built for this
   event:    model_usage { inputTokens, outputTokens }  ← carries this
-  sink:     (no branch)                    ← never connects the two
-  result:   tokens_used is null forever
+  sink:     case 'model_usage': tokensUsed = in + out  ← connects the two
+  result:   tokens_used is populated, one row per model call
 ```
 
-**`warning` / `error` — the failures that leave no trace.** This is the highest-stakes
-drop. The loop emits a `warning` event (e.g. when a turn budget is hit) and can emit
-`error`. The sink handles neither. So a tool that throws, a model that refuses, a
-recovery turn that fires — all produce events that vanish. The `messages` table, your
-only durable record, shows a clean run.
+**`warning` / `error` — the failures that now leave a trace.** This was the
+highest-stakes drop. The loop emits a `warning` event (e.g. when a turn budget is hit)
+and can emit `error`. The sink now handles both: each writes a row whose `role` is the
+event type and whose `content` is the event message. So a tool that throws, a model
+that warns, a recovery turn — all produce a durable row. The `messages` table no
+longer shows a clean run when one wasn't.
 
 ```
-  the silent failure
+  the failure that now records
 
-  tool throws ──► loop catches, emits error{message}   ← signal exists
+  tool throws ──► loop emits error{message}            ← signal exists
                     │
-  sink ──────────► (no branch for 'error')             ← signal dropped
+  sink ──────────► case 'error': row{role:'error', content:message}  ← signal kept
                     │
-  store ─────────► no error row;  run looks successful in the trace
+  store ─────────► an 'error' row;  the run looks failed in the trace, correctly
 ```
 
-Boundary condition that makes this worse than "no logging": the run *looks fine* in
-the store. Absence of an error row is indistinguishable from a clean run. That's a
-false-negative observability state — the most dangerous kind.
+Boundary condition that used to make this worse than "no logging": the run *looked
+fine* in the store because absence of an error row was indistinguishable from a clean
+run — a false-negative observability state, the most dangerous kind. That false
+negative is now closed: a failed run has an `error` row.
+
+**`tool_call_start` — the cause, now captured.** The old sink had no branch for
+`tool_call_start`, so the *search query* sent to the tool was never stored — you saw
+the effect (the tool result) but never the cause (the args). The new branch writes a
+`tool_call`-role row with `tool_calls = { toolName, args }`. The query that drove the
+retrieval is now in the trace. → `01` walks why the cause matters for replay.
 
 ### Move 2.5 — current state vs future state
 
-This is built-but-incomplete, so the comparison is the lesson: the gap is small
-because the source is already rich.
+This is now shipped, so the comparison is history-vs-now plus the small residual.
 
 ```
-  Phase A (now)                    Phase B (the cheap fix)
-  ─────────────                    ──────────────────────
-  sink: 2 branches, 2 fields       sink: 6 branches, read durationMs +
-  drops 4 event types                    tokens + error message
-  messages: timing/cost null       messages: + duration_ms, tokens_used set,
-  errors invisible                          + an 'error' role row
+  Phase A (before 2026-06-24)        Phase B (now)
+  ─────────────────────────────      ─────────────
+  sink: 2 branches, 2 fields         sink: switch, all 6 event types
+  drops 4 event types                records args, durationMs, error,
+  messages: timing/cost null               tokens, warning, error
+  errors invisible (false negative)  messages: tokens_used set; error row on failure
 
-  what does NOT change: the loop, the event contract, the CLI.
-  the source already emits everything. only the sink's emit() and a
-  migration change. that's the whole migration cost.
+  what did NOT change: the loop, the event contract, the CLI surface.
+  the source always emitted everything. only the sink's emit() and the
+  messages schema (tool_calls + tokens_used columns) changed.
+
+  residual: durationMs/tokens live in jsonb, not first-class numeric columns,
+  so there's no indexed histogram yet — captured, not yet metric-shaped.
 ```
 
 ### Move 3 — the principle
 
-Instrumentation loss at the recording boundary is invisible by construction —
-nothing throws when you drop an event, so the gap only shows up the day you go
-looking for evidence that was never written. The principle: *the cost of lossy
-instrumentation is paid in the future, by whoever's debugging, and it's unbudgeted.*
-When the source is already rich (as aptkit's event stream is), the discipline is to
-default to recording everything and narrow later — because narrowing first means the
-evidence is gone before you knew you'd want it.
+Instrumentation loss at the recording boundary is invisible by construction — nothing
+throws when you drop an event, so the gap only shows up the day you go looking for
+evidence that was never written. buffr learned this the expensive way: the original
+sink discarded latency, cost, and failures, and the cost was paid in the future by
+whoever debugged. The principle the fix encodes: *when the source is already rich (as
+aptkit's event stream is), default to recording everything and narrow at read time —
+because narrowing at write time means the evidence is gone before you knew you'd want
+it.* The cheap part is that the data already arrives; the discipline is keeping it.
 
 ## Primary diagram
 
-Every dropped signal in one frame.
+Every event type and what it now writes, in one frame.
 
 ```
-  the discarded-signal map — 6 event types, what survives
+  the full-signal map — 6 event types, all recorded
 
   ┌─ Agent loop emits ───────────────────────────────────────────────┐
-  │  step{role,content}     ──► assistant row   (content only)    ✓   │
-  │  tool_call_start{args}  ──► (dropped)        ✗  ← lose the query  │
+  │  step{role,content}     ──► <role> row  (content)            ✓    │
+  │  tool_call_start{args}  ──► tool_call row (tool_calls=args)  ✓    │
   │  tool_call_end{                                                   │
-  │     toolName, result    ──► tool row         ✓                    │
-  │     durationMs          ──► (dropped)        ✗  ← lose latency    │
-  │     timestamp           ──► (dropped)        ✗  ← lose event time │
+  │     toolName, result    ──► tool row     (tool_results)      ✓    │
+  │     error, durationMs   ──► (in tool_results jsonb)          ✓    │
+  │     timestamp           ──► created_at                      ✓    │
   │  }                                                                │
-  │  model_usage{tokens}    ──► (dropped)        ✗  ← lose cost       │
-  │  warning{message}       ──► (dropped)        ✗  ← lose warnings   │
-  │  error{message}         ──► (dropped)        ✗  ← lose failures   │
+  │  model_usage{tokens}    ──► model_usage row (tokens_used)    ✓    │
+  │  warning{message}       ──► warning row  (content)          ✓    │
+  │  error{message}         ──► error row    (content)          ✓    │
   └───────────────────────────┬──────────────────────────────────────┘
                               ▼
   ┌─ agents.messages ─────────────────────────────────────────────────┐
-  │  role · content · tool_results · model · [tokens_used: null]      │
+  │  role · content · tool_calls · tool_results · model · tokens_used │
   └───────────────────────────────────────────────────────────────────┘
 ```
 
 ## Implementation in codebase
 
-**Use cases.** Reached for (or rather, *not* reached for) on every `ask` run — the
-drops happen every time the sink processes the event stream. The cost surfaces when
-you try to answer "why slow / how much / what failed" from stored evidence and find
-the columns empty.
+**Use cases.** Reached on every `chat` turn — the sink processes the whole event
+stream and writes one row per event into the held conversation (`src/session.ts:63`
+flushes after each `ask`). The payoff surfaces when you `psql` into `messages` to
+answer "why slow / how much / what failed" and the columns are populated.
 
-**The two-branch sink — `src/supabase-trace-sink.ts:27-35`.**
+**The six-branch switch — `src/supabase-trace-sink.ts:53-85`.**
 
 ```
-  src/supabase-trace-sink.ts  (lines 27–35)
+  src/supabase-trace-sink.ts  (lines 55–84)
 
-  if (event.type === 'step' && event.role === 'assistant' && event.content) {
-      this.pending.push(persistMessage(pool, conversationId, 'assistant', event.content));
-  } else if (event.type === 'tool_call_end') {
-      this.pending.push(
-        persistMessage(pool, conversationId, 'tool', event.toolName,
-          { toolResults: event.result }));   ← event.durationMs in scope, never read
+  const at = event.timestamp;
+  switch (event.type) {
+    case 'step':                                         ← role from the event,
+      if (event.content) persist(event.role, event.content, {createdAt: at});  not hardcoded
+    case 'tool_call_start':
+      persist('tool_call', toolName,
+        { toolCalls: { toolName, args: event.args }, createdAt: at });  ← the CAUSE
+    case 'tool_call_end':
+      persist('tool', toolName,
+        { toolResults: { result, error, durationMs }, ... });  ← latency + error kept
+    case 'model_usage':
+      persist('model_usage', '',
+        { model: `${provider}/${model}`, tokensUsed: in + out, ... });  ← fills column
+    case 'warning': case 'error':
+      persist(event.type, event.message, { createdAt: at });  ← failures recorded
   }
-  // no else: model_usage, warning, error, tool_call_start all fall through
        │
-       └─ the durationMs is one property access away (event.durationMs) and the
-          branch reads everything around it except that. the leak is right here.
+       └─ every variant of the union has a branch. nothing falls through to a
+          silent drop. this switch is the whole fix.
+```
+
+**The row writer that carries the new fields — `src/supabase-trace-sink.ts:19-37`.**
+
+```
+  src/supabase-trace-sink.ts  (lines 27–36)
+
+  insert into agents.messages
+    (conversation_id, role, content, tool_calls, tool_results, model,
+     tokens_used, created_at)
+    values ($1,$2,$3,$4,$5,$6,$7, coalesce($8::timestamptz, now()))
+       │
+       └─ tool_calls + tokens_used are in the column list now (they weren't before).
+          created_at takes $8 = event.timestamp, falling back to now() only when the
+          event timestamp is empty — that fallback is the residual ordering risk, see 03.
 ```
 
 **The event contract that proves the data exists —
-`@aptkit/runtime/dist/src/events.d.ts`.**
+`@aptkit/runtime/dist/src/events.d.ts:1-40`.**
 
 ```
   node_modules/.../@aptkit/runtime/dist/src/events.d.ts
 
   | { type: 'tool_call_end'; toolName; result?; error?;
-      durationMs: number;       ← non-optional. always populated.
-      timestamp: string; }      ← ISO event time. also dropped.
-  | { type: 'model_usage'; inputTokens?; outputTokens?; ... }   ← never handled
+      durationMs: number;       ← non-optional. always populated. now recorded.
+      timestamp: string; }      ← ISO event time → created_at now.
+  | { type: 'model_usage'; inputTokens?; outputTokens?; provider; model; ... }  ← now handled
        │
-       └─ this is the receipt: the evidence is typed, required, and arriving.
-          the sink is the only reason it isn't in the database.
+       └─ the receipt: the evidence is typed, required, arriving — and now the sink
+          keeps it. the loop was always honest; the sink finally matches it.
 ```
 
-**The orphaned column — `sql/001_agents_schema.sql`.**
+**The schema that now has somewhere for it to go — `sql/001_agents_schema.sql:40-50`.**
 
 ```
   sql/001_agents_schema.sql  (agents.messages)
 
-  model         text,
-  tokens_used   int,        ← built for model_usage; nothing ever writes it
+  tool_calls    jsonb,      ← added: holds tool_call_start args
+  tool_results  jsonb,      ← holds result + error + durationMs
+  tokens_used   int,        ← model_usage now writes it (was always null before)
        │
-       └─ the schema author saw cost tracking coming. the sink never met it
-          halfway. an empty column is a documented intention, unfulfilled.
+       └─ durationMs and tokens live inside jsonb / a generic int — captured, but
+          not promoted to indexed numeric columns. that's the next rung, not a gap.
 ```
 
-**The test that quietly confirms the drop — `test/supabase-trace-sink.test.ts:27`.**
-The test *passes* `durationMs: 5` into the sink, then asserts only that an `assistant`
-and a `tool` role exist — never that the duration was stored, because it can't be.
-The test encodes the gap: it feeds the field and verifies its absence is acceptable.
+**The test that proves the capture — `test/supabase-trace-sink.test.ts:37-67`.** The
+second test (`captures the full event signal`) emits one of every event type, then
+asserts the args are in `tool_calls`, `durationMs` (42) and `error` ('boom') survive in
+`tool_results`, `tokens_used` is the summed 123, `warning`/`error` content is stored,
+*and* the replay order matches emit order via event-timestamp ordering. The test that
+once encoded the gap now encodes the contract.
 
 ## Elaborate
 
-This is the classic gap between "instrumented" and "observable." aptkit instrumented
-the loop properly — it emits a complete, typed event stream with timing and cost.
-buffr is observable only to the degree its sink chose to record, and that choice was
-made for memory, not diagnostics (see `01`). The fix is the smallest kind of change:
-add branches, add columns. The reason it's worth a whole file is that lossy
-instrumentation is the single most common observability failure in real systems —
-the telemetry exists, someone just never wired the last hop. What to read next:
-`../study-performance-engineering/` (the latency histogram `durationMs` would feed),
-and `03` (even the timestamps that *are* dropped here would have fixed the ordering
-bug there).
+This is the classic gap between "instrumented" and "observable," and buffr now sits on
+the right side of it. aptkit instrumented the loop properly — a complete, typed event
+stream with timing and cost. For a while buffr was observable only to the degree its
+sink chose to record, and that choice was made for memory, not diagnostics (see `01`).
+The rewrite made the sink faithful: it records everything the loop emits. The residual
+honesty: `durationMs` and `tokens_used` are captured but not metric-shaped (no
+histogram, no Prometheus, no OTel — `not yet exercised`, see `00-overview.md`). What to
+read next: `../study-performance-engineering/` (the latency histogram `durationMs`
+would feed once promoted), `03` (the event timestamps this sink now persists are what
+fixed the ordering gap), and `01` (the captured `tool_call_start` args complete the
+replayable trajectory).
 
 ## Interview defense
 
-**Q: Your traces have no latency data. Where exactly is it lost — the agent, the
-sink, or the schema?**
-All the way at the sink, and that's the good news — it means the fix is cheap.
-aptkit's `tool_call_end` event carries a non-optional `durationMs`, populated from
-the real tool execution. My sink's `tool_call_end` branch reads `toolName` and
-`result` and never touches `durationMs`, which is sitting in the same event object.
-The schema also lacks the column, so it's a two-line fix: read the field, add the
-column. The data was never the problem; the recording was.
+**Q: Your traces had no latency data. Where was it lost, and how did you fix it?**
+At the sink — and that was the good news, because the fix was cheap. aptkit's
+`tool_call_end` event carries a non-optional `durationMs`, populated from the real tool
+execution. The old sink's branch read `toolName` and `result` and never touched
+`durationMs`, which was sitting in the same event object. I rewrote `emit` as a switch
+over all six event types and now write `durationMs`, `error`, and `result` together
+into the `tool_results` jsonb. The data was never the problem; the recording was, and
+that's now fixed.
 
 ```
-  available ──► discarded ──► gone
+  available ──► recorded ──► durable
    (loop)        (sink)       (store)
                    ▲
-            the fix lives here, one property access
+            the fix lived here — one branch per event type
 ```
 
-**Q: What's the most dangerous thing your sink drops, and why is it worse than no
-logging at all?**
-The `error` and `warning` events. A failed tool call emits an `error` event that my
-sink has no branch for, so the run that hit an error looks *identical in the store* to
-a clean run — there's no error row, and absence of a row is indistinguishable from
-success. That's a false negative, which is worse than no logging: no logging tells you
-"I don't know"; this tells you "everything's fine" when it wasn't.
+**Q: What was the most dangerous thing your sink used to drop, and is it fixed?**
+The `error` and `warning` events. A failed tool call emits an `error` event the old
+sink had no branch for, so a run that hit an error looked *identical in the store* to a
+clean run — a false negative, worse than no logging, because it told you "everything's
+fine" when it wasn't. The new sink writes an `error`-role row with the message, so a
+failed run now has a record. The false-negative state is closed.
 
 ## Validate
 
-1. **Reconstruct.** List the six `CapabilityEvent` types and mark which the sink
-   records. (`events.d.ts`; sink at `src/supabase-trace-sink.ts:27-35` records `step`
-   + `tool_call_end`.)
-2. **Explain.** The `messages.tokens_used` column is always null. Trace why, naming
-   the event that would fill it and the missing branch. (`model_usage`; no sink
-   branch.)
-3. **Apply.** An `ask` run is slow. Name every place latency evidence exists in the
-   pipeline and the exact line where it's destroyed.
-   (`tool_call_end.durationMs`; destroyed at `src/supabase-trace-sink.ts:31-33` by
-   omission.)
-4. **Defend.** Argue whether the fix belongs in the sink, the schema, or both — and
-   what you'd record *first* if you could only add one branch. (Both; record `error`
-   first — false-negative failures are the highest-consequence drop, see `audit.md` R1.)
+1. **Reconstruct.** List the six `CapabilityEvent` types and the row each one now
+   writes. (`events.d.ts:1-40`; sink switch at `src/supabase-trace-sink.ts:56-84`.)
+2. **Explain.** The `messages.tokens_used` column used to be always null. What fills it
+   now, and where? (`model_usage` event → `case 'model_usage'`,
+   `src/supabase-trace-sink.ts:73-78`, summing input+output tokens.)
+3. **Apply.** A `chat` turn is slow. Name every place latency evidence now lives and the
+   exact line that records it. (`tool_call_end.durationMs` → `tool_results.durationMs`,
+   written at `src/supabase-trace-sink.ts:68-71`; queryable as `tool_results->>'durationMs'`.)
+4. **Defend.** The data is captured but `durationMs`/`tokens_used` live in jsonb / a
+   generic int. Argue whether to promote them to first-class numeric columns now or
+   wait. (Wait until you need an indexed histogram / SLO; capture-first, promote-on-need
+   — see `audit.md` R3 and `../study-performance-engineering/`.)
 
 ## See also
 
-- `01-trajectory-capture-as-observability.md` — the two event types that *do* survive.
-- `03-created-at-replay-ordering-gap.md` — the dropped `timestamp` would have fixed it.
+- `01-trajectory-capture-as-observability.md` — the full set of rows the sink now writes.
+- `03-created-at-replay-ordering-gap.md` — the event timestamps this sink persists are
+  what fixed the ordering gap (and the residual same-ms tie).
 - `05-eval-numbers-as-quality-signal.md` — the other signal that exists but is shallow.
-- `../study-performance-engineering/` — the latency budget `durationMs` would serve.
-- `../study-testing/` — the test that feeds `durationMs` and verifies its absence.
+- `../study-performance-engineering/` — the latency budget `durationMs` would serve once promoted.
+- `../study-testing/` — the test that emits all six events and asserts each survives.

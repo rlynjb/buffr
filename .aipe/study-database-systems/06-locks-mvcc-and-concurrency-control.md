@@ -91,7 +91,7 @@ MVCC's kernel is the visibility check, and it rides the tuple header from `02`:
 
 **Dead versions accumulate — VACUUM reclaims them.** Every UPDATE/DELETE leaves a dead version. `autovacuum` (a background Postgres process, on by default) eventually removes versions no snapshot can see. buffr never configures it; on a write-light laptop DB, autovacuum keeps up silently. This is the optional-hardening layer: tuning vacuum matters only under heavy churn, which buffr doesn't have.
 
-**Where a real lock appears — ON CONFLICT.** The one place buffr could take a row lock is `upsert`'s `INSERT … ON CONFLICT (id) DO UPDATE`. If two transactions tried to upsert the *same* `id` concurrently, the second would block on a row lock until the first commits, then proceed with the update. Bridge: it's an atomic compare-and-set on the row. But buffr is single-writer — the CLI runs one `index`/`ask` at a time — so this lock is *available* and essentially *never taken*.
+**Where a real lock appears — ON CONFLICT.** The one place buffr could take a row lock is `upsert`'s `INSERT … ON CONFLICT (id) DO UPDATE`. If two transactions tried to upsert the *same* `id` concurrently, the second would block on a row lock until the first commits, then proceed with the update. Bridge: it's an atomic compare-and-set on the row. But buffr is single-writer — the CLI runs one `index`/`chat` turn at a time — so this lock is *available* and essentially *never taken*.
 
 ```
   ON CONFLICT under concurrency (the lock buffr almost never hits)
@@ -174,18 +174,23 @@ The full concurrency picture — versions, snapshots, the one lock site.
 ```
 
 ```
-  src/supabase-trace-sink.ts  (lines 27–39)  — concurrent INSERTs, no conflict
+  src/supabase-trace-sink.ts  (lines 53–93)  — concurrent INSERTs, no conflict
 
   emit(event) {                              ← sync; queues a write promise
-    this.pending.push(persistMessage(pool, conversationId, …));
-  }
+    switch (event.type) { case 'step': … case 'model_usage': … }
+    this.push(persistMessage(pool, conversationId, …, { createdAt: at }));
+  }                                          ← at = event.timestamp (line 55)
   async flush() { await Promise.all(this.pending); }
        │
-       └─ flush() fires multiple persistMessage INSERTs concurrently on the
-          pool. They DON'T conflict: each is a fresh row (gen_random_uuid PK),
-          so no two writers race for the same id → MVCC handles it lock-free.
-          This is the closest buffr gets to concurrent writes, and it's
-          conflict-free by construction.
+       └─ all six CapabilityEvent types now queue a row (step, tool_call_start,
+          tool_call_end, model_usage, warning, error), so flush() fires MORE
+          concurrent persistMessage INSERTs than before. They still DON'T
+          conflict: each is a fresh row (gen_random_uuid PK), so no two writers
+          race for the same id → MVCC handles it lock-free. Ordering doesn't
+          ride the insert race either: created_at is set from event.timestamp
+          (the emit moment), not server now(), so replay order = emit order
+          even though the inserts land out of order. Conflict-free by
+          construction; order-stable by client clock.
 ```
 
 There is no `SELECT … FOR UPDATE`, no `pg_advisory_lock`, no `set transaction isolation level`, and no version column anywhere in `src/`. Concurrency control is entirely the Postgres default.
@@ -196,7 +201,7 @@ There is no `SELECT … FOR UPDATE`, no `pg_advisory_lock`, no `set transaction 
 
 MVCC is why Postgres reads scale without read locks — the design choice (vs. lock-based concurrency like older SQL Server) trades storage and a vacuum process for the property that analytics-style reads never block transactional writes. The cost surfaces only under heavy update churn (bloat from dead tuples), which is a tuning problem buffr doesn't have.
 
-The interesting concurrency question for buffr is forward-looking: the trace sink (`flush()`) already fires concurrent INSERTs, and they're safe *only because* each message gets a fresh UUID PK — no two writers contend for a row. If buffr ever added a counter row ("messages so far") that multiple writers incremented, that's a lost-update setup, and the fix is `UPDATE … SET n = n + 1` (atomic at the row) or a version column with retry. Recognizing which writes are conflict-free by construction (fresh-PK inserts) vs. which would race (shared-row updates) is the whole skill. Cross-link `study-runtime-systems` for the event-loop side of those concurrent `flush()` promises; cross-link `05` for the isolation level that governs what each snapshot sees.
+The interesting concurrency question for buffr is forward-looking: the trace sink (`flush()`) already fires concurrent INSERTs — now one per *every* CapabilityEvent (all six types, `src/supabase-trace-sink.ts:56-84`), so more of them than before — and they're safe *only because* each message gets a fresh UUID PK, so no two writers contend for a row. The concurrent inserts land in nondeterministic order, but trajectory order is *not* read from insert order: `created_at` is written from `event.timestamp` (the emit moment), not from server `now()` (`src/supabase-trace-sink.ts:55`, `persistMessage` coalesces to `now()` only when absent, `:26,30`). That decouples replay ordering from the flush race. If buffr ever added a counter row ("messages so far") that multiple writers incremented, *that's* a lost-update setup, and the fix is `UPDATE … SET n = n + 1` (atomic at the row) or a version column with retry. Recognizing which writes are conflict-free by construction (fresh-PK inserts) vs. which would race (shared-row updates) is the whole skill. Cross-link `study-runtime-systems` for the event-loop side of those concurrent `flush()` promises; cross-link `05` for the isolation level that governs what each snapshot sees.
 
 ---
 
@@ -236,3 +241,7 @@ Anchor: *"Fresh-PK inserts never conflict; shared-row updates would — buffr on
 - `02-records-pages-and-storage-layout.md` — the xmin/xmax tuple header MVCC rides on
 - `07-wal-durability-and-recovery.md` — how committed versions become durable
 - `study-runtime-systems` — the event loop behind concurrent flush() promises
+
+---
+
+Updated: 2026-06-24 — trace sink now queues one INSERT per all six CapabilityEvent types (was assistant/tool only), so more concurrent fresh-PK inserts; added that `created_at` is client-supplied from `event.timestamp` (not server `now()`), decoupling replay order from the flush race; `index`/`ask` → `index`/`chat turn`.

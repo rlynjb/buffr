@@ -12,7 +12,7 @@ be a product.
   Zoom out — where the vector column lives
 
   ┌─ CLI layer ─────────────────────────────────────────┐
-  │  npm run ask -- "..."   →   RagQueryAgent            │
+  │  npm run chat   →   ChatSession.ask()  →  RagQueryAgent│
   └───────────────────────────┬──────────────────────────┘
                               │  tool call: search_knowledge_base
   ┌─ Pipeline layer (aptkit) ─▼──────────────────────────┐
@@ -119,11 +119,11 @@ which is exactly how you'd validate that HNSW isn't dropping real neighbors.
 The full path, one frame, every layer labeled.
 
 ```
-  ask → embed → ANN search → cited answer
+  chat → embed → ANN search → cited answer
 
   ┌─ CLI ────────┐  question text
-  │ ask-cmd.ts   │ ─────────────────────────┐
-  └──────────────┘                          ▼
+  │ chat.tsx /   │ ─────────────────────────┐
+  │ session.ts   │                          ▼
   ┌─ aptkit pipeline ───────────────────────────────────┐
   │ OllamaEmbeddingProvider  →  number[768]              │
   │ PgVectorStore.search(vector, k)                      │
@@ -144,7 +144,9 @@ The full path, one frame, every layer labeled.
 
 ## Implementation in codebase
 
-**Use case.** Every `npm run ask` and every `eval-cmd` query hits this. The
+**Use case.** Every `npm run chat` turn and every `eval-cmd` query hits this.
+The memory-recall path (`@aptkit/memory`) also runs `store.search` over the
+same index, so episodic recall and corpus retrieval share one HNSW graph. The
 agent calls `search_knowledge_base`, aptkit embeds the query to 768 floats,
 and `PgVectorStore.search` runs the ANN query. The HNSW index is the
 difference between sub-second retrieval and scanning the entire `chunks`
@@ -236,3 +238,7 @@ load-bearing pairing is "index op-class == query operator." **Anchor:**
 - `05-app-id-tenant-column.md` — the `where app_id` filter HNSW can't use.
 - `audit.md` §3 — indexing-vs-query, the post-filter gap.
 - `study-database-systems` — HNSW on-disk layout and traversal mechanics.
+
+---
+Updated: 2026-06-24 — `ask`/`ask-cmd.ts` refs → `chat`/`session.ts`; noted the
+`@aptkit/memory` recall path also searches this same HNSW index.

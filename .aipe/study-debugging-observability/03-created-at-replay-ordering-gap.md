@@ -1,295 +1,335 @@
-# created_at replay ordering gap
+# Client-timestamp replay ordering
 
-**Industry names:** clock-ordered events / server-timestamp ordering / the
-wall-clock replay bug. **Type:** Project-specific instance of a general
-distributed-systems hazard.
+**Industry names:** event-time ordering / client-timestamped events / ordering by
+emit time, not insert time. **Type:** Project-specific instance of a general
+distributed-systems pattern.
+
+> Updated: 2026-06-24 — reframed from a bug ("replay-by-`created_at` scrambles turn
+> order under concurrent flush") to the fix. On 2026-06-24 the sink began persisting
+> `event.timestamp` into `created_at`, so replay now sorts by *emit* time, not server
+> insert time. The original gap and the one residual ambiguity (a same-millisecond tie)
+> are both kept below.
 
 ## Zoom out, then zoom in
 
-You know how if you sort a list of rows by a timestamp column and two rows have the
-*same* timestamp, their order is undefined — the database can return them either way?
-buffr's trace replay does exactly that, and the timestamps aren't even event time;
-they're the moment the row happened to get inserted, by a server clock, after a
-concurrent flush. The order you read a conversation back in is not guaranteed to be
-the order it happened.
+You know how if you sort rows by a timestamp column and two rows share the *same*
+timestamp, their order is undefined — the database can return them either way? buffr's
+trace replay used to be worse than that: the timestamps weren't event time at all, they
+were the moment each row happened to get inserted by a server clock, after a concurrent
+flush. The fix was to stamp each row with the *event's own* ISO timestamp, so replay
+order reflects when things happened, not when they landed. This file walks that
+client-timestamp ordering — and the one residual case it doesn't fully resolve.
 
 ```
-  Zoom out — where the ordering is decided
+  Zoom out — where the ordering is now decided
 
-  ┌─ SupabaseTraceSink ──────────────────────────────────────────┐
-  │  emit() pushes writes onto pending[]  (in event order)       │
-  │  flush() → Promise.all(pending)       (fires CONCURRENTLY)   │ ← we are here
+  ┌─ Agent loop (aptkit-core) ───────────────────────────────────┐
+  │  every event carries timestamp: string  (ISO emit time)      │ ← the source of order
   └───────────────────────────┬──────────────────────────────────┘
-                              │ N inserts race to the DB
+                              │ emit()
+  ┌─ SupabaseTraceSink ───────▼──────────────────────────────────┐
+  │  flush() → Promise.all(pending)  (still fires concurrently)   │ ← we are here
+  │  but each row carries created_at = event.timestamp           │
+  └───────────────────────────┬──────────────────────────────────┘
+                              │ N inserts race — but order key no longer depends on it
   ┌─ Storage (agents.messages) ▼─────────────────────────────────┐
-  │  created_at = now()  set per-insert by the SERVER            │
-  │  no explicit sequence column                                 │
+  │  created_at = coalesce(event.timestamp, now())               │
   └───────────────────────────┬──────────────────────────────────┘
                               │ read back
   ┌─ Replay (test + any future consumer) ▼───────────────────────┐
-  │  select ... order by created_at      ← undefined on ties     │
+  │  select ... order by created_at  ← now = emit order          │
   └──────────────────────────────────────────────────────────────┘
 ```
 
-Zoom in: the pattern is **wall-clock event ordering with no logical sequence** — the
-hazard where you reconstruct causal order from physical insert time, and physical
-time isn't a reliable proxy for logical order under concurrency. A scrambled trace is
-worse than a missing one: it reads as authoritative and it's wrong.
+Zoom in: the pattern is **client-timestamped event ordering** — the producer stamps
+each event with the time it happened, the recorder carries that stamp into the row, and
+replay sorts by it. The insert race that used to scramble order no longer decides the
+sort key, because the sort key is set upstream of the race. The residual: two events
+emitted within the same millisecond tie, and a tie is still undefined under `order by`.
 
 ## Structure pass
 
-**Layers.** Three: the *flush* (decides write concurrency), the *insert* (decides the
-timestamp), the *replay* (decides the read order). The bug is an interaction across
-all three — no single layer is wrong alone.
+**Layers.** Three: the *emit* (stamps event time), the *flush* (writes concurrently),
+the *replay* (reads by the stamped time). The fix moved the ordering authority from the
+insert layer up to the emit layer.
 
 **Axis — trace `what guarantees turn order?` down the layers.**
 
 ```
-  "what guarantees turn order?" — traced down
+  "what guarantees turn order?" — traced down, after the fix
 
   ┌──────────────────────────────────────┐
-  │ emit(): pushes in true event order   │   → ORDER KNOWN (the pending[] array)
+  │ emit(): event.timestamp = emit time  │   → ORDER STAMPED (on the event itself)
   └──────────────────┬──────────────────┘
         ┌─────────────────────────────────┐
-        │ flush(): Promise.all — parallel │   → ORDER LOST (concurrent, no sequencing)
+        │ flush(): Promise.all — parallel │   → ORDER CARRIED (created_at already set)
         └─────────────┬───────────────────┘
               ┌──────────────────────────┐
-              │ replay: order by created_at│ → ORDER GUESSED (ties undefined)
+              │ replay: order by created_at│ → ORDER REPLAYED (= emit order, modulo ties)
               └──────────────────────────┘
 
-  the true order is known in pending[] and thrown away at flush()
+  the true order is stamped at emit and survives the concurrent flush
 ```
 
-That's the whole bug in one diagram: the correct order *exists* — it's the index of
-each write in `pending[]` — and `Promise.all` discards it by firing everything at
-once. The seam that fails is `flush → insert`: the array index (logical order) does
-not propagate into any column, so the insert has nothing to carry it.
+That's the whole fix in one diagram: the correct order is no longer something
+`pending[]` knows and `Promise.all` throws away — it's stamped onto each row's
+`created_at` before the inserts race, so the race can't reorder it. The seam that used
+to fail is `flush → insert`; it no longer carries the ordering responsibility, because
+the order travels in the column value, not in arrival time.
 
 ## How it works
 
 ### Move 1 — the mental model
 
-The shape is a **lost-sequence race**: an ordered producer feeding a parallel writer
-into a store sorted by arrival time.
+The shape is **stamp-at-source ordering**: the producer attaches a monotonic-enough
+timestamp to each event, the recorder writes it verbatim, and the reader sorts by it —
+so concurrency in the write path can't perturb the read order.
 
 ```
-  the lost-sequence race
+  stamp-at-source ordering
 
-  pending[]:  [w0]  [w1]  [w2]  [w3]      ← index = true order
-                │     │     │     │
-  Promise.all fires all four at once
-                ▼     ▼     ▼     ▼
-  inserts land:  w0   w2   w1   w3        ← arrival ≠ index (race)
-  created_at:    t    t    t    t+ε       ← near-identical now()
-                └──────────────┬────────┘
-  order by created_at  ──►  w0, w2, w1, ... ← scrambled, and "valid" per SQL
+  events:   e0@T0   e1@T1   e2@T2          ← emit time stamped on each
+              │       │       │
+  flush fires all three concurrently (order of arrival irrelevant)
+              ▼       ▼       ▼
+  inserts land: e1   e0   e2               ← arrival scrambled by the race
+  created_at:   T1   T0   T2               ← but the stamp came WITH the event
+              └───────┬───────┘
+  order by created_at  ──►  e0, e1, e2      ← emit order, restored at read time
 ```
 
-The kernel that's missing: a monotonic per-conversation sequence number written into
-each row, so replay sorts by *intent order*, not *arrival time*. What breaks without
-it: replay order is undefined whenever two writes share a `created_at` — which, under
-`Promise.all`, is the common case, not the edge case.
+The kernel that's now present: each row carries the *event's* timestamp, so replay
+sorts by intent order, not arrival time. What still breaks: if two events carry the
+*same* `created_at` (same millisecond, or both empty → both `now()`), the tie is
+undefined — that's the residual, not the common case.
 
 ### Move 2 — the walkthrough
 
-**Why `Promise.all` loses the order.** The sink queues writes synchronously as events
-arrive, so `pending[]` is in true order. But `flush()` does `Promise.all(pending)` —
-which starts all the writes concurrently and waits for all to *finish*, with no
-ordering between them. The DB sees N inserts arrive interleaved on whatever
-connections the pool hands out.
+**Why `created_at = event.timestamp` survives the race.** The sink reads
+`event.timestamp` at the top of `emit` and threads it through `persistMessage` as the
+`createdAt` extra; the insert coalesces it into the `created_at` column. So the value
+written is fixed at emit time, before any insert fires. `Promise.all` can interleave the
+inserts however it likes — each row already carries its correct sort key.
 
 ```
-  Promise.all — concurrent, unordered
+  the timestamp travels with the event, not the insert
+
+  emit(event):
+    at = event.timestamp           ← captured at emit, before any write
+    persist(..., { createdAt: at }) ← row's created_at is now fixed
+       │
+       └─ Promise.all reorders the INSERTS, not the VALUES. created_at is
+          decided upstream of the race, so the race can't touch the sort key.
+```
+
+This is the move that closed the original bug: had the sink still left `created_at` to
+default `now()`, the inserts racing under `Promise.all` would land at near-identical
+server times and `order by created_at` would be undefined. Stamping emit time sidesteps
+the race entirely.
+
+**Why `Promise.all` is now safe to keep.** The concurrent flush is still there
+(`Promise.all(this.pending)`), chosen for throughput. It used to be the thing that
+opened the race; now it's harmless to ordering, because ordering no longer depends on
+insert arrival. The throughput win comes for free now — parallel writes, deterministic
+replay.
+
+```
+  Promise.all — still concurrent, no longer order-deciding
 
   flush():
-    await Promise.all([ insert(w0), insert(w1), insert(w2) ])
-                          │           │           │
-                          └─ these run in parallel; the DB decides arrival order,
-                             not the array order. nothing serializes them.
+    await Promise.all([ insert(e0@T0), insert(e1@T1), insert(e2@T2) ])
+                          │             │             │
+                          └─ arrival order varies; created_at values don't.
+                             replay sorts by the values, so order is stable.
 ```
 
-If this were a plain `for...of` with `await` inside — one insert at a time — arrival
-order would match `pending[]` order and the bug would mostly disappear (mostly:
-`now()` could still tie). The choice of `Promise.all` for throughput is what opens the
-race. That's the deliberate tradeoff: parallel writes are faster, and they cost you
-ordering.
-
-**Why `created_at = now()` can't save it.** The timestamp is set by the *server* at
-insert time, not by the *event* at emit time. Two things break it:
+**The residual: same-millisecond ties and the empty-timestamp fallback.** Two honest
+gaps remain. First, if two events share a `created_at` to the millisecond, `order by
+created_at` is undefined between them — SQL gives no tiebreaker. Second, the insert
+coalesces: `created_at = coalesce($8::timestamptz, now())`, so an event with an empty
+`timestamp` (the loop emits `''` in some paths, and the unit test passes `''`) falls
+back to server `now()` — reintroducing the old race for exactly those rows.
 
 ```
-  now() is the wrong clock
+  the residual tie
 
-  event emitted at:   T0, T1, T2     ← the order that matters (dropped, see 02)
-  row inserted at:    now(), now(), now()
-                       │      │      │
-                       └──────┴──────┴── all within microseconds under Promise.all
-                          → ties → order by created_at is undefined on ties
+  e3@T  e4@T                          ← same millisecond
+       │     │
+  created_at  T     T                 ← identical
+       └──────┬─────┘
+  order by created_at  ──►  e3,e4  OR  e4,e3   ← undefined on the tie
+
+  fix if it ever bites: add an integer seq column from the pending[] index
+  and sort (created_at, seq). free order already exists in pending[].
 ```
 
-The event's *own* `timestamp` field — the ISO time of when it actually happened — is
-dropped by the sink (that's `02-discarded-trace-signal.md`). Had the sink written
-`event.timestamp` into the row and replayed by *that*, this bug largely closes,
-because event time reflects emit order regardless of insert race. The two gaps are the
-same gap seen twice.
-
-**Why the test bakes it in.** The one trace test reads rows back with `order by
-created_at` (`test/supabase-trace-sink.test.ts:31`) and asserts only that an
-`assistant` role and a `tool` role *exist* — it never asserts they're in the right
-*order*. So the test passes regardless of scramble, and it teaches the wrong replay
-query to anyone who copies it. The flawed read path is now the documented one.
+The bulletproof version is still the explicit sequence column — `pending[]` knows the
+true order as its array index, and persisting that index as a `seq int` would break any
+tie. buffr hasn't needed it: on one device, one turn at a time, sub-millisecond ties are
+rare and the timestamp fix already orders the common case correctly.
 
 ### Move 2.5 — current state vs future state
 
 ```
-  Phase A (now)                       Phase B (the fix)
-  ─────────────                       ────────────────
-  flush: Promise.all (parallel)       option 1: serial for-await (cheap, slower)
-  order key: created_at = now()       option 2: + seq int column, set from
-  replay: order by created_at                   pending[] index, replay by seq
-  ties → undefined order              option 3: persist event.timestamp (free —
-                                                the field is already on the event,
-                                                just dropped today; see 02)
+  Phase A (before 2026-06-24)         Phase B (now)
+  ─────────────────────────────       ─────────────
+  created_at = server now()           created_at = event.timestamp (coalesce now())
+  ordering depends on insert race     ordering fixed at emit, survives the race
+  ties common under Promise.all       ties only on same-ms OR empty-timestamp rows
+  test replayed by fragile key        test asserts replay == emit order
 
-  what does NOT change: the event source, the CLI, conversation grouping.
-  on one device with one ask at a time, the race window is tiny — but the
-  test already replays by the wrong key, so the bug is latent, not theoretical.
+  what did NOT change: Promise.all flush, conversation grouping, the CLI.
+  residual: same-millisecond tie + the now() fallback for empty timestamps.
+            close it with a seq column (pending[] index) if it ever matters.
 ```
 
 ### Move 3 — the principle
 
-Physical time is not logical order. The moment you reconstruct "what happened in what
-sequence" from wall-clock insert timestamps, you've bet that physical time and causal
-order agree — and under any concurrency, they don't. The principle: *if order
-matters, carry an explicit logical sequence; never infer it from a clock.* The
-correct order existed for free (the `pending[]` index) and was thrown away for a
-throughput win that one device doesn't need.
+Physical insert time is not logical order, but a *client-stamped* event time is a good
+proxy for it — and stamping at the source, before any concurrent write, is what lets
+replay survive the race. The principle: *if order matters, carry the order in the data,
+decided as far upstream as you can — never infer it from when the write happened to
+land.* buffr first inferred order from server `now()` and got bitten; the fix stamps
+emit time onto every row. The last mile (a same-ms tiebreaker) is the sequence column,
+and the order for it already exists for free in `pending[]`.
 
 ## Primary diagram
 
-The full hazard, end to end.
+The full path, end to end, after the fix.
 
 ```
-  the ordering gap — full path
+  client-timestamp ordering — full path
 
   ┌─ Sink emit() ────────────────────────────────────────────────────┐
-  │  pending = [ w0(user-step), w1(tool), w2(assistant) ]  ← TRUE order│
+  │  at = event.timestamp   (e0@T0, e1@T1, e2@T2)  ← order stamped here│
+  │  pending.push(persist(..., { createdAt: at }))                    │
   └───────────────────────────┬──────────────────────────────────────┘
-                              │ flush(): Promise.all  ← order discarded
+                              │ flush(): Promise.all  ← reorders inserts only
   ┌─ Postgres (agents.messages) ▼────────────────────────────────────┐
-  │  inserts race; created_at = now() for each; no seq column        │
-  │  rows land:  w0@t  w2@t  w1@t   (arrival ≠ true order)            │
+  │  created_at = coalesce(event.timestamp, now())                   │
+  │  rows land in race order; created_at values are emit times       │
   └───────────────────────────┬──────────────────────────────────────┘
                               │ select ... order by created_at
   ┌─ Replay ──────────────────▼──────────────────────────────────────┐
-  │  returns w0, w2, w1  → assistant appears BEFORE its tool call     │
-  │  the trace now lies about causality                              │
+  │  returns e0, e1, e2  → tool call BEFORE its result, correctly     │
+  │  residual: ties on identical created_at remain undefined         │
   └───────────────────────────────────────────────────────────────────┘
 ```
 
 ## Implementation in codebase
 
-**Use cases.** Reached on every `ask` flush and every trace replay. The scramble
-window is widest when a run produces several messages close together (a tool turn
-plus an assistant turn) and the flush fires them in parallel. On one device with one
-query at a time the window is narrow — but the read path is already wrong, so it's a
-latent bug waiting for the first concurrent or higher-volume use.
+**Use cases.** Reached on every `chat` flush (`src/session.ts:63`) and every trace
+replay. The common case — a tool turn then an assistant turn emitted milliseconds apart
+— now replays in emit order regardless of how the concurrent inserts land. The residual
+window is a sub-millisecond tie, narrow on one device.
 
-**The concurrent flush — `src/supabase-trace-sink.ts:37-39`.**
+**The stamp capture — `src/supabase-trace-sink.ts:53-55`.**
 
 ```
-  src/supabase-trace-sink.ts  (lines 37–39)
+  src/supabase-trace-sink.ts  (lines 54–55)
+
+  emit(event: CapabilityEvent): void {
+    const at = event.timestamp;          ← captured once, before any write
+       │
+       └─ every branch below threads `at` through as createdAt. the sort key is
+          decided here, at emit, upstream of the Promise.all race.
+```
+
+**The coalescing insert — `src/supabase-trace-sink.ts:26-36`.**
+
+```
+  src/supabase-trace-sink.ts  (lines 26–30)
+
+  const createdAt = extra?.createdAt && extra.createdAt.length > 0 ? extra.createdAt : null;
+  ...
+    values (..., coalesce($8::timestamptz, now()))
+       │
+       └─ event.timestamp becomes created_at when present; when empty it falls
+          back to now() — the one path that reintroduces the old insert-race
+          dependency. that's the residual ordering ambiguity.
+```
+
+**The concurrent flush — `src/supabase-trace-sink.ts:91-93`.**
+
+```
+  src/supabase-trace-sink.ts  (lines 91–93)
 
   async flush(): Promise<void> {
-    await Promise.all(this.pending);   ← fires all queued inserts concurrently
+    await Promise.all(this.pending);   ← still concurrent, now safe for ordering
   }
        │
-       └─ pending[] holds the writes in true event order. Promise.all throws that
-          order away. swap for a serial for-await loop, or attach the index to
-          each row, to preserve it.
+       └─ Promise.all reorders the inserts, not the created_at values. ordering
+          survives because the sort key was stamped before flush ran.
 ```
 
-**The timestamp source — `sql/001_agents_schema.sql` (agents.messages).**
+**The schema — `sql/001_agents_schema.sql:49`.** `created_at timestamptz not null
+default now()` — the default is now the *fallback*, not the primary source. There's
+still no explicit `seq` column; a same-millisecond tie has no tiebreaker, which is the
+documented residual.
 
-```
-  sql/001_agents_schema.sql
-
-  created_at timestamptz not null default now()
-       │
-       └─ set by the SERVER at insert time, not by the event. there is no
-          sequence column and no event-time column. now() is the only sort key
-          available to replay, and it ties under concurrent insert.
-```
-
-**The replay query that cements it — `test/supabase-trace-sink.test.ts:30-34`.**
-
-```
-  test/supabase-trace-sink.test.ts  (lines 30–34)
-
-  select role from agents.messages where conversation_id = $1 order by created_at
-  ...
-  assert.ok(roles.includes('assistant'));   ← only checks PRESENCE
-  assert.ok(roles.includes('tool'));        ← never checks ORDER
-       │
-       └─ the test replays by the fragile key AND doesn't assert order, so it
-          passes under scramble. it documents the wrong query as the right one.
-```
-
-**The dropped fix — `events.d.ts`.** Every event carries `timestamp: string` (event
-time). The sink drops it (`02`). Persisting `event.timestamp` and replaying by it
-would order by *emit* time, which survives the insert race — the cheapest fix, and the
-data already arrives.
+**The test that proves emit-order replay — `test/supabase-trace-sink.test.ts:64-66`.**
+The second test emits five events with distinct ISO timestamps
+(`...00:00:01Z`…`...00:00:05Z`), replays with `order by created_at`, and asserts the
+roles come back in *exactly* emit order (`['tool_call','tool','model_usage','warning',
+'error']`). The test now pins the correct replay contract instead of baking in the old
+gap.
 
 ## Elaborate
 
 This is a small, local instance of one of the load-bearing lessons in distributed
-systems: clocks are not sequence numbers. The full version (Lamport clocks, vector
-clocks, the reasons `now()` across machines is hopeless) lives in
-`../study-distributed-systems/`; here it shows up in miniature on a single machine,
-because `Promise.all` plus server-`now()` recreates the same hazard without any
-network at all. The fix that real systems reach for is the same: an explicit logical
-sequence per stream. buffr already *has* the sequence (the `pending[]` index) and the
-event time (the dropped `timestamp`) — it just doesn't persist either. What to read
-next: `02` (the dropped timestamp is the free fix) and `../study-distributed-systems/`
-(the general principle).
+systems: clocks are not sequence numbers, but a client-stamped event time gets you most
+of the way there. The full version (Lamport clocks, vector clocks, why `now()` across
+machines is hopeless) lives in `../study-distributed-systems/`; here it showed up in
+miniature on a single machine, because `Promise.all` plus server-`now()` recreated the
+hazard without any network at all — and the fix is the same one real systems reach for
+first: stamp the order at the source. buffr already *had* the event time on every event;
+it just wasn't persisting it. Now it does. The last residual (same-ms ties) is exactly
+where you'd reach for the explicit sequence number, and the order for it already exists
+as the `pending[]` index. What to read next: `02` (the timestamp this file relies on is
+one of the signals that sink now keeps) and `../study-distributed-systems/`.
 
 ## Interview defense
 
-**Q: You replay traces ordered by `created_at`. What's wrong with that?**
-`created_at` is `now()` set by the server at insert time, and I flush with
-`Promise.all`, so my inserts race and land at near-identical timestamps. `order by
-created_at` is undefined on ties, so the replay can show an assistant turn before the
-tool call that produced it — the trace lies about causality. The real order existed
-in my `pending[]` array and `Promise.all` threw it away.
+**Q: You replay traces ordered by `created_at`. Server insert time scrambles under
+concurrent flush — how is that safe?**
+It would be, if `created_at` were server `now()` — and it used to be, which was a real
+bug. I fixed it by persisting `event.timestamp` (the loop stamps every event with its
+ISO emit time) into `created_at`. So the sort key is decided at emit, before the
+`Promise.all` flush races the inserts. The race reorders which insert lands first; it
+can't touch the `created_at` values, so `order by created_at` returns emit order.
 
 ```
-  pending[] index = truth ──Promise.all──► arrival order = guess
-                                            order by created_at = ties
+  event.timestamp stamped at emit ──Promise.all──► inserts race
+                                                    created_at values unchanged
+                                                    order by created_at = emit order
 ```
 
-**Q: Cheapest fix?**
-Persist the event's own `timestamp` — it's already on every event, I'm just dropping
-it today — and replay by that instead of `created_at`. Event time reflects emit order
-regardless of the insert race. If I want it bulletproof, add an integer sequence
-column set from the `pending[]` index and sort by that. The fix that costs nothing is
-the one where the data already arrives.
+**Q: What's the residual gap, and how would you close it?**
+Two events emitted in the same millisecond carry the same `created_at`, and a tie is
+undefined under `order by` — plus an empty event timestamp falls back to `now()`, which
+reintroduces the race for those rows. To close it I'd add an integer `seq` column set
+from the `pending[]` array index and sort by `(created_at, seq)`. The true order already
+exists as that index; I just don't persist it yet, because on one device a sub-ms tie is
+rare enough not to have earned the column.
 
 ## Validate
 
-1. **Reconstruct.** Draw why `Promise.all` over `pending[]` loses the order that
-   `pending[]` itself preserves. (`src/supabase-trace-sink.ts:38`.)
-2. **Explain.** Why doesn't `created_at = now()` rescue the order?
-   (`sql/001_agents_schema.sql` — server insert time, ties under concurrency.)
-3. **Apply.** Write the replay query you'd use *after* persisting `event.timestamp`,
-   and say why it survives the insert race. (`order by <event_time_col>`; event time
-   reflects emit order, not arrival.)
-4. **Defend.** Argue serial-flush vs sequence-column vs persist-timestamp. Which would
-   you ship first on a single-device tool, and why? (Persist-timestamp: zero schema
-   risk beyond one column, data already arrives, fixes the read path the test uses.)
+1. **Reconstruct.** Draw why stamping `event.timestamp` at emit survives the
+   `Promise.all` race that server `now()` did not. (`src/supabase-trace-sink.ts:54-55`.)
+2. **Explain.** What's the one path where ordering still falls back to insert time?
+   (Empty `event.timestamp` → `coalesce(..., now())`, `src/supabase-trace-sink.ts:26,30`.)
+3. **Apply.** Two events are emitted in the same millisecond. Write the replay query
+   that would order them deterministically and the schema change it needs.
+   (`order by created_at, seq`; add a `seq int` column from the `pending[]` index.)
+4. **Defend.** Argue whether to ship the `seq` column now or stay on event-timestamp
+   ordering. Which would you pick on a single-device tool, and why? (Stay: the timestamp
+   fix orders the common case; add `seq` at the first sub-ms tie or first multi-writer
+   path — see `audit.md` R2.)
 
 ## See also
 
-- `02-discarded-trace-signal.md` — the dropped `event.timestamp` is the free fix.
-- `01-trajectory-capture-as-observability.md` — the rows this bug reorders.
+- `02-discarded-trace-signal.md` — the `event.timestamp` this file relies on is one of
+  the signals the sink now persists.
+- `01-trajectory-capture-as-observability.md` — the rows this ordering replays.
 - `../study-distributed-systems/` — clocks-aren't-sequence-numbers, the full lesson.
-- `../study-testing/` — the test that replays by the fragile key without asserting order.
+- `../study-testing/` — the test that now asserts replay order matches emit order.

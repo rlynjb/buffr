@@ -6,15 +6,17 @@
 
 ## Zoom out, then zoom in
 
-Where does buffr's memory go, and what holds it? Three allocations dominate, and
-all three are short-lived because the process itself is short-lived: the
-**whole file read into a string** (`index-cmd.ts:23`), the **embedding arrays**
-(768 floats each, serialized to a text literal), and the **`pending[]` promise
-array** that grows for one agent run and is dropped at flush. There's no manual
-memory management — V8's garbage collector reclaims everything — but the
-*shapes* of these allocations are worth seeing, because two of them scale with
-input size and one of them holds references that prevent collection until a
-specific await.
+Where does buffr's memory go, and what holds it? In the **batch** CLIs three
+allocations dominate and all are short-lived because the process is: the **whole
+file read into a string** (`index-cmd.ts:23`), the **embedding arrays** (768
+floats each, serialized to a text literal), and the **`pending[]` promise array**
+that grows for one agent run and drops at flush. The **chat** process changes the
+calculus for one of them and adds a new one: `pending[]` resets per turn (flushed
+each `ask`), but the React **`turns[]` array** (`chat.tsx:11`) grows for the
+whole session and is never trimmed — in a long-lived process that's the
+allocation to watch. There's no manual memory management — V8's GC reclaims
+everything — but the *shapes* matter, because some scale with input and some
+(now) scale with session length.
 
 ```
   Zoom out — where memory lives
@@ -46,8 +48,9 @@ process exit is the ultimate "free," which changes how much the GC even matters.
   ────────────────  ───────────────────────────   ──────────────────────
   stack frame       loop vars, function args      automatic (frame pops)
   one I/O op        file string, embedding array  GC after last reference
-  one agent run     pending[], conversationId     GC after flush / exit
-  whole process     pg.Pool, config, module vars  process exit
+  one turn          pending[] (flushed each ask)  GC after flush
+  whole session     turns[] (chat), pg.Pool,      GC at /exit, or process exit
+  (chat) / process  agent, conversationId
 ```
 
 **Axis traced — "what keeps this alive?"**
@@ -64,16 +67,21 @@ process exit is the ultimate "free," which changes how much the GC even matters.
       │                gone once the row is written │  returns
       └──────────────────────────────────────────┘
           ┌──────────────────────────────────────┐
-          │ pending[]    → the array field on the │  ← held the WHOLE run;
-          │                sink holds every promise│     each promise keeps its
-          │                until flush             │     closure data alive too
+          │ pending[]    → sink array; held one    │  ← reset each turn
+          │                turn, dropped at flush   │     (flushed per ask)
           └──────────────────────────────────────┘
+              ┌──────────────────────────────────┐
+              │ turns[] (chat) → React state array │  ← held the WHOLE
+              │                  appended every turn│     SESSION, never trimmed
+              └──────────────────────────────────┘
 ```
 
-The answer that matters: `pending[]` is the longest-lived growing allocation in
-a run. Every pushed promise keeps alive whatever its closure captured (the
-event content string, the pool reference) until `flush()` resolves it and the
-array goes out of scope.
+The answer that matters has shifted with the chat process. `pending[]` is no
+longer the longest-lived growing allocation — it's flushed and dropped each
+turn. The longest-lived growing one is now `turns[]` (`chat.tsx:11,25,29`): every
+exchange appends a `{role, text}` object and nothing ever removes them, so it
+grows for the entire session. Each entry is small, but in a long-lived process
+"small and unbounded" is the classic slow leak shape — see Elaborate.
 
 **Seams:**
 
@@ -81,8 +89,9 @@ array goes out of scope.
   strings, arrays, and objects they point to live on the heap. The `for` loop
   variable `path` is on the stack; the file contents it reads are on the heap.
 - **alive ↔ collectable.** An object becomes collectable the instant its last
-  reference drops. For `pending[]` that's after `flush()` completes and the sink
-  is no longer reachable.
+  reference drops. For `pending[]` that's after `flush()` each turn; for
+  `turns[]` it's never until `/exit` — the React array holds every entry for the
+  session's life.
 
 ---
 
@@ -138,41 +147,50 @@ it into a `[0.1,0.2,...]` *string* for the SQL parameter. So momentarily you hol
 both the array *and* its string serialization. 768 doubles ≈ 6KB per array; the
 string is similar. Per chunk, freed after the insert. Bounded and small.
 
-**The heap, allocation #3 — the `pending[]` promise array.** During an agent
-run, `SupabaseTraceSink.pending` (`supabase-trace-sink.ts:24`) grows by one
-promise per emitted event. Each promise retains its closure: the `pool`, the
-`conversationId`, the event content string. The array — and everything it
-transitively holds — stays alive until `flush()` resolves them and the sink
-falls out of scope at process end. For a normal agent run that's a handful of
-promises; it only matters if an agent emitted thousands of events without an
-intermediate flush. The kernel:
+**The heap, allocation #3 — the `pending[]` promise array (per turn).** During a
+turn, `SupabaseTraceSink.pending` (`supabase-trace-sink.ts:50`) grows by one
+promise per emitted event — now potentially more, since all 6 event types persist
+(`03`). Each promise retains its closure: the `pool`, the `conversationId`, the
+event content. The array stays alive until `flush()` resolves it. Critically, in
+chat the sink is built once per session and `pending[]` is **not** reset between
+turns — it keeps accumulating settled promises across every `ask()` because
+nothing clears it after `flush()`. The promises are resolved (so their closures
+*can* be collected), but the array slots themselves grow unboundedly with turn
+count. Small, but it's a second session-scoped growth alongside `turns[]`.
 
 ```
-  pending[] lifetime — grows, then released as a unit
+  pending[] lifetime — accumulates across turns in a held session
 
-  emit ─► push p1 ─► push p2 ─► push p3 ─► ... ─► flush()
-            │         │         │                   │
-            └─ each holds its closure data alive ───┘
-                                                    │
-                          after flush resolves & sink unreachable → all GC'd
+  turn 1: push p1 p2 ─► flush ✓   turn 2: push p3 p4 ─► flush ✓   ...
+            │                                │
+            └─ array never cleared ──────────┘ → grows with #turns × #events
+               (resolved promises are light, but the slots persist)
 ```
 
-**The GC, and why it barely matters here.** V8 runs a generational
-mark-and-sweep collector: young objects (most of buffr's allocations) die fast
-in a cheap minor GC; survivors get promoted. buffr never tunes it — no
-`--max-old-space-size`, no manual `global.gc()`. And critically: **the process
-exits in seconds.** Whatever the GC doesn't reclaim, process exit hands back to
-the OS wholesale. A long-lived server must care about GC pauses and leaks; a
-fire-and-exit CLI mostly doesn't, because its memory ceiling is "one run's worth"
-and then it's gone.
+**The heap, allocation #4 — `turns[]`, the session-scoped React array.** This is
+the one the long-lived process introduces. `chat.tsx:11` holds
+`useState<Turn[]>`; every exchange appends two entries (`:25,29`) and none are
+removed. It grows for the entire session and is the closest thing buffr has to a
+real leak — bounded only by how long you chat and how long each answer is.
+
+**The GC, and why it matters *more* now.** V8 runs a generational mark-and-sweep
+collector: young objects die fast in a cheap minor GC; survivors get promoted.
+The batch CLIs barely stress it — **they exit in seconds**, so whatever the GC
+doesn't reclaim, process exit hands back to the OS wholesale. The chat process is
+the opposite: it doesn't exit until `/exit`, so `turns[]` and the `pending[]`
+slots are *promoted to old space* and stay there. A leak that's invisible in a
+fire-and-exit CLI becomes a real (if slow) one in a session you leave open for
+hours.
 
 ### Move 3 — the principle
 
-**In a short-lived process, lifetime is dominated by the process boundary, not
-the GC.** The allocations that matter are the *unbounded* ones — the whole-file
-read scales with input — because those set the peak heap. The GC handles the
-rest invisibly, and process exit is the final, total free. Watch for allocations
-that scale with input; ignore the ones that don't.
+**Whether an allocation matters depends on the process model around it.** In the
+batch CLIs, lifetime is dominated by the process boundary — the unbounded
+whole-file read sets the peak, exit is the final free, GC barely matters. In the
+long-lived chat process the rule flips: the allocations that matter are the
+*session-scoped* ones (`turns[]`, the uncleared `pending[]`), because there's no
+near-term exit to reclaim them. Watch input-scaling allocations in batch; watch
+session-scaling allocations in chat.
 
 ---
 
@@ -188,15 +206,19 @@ that scale with input; ignore the ones that don't.
   │   embedding number[768] + its [..] string literal ── ~12KB ea │
   │   SQL param objects ── tiny                                    │
   │                                                               │
-  │  PER-RUN (alive until flush / exit):                          │
+  │  PER-TURN (alive until flush):                                │
   │   pending[] promises ── grows per emitted event               │
-  │   pg.Pool + idle clients ── until pool.end()                  │
+  │                                                               │
+  │  PER-SESSION (chat — alive until /exit):                      │
+  │   turns[] React array ── grows every turn, never trimmed ◄── watch│
+  │   pending[] SLOTS ── never cleared after flush                │
+  │   pg.Pool + idle clients ── until session.close()             │
   │                                                               │
   └───────────────────────────────────────────────────────────────┘
-        │ GC sweeps the dead between ops
-        │ process exit reclaims EVERYTHING at the end
+        │ batch: GC sweeps between ops, exit reclaims EVERYTHING
+        │ chat:  no near-term exit → session-scoped arrays promoted to old space
         ▼
-   peak heap ≈ largest file + a run's worth of promises
+   batch peak ≈ largest file · chat growth ≈ turns × answer size
 ```
 
 ---
@@ -240,18 +262,36 @@ peak.
           this one never sets the heap peak.
 ```
 
-**The per-run array** (`src/supabase-trace-sink.ts`, lines 24, 38):
+**The per-turn array, never cleared** (`src/supabase-trace-sink.ts`, lines 50, 87–92):
 
 ```
-  src/supabase-trace-sink.ts  (lines 24, 38)
+  src/supabase-trace-sink.ts  (lines 50, 87–92)
 
-  private readonly pending: Promise<void>[] = [];   ← grows for the whole run
+  private readonly pending: Promise<void>[] = [];   ← built once per session (chat)
   ...
-  await Promise.all(this.pending);                   ← after this, array + closures
-       │                                                become collectable
-       └─ each promise retains its captured content string + pool ref until it
-          settles. Released as a unit once flush resolves and the sink is
-          unreachable. Matters only if an agent emits thousands of events.
+  private push(p) { this.pending.push(p); }          ← grows every turn
+  async flush() { await Promise.all(this.pending); } ← awaits but does NOT clear
+       │
+       └─ flush() resolves the promises but never empties the array. In a batch
+          run that's fine — exit frees it. In chat the same sink lives the whole
+          session, so the array's slots accumulate across turns (the resolved
+          promises are light, but the array itself only grows). A reset
+          (this.pending.length = 0) after flush would cap it. (see 03)
+```
+
+**The session-scoped React array** (`src/cli/chat.tsx`, lines 11, 25, 29):
+
+```
+  src/cli/chat.tsx  (lines 11, 25, 29)
+
+  const [turns, setTurns] = useState<Turn[]>([]);    ← session-lifetime state
+  ...
+  setTurns((t) => [...t, { role: 'you', text: q }]);     ← append, never remove
+  setTurns((t) => [...t, { role: 'buffr', text: answer }]); ← append, never remove
+       │
+       └─ grows for the entire session; nothing trims it. The closest thing buffr
+          has to a real leak — bounded only by chat length × answer size. Benign
+          for a short chat, a slow climb for a session left open for hours.
 ```
 
 ---
@@ -264,17 +304,21 @@ params are all born and die within one loop iteration, so they're reclaimed by
 cheap minor GCs and never promoted to old space. This is why a CLI that
 allocates a lot but holds little stays flat in memory.
 
-The interesting tension is *short-lived process vs leak*. In a server, a slowly
-growing array like `pending[]` would be a classic leak — it never resets across
-requests. Here it can't leak across runs because there's only one run, then exit.
-The same code that would be a bug in a daemon is benign in a CLI. That's the
-lifetime lesson: the *correctness* of an allocation pattern depends on the
-process model it runs in. → `02` for why this process model was chosen, `06` for
+The interesting tension is *process model vs leak* — and the chat path makes it
+concrete instead of hypothetical. A slowly growing array that never resets (the
+uncleared `pending[]`, or `turns[]`) is a classic leak in a long-lived process.
+In the batch CLIs it can't leak across runs — there's one run, then exit — so the
+identical code is benign. In chat the *same* sink and the `turns[]` state live
+the whole session, so they accumulate. That's the lifetime lesson made real here:
+the *correctness* of an allocation pattern depends on the process model around
+it, and buffr now ships both models. → `02` for the two process shapes, `06` for
 streaming as the fix to the unbounded read, `03` for what fills `pending[]`.
 
 **Not yet exercised:** heap profiling, `--max-old-space-size` tuning,
-`Buffer`/`ArrayBuffer` manual memory, weak references (`WeakMap`/`WeakRef`).
-None needed at single-user laptop scale.
+`Buffer`/`ArrayBuffer` manual memory, weak references (`WeakMap`/`WeakRef`), and
+any trimming/windowing of the session-scoped arrays. None *measured* yet — but
+the long-lived chat process is exactly where a heap snapshot would now earn its
+place. At single-user laptop scale the growth is slow enough to ignore today.
 
 ---
 
@@ -297,30 +341,38 @@ heap string before chunking, so peak heap tracks the largest file. Everything
 else (embeddings, params) is small and per-chunk. *Anchor:* the unbounded
 allocation is the read; that's where streaming would earn its place.
 
-**Q: `pending[]` only grows and never resets. Isn't that a leak?** In a server,
-yes — that's textbook. Here, no: the process runs one agent query and exits, so
-the array can't accumulate across runs, and `flush` makes its contents
-collectable. The same pattern would be a real bug in a daemon. *Anchor:* whether
-an allocation pattern is a leak depends on the process lifetime around it.
+**Q: `pending[]` and `turns[]` only grow and never reset. Isn't that a leak?** In
+the batch CLIs, no — one run, then exit, so nothing accumulates. In `chat`, yes —
+that's the honest answer now. The sink and `turns[]` (`chat.tsx:11`) live the
+whole session, `flush()` resolves the promises but never clears the array
+(`supabase-trace-sink.ts:91`), and `turns[]` only appends. It's a *slow* leak,
+fine for a normal chat, a real one for a session left open for hours. The fix is
+trimming/windowing. *Anchor:* the identical code is benign in the short-lived CLI
+and a leak in the long-lived session — the process model decides.
 
 ---
 
 ## Validate
 
-1. **Reconstruct:** list buffr's three dominant heap allocations and order them
-   by lifetime (per-op → per-run → per-process).
-2. **Explain:** why is `pending[]` (`supabase-trace-sink.ts:24`) not a memory
-   leak in this repo, even though it only grows?
+1. **Reconstruct:** list buffr's dominant heap allocations and order them by
+   lifetime (per-op → per-turn → per-session/process).
+2. **Explain:** why is `turns[]` (`chat.tsx:11`) a slow leak in `chat` but the
+   equivalent growth in a batch CLI is not? What clears `pending[]`, and what
+   doesn't (`supabase-trace-sink.ts:91`)?
 3. **Apply:** someone indexes a 2GB log file. Trace what happens to the heap at
    `index-cmd.ts:23` and name the fix.
-4. **Defend:** argue why buffr correctly ignores GC tuning, and name the single
-   change (a long-lived daemon) that would force you to care.
+4. **Defend:** the chat process is long-lived now. Argue what would force you to
+   take a heap snapshot, and name the two session-scoped arrays you'd inspect.
 
 ---
 
 ## See also
 
-- `02-processes-threads-and-tasks.md` — the process model that makes exit the final free
-- `03-event-loop-and-async-io.md` — what pushes promises into `pending[]`
+- `02-processes-threads-and-tasks.md` — the two process models (batch exit vs held chat)
+- `03-event-loop-and-async-io.md` — what pushes promises into `pending[]` (now 6 event types)
 - `06-filesystem-streams-and-resource-lifecycle.md` — streaming vs the whole-file read
 - `00-overview.md` → "Not yet exercised" — streams / heap-profiling gap
+
+---
+
+Updated: 2026-06-24 — flipped the "short-lived → no leak" framing: chat is long-lived, so `turns[]` (`chat.tsx:11`) and the never-cleared `pending[]` (`supabase-trace-sink.ts:91`) are session-scoped slow leaks promoted to old space; added per-turn vs per-session lifetime tier.

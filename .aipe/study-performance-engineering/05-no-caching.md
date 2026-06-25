@@ -6,14 +6,17 @@
 ## Zoom out, then zoom in
 
 Ask buffr the same question twice and it does the same work twice: embed the
-question over HTTP, run the HNSW search, feed the LLM. Nothing is remembered
-between asks. Here's the path, with the box where a cache *would* sit — and
-currently doesn't — marked.
+question over HTTP, run the HNSW search, feed the LLM. Nothing is *cached* between
+turns. (Note: `chat` does now keep *episodic memory* — each turn's exchange is
+embedded and stored for relevance-based recall on later turns via
+`memory.remember`, `src/session.ts:66` — but that's a growing memory store, not a
+result cache: it adds work per turn, it doesn't skip repeated work.) Here's the
+path, with the box where a *cache* would sit — and currently doesn't — marked.
 
 ```
   Zoom out — where a cache would live (it doesn't)
 
-  ┌─ Agent layer (ask-cmd.ts) ──────────────────────────────────┐
+  ┌─ Agent layer (chat.tsx → session.ts) ───────────────────────┐
   │  question string                                            │
   └─────────────────────────┬────────────────────────────────────┘
                             │
@@ -38,9 +41,13 @@ exactly when it stops being correct.
 
 ## Structure pass
 
-**Layers.** Three cacheable units, all currently uncached: the *query embedding*
-(`embed(query)` → vector), the *search result* (vector → ranked chunks), the
-*profile* (`loadProfile` → system-prompt text).
+**Layers.** Three cacheable units. Two are uncached and recomputed every turn —
+the *query embedding* (`embed(query)` → vector) and the *search result* (vector →
+ranked chunks). The third, the *profile* (`loadProfile` → system-prompt text), is
+now effectively cached at *session* granularity: `chat` reads it once at session
+setup (`src/session.ts:47`) and holds it for every turn, where the old one-shot
+`ask` re-read it on each invocation. So the cheapest-to-cache unit already got its
+(coarse) cache for free from the long-lived session.
 
 **Axis — cost (work repeated on a duplicate input).** Trace it:
 
@@ -48,16 +55,17 @@ exactly when it stops being correct.
   "what does a REPEAT identical ask recompute?" — traced down
 
   ┌───────────────────────────────────────┐
-  │ query embedding: embed(question)       │   → recomputed: 1 HTTP call
+  │ query embedding: embed(question)       │   → recomputed: 1 HTTP call/turn
   └───────────────────────────────────────┘
       ┌─────────────────────────────────────┐
-      │ search result: HNSW walk             │   → recomputed: 1 graph walk
+      │ search result: HNSW walk             │   → recomputed: 1 graph walk/turn
       └─────────────────────────────────────┘
           ┌─────────────────────────────────┐
-          │ profile read: pool.query         │   → recomputed: 1 SQL read
+          │ profile read: pool.query         │   → ONCE per session (session.ts:47)
           └─────────────────────────────────┘
 
-  every layer recomputes on every ask — there's no memo to short-circuit it
+  the two retrieval units recompute every turn — no memo short-circuits them;
+  the profile is read once per session, not per turn
 ```
 
 **Seam — the cache key.** The boundary a cache would insert is "input → key →
@@ -111,21 +119,25 @@ result for an overlapping query is now stale. That invalidation is the hard part
 of caching, and the reason absence is defensible until repeat traffic justifies
 the complexity.
 
-**The uncached profile read.** Bridge: a config value re-read from the DB on every
-request instead of loaded once. `loadProfile` runs a `pool.query` on every `ask`
-(`src/profile.ts:5-6`) even though the profile changes rarely. Boundary
-condition: this is the *easiest* thing to cache (rarely changes, single row,
-clear invalidation on profile update) and the lowest-value (one fast indexed
-read).
+**The session-cached profile read.** Bridge: a config value loaded once at startup
+instead of re-read per request. `loadProfile` runs a `pool.query` *once* at chat
+session setup (`src/session.ts:47` → `src/profile.ts:5-6`) and the result is held
+in the closure for every turn. The old one-shot `ask` re-ran it per invocation;
+the long-lived session turned that into a de-facto per-session cache for free.
+Boundary condition: this is the *easiest* thing to cache (rarely changes, single
+row) and lowest-value (one fast indexed read) — and the long session now gets it
+without any explicit cache. The trade: a profile *edited mid-session* won't be
+picked up until the next session, since it's read once.
 
 ```
   What a repeat identical ask pays today vs with a cache
 
-  TODAY (no cache):                 WITH a query cache:
+  TODAY (no query cache):           WITH a query cache:
     embed(question)  → HTTP           hash(question) → HIT
     search(vector)   → HNSW walk      return stored chunks
-    loadProfile      → SQL            (embed + search skipped)
+    (profile already loaded once)     (embed + search skipped)
     LLM generate     → HTTP*          *LLM still runs unless answer-cached
+    memory upsert    → HTTP+SQL       (per-turn write, not a cache lookup)
 
   *the LLM generate dominates either way — caching embed+search helps
    retrieval latency, not the gemma2 generation that follows it
@@ -189,10 +201,10 @@ oversight.
 The recompute path, every recomputed unit marked, and where a cache would cut in.
 
 ```
-  Repeat-ask recompute path — what runs again every time
+  Repeat-turn recompute path — what runs again every turn
 
-  ┌─ Agent layer (ask-cmd.ts) ──────────────────────────────────┐
-  │  "what programming stack is used"  (asked again)            │
+  ┌─ Agent layer (chat.tsx → session.ts) ───────────────────────┐
+  │  "what programming stack is used"  (asked again, same chat)  │
   └─────────────────────────┬────────────────────────────────────┘
         ░ cache would go here ░ — ABSENT, always falls through
                             ▼
@@ -200,45 +212,51 @@ The recompute path, every recomputed unit marked, and where a cache would cut in
   │  embed(question)  → recomputed  ── HTTP → Ollama nomic-embed  │
   │  search(vector,k) → recomputed  ── HNSW walk → Postgres       │
   └─────────────────────────┬────────────────────────────────────┘
-        also recomputed:     │
+        loaded once/session: │
   ┌─ Side reads ────────────▼────────────────────────────────────┐
-  │  loadProfile → recomputed  ── pool.query → agents.profiles   │
+  │  loadProfile → ONCE at setup (session.ts:47), not per turn   │
   └─────────────────────────┬────────────────────────────────────┘
                             ▼
   ┌─ Provider ───────────────────────────────────────────────────┐
   │  gemma2:9b generate ── the actual bottleneck, cache or not   │
+  └─────────────────────────┬────────────────────────────────────┘
+        per-turn write:      │
+  ┌─ Memory ────────────────▼────────────────────────────────────┐
+  │  memory.remember → embed + upsert  (adds work, not a cache)  │
   └──────────────────────────────────────────────────────────────┘
 ```
 
 ## Implementation in codebase
 
-**Use cases.** There is no caching code to point at — that's the finding. The
-*places a cache would attach* are concrete: the `pipeline.query` call inside the
-`search_knowledge_base` tool handler, and the `loadProfile` call in `ask-cmd`.
+**Use cases.** There is no query/result caching code to point at — that's the
+finding. The *places a cache would attach* are concrete: the `pipeline.query`
+call inside the `search_knowledge_base` tool handler (reached per turn in the
+agent loop). The `loadProfile` call now lives in session setup, read once.
 
-**The uncached query path — `src/cli/ask-cmd.ts:24-27`:**
+**The uncached query path — `src/session.ts:43, 62`:**
 
 ```
-  src/cli/ask-cmd.ts  (lines 24-27)
+  src/session.ts  (setup + per-turn answer)
 
-  const tool = createSearchKnowledgeBaseTool(pipeline, { minTopK: 4 });
+  const tool = createSearchKnowledgeBaseTool(pipeline, { minTopK: 4 });  (43)
   …
-  const profile = await loadProfile(pool, cfg.appId);   ← re-read every ask
+  const answer = await agent.answer(question);   ← runs search per turn  (62)
         │
-        └─ the tool wraps pipeline.query with no memo. Two identical asks =
-           two identical embed HTTP calls + two HNSW walks. A cache would
-           wrap pipeline.query here; nothing downstream changes.
+        └─ the tool wraps pipeline.query with no memo. Two identical questions
+           in one chat = two identical embed HTTP calls + two HNSW walks. A
+           cache would wrap pipeline.query here; nothing downstream changes.
 ```
 
-**The uncached profile read — `src/profile.ts:4-7`:**
+**The session-loaded profile read — `src/session.ts:47` → `src/profile.ts:4-7`:**
 
 ```
+  src/session.ts:47    const profile = await loadProfile(pool, cfg.appId);
   src/profile.ts  (lines 4-7)
 
   export async function loadProfile(pool, appId): Promise<string> {
     const { rows } = await pool.query(
       'select content from agents.profiles where app_id = $1
-       order by updated_at desc limit 1', [appId]);  ← runs on EVERY ask
+       order by updated_at desc limit 1', [appId]);  ← runs ONCE per session
     return rows[0]?.content ?? '';
   }
         │
@@ -279,8 +297,9 @@ query-vector LRU keyed on the question string.
   add it when the trigger fires, not before
 ```
 
-Anchor: the cache would wrap `pipeline.query` at the tool in
-`src/cli/ask-cmd.ts:24`; nothing below it changes.
+Anchor: the cache would wrap `pipeline.query` at the tool created in
+`src/session.ts:43` (run per turn via `agent.answer`, `src/session.ts:62`);
+nothing below it changes.
 
 **Q: The part people forget?**
 Invalidation. Anyone can add `lru.get(key)`. The load-bearing part is wiring
@@ -288,11 +307,13 @@ Invalidation. Anyone can add `lru.get(key)`. The load-bearing part is wiring
 and any cached result overlapping it is stale. Forget that and the cache silently
 serves outdated retrievals.
 
-**Q: Would caching fix buffr's slow `ask`?**
+**Q: Would caching fix buffr's slow `chat` turn?**
 Only partly, and not the slow part. Caching cuts embed + search — already the fast
-units. The gemma2:9b *generation* dominates `ask` latency on a laptop, and that's
-only helped by caching the full *answer*, which needs the same invalidation care
-plus tolerance for stale answers.
+units. The gemma2:9b *generation* dominates a turn's latency on a laptop, and
+that's only helped by caching the full *answer*, which needs the same invalidation
+care plus tolerance for stale answers. (Note the per-turn `memory.remember` embed
+*adds* a round-trip rather than removing one — it's recall infrastructure, not a
+cache.)
 
 ## Validate
 
@@ -301,14 +322,28 @@ plus tolerance for stale answers.
 2. **Explain:** why is caching the *search result* harder than caching the
    *query embedding*?
 3. **Apply:** wrap `pipeline.query` (reached via the tool at
-   `src/cli/ask-cmd.ts:24`) in a bounded LRU. Where do you wire invalidation so a
-   re-index doesn't serve stale results?
+   `src/session.ts:43`) in a bounded LRU. Where do you wire invalidation so a
+   re-index — *or* a per-turn `memory.remember` upsert — doesn't serve stale
+   results?
 4. **Defend:** argue why the absence of a cache is the *correct* call today and
-   name the exact condition that flips it.
+   name the exact condition that flips it. Then explain why per-session profile
+   reuse (`session.ts:47`) is a cache, but episodic memory (`session.ts:66`) is
+   not.
 
 ## See also
 
 - `audit.md` § caching-batching-and-backpressure, § performance-red-flags (#5)
-- `02-embedding-http-roundtrip.md` — the embed call a cache would skip
+- `02-embedding-http-roundtrip.md` — the embed call a cache would skip; also the
+  per-turn memory embed this file distinguishes from a cache
 - `01-hnsw-approximate-search.md` — the search a cache would skip
+- `04-connection-pool-reuse.md` — the session that loads the profile once
 - `study-database-systems` — cache invalidation on write
+
+---
+
+Updated: 2026-06-24 — Reframed `ask` → `chat` turns (`session.ts`). Corrected the
+profile lens: `loadProfile` now runs ONCE per session (`session.ts:47`), a
+de-facto per-session cache, not a per-ask re-read. Added the distinction that
+`chat`'s new episodic memory (`memory.remember`, `session.ts:66`) is recall
+infrastructure that *adds* per-turn work, not a result cache. Core finding
+(no query/result cache) re-verified unchanged; re-grounded anchors.

@@ -132,7 +132,7 @@ through `createRetrievalPipeline({ embedder: fakeEmbedder, store })`. There's no
 `jest.mock`, no module-level monkey-patch, no global stub to clean up. The test
 owns the pipeline it built; nothing leaks to other tests. This is only possible
 because the production code *also* takes the embedder as a constructor argument
-(`ask-cmd.ts:20-22`, `index-cmd.ts:18-20`) — the seam exists in the real code,
+(`session.ts:40-42`, `index-cmd.ts:18-20`) — the seam exists in the real code,
 the test just passes a different value through it.
 
 **The skeleton — what breaks without each part:**
@@ -191,8 +191,8 @@ The full picture — the fake plugged into the real pipeline, real store behind 
 
 **Use cases.** Reached for once, in `runtime.test.ts`, to test
 `indexDocumentRow` without Ollama. It's the only test double in the repo. The
-production embedder it stands in for is constructed at `index-cmd.ts:18` and
-`ask-cmd.ts:20`.
+production embedder it stands in for is constructed at `index-cmd.ts:18`,
+`eval-cmd.ts:14`, and `session.ts:40`.
 
 The fake, in full:
 
@@ -251,12 +251,15 @@ an interface so a deterministic stub can replace it. It's the same instinct as
 faking `fetch`, faking `Date.now`, faking a random seed — isolate the source of
 unpredictability behind a seam, then control it in the test.
 
-Where it goes next in this repo: the *agent* path (`ask-cmd.ts`) has the same
-shape but isn't covered. `GemmaModelProvider` is injected the same way
-(`ask-cmd.ts:26`), so a fake `ModelProvider` returning a scripted tool-call +
-answer would let you assert the deterministic wrapper — profile injection, tool
-dispatch landing a `tool` row — without live Gemma. The technique is proven;
-it just hasn't been extended past the embedder yet. → see `audit.md` lens 6.
+Where it goes next in this repo: the *chat session* path (`session.ts`) has the
+same shape but isn't covered. `GemmaModelProvider` is injected the same way
+(`session.ts:46`, wrapped in `ContextWindowGuardedProvider`), so a fake
+`ModelProvider` returning a scripted tool-call + answer would let you assert the
+deterministic wrapper of `createChatSession`'s per-turn `ask()` — profile
+injection, the user-turn-before-agent ordering (`session.ts:61`), tool dispatch
+landing a `tool` row, and the swallowed memory-failure branch (`session.ts:66-69`)
+— without live Gemma. The technique is proven; it just hasn't been extended past
+the embedder yet. → see `audit.md` lens 6.
 
 The handoff to evals: this fake answers "does indexing work?" It does **not**
 answer "is the embedding good?" That's `scorePrecisionAtK` over
@@ -301,9 +304,10 @@ contract, the fake stops compiling. The compiler keeps the stub honest.
 2. **Explain:** Why does `dimension: 768` in the fake (`runtime.test.ts:15`)
    matter? (Mismatch trips `assertDim` at `pg-vector-store.ts:33` before
    indexing.)
-3. **Apply:** Extend the pattern to test `ask-cmd.ts`'s profile injection
-   without live Gemma — what do you fake? (A `ModelProvider` returning a
-   scripted response; inject at the `RagQueryAgent` constructor.)
+3. **Apply:** Extend the pattern to test `session.ts`'s `ask()` profile
+   injection without live Gemma — what do you fake? (A `ModelProvider` returning
+   a scripted response; inject at the `RagQueryAgent` constructor in
+   `createChatSession`.)
 4. **Defend:** Someone says "just run real Ollama, it's more realistic." Argue
    the cost. (Non-deterministic floats → no `equals` assertion; you'd be back to
    "something happened.")
@@ -319,3 +323,13 @@ contract, the fake stops compiling. The compiler keeps the stub honest.
 - `03-contract-parity-vector-store.md` — the `store` the fake pipeline writes to.
 - `.aipe/study-ai-engineering/` — the eval half of this seam (precision@k).
 - `.aipe/study-debugging-observability/` — the trace the agent path emits.
+- `05-full-signal-trace-capture.md` — what the trace sink now persists once the
+  agent runs.
+
+---
+
+Updated: 2026-06-24 — repointed the embedder-injection seam refs from the
+deleted `ask-cmd.ts` to `session.ts:40-46` / `eval-cmd.ts:14` / `index-cmd.ts`;
+the "where it goes next" target is now `createChatSession`'s per-turn `ask()`
+(fake `ModelProvider` to assert user-turn ordering + swallowed memory-failure
+branch).

@@ -1,5 +1,11 @@
 # Pure core, impure shell — `loadConfig` vs the `cli/*` edges
 
+> Updated: 2026-06-24 — `ask-cmd.ts` deleted. Its shell role split: `src/session.ts`
+> (`createChatSession`) now does the env-load → `loadConfig` → `DATABASE_URL` guard
+> → build, and exposes `close()` instead of a bottom-of-script `pool.end()`. The
+> remaining one-shot shells are `index-cmd`, `eval-cmd`, `migrate`. `loadConfig`
+> stays the one pure core; the dead `cfg.schema` knob (Move 2.5) is still dead.
+
 **Subtitle:** Functional Core / Imperative Shell — *Industry standard*.
 The pure function `loadConfig` is the testable core; the CLI files are the
 imperative shell that does all the I/O.
@@ -34,10 +40,10 @@ no side effects at all. That separation is the whole pattern.
 **Zoom in.** The pattern is *functional core, imperative shell*. `loadConfig`
 (`src/config.ts:9`) is the core: deterministic, no I/O, the same env always
 produces the same config. Everything around it — `cli/index-cmd.ts`,
-`ask-cmd.ts`, `eval-cmd.ts` — is the shell: it gathers the impure inputs, calls
-the pure core, then performs the effects the core decided. You test the core
-without a database; you keep the shell thin enough that there's little left to
-test.
+`cli/eval-cmd.ts`, `migrate.ts`, and now `session.ts` — is the shell: it gathers
+the impure inputs, calls the pure core, then performs the effects the core decided.
+You test the core without a database; you keep the shell thin enough that there's
+little left to test.
 
 ---
 
@@ -97,7 +103,7 @@ and keep a deterministic core in the middle.**
 
 **The core is total — every field has a defined value.** `loadConfig` never
 returns `undefined` for `appId`, `schema`, or `ollamaHost`; each falls back to a
-default with `||` (`src/config.ts:11-14`). `databaseUrl` is the one allowed to be
+default with `||` (`src/config.ts:12-14`). `databaseUrl` is the one allowed to be
 `undefined` — because "no database configured" is a real state the shell must
 handle, not a default the core can invent. The boundary condition: pass an empty
 env `{}` and you still get a valid `Config` with `appId: 'laptop'`. The core can't
@@ -115,7 +121,7 @@ fail.
 **The shell guards what the core left optional.** The core returns
 `databaseUrl?: undefined`; the shell turns that into a hard failure at the
 entrance: `if (!cfg.databaseUrl) throw new Error('DATABASE_URL is not set')`
-(`src/cli/index-cmd.ts:12`, `ask-cmd.ts:15`, `eval-cmd.ts:11`). This is the right
+(`src/cli/index-cmd.ts:12`, `src/session.ts:37`, `cli/eval-cmd.ts:11`). This is the right
 division of labor — the core *describes* the world (db may be absent), the shell
 *decides* what to do about it (die loudly). Move the guard into the core and
 you've made `loadConfig` throw, which means tests can no longer call it with a
@@ -128,12 +134,15 @@ fixture that omits the URL.
    shell: "undefined? throw and die"         (acts on it, owns the effect)
 ```
 
-**The shell drains its own resources.** Every CLI ends with `await pool.end()`
-(`src/cli/index-cmd.ts:27`, `ask-cmd.ts:38`, `eval-cmd.ts:34`). The core never
-opens a pool, so it never has to close one. All resource lifecycle lives in the
-shell — open at the top, drain at the bottom. The boundary: forget `pool.end()`
-and the CLI hangs after its work is done because the pool's idle connections keep
-the event loop alive.
+**The shell drains its own resources.** Each one-shot ends with `await pool.end()`
+(`src/cli/index-cmd.ts:27`, `cli/eval-cmd.ts:34`, `migrate.ts`). The core never
+opens a pool, so it never has to close one. The chat path is the variant: because
+the session is long-lived, `session.ts` doesn't drain at the bottom of a script —
+it hands a `close()` method to the caller (`src/session.ts:72-74`), which the Ink
+UI invokes on `/exit` (`src/cli/chat.tsx:18-20`). Same principle (the shell owns
+lifecycle), different shape (caller-triggered teardown vs script-end). The boundary
+still bites: forget `close()`/`pool.end()` and the process hangs because idle
+connections keep the event loop alive.
 
 ### Move 2.5 — the dead knob in the core
 
@@ -173,9 +182,9 @@ object." Pure cores are testable cores.
 The whole pattern in one frame.
 
 ```
-  Functional core / imperative shell across the three CLIs
+  Functional core / imperative shell across the entry points
 
-  ┌─ impure shell (cli/index · ask · eval) ──────────────────────┐
+  ┌─ impure shell (cli/index · cli/eval · session.ts · migrate) ─┐
   │  loadEnv() ─► loadConfig(process.env) ─► guard DATABASE_URL   │
   │      │              │                          │              │
   │   reads .env    ┌───▼──────────────┐       throw if unset     │
@@ -194,8 +203,8 @@ The whole pattern in one frame.
 
 ## Implementation in codebase
 
-**Use cases.** Every CLI entry reaches for this split. Indexing
-(`src/cli/index-cmd.ts:10-12`), asking (`src/cli/ask-cmd.ts:13-15`), and eval
+**Use cases.** Every entry reaches for this split. Indexing
+(`src/cli/index-cmd.ts:10-12`), the chat session (`src/session.ts:35-37`), and eval
 (`src/cli/eval-cmd.ts:9-11`) all run the identical core call + shell guard. The
 migration runner does too (`src/migrate.ts:24-26`), inside its `import.meta.url`
 main-module check. The core is one function reused by four shells.
@@ -220,18 +229,18 @@ main-module check. The core is one function reused by four shells.
 ```
 
 ```
-  src/cli/ask-cmd.ts  (the shell, lines 13-19, 38) — effects at the edge
+  src/session.ts  (the shell, lines 35-39, 72-74) — effects at the edge
 
   loadEnv();                                  ← side effect: read .env from disk
   const cfg = loadConfig(process.env);        ← cross into the pure core, once
   if (!cfg.databaseUrl)                        ← shell acts on the core's optional
     throw new Error('DATABASE_URL is not set (see .env)');
-  const question = process.argv.slice(2).join(' ');  ← gather impure input
-  ...
   const pool = createPool(cfg.databaseUrl);   ← open resource (effect)
-  ...
-  await pool.end();                            ← drain resource (effect) — drop
-                                                  this and the process hangs
+  ...                                          ← build agent/memory/conversation
+  return {
+    async ask(q) { ... },                      ← run turns (effects)
+    async close() { await pool.end(); },       ← drain resource — caller-triggered
+  };                                              (chat.tsx calls it on /exit)
 ```
 
 ---
@@ -291,7 +300,7 @@ through.
    provider.)
 4. **Defend:** a reviewer wants the `pool.end()` moved into `loadConfig` "to keep
    cleanup near config." Refute it. (Core must stay effect-free; cleanup is a shell
-   concern; `src/cli/ask-cmd.ts:38`.)
+   concern; `src/session.ts:73` `close()`.)
 
 ---
 

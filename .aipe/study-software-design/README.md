@@ -1,5 +1,11 @@
 # study-software-design — buffr-laptop
 
+> Updated: 2026-06-24 — reconciled against current code: `ask-cmd.ts` deleted,
+> chat wiring now in `src/session.ts` (deep module, `ask`/`close`) + Ink/React UI
+> `src/cli/chat.tsx` (new ink/react deps); memory is aptkit's
+> `createConversationMemory` with buffr's store injected up; trace sink handles all
+> 6 event types; aptkit ^0.4.1. The three top fixes below are unchanged.
+
 A software-design audit of **this repo** through the primitives in John
 Ousterhout's *A Philosophy of Software Design* (APOSD): deep modules, information
 hiding, complexity, layering, readability. The product is the **findings about

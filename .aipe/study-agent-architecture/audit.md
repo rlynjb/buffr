@@ -43,8 +43,8 @@ re-decides every turn from scratch; there is no up-front step list, no
 **Tree of Thoughts — not yet exercised.** No branching, no scoring, single path.
 
 **Routing — not yet exercised as a distinct stage.** There is no heuristic or
-LLM router in front of the agent. `ask-cmd.ts` sends every question straight
-into the one agent. (The model's per-turn choice of *whether* to call the tool
+LLM router in front of the agent. The chat session (`src/session.ts`) sends every
+question straight into the one agent. (The model's per-turn choice of *whether* to call the tool
 is in-loop decision-making, not a routing stage.)
 
 ---
@@ -82,8 +82,8 @@ source, not routing across sources.
 
 **Not yet exercised — by deliberate design.** buffr is a single agent. There is
 no supervisor, no worker, no second `*Agent` instance, no handoff, no shared
-blackboard, no message bus between agents. `ask-cmd.ts:33-34` constructs one
-`RagQueryAgent` and calls `answer` once.
+blackboard, no message bus between agents. `session.ts:57` constructs one
+`RagQueryAgent`; each `ask()` calls `answer` once (`session.ts:62`).
 
 This is a stated decision, not an oversight. `agent-layer-plan.md:13-18`:
 "a **single** RAG agent", "Not a fleet of agents. Ship ONE agent end-to-end,
@@ -107,20 +107,30 @@ agent's state — it accumulates assistant turns and tool results across the run
 (`run-agent-loop.js:22, 48, 104`). It is the thing that makes it a loop and not
 N independent calls. Gone when the run ends.
 
-**Trajectory persistence — exercised, but as a sink, not as recall.** Every
-assistant `step` and every `tool_call_end` is written to
-`agents.conversations` / `agents.messages` via `SupabaseTraceSink`
-(`src/supabase-trace-sink.ts:27-36`). This is the project's real differentiator
-(`agent-layer-plan.md:17` — "capture every conversation as a trajectory now so
-fine-tuning is *answerable* later"). → `04-trajectory-as-memory.md`.
+**Trajectory persistence — exercised, full-signal sink.** Every
+`CapabilityEvent` variant — `step`, `tool_call_start` (args), `tool_call_end`
+(result/error/durationMs), `model_usage` (tokens), `warning`/`error` — is written
+to `agents.conversations` / `agents.messages` via `SupabaseTraceSink`
+(`src/supabase-trace-sink.ts:53-85`), with the event timestamp carried into
+`created_at` so replay order matches emit order. This is the project's real
+differentiator (`agent-layer-plan.md:17` — "capture every conversation as a
+trajectory now so fine-tuning is *answerable* later"). → `04-trajectory-as-memory.md`.
 
-**Episodic / cross-session memory — not yet exercised.** Crucial honesty point:
-buffr *persists* trajectories but never *reads them back* into a later run.
-`ask-cmd.ts:29` calls `startConversation` fresh every invocation; nothing
-retrieves prior conversations into the next question's context. The data is
-write-only from the agent's perspective — a corpus for future fine-tuning, not
-a memory tier the agent queries. → covered in `04-trajectory-as-memory.md` as
-the Phase A / Phase B split.
+**Episodic / cross-session memory — NOW exercised (relevance recall).** After each
+turn, `memory.remember({ conversationId, question, answer })` embeds the exchange
+into the SAME `PgVectorStore` as the documents, tagged `kind=memory`
+(`src/session.ts:53, 66`; `createConversationMemory` in `@aptkit/memory`). Because
+memory rows share the store, they surface on a later turn — across sessions —
+through the existing `search_knowledge_base` tool by similarity. So the data is no
+longer write-only: it's recalled by relevance, indirectly via the retrieval tool
+(buffr calls `remember()` but not `recall()`; the shared store is the recall path).
+→ `04-trajectory-as-memory.md`.
+
+**Sequential in-prompt history — not yet exercised.** The remaining honest gap:
+`RagQueryAgent.answer()` (`session.ts:62`) takes one question and no transcript,
+so the running conversation is not threaded into the prompt. Relevance recall
+covers cross-session recall; conversational context threading is an aptkit-side
+change. → the Phase A / Phase B split in `04-trajectory-as-memory.md`.
 
 **Long-term knowledge (the corpus) — exercised.** The indexed `documents` /
 `chunks` are durable knowledge the agent retrieves over (pgvector HNSW). This is
@@ -168,7 +178,7 @@ allowlist of exactly one read-only tool:
   (`search-knowledge-base-tool.js:29-45`).
 
 Even though buffr's registry only registers one tool anyway
-(`ask-cmd.ts:24`), the policy is the *contract* that bounds the blast radius —
+(`session.ts:44`), the policy is the *contract* that bounds the blast radius —
 adding more tools to the registry would not widen the agent's reach without an
 explicit allowlist change. → `02-single-tool-capability-scope.md`. Cross-links
 to `.aipe/study-security/04-least-privilege-tool-scope.md`.
@@ -182,7 +192,7 @@ profile (`me.md`-style) is loaded from `agents.profiles`
 (`src/profile.ts:4-8`) and injected at the *front* of the system prompt before
 template rendering (`injectProfile`, `@aptkit/context/dist/src/profile-injector.js:15-22`;
 wired at `rag-query-agent.js:29-32`). Plus a context-window guard wraps the
-provider (`ContextWindowGuardedProvider`, `ask-cmd.ts:26`, `maxTokens: 8192`).
+provider (`ContextWindowGuardedProvider`, `session.ts:46`, `maxTokens: 8192`).
 → `06`-template eval framing references this; deep walk of the injection seam
 lives in `.aipe/study-system-design/06-profile-injection-as-context.md`.
 
@@ -240,8 +250,9 @@ add if the tool count or budget grew.
 | Self-RAG / retrieval routing | not yet exercised | —                                     |
 | Multi-agent orchestration  | not yet exercised | design-only → `06`                      |
 | Working state              | exercised         | `run-agent-loop.js:22,48,104`           |
-| Trajectory persistence     | exercised         | `supabase-trace-sink.ts:27-36` → `04`   |
-| Cross-session memory       | not yet exercised | persisted, never read back → `04`       |
+| Trajectory persistence     | exercised (full)  | `supabase-trace-sink.ts:53-85` (6 events) → `04` |
+| Cross-session memory (recall) | exercised      | relevance recall via shared store, `session.ts:53,66` → `04` |
+| Sequential in-prompt history | not yet exercised | `answer()` takes no transcript → `04`  |
 | Control loop & termination | exercised (strong)| forced synthesis `run-agent-loop.js:17-32` → `01` |
 | Capability scoping         | exercised (tight) | `rag-query-agent.js:8-11` → `02`        |
 | Profile-as-context         | exercised         | `rag-query-agent.js:29-32`              |
@@ -249,3 +260,11 @@ add if the tool count or budget grew.
 | MCP                        | not yet exercised | —                                       |
 | Agent eval (trajectory)    | not yet exercised | retrieval eval only (`eval-cmd.ts`)     |
 | Cross-turn cache / breaker | not yet exercised | bounded by 4-call budget                |
+
+---
+
+Updated: 2026-06-24 — Lens 4 reframed: cross-session memory is now exercised
+(relevance recall via `createConversationMemory` + shared `PgVectorStore`,
+`session.ts:53,66`); split out "sequential in-prompt history" as the remaining
+gap. Trace sink is now full-signal (6 event variants, `supabase-trace-sink.ts:53-85`).
+Purged `ask-cmd.ts` refs → `session.ts` (wiring moved into the long-lived chat session).

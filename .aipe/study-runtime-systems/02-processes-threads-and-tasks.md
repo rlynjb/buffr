@@ -28,9 +28,11 @@ juggles while one thread does all the JS.
 ```
 
 Zoom in: the concept is **process boundary vs task**. A *process* is the OS-
-level container (one per CLI). A *task* is a unit of pending async work *inside*
-that process. buffr has many tasks in flight (several pending Postgres writes)
-but exactly one thread and one process at a time.
+level container (one per CLI invocation, or one long-lived `chat`). A *task* is a
+unit of pending async work *inside* that process. buffr has many tasks in flight
+(several pending Postgres writes) but exactly one thread and one process at a
+time. In `chat` that single process and single thread now stay alive across many
+turns rather than exiting after one.
 
 ---
 
@@ -41,10 +43,12 @@ but exactly one thread and one process at a time.
 ```
   Substrate        Count in buffr        Who schedules it
   ───────────────  ────────────────────  ─────────────────────────
-  process          1 per CLI invocation  the OS / your shell
+  process          1 (batch: per cmd;    the OS / your shell
+                    chat: 1 long-lived)
   JS thread        exactly 1             V8, runs your code
   libuv pool       4 (default), hidden   Node, for fs/dns under the hood
   task (promise)   many, transient       the event loop (see 03)
+  Ink render loop  1 (chat only)         React reconciler on the event loop
 ```
 
 **Axis traced — "what runs in parallel, truly?"**
@@ -54,7 +58,8 @@ but exactly one thread and one process at a time.
 
   ┌──────────────────────────────────────────────┐
   │ process level   → could be parallel, but buffr│  one at a time
-  │                   runs ONE CLI at a time       │
+  │                   runs ONE process at a time   │
+  │                   (chat: one, long-lived)      │
   └──────────────────────────────────────────────┘
       ┌──────────────────────────────────────────┐
       │ JS thread       → NEVER parallel. One     │  ← the hard limit
@@ -105,21 +110,28 @@ a way that blocks.
 
 ### Move 2 — the parts
 
-**The process boundary.** Each CLI is its own OS process with its own pid, heap,
-and file descriptors. `process.argv` (`ask-cmd.ts:16`, `index-cmd.ts:14`) is
-the process reading its launch arguments. `process.stdout.write` (`:37`) writes
-to the process's stdout descriptor. `process.env` (`config.ts:9`) is the
-process's environment. These are the only `process.*` touchpoints — buffr never
-spawns a child or forks.
+**The process boundary.** Each entry point is its own OS process with its own
+pid, heap, and file descriptors. `process.argv` (`index-cmd.ts:14`,
+`eval-cmd.ts`) is the process reading its launch arguments; `process.env`
+(`config.ts:9`) is its environment. In `chat`, the boundary in is no longer argv
+— it's the **raw-mode TTY stdin** that Ink reads keystrokes from
+(`ink-text-input`), and the boundary out is Ink's render to stdout rather than a
+single `process.stdout.write`. These are the only `process.*`/stdio touchpoints —
+buffr never spawns a child or forks.
 
 ```
-  Process boundary — what crosses it
+  Process boundary — what crosses it (batch vs chat)
 
+  BATCH:
   ┌─ shell ──────┐ argv + env  ┌─ node process ──────────┐ stdout ┌─ terminal ┐
-  │ npm run ask  │ ──────────► │ process.argv / .env     │ ─────► │  your eyes│
-  └──────────────┘             │ ★ all work happens here ★│       └───────────┘
+  │ npm run index│ ──────────► │ process.argv / .env     │ ─────► │  your eyes│
+  └──────────────┘             │ runs, prints, exits      │       └───────────┘
                                └─────────────────────────┘
-                                 no child process spawned
+  CHAT (long-lived):
+  ┌─ terminal ───┐ keystrokes  ┌─ node process ──────────┐ render ┌─ terminal ┐
+  │ raw-mode TTY │ ──────────► │ Ink loop · stays UP      │ ─────► │  Ink UI   │
+  └──────────────┘  (stdin)    │ ★ held across turns ★    │ ◄──────┘  redraws  │
+                               └─────────────────────────┘  no child spawned
 ```
 
 **The single JS thread.** There is no `worker_threads`, no `child_process`, no
@@ -136,12 +148,14 @@ resolves the promise on the JS thread. buffr never schedules to this pool
 directly — it's Node's implementation detail — but it's *why* `await readFile`
 doesn't block the thread. Worth knowing it exists; you don't touch it.
 
-**Tasks, not threads, are the unit.** When `ask-cmd` is mid-run, the
+**Tasks, not threads, are the unit.** When a chat turn is mid-run, the
 `SupabaseTraceSink` has multiple `persistMessage` promises sitting in its
-`pending[]` array (`supabase-trace-sink.ts:24`). Those are *tasks* — concurrent
+`pending[]` array (`supabase-trace-sink.ts:50`). Those are *tasks* — concurrent
 units of work — but they all complete on the one JS thread as their I/O
-resolves. Many tasks, one thread. → `03` walks how the event loop sequences
-them.
+resolves. Many tasks, one thread. The Ink render loop is *also* just tasks on
+this same thread: each `setState` (`chat.tsx:25,29`) schedules a re-render the
+reconciler runs when the stack clears — no extra thread. → `03` walks how the
+event loop sequences them.
 
 ### Move 3 — the principle
 
@@ -163,8 +177,8 @@ boundary, not an oversight.
   │  one node process (per CLI)                                   │
   │                                                               │
   │   ┌─ JS thread (your code) ──────────────────────────────┐   │
-  │   │  loadConfig → createPool → agent.answer → flush       │   │
-  │   │  sequential · one stack · never two things at once    │   │
+  │   │  createChatSession → [ask → agent.answer → flush]ⁿ    │   │
+  │   │  + Ink render loop · one stack · never two at once     │   │
   │   └───────────────┬───────────────────────┬───────────────┘   │
   │                   │ park on await          │ park on await     │
   │   ┌─ libuv pool ──▼─────┐    ┌─ network ───▼───────────────┐   │
@@ -182,9 +196,10 @@ boundary, not an oversight.
 
 ## Implementation in codebase
 
-**Use cases.** Every CLI run is one process. The "many tasks, one thread" model
-shows up most clearly in `ask-cmd` where trace writes pile up as concurrent
-tasks while the agent loop runs on the single thread.
+**Use cases.** Every batch run is one process; `chat` is one long-lived process.
+The "many tasks, one thread" model shows up most clearly in a chat turn
+(`session.ask`) where trace writes pile up as concurrent tasks while the agent
+loop *and* the Ink reconciler share the single thread.
 
 **The only process touchpoints** (`src/cli/index-cmd.ts`, lines 14, 25):
 
@@ -199,18 +214,21 @@ tasks while the agent loop runs on the single thread.
           The process boundary is touched only to read input and write output.
 ```
 
-**Concurrent tasks on one thread** (`src/supabase-trace-sink.ts`, lines 24, 30–34):
+**Concurrent tasks on one thread** (`src/supabase-trace-sink.ts`, lines 50, 87–89):
 
 ```
-  src/supabase-trace-sink.ts  (lines 24, 30–34)
+  src/supabase-trace-sink.ts  (lines 50, 87–89)
 
   private readonly pending: Promise<void>[] = [];   ← a list of TASKS, not threads
   ...
-  this.pending.push(persistMessage(pool, ...));      ← starts a task, doesn't await
+  private push(p: Promise<void>): void {
+    this.pending.push(p);                            ← starts a task, doesn't await
+  }
        │
-       └─ each push fires a Postgres write that runs concurrently with the
-          others. All of them complete on the SAME single JS thread as their
-          I/O resolves. This is "many tasks, one thread" in one line. (see 03)
+       └─ emit()'s switch over all 6 event types calls push() for each; each is a
+          Postgres write running concurrently with the others. All complete on the
+          SAME single JS thread as their I/O resolves. "many tasks, one thread"
+          in one line. (see 03)
 ```
 
 ---
@@ -228,7 +246,11 @@ ever does light glue work between I/O waits.
 
 `worker_threads` and `child_process` are the escape hatches when this model
 breaks. Neither appears here — correctly, since nothing in buffr is CPU-bound on
-the JS thread.
+the JS thread. The `chat` process being long-lived doesn't change that: Ink's
+reconciler is light work on the same thread, and the heavy compute is still all
+remote. What the long-lived shape *does* change is the leak math — a growing
+array that's harmless in a process that exits in seconds (`05`) can accumulate
+across turns in a session that never exits. Still not a CPU/thread problem.
 
 ---
 
@@ -274,7 +296,11 @@ workers are for CPU, not I/O; buffr's heavy CPU is all remote.
 
 ## See also
 
-- `03-event-loop-and-async-io.md` — how the one thread sequences many tasks
+- `03-event-loop-and-async-io.md` — how the one thread sequences many tasks (and the Ink loop)
 - `04-shared-state-races-and-synchronization.md` — why one thread means no JS-level races
 - `07-backpressure-bounded-work-and-cancellation.md` — the serial loop on the single thread
 - `00-overview.md` → "Not yet exercised" — threads/workers gap
+
+---
+
+Updated: 2026-06-24 — added the long-lived `chat` process + Ink render loop as a thread-level substrate row; purged ask-cmd; re-grounded process boundary on raw-mode TTY stdin and trace-sink line refs.

@@ -234,7 +234,7 @@ ACID's "A" (atomicity) is the transaction's whole reason to exist: group writes 
 
 The cross-transaction gap in `indexDocumentRow` is the classic "dual write" problem in miniature — two stores (here, two tables) that must agree, updated in two steps. At scale the answer is the outbox pattern or a saga; at buffr's scale the answer is "wrap both in one transaction" (one-line fix: pass the `client` from a single `BEGIN` into both the documents insert and the chunk upsert). It's left un-wrapped because the soft `document_id` link (see below) and idempotent re-index make the inconsistency self-healing.
 
-**The dropped foreign key.** `chunks.document_id` is a *soft* link — `sql/001_agents_schema.sql:16-17` explains why, and line 27 actively drops any prior FK. A hard FK (`references documents(id)`) would reject a chunk whose document row doesn't exist yet — which would *break* the VectorStore contract, since `upsert(chunks)` is called with no guarantee a documents row exists (the pipeline indexes chunks directly). So the FK was removed to preserve drop-in parity with an in-memory store that has no documents table at all. The cost: no referential integrity — orphan chunks and dangling `document_id`s are possible and never rejected by the engine. Cross-link `study-data-modeling` for whether that link *should* be hard.
+**The dropped foreign key.** `chunks.document_id` is a *soft* link — `sql/001_agents_schema.sql:16-17` explains why, and line 27 actively drops any prior FK. A hard FK (`references documents(id)`) would reject a chunk whose document row doesn't exist yet — which would *break* the VectorStore contract, since `upsert(chunks)` is called with no guarantee a documents row exists (the pipeline indexes chunks directly). So the FK was removed to preserve drop-in parity with an in-memory store that has no documents table at all. The cost: no referential integrity — orphan chunks and dangling `document_id`s are possible and never rejected by the engine. That cost is now *exercised* on purpose: episodic memory chunks written via `createConversationMemory` (`src/session.ts:53,67`) live in the same `chunks` table with no `documents` row at all — they're permanent intentional "orphans" (ids `memory:<conv>:<n>`, `meta.kind='memory'`), which a hard FK would reject outright. Cross-link `study-data-modeling` for whether that link *should* be hard.
 
 ---
 
@@ -275,3 +275,7 @@ Anchor: *"A transaction is per-connection — `pool.connect()`, not `pool.query(
 - `07-wal-durability-and-recovery.md` — what COMMIT actually guarantees
 - `04-query-planning-and-execution.md` — the N+1 loop inside the upsert transaction
 - `study-data-modeling` — whether the soft `document_id` link should be a hard FK
+
+---
+
+Updated: 2026-06-24 — cross-transaction `indexDocumentRow` finding re-verified (`src/runtime.ts:11-17` → `src/pg-vector-store.ts` BEGIN/COMMIT) — unchanged, still stands. Dropped-FK section now notes the soft-link cost is exercised on purpose by episodic memory chunks (`createConversationMemory`, `src/session.ts:53,67`) that carry no documents row.

@@ -1,5 +1,12 @@
 # Sync interface, async work — `SupabaseTraceSink.emit` / `flush`
 
+> Updated: 2026-06-24 — emit now switches on all 6 CapabilityEvent variants
+> (step · tool_call_start · tool_call_end · model_usage · warning · error), not
+> just assistant steps + tool results. Choreography moved from the deleted
+> `ask-cmd.ts` into `src/session.ts` (`createChatSession`), which holds the sink
+> across every turn of a long-lived chat instead of building one per one-shot
+> call. The sync-emit / async-flush kernel is unchanged.
+
 **Subtitle:** Fire-and-collect / deferred-await over a synchronous callback —
 *Language-agnostic*. aptkit's `emit()` is synchronous; the DB write is not, so the
 sink queues promises and drains them once with `flush()`.
@@ -110,11 +117,23 @@ trace). The queue is what lets a sync function defer async work.
 ```
 
 **Part 2 — the un-awaited write inside `emit`.** `emit` calls `persistMessage(...)`
-which returns a `Promise`, and pushes it *without awaiting*. This is the move that
-keeps the agent loop fast: the DB round trip happens off to the side while the loop
-proceeds to the next step. Remove the "don't await" and `emit` would need to be
-`async` — which violates aptkit's synchronous contract and stalls the loop on every
-event.
+which returns a `Promise`, and pushes it (via the private `push` helper) *without
+awaiting*. This is the move that keeps the agent loop fast: the DB round trip
+happens off to the side while the loop proceeds to the next step. Remove the
+"don't await" and `emit` would need to be `async` — which violates aptkit's
+synchronous contract and stalls the loop on every event.
+
+**All six event variants are persisted now, not two.** `emit` is a `switch` over
+the full `CapabilityEvent` union (`src/supabase-trace-sink.ts:56-84`): `step`
+(assistant/user content), `tool_call_start` (the cause — tool name + args),
+`tool_call_end` (result + error + `durationMs`), `model_usage` (token counts into
+the once-orphaned `tokens_used` column), and `warning`/`error`. Each pushes one
+`persistMessage` promise carrying `event.timestamp` into `createdAt`, so replay
+order matches emit order rather than the race between concurrent flush inserts
+(`src/supabase-trace-sink.ts:55,59`). The earlier guide only saw `step` +
+`tool_call_end`; the sink now captures a complete, replayable trajectory. The
+kernel — queue, un-awaited write, single drain — is identical; only the *fan-out*
+of event types it handles grew.
 
 **Part 3 — the single drain (`flush`).** `await Promise.all(this.pending)`. This is
 the barrier that turns "eventually durable" into "now durable." Remove it and the
@@ -160,13 +179,14 @@ The full lifecycle in one frame.
   └──────────────────────┬───────────────────────────────────────┘
             emit (sync)   │
   ┌──────────────────────▼───────────────────────────────────────┐
-  │ SupabaseTraceSink   (src/supabase-trace-sink.ts:23-40)        │
-  │  emit(e): if step/assistant → pending.push(persistMessage(..))│
-  │           if tool_call_end   → pending.push(persistMessage(..))│
+  │ SupabaseTraceSink   (src/supabase-trace-sink.ts:49-94)        │
+  │  emit(e): switch over ALL 6 variants:                         │
+  │    step · tool_call_start · tool_call_end · model_usage ·     │
+  │    warning · error  →  pending.push(persistMessage(..))       │
   │  pending: [ Promise, Promise, ... ]   (racing in background)  │
   │  flush(): await Promise.all(pending)   ◄── the barrier        │
   └──────────────────────┬───────────────────────────────────────┘
-            async INSERT  │   (shell: await trace.flush() then pool.end())
+            async INSERT  │   (session: ask() flushes per turn; close() ends pool)
   ┌──────────────────────▼───────────────────────────────────────┐
   │ Postgres: agents.messages  (conversation_id, role, content)   │
   └────────────────────────────────────────────────────────────────┘
@@ -176,57 +196,83 @@ The full lifecycle in one frame.
 
 ## Implementation in codebase
 
-**Use cases.** Reached for in exactly one flow: `cli/ask-cmd.ts` constructs the
-sink, hands it to `RagQueryAgent`, runs the answer, then drains.
-`src/cli/ask-cmd.ts:31-35` is the whole choreography — build the sink with a
-conversation id, let the agent emit during `answer()`, then `await trace.flush()`
-*before* `pool.end()`. The ordering of those last two lines is the entire
-correctness of the pattern.
+**Use cases.** Reached for in exactly one flow, now owned by `src/session.ts`
+(the deleted `ask-cmd.ts` used to hold it). `createChatSession` builds the sink
+*once* with a conversation id, hands it to `RagQueryAgent`, and reuses it across
+every turn (`src/session.ts:55-57`). Inside each `ask()`, the agent emits during
+`answer()`, then `await trace.flush()` drains the queue
+(`src/session.ts:62-63`). The pool is closed separately in `close()`
+(`src/session.ts:72-74`) — called by the Ink UI on `/exit`
+(`src/cli/chat.tsx:18-20`). The ordering still matters: every turn must `flush`
+before the session is closed, or the trajectory's tail dies in a closing pool.
 
 **Code side by side.**
 
 ```
-  src/supabase-trace-sink.ts  (emit, lines 27-35) — fire
+  src/supabase-trace-sink.ts  (emit, lines 53-85) — fire
 
   emit(event: CapabilityEvent): void {           ← SYNC return type: can't await
     const { pool, conversationId } = this.opts;
-    if (event.type === 'step' && event.role === 'assistant' && event.content) {
-      this.pending.push(                          ← push, DON'T await: the write
-        persistMessage(pool, conversationId,         races in the background while
-          'assistant', event.content));              the agent loop continues
-    } else if (event.type === 'tool_call_end') {
-      this.pending.push(persistMessage(pool, conversationId,
-        'tool', event.toolName,                   ← tool turns recorded too
-        { toolResults: event.result }));
+    const at = event.timestamp;                   ← carried into created_at so
+    switch (event.type) {                            replay order = emit order
+      case 'step':
+        if (event.content)
+          this.push(persistMessage(pool, conversationId,
+            event.role, event.content, { createdAt: at }));   ← push, DON'T await
+        return;
+      case 'tool_call_start':                     ← the CAUSE: tool name + args
+        this.push(persistMessage(pool, conversationId, 'tool_call',
+          event.toolName, { toolCalls: { ... }, createdAt: at })); return;
+      case 'tool_call_end':                       ← result + error + durationMs
+        this.push(...); return;
+      case 'model_usage':                         ← fills the once-orphaned
+        this.push(persistMessage(pool, conversationId, 'model_usage', '', {
+          tokensUsed: (event.inputTokens ?? 0) + (event.outputTokens ?? 0), ...
+        })); return;
+      case 'warning': case 'error':               ← surfaced, not dropped
+        this.push(persistMessage(pool, conversationId,
+          event.type, event.message, { createdAt: at })); return;
     }
   }
        │
        └─ the push-without-await IS the pattern. Make emit async and you
           stall aptkit's loop on every DB round trip. (load-bearing)
+          NEW: the switch is exhaustive over all 6 variants — every event
+          type lands a row, so the trajectory is fully replayable.
 ```
 
 ```
-  src/supabase-trace-sink.ts  (flush, lines 37-39) — collect
+  src/supabase-trace-sink.ts  (flush, lines 91-93) — collect
 
   async flush(): Promise<void> {
     await Promise.all(this.pending);              ← the barrier: every queued
   }                                                  write must land before the
-                                                     shell closes the pool
+                                                     pool closes
        │
-       └─ called at src/cli/ask-cmd.ts:35, BEFORE pool.end() on line 38.
-          Reverse those two lines and the trace's tail is lost to a
-          closed pool mid-INSERT.
+       └─ called at src/session.ts:63 inside every ask(), BEFORE close()
+          ever runs pool.end() (src/session.ts:73). Flush per turn, close
+          once — drain before the pool dies or the trace's tail is lost.
 ```
 
 ```
-  src/cli/ask-cmd.ts  (the choreography, lines 31-38)
+  src/session.ts  (the choreography, lines 55-74)
 
-  const trace = new SupabaseTraceSink({ pool, conversationId });
+  const trace = new SupabaseTraceSink({ pool, conversationId });  ← built ONCE
   const agent = new RagQueryAgent({ model, tools, profile, trace });
-  const answer = await agent.answer(question);    ← emit() fires N times in here
-  await trace.flush();                             ← barrier: drain the queue
-  process.stdout.write(`\n${answer}\n`);
-  await pool.end();                                ← ONLY now safe to close
+  return {
+    async ask(question) {
+      await persistMessage(pool, conversationId, 'user', question);
+      const answer = await agent.answer(question); ← emit() fires N times in here
+      await trace.flush();                          ← barrier: drain THIS turn
+      ...                                            (then best-effort memory)
+      return answer;
+    },
+    async close() { await pool.end(); },           ← pool closes once, on /exit
+  };
+       │
+       └─ flush() is per-turn (inside ask), pool.end() is once (in close).
+          The sink and conversation are long-lived across the chat — a
+          shift from the old per-call one-shot. (src/session.ts)
 ```
 
 ---
@@ -265,8 +311,11 @@ fixed by the contract; the queue is how you live within it.
 
 **Q: What's the load-bearing part people forget?** The `flush()` barrier *and its
 ordering relative to `pool.end()`*. Everyone gets the queue; the bug is closing the
-pool before draining it (`src/cli/ask-cmd.ts:35` must precede `:38`). Naming that
-ordering is the signal you've actually run this and watched a trace go missing.
+pool before draining it. With the long-lived session this is sharper: `flush()`
+runs inside every `ask()` (`src/session.ts:63`), `pool.end()` runs once in
+`close()` (`src/session.ts:73`) — fired by the Ink UI's `/exit`
+(`src/cli/chat.tsx:18-20`). Flush each turn, close once. Naming that ordering is
+the signal you've run this and watched a trace go missing.
 
 **Q: What's the failure mode this design doesn't handle yet?** A rejected write.
 `Promise.all` short-circuits on the first rejection, so one failed `persistMessage`
@@ -285,8 +334,9 @@ now.
    (`src/supabase-trace-sink.ts:27`; aptkit's contract is synchronous.)
 3. **Apply:** the agent runs an unbounded loop. What grows without bound, and which
    hardening layer fixes it? (`pending[]`; backpressure/bounded buffer — Move 2.)
-4. **Defend:** a reviewer moves `pool.end()` above `trace.flush()` "to release the
-   pool sooner." Show them the bug. (`src/cli/ask-cmd.ts:35,38`.)
+4. **Defend:** a reviewer moves `pool.end()` so it can run before a turn's
+   `trace.flush()` resolves "to release the pool sooner." Show them the bug.
+   (`src/session.ts:63` flush vs `:73` close.)
 
 ---
 

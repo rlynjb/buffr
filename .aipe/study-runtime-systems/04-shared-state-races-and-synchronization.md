@@ -112,11 +112,14 @@ one sees a half-finished version."
 
 **The pool is shared, and that's by design.** `createPool` (`db.ts:4`) makes one
 `pg.Pool`. That single pool is passed into `PgVectorStore`, the trace sink,
-`indexDocumentRow`, `loadProfile` — everyone shares it. This is safe because the
-pool *itself* manages concurrent access: each `query`/`connect` checks out a
-distinct underlying client from its internal pool, and queues the request if
-none is free. You never see two callers on the same socket. → see `06` for the
-checkout/release lifecycle.
+`indexDocumentRow`, `loadProfile` — everyone shares it. In `chat` it's shared
+across an extra dimension too: not just across borrowers *within* one run but
+across *every turn* of the session — `createChatSession` builds it once
+(`session.ts:39`) and every `ask()` reuses it. This is safe because the pool
+*itself* manages concurrent access: each `query`/`connect` checks out a distinct
+underlying client from its internal pool, and queues the request if none is free.
+You never see two callers on the same socket. → see `06` for the checkout/release
+lifecycle.
 
 ```
   One pool, many borrowers — the pool's internal queue
@@ -327,3 +330,7 @@ must share a transaction; `query` when one statement stands alone.
 - `06-filesystem-streams-and-resource-lifecycle.md` — the client checkout/release lifecycle
 - `study-database-systems` — transaction isolation levels (neighbor guide)
 - `study-testing` — the testing strategy behind the concurrency flag (neighbor guide)
+
+---
+
+Updated: 2026-06-24 — noted the pool is now shared across every chat turn (built once in `session.ts:39`, reused per `ask()`), not just across borrowers within one run; transaction + test-concurrency findings unchanged.

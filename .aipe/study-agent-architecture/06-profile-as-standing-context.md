@@ -46,7 +46,7 @@ standing frame everything else fills in.
   "when is this context assembled?" — traced by lifecycle
 
   ┌──────────────────────────────────────────────┐
-  │ profile: at agent CONSTRUCTION (once per run) │  → standing, every turn
+  │ profile: at agent CONSTRUCTION (once/session) │  → standing, every turn
   └──────────────────────────────────────────────┘
       ┌──────────────────────────────────────────┐
       │ retrieved chunks: per TOOL CALL (≤4×)     │  → dynamic, some turns
@@ -127,7 +127,7 @@ every turn at zero per-turn cost — it's part of the prompt prefix.
 ```
   Layers-and-hops — profile from DB to every turn
 
-  ┌─ DB ─────────┐ loadProfile  ┌─ ask-cmd ────┐ profile  ┌─ RagQueryAgent ─┐
+  ┌─ DB ─────────┐ loadProfile  ┌─ session.ts ─┐ profile  ┌─ RagQueryAgent ─┐
   │ agents.      │ ───────────► │ pass to ctor │ ───────► │ injectProfile   │
   │ profiles     │              └──────────────┘          │ → this.system   │
   └──────────────┘                                        └────────┬────────┘
@@ -153,7 +153,7 @@ free for what retrieval brings back.
 ```
   Profile-as-context in buffr — full recap
 
-  ┌─ ask-cmd.ts:27 ───────────────────────────────────────────┐
+  ┌─ session.ts:47 ───────────────────────────────────────────┐
   │ profile = await loadProfile(pool, appId)   ← latest row    │
   └───────────────────────────────┬───────────────────────────┘
                                   │ new RagQueryAgent({ ..., profile })
@@ -178,8 +178,9 @@ free for what retrieval brings back.
 
 ### Use cases
 
-Reached once per run, at agent construction. It's what lets the same corpus and
-the same model answer *as the user's* assistant — grounding tone and
+Reached once per chat session, at agent construction (the session builds the
+agent once and reuses it for every turn — `session.ts:47, 57`). It's what lets
+the same corpus and the same model answer *as the user's* assistant — grounding tone and
 relevance to the person in `agents.profiles`. With no profile row, the agent
 degrades gracefully to a generic knowledge assistant (empty-string injection).
 
@@ -213,7 +214,7 @@ constructor(options) {
           profile-injector.js:8-13).
 ```
 
-The wiring (`src/cli/ask-cmd.ts:27, 33`):
+The wiring (`src/session.ts:47, 57`):
 
 ```
 const profile = await loadProfile(pool, cfg.appId);
@@ -284,3 +285,10 @@ Anchor: "Inject then render — order keeps both halves valid."
 - `audit.md` — Lens 7 (context engineering)
 - `.aipe/study-system-design/06-profile-injection-as-context.md` — the injection seam
 - Context window / lost-in-the-middle (sibling generator): `.aipe/study-ai-engineering/02-llm-foundations/`
+
+---
+
+Updated: 2026-06-24 — Injection pattern unchanged; re-pointed profile-load/wiring
+refs from the deleted `ask-cmd.ts` to `src/session.ts:47, 57`. Profile is now
+loaded once per long-lived chat session (agent built once, reused every turn),
+rather than once per one-shot `ask` invocation.

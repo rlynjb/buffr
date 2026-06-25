@@ -1,16 +1,18 @@
 # Agent loop with tool calling — bounded turns, forced synthesis
 
+> Updated: 2026-06-24 — `ask-cmd.ts` retargeted to the `chat`/`session.ts` surface; the `model_usage` event is no longer dropped — the trace sink now persists it into `tokens_used` (see `audit.md` LLM observability, `08-conversation-memory.md`).
+
 **Industry name(s):** Agentic RAG / tool-using agent loop (ReAct-shaped) · Language-agnostic pattern.
 
 ## Zoom out, then zoom in
 
-When you run `ask`, you don't call retrieval then generation in a fixed order — you hand the model a tool and let *it* decide whether to search and when to answer. That's the difference between a chain and an agent. The loop sits between the CLI and the model, mediating every turn.
+When you type a question into `chat`, you don't call retrieval then generation in a fixed order — you hand the model a tool and let *it* decide whether to search and when to answer. That's the difference between a chain and an agent. The loop sits between the session and the model, mediating every turn.
 
 ```
   Zoom out — where the agent loop lives
 
-  ┌─ CLI layer ──────────────────────────────────────────────┐
-  │  ask-cmd.ts → RagQueryAgent.answer(question)              │
+  ┌─ Session layer ──────────────────────────────────────────┐
+  │  session.ts → RagQueryAgent.answer(question)             │
   └───────────────────────────┬──────────────────────────────┘
                               │
   ┌─ Library layer ───────────▼──────────────────────────────┐
@@ -76,7 +78,7 @@ Mental model: you know a `while` loop that polls until a condition flips — `wh
 
 ### Step 1 — the model gets one turn to think
 
-Each iteration calls `model.complete({ system, messages, tools })`. The system prompt tells Gemma to *always search first* before answering. The model returns content blocks — either `text` (an answer or reasoning) or `tool_use` (a request to run a tool). buffr's profile is already baked into `system`. Boundary condition: the response's usage counts (`model_usage`) are emitted to the trace — but buffr's sink drops that event, so token cost isn't recorded.
+Each iteration calls `model.complete({ system, messages, tools })`. The system prompt tells Gemma to *always search first* before answering. The model returns content blocks — either `text` (an answer or reasoning) or `tool_use` (a request to run a tool). buffr's profile is already baked into `system`. Boundary condition: the response's usage counts (`model_usage`) are emitted to the trace and now *captured* — buffr's sink writes the summed input+output tokens into `agents.messages.tokens_used` (`src/supabase-trace-sink.ts:73`). Captured, not yet acted on: there's still no budget or cost rollup reading them.
 
 ### Step 2 — if it called a tool, run it and feed the result back
 
@@ -159,12 +161,12 @@ The full loop, every layer and the forced-final branch labeled.
 
 ## Implementation in codebase
 
-**Use cases.** Every `ask` invocation. The agent decides: search the personal corpus, read the chunks, answer with citations — or, if nothing's relevant, say so plainly. buffr wires the model, the tool registry, the profile, and the trace sink; the library runs the loop.
+**Use cases.** Every `chat` turn (`src/cli/chat.tsx` → `session.ask`). The agent decides: search the personal corpus, read the chunks, answer with citations — or, if nothing's relevant, say so plainly. buffr wires the model, the tool registry, the profile, and the trace sink; the library runs the loop. The session holds one warm conversation across all turns rather than rebuilding per call.
 
 **Code side by side.**
 
 ```
-  src/cli/ask-cmd.ts  (lines 23–34)
+  src/session.ts  (lines 43–62)
 
   const tool = createSearchKnowledgeBaseTool(pipeline, { minTopK: 4 });
   const tools = new InMemoryToolRegistry(
@@ -211,17 +213,17 @@ What to read next: `04-gemma-tool-call-emulation.md` — the inner seam where th
 
 - **What to build:** Detect when the model issues the same `search_knowledge_base` query twice and inject a "try a different approach" message instead of re-running it.
 - **Why it earns its place:** Closes a named gap in error recovery — "my agent detects when it's stuck and breaks the loop" is concrete agent-craft signal.
-- **Files to touch:** Since the loop is in the library (not editable), wrap it: add a buffr-side `LoopGuardTool` decorator around the search tool's handler in `src/cli/ask-cmd.ts`, or a thin wrapping registry that tracks recent args.
+- **Files to touch:** Since the loop is in the library (not editable), wrap it: add a buffr-side `LoopGuardTool` decorator around the search tool's handler in `src/session.ts`, or a thin wrapping registry that tracks recent args.
 - **Done when:** a test where the model repeats a query gets a redirect on the second identical call rather than a duplicate search.
 - **Estimated effort:** 1–4hr.
 
-### Capture token/cost per turn
+### Act on the now-captured token counts
 
-- **What to build:** Handle the `model_usage` trace event in `SupabaseTraceSink` and write `tokens_used` into `agents.messages`.
-- **Why it earns its place:** The column and the event already exist and are both unused — wiring them is the cheapest observability win and shows you can find the slow/expensive link.
-- **Files to touch:** `src/supabase-trace-sink.ts` (handle `model_usage`), `sql/001_agents_schema.sql` (already has `tokens_used`).
-- **Done when:** an `ask` run populates `tokens_used` for assistant messages.
-- **Estimated effort:** <1hr.
+- **What to build:** `tokens_used` is already populated per turn (`src/supabase-trace-sink.ts:73`). Read it: print a per-conversation token total when `chat` exits, or warn when a turn exceeds a budget.
+- **Why it earns its place:** Capture is done — the remaining gap is *acting* on the signal. "I log cost and I act on it" is a stronger observability story than logging alone.
+- **Files to touch:** `src/session.ts` (sum on close), `src/cli/chat.tsx` (surface the total), optionally a query over `agents.messages`.
+- **Done when:** exiting a `chat` session prints the conversation's total tokens, read from `agents.messages.tokens_used`.
+- **Estimated effort:** 1–4hr.
 
 ## Interview defense
 
@@ -242,8 +244,8 @@ The forced-final synthesis turn. "On the last turn the loop drops the tools arra
 
 - **Reconstruct:** Draw the loop kernel from memory: the turn, the tool-use branch, the break, the budget, the forced-final turn. (library `runAgentLoop`; budget set in `RagQueryAgent`)
 - **Explain:** Why is `maxTurns: 6` larger than `maxToolCalls: 4`? What would break if they were equal? (`RagQueryAgent.answer`)
-- **Apply:** A user reports `ask` sometimes returns "I couldn't find anything..." even though the corpus has the answer. Walk the loop and name two places this could originate. (`src/cli/ask-cmd.ts:23` minTopK; `04` JSON parse failure)
-- **Defend:** buffr wraps Gemma in `ContextWindowGuardedProvider(maxTokens: 8192)`. Defend that choice given the loop appends tool results to `messages` every turn. (`src/cli/ask-cmd.ts:26`)
+- **Apply:** A user reports `chat` sometimes returns "I couldn't find anything..." even though the corpus has the answer. Walk the loop and name two places this could originate. (`src/session.ts:43` minTopK; `04` JSON parse failure)
+- **Defend:** buffr wraps Gemma in `ContextWindowGuardedProvider(maxTokens: 8192)`. Defend that choice given the loop appends tool results to `messages` every turn. (`src/session.ts:46`)
 
 ## See also
 

@@ -163,7 +163,10 @@ Both resolution paths, side by side, with the cost and failure contrast.
 
 **Use cases.** Resolution happens implicitly on the first query/fetch of every
 CLI. There is no explicit DNS code in the repo — addressing is entirely
-delegated to the OS via the host strings.
+delegated to the OS via the host strings. Note the cadence under `chat`: the
+Supabase host is resolved once when the warm session pool dials its first
+connection (`src/session.ts:55`), and every later turn reuses that connection —
+so a long `chat` session pays the DNS+TCP cost once, not per turn.
 
 **Code side by side.** The entire addressing surface is two lines of config:
 
@@ -237,3 +240,5 @@ opaque strings." Anchor: `src/db.ts:5`.
 - `04-tls-and-trust-establishment.md` — why the remote name needs encryption and
   loopback doesn't.
 - `study-security` — credentials traveling to the resolved remote host.
+
+Updated: 2026-06-24 — Added the resolution-cadence note for the warm `chat` session: the Supabase host is resolved once on the session pool's first connection (`src/session.ts:55`) and reused across every turn, so a long session pays DNS+TCP once, not per turn. No stale `ask-cmd` refs in this file; the loopback-vs-remote address seam is unchanged.

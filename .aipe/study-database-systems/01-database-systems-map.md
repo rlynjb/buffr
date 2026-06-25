@@ -12,7 +12,7 @@ Before any single mechanism, here's the whole storage stack buffr stands on. One
   Zoom out — where the datastore sits in buffr
 
   ┌─ CLI layer ─────────────────────────────────────────────────┐
-  │  index-cmd · ask-cmd · eval-cmd  (src/cli/*.ts)             │
+  │  index-cmd · chat (session) · eval-cmd  (src/cli/*.ts)      │
   └──────────────────────────┬──────────────────────────────────┘
                              │  function calls
   ┌─ Persistence layer ──────▼──────────────────────────────────┐
@@ -122,13 +122,14 @@ The full recap — every layer, every path, the durability edge marked.
   buffr datastore — full map
 
   ┌─ CLI ───────────────────────────────────────────────────────────┐
-  │  index-cmd          ask-cmd               eval-cmd               │
+  │  index-cmd          chat (session)        eval-cmd               │
   └──────┬──────────────────┬─────────────────────┬──────────────────┘
-         │ index            │ ask                 │ score
+         │ index            │ ask() per turn      │ score
   ┌──────▼──────────────────▼─────────────────────▼─── Persistence ──┐
   │ indexDocumentRow    PgVectorStore          PgVectorStore         │
   │  + pipeline.index    .upsert (BEGIN/COMMIT) .search (1 SELECT)   │
-  │  trace-sink.persistMessage   loadProfile                         │
+  │  trace-sink.persistMessage   memory.remember → .upsert           │
+  │  loadProfile                                                     │
   └──────────────────────────┬───────────────────────────────────────┘
                              │  pg.Pool — rent a warm TCP conn
   ════════════════════════════ SEAM ════════════════════════════════
@@ -149,7 +150,7 @@ The full recap — every layer, every path, the durability edge marked.
 
 ## Implementation in codebase
 
-**Use cases.** Every CLI entry builds one pool and shares it. `ask-cmd.ts:19` does `const pool = createPool(cfg.databaseUrl)` then hands that *same* pool to `PgVectorStore`, `loadProfile`, `startConversation`, `persistMessage`, and the trace sink. The map is literally constructed in the first 33 lines of `ask-cmd.ts`.
+**Use cases.** Every CLI entry builds one pool and shares it. The interactive `chat` REPL is the longest-lived case: `createChatSession()` in `src/session.ts:39` does `const pool = createPool(cfg.databaseUrl)` once, then hands that *same* warm pool to `PgVectorStore`, `createRetrievalPipeline`, `loadProfile`, `createConversationMemory`, `startConversation`, `persistMessage`, and the trace sink — and holds all of them across *every* turn of the session, not just one call. The map is literally constructed in `createChatSession` (`src/session.ts:34-57`); each `ask()` reuses it (`src/session.ts:60-71`).
 
 ```
   src/db.ts  (lines 4–6)  — the entire pool factory
@@ -165,18 +166,21 @@ The full recap — every layer, every path, the durability edge marked.
 ```
 
 ```
-  src/cli/ask-cmd.ts  (lines 19–31)  — the map, constructed
+  src/session.ts  (lines 39–57)  — the map, constructed once per session
 
-  const pool = createPool(cfg.databaseUrl);          ← one pool…
+  const pool = createPool(cfg.databaseUrl);          ← one warm pool…
   const store = new PgVectorStore({ pool, ... });    ← …shared to the store
+  const pipeline = createRetrievalPipeline({...store});← …and the RAG pipeline
   const profile = await loadProfile(pool, cfg.appId);← …and to profile reads
+  const memory = createConversationMemory({...store});← …and episodic memory
   const conversationId =
     await startConversation(pool, cfg.appId);        ← …and to trace writes
   const trace = new SupabaseTraceSink({ pool, ... });← …and to the sink
        │
-       └─ every storage path in a single `ask` run crosses this one
-          pool. The pool IS the seam. Drop it and you'd open a fresh
-          TCP+auth handshake per query — fatal to localhost latency.
+       └─ every storage path in the WHOLE session crosses this one warm
+          pool — held across every turn, not rebuilt per call. The pool
+          IS the seam. Drop it and you'd open a fresh TCP+auth handshake
+          per query — fatal to localhost latency.
 ```
 
 ```
@@ -226,7 +230,7 @@ Anchor: *"Colocate until you have a scaling axis that splits them; buffr never d
 
 1. **Reconstruct:** Draw the three-layer map (CLI / persistence / engine) and mark the durability edge. Where is the one seam every query crosses?
 2. **Explain:** Why does `createPool` (`src/db.ts:4-6`) taking only a connection string mean pool sizing is "not yet exercised"?
-3. **Apply:** A new CLI command needs to read profiles *and* search chunks. How many pools should it build, and which existing line is the template? (See `ask-cmd.ts:19`.)
+3. **Apply:** A new CLI command needs to read profiles *and* search chunks. How many pools should it build, and which existing line is the template? (See `src/session.ts:39`.)
 4. **Defend:** Someone proposes moving vectors to Pinecone "for scale." Given buffr is single-device, what do you tell them?
 
 ---
@@ -238,3 +242,7 @@ Anchor: *"Colocate until you have a scaling axis that splits them; buffr never d
 - `07-wal-durability-and-recovery.md` — the durability edge in detail
 - `study-system-design` — which datastore and how it scales (the colocation decision)
 - `study-networking` — the TCP/connection lifecycle below the pool seam
+
+---
+
+Updated: 2026-06-24 — replaced deleted `ask-cmd` with `chat`/`createChatSession` (`src/session.ts`) as the long-lived warm-pool entry; added `createRetrievalPipeline` + `createConversationMemory` to the constructed-map snippet and diagram; the pool is now held across the whole session, not per-call.

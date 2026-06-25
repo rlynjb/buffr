@@ -1,5 +1,7 @@
 # Embedding model choice — nomic 768-dim as a one-way door
 
+> Updated: 2026-06-24 — `ask` entrypoint renamed to `chat`/`session.ts`; the same 768-dim embedder now also feeds conversation memory (`08-conversation-memory.md`), so memory rows share the one-way-door space too.
+
 **Industry name(s):** Embedding model / dimensionality selection · Industry standard (the "one-way door" framing).
 
 ## Zoom out, then zoom in
@@ -120,7 +122,7 @@ The four guards around the single source, full recap.
 
 ## Implementation in codebase
 
-**Use cases.** The dimension is committed at every entrypoint that touches vectors — `index`, `ask`, and `eval` all construct the provider and store the same way, so all three share the exact 768-dim space. This is why the eval measures the agent's real retrieval: same provider, same dimension, same store.
+**Use cases.** The dimension is committed at every entrypoint that touches vectors — `index`, `chat` (`session.ts`), `eval`, and now conversation memory all construct the provider and store the same way, so they share the exact 768-dim space. This is why the eval measures the agent's real retrieval: same provider, same dimension, same store — and why remembered exchanges land in that same space, recallable through the same search tool.
 
 **Code side by side.**
 

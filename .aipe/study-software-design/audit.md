@@ -1,14 +1,24 @@
 # Pass 1 — The APOSD audit (buffr-laptop)
 
+> Updated: 2026-06-24 — `ask-cmd.ts` deleted; its wiring moved into a new deep-ish
+> module `src/session.ts` (`createChatSession`). New Ink/React UI `src/cli/chat.tsx`
+> (new deps: ink/react). Inline memory block replaced by aptkit's
+> `createConversationMemory({ embedder, store })` (cleaner boundary, less code).
+> Trace sink now handles all 6 event types. aptkit bumped to ^0.4.1. The two
+> headline findings (dead `cfg.schema` knob + hardcoded `agents.`; the undocumented
+> `meta` contract) STILL hold — the meta contract is now partly co-owned by
+> @aptkit/memory.
+
 Eight lenses from *A Philosophy of Software Design*, walked against this repo's
 real files. Each lens names what the code actually does with `file:line`
 grounding, or says `not yet exercised` honestly. The capstone (Lens 8)
 consolidates the red-flag checklist. Where a finding earns a deep walk, it
 cross-links to a Pass 2 pattern file rather than restating it.
 
-The codebase: 10 TS source files, ~250 LOC of logic, ESM, consuming
-`@rlynjb/aptkit-core`. Small and young — several APOSD lenses have little to bite
-on, and that's stated plainly rather than padded.
+The codebase: ~12 TS source files (now including `src/session.ts` and the
+`src/cli/chat.tsx` Ink UI), ESM, consuming `@rlynjb/aptkit-core` ^0.4.1. Small and
+young — several APOSD lenses have little to bite on, and that's stated plainly
+rather than padded.
 
 ---
 
@@ -19,15 +29,17 @@ amplification* (one decision forces edits in many files), *cognitive load* (the
 module nobody wants to touch), and *unknown-unknowns* (you can't tell what a
 change will break). Here's where each lives.
 
-**Change amplification — the schema name.** The single worst spot. The decision
-"the schema is called `agents`" is hardcoded as the literal `agents.` in six SQL
-strings across five files: `src/profile.ts:6`, `src/runtime.ts:12`,
-`src/pg-vector-store.ts:48`, `src/pg-vector-store.ts:73`,
-`src/supabase-trace-sink.ts:6`, `src/supabase-trace-sink.ts:15`. Rename the
-schema and you touch five files. Worse, `loadConfig` already computes the schema
-name (`src/config.ts:13`) — so the fact lives in *seven* places and the one that
-was meant to be the single source of truth is never read. This is the audit's
-headline finding; it recurs under Lens 3 (leakage) and Lens 5 (dead knob).
+**Change amplification — the schema name. STILL the worst spot (verified
+2026-06-24).** The decision "the schema is called `agents`" is hardcoded as the
+literal `agents.` in six SQL strings across five files: `src/profile.ts:6`,
+`src/runtime.ts:12`, `src/pg-vector-store.ts:48`, `src/pg-vector-store.ts:73`,
+`src/supabase-trace-sink.ts:6` (conversations) and `src/supabase-trace-sink.ts:28`
+(messages). Rename the schema and you touch five files. Worse, `loadConfig` still
+computes the schema name (`src/config.ts:13`) — so the fact lives in *seven* places
+and the one that was meant to be the single source of truth is never read. The new
+`session.ts` doesn't add a site (it calls into the same persistence helpers), so
+the count is unchanged. This is the audit's headline finding; it recurs under Lens
+3 (leakage) and Lens 5 (dead knob).
 
 **Cognitive load — `PgVectorStore.upsert`.** Not a criticism — this is just where
 the density is. `upsert` (`src/pg-vector-store.ts:38-65`) holds a transaction
@@ -37,15 +49,19 @@ ON CONFLICT upsert. It's the most you have to hold in your head at once in this
 repo. It earns it: that's a deep module doing real work, not accidental tangle.
 → deep walk in `01-adapter-behind-a-contract.md`.
 
-**Unknown-unknowns — the `meta` shape contract.** The riskiest hidden coupling.
-`upsert` reads `c.meta.docId`, `c.meta.chunkIndex`, `c.meta.text`
-(`src/pg-vector-store.ts:44-46`) and `search` rebuilds exactly those keys
-(`src/pg-vector-store.ts:83`). Those string keys are an undocumented contract
-with aptkit's chunker on one side and aptkit's `search_knowledge_base` tool's
-citation rendering on the other. Nothing in the type system enforces them —
-`meta` is `Record<string, unknown>`. Change aptkit's chunk meta keys and buffr
-silently writes nulls. That's the textbook unknown-unknown: a dependency you
-can't see from the call site.
+**Unknown-unknowns — the `meta` shape contract. STILL undocumented, now
+co-owned.** The riskiest hidden coupling. `upsert` reads `c.meta.docId`,
+`c.meta.chunkIndex`, `c.meta.text` (`src/pg-vector-store.ts:44-46`) and `search`
+rebuilds exactly those keys (`src/pg-vector-store.ts:83`). Those string keys are an
+undocumented contract with aptkit's chunker on one side and aptkit's
+`search_knowledge_base` tool's citation rendering on the other. **New as of
+2026-06-24:** there's now a *third* writer of these keys — aptkit's
+`createConversationMemory` (`src/session.ts:53`) embeds each exchange into the SAME
+`PgVectorStore`, so memory chunks flow through the identical `upsert`/`search` meta
+round-trip, tagged `kind=memory`. The contract is now partly @aptkit/memory's, but
+it's still undocumented in buffr and still `Record<string, unknown>` with nothing
+enforcing it. Change aptkit's chunk/memory meta keys and buffr silently writes
+nulls. Textbook unknown-unknown — and the surface that depends on it just grew.
 
 Highest-complexity hotspots by path, ranked:
 1. The `agents.` schema literal (5 files) — change amplification.
@@ -67,6 +83,23 @@ encoding (`toVectorLiteral`, line 15), the cosine-distance→similarity inversio
 writes `await store.upsert(chunks)` and gets transactional, dimension-checked,
 ANN-indexed persistence. That's the deepest module in the repo by a wide margin.
 → `01-adapter-behind-a-contract.md`.
+
+**Newly deep (good): `ChatSession` / `createChatSession`** — `src/session.ts:29-76`.
+The `ChatSession` interface is two methods, `ask(question)` and `close()`
+(`src/session.ts:29-32`) — a *narrow* surface. Behind it `createChatSession` hides a
+lot: it builds the pg pool, the Ollama embedder, `PgVectorStore`, the retrieval
+pipeline + search tool, the context-guarded Gemma model, the profile load, the
+injected `createConversationMemory`, a long-lived conversation row, the trace sink,
+and the `RagQueryAgent` (`src/session.ts:34-57`). A caller does `const s = await
+createChatSession(); await s.ask(q)` and inherits the entire warm-pool, single-
+conversation, RAG-plus-memory machine. Functionality-to-interface ratio is high —
+this is a genuine deep module, the second-best in the repo. Two small info-hiding
+notes: (a) `ask` returns a bare `string`, hiding the trajectory/memory writes
+entirely — good; (b) the only knob it *doesn't* hide is global env (`loadEnv()` /
+`process.env` at `src/session.ts:35-36`), so unlike `loadConfig` this builder isn't
+purely testable — it reaches for the environment itself. That's the one place its
+interface is wider than it looks. Acceptable for a top-level wiring entry, but worth
+naming: it's the impure shell with a deep module's shape.
 
 **Shallowest (worst): `db.ts`** — `src/db.ts:4-6`. `createPool` is a one-line
 pass-through: it takes a connection string and returns `new pg.Pool({
@@ -141,10 +174,14 @@ queried, `cfg.appId` is read, `embedder.dimension` flows into the store
 (`src/cli/index-cmd.ts:19`). Nothing is threaded through a layer that doesn't
 touch it.
 
-**The CLI layer does not duplicate the persistence layer's abstraction.** `cli/*`
-is pure wiring (env → construct → run → drain). It offers *orchestration*, not a
-second copy of the storage abstraction. Clean separation. → walked in
-`02-pure-core-impure-shell.md`.
+**The wiring layer does not duplicate the persistence layer's abstraction.** The
+one-shot commands (`cli/index-cmd`, `cli/eval-cmd`) are still pure wiring (env →
+construct → run → drain). The chat path now splits in two: `session.ts` owns the
+*construction + orchestration* (build the agent, run turns) and `cli/chat.tsx` owns
+*presentation* (Ink render loop, input, busy state) — calling only `session.ask` /
+`session.close`. Neither re-implements storage; the split is orchestration vs UI,
+and the UI knows nothing of pools or aptkit. Clean separation, now across one more
+seam. → walked in `02-pure-core-impure-shell.md`.
 
 ---
 
@@ -185,11 +222,21 @@ definition would erase.
 **Mostly `not yet exercised` — and that's honest for a repo this small.** The
 error strategy here is uniform and shallow-by-design: throw and let it bubble.
 `assertDim` throws on dimension mismatch (`src/pg-vector-store.ts:33-34`); the
-CLIs throw on missing `DATABASE_URL` (`src/cli/index-cmd.ts:12`,
-`ask-cmd.ts:15`, `eval-cmd.ts:11`) and missing args. There is no try/catch
-sprawl, no swallowed errors, no scattered handling — because there's no recovery
-logic anywhere. For a single-device CLI tool, "throw and die with a clear message"
-is the right error model; you don't need aggregation or masking yet.
+entry points throw on missing `DATABASE_URL` (`src/cli/index-cmd.ts:12`,
+`src/session.ts:37`, `src/cli/eval-cmd.ts:11`) and missing args. For a single-device
+CLI tool, "throw and die with a clear message" is the right error model; you don't
+need aggregation or masking yet.
+
+**One deliberate swallow worth naming (NEW 2026-06-24).** `session.ts` wraps the
+memory write in a try/catch that intentionally drops the error:
+`try { await memory.remember(...) } catch { /* swallow: best-effort */ }`
+(`src/session.ts:65-69`). This is the *correct* kind of swallow — a comment names
+why (a memory-write failure must not lose the answer the user already has) and it's
+scoped to exactly one best-effort side effect, not blanket. It's the repo's first
+recovery decision, and it's defined in one place with a rationale, not scattered.
+The UI has a sibling: `chat.tsx` catches `session.ask` failures and renders them as
+a turn rather than crashing (`src/cli/chat.tsx:30-32`) — again localized, again with
+a clear purpose. Two intentional catches, both justified; still no try/catch sprawl.
 
 **The two real transaction try/catch blocks are correct and not sprawl.**
 `PgVectorStore.upsert` (`src/pg-vector-store.ts:59-64`) and `runMigration`
@@ -213,15 +260,21 @@ one private method and applied at both entry points. Good.
 ### names
 Strong overall. `toVectorLiteral`, `assertDim`, `indexDocumentRow`,
 `startConversation`, `persistMessage`, `loadProfile` — every name says what it
-does. No `data`, `obj`, `tmp`, or `manager` anywhere. One nit: `extra` in
-`persistMessage` (`src/supabase-trace-sink.ts:12`) is a vague name for a real
-shape (`{ toolResults?, model? }`); `messageMeta` would say more. Minor.
+does. No `data`, `obj`, `tmp`, or `manager` anywhere. One nit (still live): `extra`
+in `persistMessage` (`src/supabase-trace-sink.ts:21`, typed `MessageExtra` at
+`:10-17`) is a vague name for a now-richer shape (`{ toolCalls?, toolResults?,
+model?, tokensUsed?, createdAt? }`); `messageMeta` would say more. The shape grew
+with the 6-event capture, which makes the vague name slightly more costly than
+before. Still minor.
 
 ### comments
 This repo's strongest readability facet. The comments carry *why*, not *what*:
 the cosine-distance note (`src/pg-vector-store.ts:69`), the meta-rebuild rationale
 (line 79), the no-FK justification (`sql/001_agents_schema.sql:15-17`), the
-sync-emit/async-flush contract (`src/supabase-trace-sink.ts:21-22`). These are
+sync-emit/async-flush + full-trajectory contract (`src/supabase-trace-sink.ts:39-48`),
+and the new memory-model docblock on `createChatSession` (`src/session.ts:13-28`),
+which is unusually thorough about what's recalled, what's still missing, and whose
+engine the memory is. These are
 interface comments that capture decisions the code can't show. **The one missing
 interface comment that matters:** `upsert` reads three magic keys off `meta`
 (`docId`, `chunkIndex`, `text`) with no comment naming that contract
@@ -230,9 +283,13 @@ missing — add it.
 
 ### consistency
 Consistent. Two transaction blocks use the identical begin/commit/rollback/release
-shape (`pg-vector-store.ts:42-64`, `migrate.ts:10-19`). Every CLI uses the
-identical preamble (`loadEnv()` → `loadConfig` → `DATABASE_URL` guard → build →
-`pool.end()`). One job, one convention. No competing styles.
+shape (`pg-vector-store.ts:42-64`, `migrate.ts:10-19`). The remaining one-shot
+entries (`index-cmd.ts`, `eval-cmd.ts`, `migrate.ts`) still use the identical
+preamble (`loadEnv()` → `loadConfig` → `DATABASE_URL` guard → build → `pool.end()`).
+`session.ts` follows the same build phase but inverts the teardown: instead of
+`pool.end()` at the bottom of a script, it exposes `close()` for the long-lived
+caller to invoke (`src/session.ts:72-74`). One job, one convention, with a
+deliberate lifecycle variant for the chat session. No competing styles.
 
 ### obviousness
 One "huh?" spot: the `1 - (embedding <=> $1::vector) as score` inversion

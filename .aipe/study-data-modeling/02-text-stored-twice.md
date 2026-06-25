@@ -143,9 +143,16 @@ nothing.
 ## Implementation in codebase
 
 **Use case.** Triggered on every index (`npm run index`) and every search
-(`npm run ask`). Indexing writes the duplication; searching reads `content`
+(`npm run chat`). Indexing writes the duplication; searching reads `content`
 and rebuilds `meta.text` so aptkit's `search_knowledge_base` citations have
-the text to quote.
+the text to quote. It also fires on every **memory write**: `createConversationMemory`
+upserts each exchange through the *same* `PgVectorStore`
+(`src/session.ts:53,67`), and `@aptkit/memory` itself sets `meta.text` to the
+formatted exchange (`conversation-memory.ts:84`) — which the upsert then
+derives `content` from (`pg-vector-store.ts:46`). So the redundancy holds
+identically for `memory:<conv>:<n>` rows: the exchange text lives in `content`
+and in `meta.text` of the same row, library-set on one side, column-derived on
+the other.
 
 **Write side — `src/pg-vector-store.ts:46,55`:**
 
@@ -226,3 +233,8 @@ column is the only source I actually need.
 - `03-deterministic-chunk-ids.md` — the other column/`meta` redundancy pair.
 - `audit.md` §2 — normalization-and-duplication, the worst finding.
 - `study-software-design` → information-hiding (the code analog).
+
+---
+Updated: 2026-06-24 — re-verified the duplication still holds for memory rows
+written via `@aptkit/memory` (it sets `meta.text` at `conversation-memory.ts:84`;
+buffr derives `content` from it); added the memory-write use case; `ask` → `chat`.

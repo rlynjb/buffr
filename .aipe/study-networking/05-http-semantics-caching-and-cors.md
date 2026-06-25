@@ -46,7 +46,7 @@ cross-origin — because there's no browser and no GET.
 
   "who controls this request?"
 
-  ┌─ buffr (ask-cmd.ts) ────────────────────┐  → decides the HOST only
+  ┌─ buffr (session.ts) ────────────────────┐  → decides the HOST only
   │  new GemmaModelProvider({ host })        │     ("which server?")
   └──────────────────────────────────────────┘
       ┌─ aptkit transport ──────────────────┐  → decides method, path,
@@ -192,14 +192,15 @@ The full HTTP surface — both POSTs, the status branch, the absent server.
 
 ## Implementation in codebase
 
-**Use cases.** The chat POST fires once per `ask` (hop 5). The embed POST fires
-once per indexed document (`index`) and once per query (`ask`, `eval`). buffr
-configures both by host string and never touches the request itself.
+**Use cases.** The chat POST fires once per `chat` turn (hop 4). The embed POST
+fires once per indexed document (`index`), once per query turn (`chat`, `eval`),
+and once more per turn for the memory write. buffr configures both by host string
+and never touches the request itself.
 
-**Code side by side.** buffr's entire HTTP contribution:
+**Code side by side.** buffr's entire HTTP contribution, built once per session:
 
 ```
-  src/cli/ask-cmd.ts  (lines 20, 26)
+  src/session.ts  (lines 40, 46)
 
   const embedder = new OllamaEmbeddingProvider(
     { model: 'nomic-embed-text:v1.5', host: cfg.ollamaHost });  ← embed endpoint
@@ -256,8 +257,9 @@ I served a web UI." Anchor: no server in the repo; `src/cli/*`.
 Answer: "One status branch, inherited from aptkit's transport. `res.ok` means
 parse the body; anything else throws an error with the status and response text.
 There's no per-status logic — 404, 500, and 503 all become the same throw — and
-no retry. For a single-user CLI that surfaces-and-exits, that's adequate." Anchor:
-aptkit transport behind `src/cli/ask-cmd.ts:26`. → `07`.
+no retry. For a single-user CLI — where a thrown turn surfaces as an error line
+and the human re-asks — that's adequate." Anchor: aptkit transport behind
+`src/session.ts:46`. → `07`.
 
 ## Validate
 
@@ -274,3 +276,5 @@ aptkit transport behind `src/cli/ask-cmd.ts:26`. → `07`.
 - `07-timeouts-retries-pooling-and-backpressure.md` — what happens when these POSTs hang.
 - `study-security` — auth headers the current host-only seam can't carry.
 - `study-performance-engineering` — re-embedding identical text.
+
+Updated: 2026-06-24 — Repointed all HTTP-config cites off the deleted `ask-cmd.ts` onto `src/session.ts:40,46`, reframed POST cadence as per-`chat`-turn (plus the extra per-turn memory embed), and updated the error-contract framing from "surfaces-and-exits" to "thrown turn surfaces as an error line and the human re-asks." The aptkit-owned request shape (POST `/api/chat`, single content-type header, `res.ok` throw) is unchanged.

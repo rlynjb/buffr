@@ -1,5 +1,13 @@
 # Dependency as a boundary — aptkit imported, never edited
 
+> Updated: 2026-06-24 — the boundary now flows *both* ways. buffr still consumes
+> aptkit's contracts AND now injects its own `PgVectorStore` UP into aptkit's
+> `createConversationMemory({ embedder, store })` (`src/session.ts:53`) — buffr
+> supplies the storage detail, aptkit owns the memory engine. A *new* dependency
+> also crosses the line in the other direction: ink/react for the chat UI
+> (`src/cli/chat.tsx`, `package.json` ink/ink-spinner/ink-text-input/react). aptkit
+> bumped to ^0.4.1. The aptkit-is-immutable rule is unchanged.
+
 **Subtitle:** Dependency Inversion / consume-a-library-as-a-contract —
 *Industry standard*. aptkit is a hard boundary: buffr imports `@rlynjb/aptkit-core`
 and implements its interfaces, but never edits a line of it.
@@ -18,17 +26,20 @@ that makes every other pattern in this guide possible.
 ```
   Zoom out — the two-repo boundary
 
-  ┌─ @rlynjb/aptkit-core (npm, ^0.4.0 — NEVER EDITED here) ───────┐
+  ┌─ @rlynjb/aptkit-core (npm, ^0.4.1 — NEVER EDITED here) ───────┐
   │  contracts:  VectorStore  CapabilityTraceSink  RetrievalPipeline│
   │  behavior:   RagQueryAgent  createSearchKnowledgeBaseTool       │
   │              OllamaEmbeddingProvider  GemmaModelProvider         │
   │              scorePrecisionAtK  ContextWindowGuardedProvider     │
+  │              createConversationMemory  ◄─ buffr injects its store│
   └───────────────────────────┬───────────────────────────────────┘
               import boundary  ▼  (the hard line — ★ THIS CONCEPT ★)
   ┌─ buffr (this repo) ───────────────────────────────────────────┐
   │  implements:  PgVectorStore  SupabaseTraceSink                 │
-  │  wires:       cli/* builds aptkit objects + buffr adapters     │
-  │  adds:        Postgres persistence aptkit knows nothing about  │
+  │  injects UP:  PgVectorStore into createConversationMemory       │
+  │  wires:       session.ts builds aptkit objects + buffr adapters │
+  │  adds:        Postgres persistence aptkit knows nothing about   │
+  │  + new dep:   ink/react (chat.tsx UI) — crosses the line too    │
   └────────────────────────────────────────────────────────────────┘
 ```
 
@@ -69,10 +80,20 @@ import arrow points, and what that forbids.
   upward, because it doesn't own that interface. The boundary is an *upper bound on
   leakage* — see `01-adapter-behind-a-contract.md`, which is one concrete plug into
   this boundary.
-- **The two kinds of things crossing the seam:** *contracts* buffr implements
-  (`VectorStore`, `CapabilityTraceSink`) and *behavior* buffr instantiates
-  (`RagQueryAgent`, `OllamaEmbeddingProvider`, the eval scorers). The first buffr
-  fills in; the second buffr just uses.
+- **Three kinds of things crossing the seam (was two):** *contracts* buffr
+  implements (`VectorStore`, `CapabilityTraceSink`); *behavior* buffr instantiates
+  (`RagQueryAgent`, `OllamaEmbeddingProvider`, the eval scorers); and now
+  *inject-up* — buffr passes its own `PgVectorStore` *into* aptkit's
+  `createConversationMemory` (`src/session.ts:53`), so a buffr detail backs an
+  aptkit engine. The first buffr fills in, the second buffr uses, the third buffr
+  supplies the storage for.
+- **A second, non-aptkit boundary (NEW):** the chat UI imports ink/react
+  (`src/cli/chat.tsx:1-4`), a fresh dependency listed in `package.json`
+  (ink, ink-spinner, ink-text-input, react). It's the same consume-as-a-contract
+  discipline — buffr writes components against ink's API, never forks ink — but it
+  widens buffr's dependency surface beyond aptkit for the first time. The UI layer
+  is the only place ink reaches; `session.ts` and the persistence layer stay
+  ink-free, so the React dependency is quarantined at the edge.
 
 ---
 
@@ -133,6 +154,30 @@ point is where buffr's adapters meet aptkit's behavior.
                            ├─► createRetrievalPipeline (aptkit) ──► pipeline
    aptkit's Ollama embedder┘
    buffr's SupabaseTraceSink ──► new RagQueryAgent({ trace }) (aptkit) ──► agent
+   buffr's PgVectorStore ──────► createConversationMemory (aptkit) ──► memory
+```
+
+**Injecting up — the strengthened case (NEW).** Conversation memory makes the
+boundary's bidirectionality explicit. `createConversationMemory({ embedder, store })`
+(`src/session.ts:53`) is aptkit *behavior* buffr instantiates — but buffr hands it
+buffr's own `PgVectorStore` as the `store`. So the dependency arrow still points
+buffr → aptkit (buffr calls aptkit's factory), yet the *data* flows up: buffr's
+storage detail fills aptkit's memory engine. aptkit owns "embed the exchange, tag
+it `kind=memory`, recall relevant past turns"; buffr owns "where those vectors
+live." Before this change, buffr had an inline memory block; replacing it with the
+injected factory is *less buffr code* and a *cleaner boundary* — the recall logic
+moved to the side that should own it (aptkit), and buffr kept only the part it
+should own (the store). This is the boundary working as a force for extraction, not
+just consumption.
+
+```
+  Inject-up — buffr supplies the detail, aptkit owns the engine
+
+   buffr's PgVectorStore ─inject─► createConversationMemory (aptkit)
+        │ (the store, buffr's)            │ (embed · tag · recall — aptkit's)
+        └─ memory chunks land in the SAME store, surfaced via the existing
+           search_knowledge_base tool. The dropped FK (no documents row for
+           a memory chunk) is what lets this share the chunks table. (audit Lens 3)
 ```
 
 **The constraint that proves the boundary: 768 lives on both sides, owned by
@@ -160,18 +205,21 @@ The full boundary in one frame.
 ```
   Dependency-as-a-boundary — the whole two-repo relationship
 
-  ┌─ @rlynjb/aptkit-core (npm ^0.4.0 — immutable) ───────────────┐
+  ┌─ @rlynjb/aptkit-core (npm ^0.4.1 — immutable) ───────────────┐
   │  CONTRACTS              BEHAVIOR                              │
   │  VectorStore ───┐       RagQueryAgent     OllamaEmbedder     │
   │  CapabilityTrace│       RetrievalPipeline ContextGuarded     │
   │  Sink ──────────┤       ToolRegistry      score{Precision,   │
-  │                 │       GemmaProvider      Recall}AtK        │
+  │                 │       GemmaProvider     createConversation- │
+  │                 │       Recall/PrecisionAtK   Memory ◄inject  │
   └─────────────────┼────────────────┬───────────────────────────┘
-       implements    │     instantiates│   (one-way import arrow ▲)
+       implements    │  instantiate / │   (one-way import arrow ▲)
+                     │  inject-up     │
   ┌─────────────────▼────────────────▼───────────────────────────┐
   │ buffr:  PgVectorStore   SupabaseTraceSink                     │
-  │         cli/index · ask · eval  (compose + wire + persist)    │
+  │         session.ts (compose + wire) · cli/{index,eval,chat}   │
   │         + Postgres aptkit never sees                          │
+  │         + ink/react (new dep) drives chat.tsx                 │
   └────────────────────────────────────────────────────────────────┘
 ```
 
@@ -181,10 +229,12 @@ The full boundary in one frame.
 
 **Use cases.** Every source file that touches aptkit reaches for this boundary.
 The *implements* side: `src/pg-vector-store.ts:2,19` (`VectorStore`) and
-`src/supabase-trace-sink.ts:2,23` (`CapabilityTraceSink`). The *instantiates* side:
-all three CLIs — `src/cli/index-cmd.ts:4,18-20`, `src/cli/ask-cmd.ts:2-6,23-33`,
-`src/cli/eval-cmd.ts:3-4,14-16`. `runtime.ts` sits on the boundary too, taking an
-aptkit `RetrievalPipeline` as a parameter (`src/runtime.ts:2,8`) and calling
+`src/supabase-trace-sink.ts:2,49` (`CapabilityTraceSink`). The *instantiates* side:
+the chat wiring in `src/session.ts:2-11,40-57` (which replaced the deleted
+`ask-cmd.ts`), plus `src/cli/index-cmd.ts:4,18-20` and `src/cli/eval-cmd.ts:3-4,15-16`.
+The *inject-up* side (new): `src/session.ts:53` hands `PgVectorStore` to aptkit's
+`createConversationMemory`. `runtime.ts` sits on the boundary too, taking an aptkit
+`RetrievalPipeline` as a parameter (`src/runtime.ts:2,8`) and calling
 `pipeline.index` without owning it.
 
 **Code side by side.**
@@ -203,20 +253,24 @@ aptkit `RetrievalPipeline` as a parameter (`src/runtime.ts:2,8`) and calling
 ```
 
 ```
-  src/cli/ask-cmd.ts  (lines 23-33) — the instantiates side
+  src/session.ts  (lines 42-57) — the instantiates + inject-up side
 
-  const tool = createSearchKnowledgeBaseTool(pipeline, { minTopK: 4 });  ← aptkit
-  const tools = new InMemoryToolRegistry([tool.definition], {...});      ← aptkit
-  const model = new ContextWindowGuardedProvider(                        ← aptkit
+  const pipeline = createRetrievalPipeline({ embedder, store });        ← aptkit
+  const tool = createSearchKnowledgeBaseTool(pipeline, { minTopK: 4 }); ← aptkit
+  const tools = new InMemoryToolRegistry([tool.definition], {...});     ← aptkit
+  const model = new ContextWindowGuardedProvider(                       ← aptkit
     new GemmaModelProvider({ host: cfg.ollamaHost }), { maxTokens: 8192 });
-  ...
+  const memory = createConversationMemory({ embedder, store });  ← INJECT-UP:
+                                                          buffr's store into aptkit
   const agent = new RagQueryAgent({                          ← aptkit BEHAVIOR
     model, tools, profile,
     trace,                                                   ← buffr's adapter,
   });                                                           plugged in here
        │
        └─ buffr supplies the args (some are buffr's own contract impls);
-          aptkit supplies the orchestration. The wiring point is the seam.
+          aptkit supplies the orchestration. session.ts is the seam — and
+          memory shows the arrow points up in DATA while pointing buffr→aptkit
+          in CONTROL: buffr calls aptkit's factory with buffr's store.
 ```
 
 ```

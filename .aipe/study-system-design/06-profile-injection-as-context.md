@@ -17,7 +17,7 @@ agent* rather than a generic Gemma.
   Zoom out — where the profile enters the agent
 
   ┌─ CLI layer (buffr) ──────────────────────────────────────────┐
-  │  ask-cmd: profile = await loadProfile(pool, appId)            │
+  │  chat session: profile = await loadProfile(pool, appId)      │
   └──────────────────────────┬───────────────────────────────────┘
   ┌─ Adapter layer (buffr) ──▼──────────────────────────────────┐
   │      ★ loadProfile ★   SELECT content ... ORDER BY updated_at │
@@ -96,7 +96,8 @@ Three parts. Each named by what breaks without it.
 `loadProfile` doesn't read *a* profile — it reads the *most recent* one,
 `order by updated_at desc limit 1`, scoped to `app_id`. That ordering is the
 versioning scheme: update the profile by inserting a newer row, and the next
-`ask` picks it up.
+chat *session* picks it up (profile is loaded once when the session is built,
+not per turn — so a mid-session insert lands on the next launch).
 
 ```
   pseudocode — latest-wins
@@ -173,8 +174,8 @@ The full injection path, latest-wins and fallback marked.
   │ rows[0]?.content ?? ''   ← latest-wins + empty fallback         │
   └───────────────────────┬────────────────────────────────────────┘
                           │ string
-  ┌─ CLI (ask-cmd) ───────▼────────────────────────────────────────┐
-  │ const profile = await loadProfile(pool, cfg.appId)             │
+  ┌─ CLI (session.ts) ────▼────────────────────────────────────────┐
+  │ const profile = await loadProfile(pool, cfg.appId)  (once)     │
   │ new RagQueryAgent({ model, tools, profile, trace })            │
   └───────────────────────┬────────────────────────────────────────┘
                           │ profile injected
@@ -185,9 +186,10 @@ The full injection path, latest-wins and fallback marked.
 
 ## Implementation in codebase
 
-**Use cases.** Read once per `ask`, right before the agent is built. It's the
-"who am I answering as" step. There's no write path in the repo — profile rows
-are inserted out of band (the design calls it "me.md as a row").
+**Use cases.** Read once per chat *session*, right before the agent is built
+(not per turn — the agent is constructed once and reused). It's the "who am I
+answering as" step. There's no write path in the repo — profile rows are
+inserted out of band (the design calls it "me.md as a row").
 
 **The whole adapter — eight lines** — `src/profile.ts:1-9`
 
@@ -204,16 +206,17 @@ are inserted out of band (the design calls it "me.md as a row").
            side — read-only by design this phase.
 ```
 
-**Where it's injected** — `src/cli/ask-cmd.ts:27, 33`
+**Where it's injected** — `src/session.ts:47, 57`
 
 ```
-  const profile = await loadProfile(pool, cfg.appId);              ← 27: fetch
+  const profile = await loadProfile(pool, cfg.appId);              ← 47: fetch (once)
   ...
-  const agent = new RagQueryAgent({ model, tools, profile, trace });← 33: inject
+  const agent = new RagQueryAgent({ model, tools, profile, trace });← 57: inject
         │
         └─ profile is a constructor option on aptkit's RagQueryAgent — buffr
            fills the persona slot the toolkit exposes. The agent assembles it
-           into the system prompt (aptkit's job, not buffr's).
+           into the system prompt (aptkit's job, not buffr's). Built once at
+           createChatSession and reused across every turn of the session.
 ```
 
 **The table it reads** — `sql/001_agents_schema.sql:52-58`
@@ -257,7 +260,7 @@ benefit is the agent's identity is a fact you can change without a deploy.
 
 ```
   hardcoded string → redeploy to change persona
-  agents.profiles row → insert a row, next ask picks it up
+  agents.profiles row → insert a row, next chat session picks it up
 ```
 
 Anchor: `src/profile.ts:6`.
@@ -294,6 +297,13 @@ Anchor: `src/profile.ts:8`.
   (the trace sink).
 - `04-library-as-dependency-boundary.md` — `profile` is an aptkit option buffr
   fills.
-- `05-cli-as-entrypoints.md` — where `loadProfile` runs in the `ask` flow.
+- `05-cli-as-entrypoints.md` — where `loadProfile` runs in the chat session
+  wiring (once, at `createChatSession`).
 - `study-prompt-engineering` — how persona is assembled into the prompt.
 - `study-data-modeling` — the `profiles` table shape and `app_id` scoping.
+
+---
+
+Updated: 2026-06-24 — re-anchored `loadProfile` injection from `ask-cmd.ts:27,33`
+to `session.ts:47,57`; clarified profile is loaded once per chat session (not
+per turn), so an out-of-band insert lands on next launch.

@@ -1,5 +1,7 @@
 # Gemma tool-call emulation — prompt-and-parse instead of native tools
 
+> Updated: 2026-06-24 — emulation mechanics unchanged; `ask`/`ask-cmd.ts` references retargeted to the `chat`/`session.ts` surface.
+
 **Industry name(s):** Tool-call emulation / JSON-mode tool calling for non-tool models · Project-specific (forced by the model choice).
 
 ## Zoom out, then zoom in
@@ -139,12 +141,12 @@ The full emulation round-trip, both directions and the retry branch.
 
 ## Implementation in codebase
 
-**Use cases.** Runs on every model turn inside `ask` where the loop offers tools (every turn except the forced-final one). buffr's decision to use Gemma — a free, local, no-native-tools model — is what makes emulation necessary. Choose a native-tool model and this entire layer disappears.
+**Use cases.** Runs on every model turn inside `chat` where the loop offers tools (every turn except the forced-final one). buffr's decision to use Gemma — a free, local, no-native-tools model — is what makes emulation necessary. Choose a native-tool model and this entire layer disappears.
 
 **Code side by side.** The emulation logic lives in the library's `GemmaModelProvider` (buffr consumes it unchanged), but buffr's choice at the call site is what activates it:
 
 ```
-  src/cli/ask-cmd.ts  (line 26)
+  src/session.ts  (line 46)
 
   const model = new ContextWindowGuardedProvider(
     new GemmaModelProvider({ host: cfg.ollamaHost }), { maxTokens: 8192 });
@@ -186,13 +188,13 @@ What to read next: `03-agent-loop-with-tool-calling.md` (the loop that consumes 
 
 - **What to build:** A buffr-side wrapper around the search tool's handler (or the registry) that validates `args` against `search_knowledge_base`'s `inputSchema` and rejects a call with a missing/empty `query` instead of searching for `''`.
 - **Why it earns its place:** Closes the silent-bad-retrieval path — "I found that emulated tool calls with the wrong argument key searched for empty string, and I added schema validation at the boundary" is a precise, real bug story.
-- **Files to touch:** `src/cli/ask-cmd.ts` (wrap `tool.handler`), optionally a new `src/tool-guard.ts`.
+- **Files to touch:** `src/session.ts` (wrap `tool.handler`), optionally a new `src/tool-guard.ts`.
 - **Done when:** a test feeding `{arguments: {q: "x"}}` (wrong key) gets a clear error fed back to the loop, not an empty-string search.
 - **Estimated effort:** 1–4hr.
 
 ### Measure emulation failure rate
 
-- **What to build:** An eval that runs N fixed questions through `ask` and counts how often Gemma needed the retry nudge vs. emitted clean JSON on the first attempt.
+- **What to build:** An eval that runs N fixed questions through `chat` and counts how often Gemma needed the retry nudge vs. emitted clean JSON on the first attempt.
 - **Why it earns its place:** Quantifies the reliability ceiling — "my tool-call emulation succeeds first-try 80% of the time" is a number most candidates can't produce about their own agent.
 - **Files to touch:** new `src/cli/emulation-eval-cmd.ts`, a transport/trace hook to count attempts.
 - **Done when:** the command prints a first-try success rate over a fixed question set.
@@ -218,7 +220,7 @@ The `includes('{')` retry heuristic and the lack of argument validation. "A pros
 - **Reconstruct:** Draw the emulation round-trip from memory: outbound render, inbound parse, the retry-or-accept branch. (library `GemmaModelProvider.complete`)
 - **Explain:** Why does the provider retry only when the text contains `{`? What two failure modes does that heuristic have? (`looksLikeToolAttempt`)
 - **Apply:** Gemma returns `{"tool":"search_knowledge_base","input":{"query":"coffee"}}` — note `input` not `arguments`. Does it work? Trace `parseToolCall`. (multi-key tolerance: `obj.arguments ?? obj.input ?? obj.args`)
-- **Defend:** buffr chose Gemma over a native-tool cloud model. Defend that for a local personal RAG agent, then name the reliability cost. (`src/cli/ask-cmd.ts:26`)
+- **Defend:** buffr chose Gemma over a native-tool cloud model. Defend that for a local personal RAG agent, then name the reliability cost. (`src/session.ts:46`)
 
 ## See also
 

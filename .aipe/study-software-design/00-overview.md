@@ -1,5 +1,11 @@
 # Software Design — buffr-laptop (overview)
 
+> Updated: 2026-06-24 — `ask-cmd.ts` deleted; chat wiring now lives in a new deep
+> module `src/session.ts` (`createChatSession`), driven by a new Ink/React UI
+> `src/cli/chat.tsx` (new deps: ink/react). Memory is now aptkit's
+> `createConversationMemory` with buffr's store injected. Trace sink handles all 6
+> event types. aptkit ^0.4.1. The three ranked fixes below are unchanged.
+
 > Source framework: John Ousterhout, *A Philosophy of Software Design* (APOSD).
 > This guide applies its primitives — deep modules, information hiding,
 > complexity, layering, readability — to **this repo's real files**. Read the
@@ -14,13 +20,16 @@ makes a module hard to change without breaking something you didn't know was
 connected. The weapon is the **deep module**: a lot of behavior hidden behind a
 small interface, so callers learn a few names and inherit a lot of correctness.
 
-buffr is a small, young codebase (10 source files, ~250 LOC of logic) — and it is
-*unusually well-shaped for its size*. The reason is structural, not lucky: buffr
-consumes `@rlynjb/aptkit-core` as a library and implements three of aptkit's
-**contracts** (`VectorStore`, `CapabilityTraceSink`, `RetrievalPipeline`
-consumer). When you implement someone else's interface, the interface width is
-decided *for* you — you can't leak, because the contract won't let you. Most of
-buffr's design quality is downstream of that one decision.
+buffr is a small, young codebase (~12 source files) — and it is *unusually
+well-shaped for its size*. The reason is structural, not lucky: buffr consumes
+`@rlynjb/aptkit-core` as a library and implements three of aptkit's **contracts**
+(`VectorStore`, `CapabilityTraceSink`, `RetrievalPipeline` consumer). When you
+implement someone else's interface, the interface width is decided *for* you — you
+can't leak, because the contract won't let you. Most of buffr's design quality is
+downstream of that one decision. The newest module, `session.ts`
+(`createChatSession`), extends the same instinct: a two-method `ChatSession`
+interface (`ask`/`close`) hiding the whole warm-pool, single-conversation,
+RAG-plus-memory machine.
 
 ```
   buffr-laptop — where design quality comes from
@@ -32,13 +41,19 @@ buffr's design quality is downstream of that one decision.
                   buffr implements the contracts ▼  (narrow seam)
   ┌─ buffr persistence layer ────────────────────────────────────┐
   │  PgVectorStore      ← deepest module (★ best in repo)         │
-  │  SupabaseTraceSink  ← sync emit / async flush                 │
+  │  SupabaseTraceSink  ← sync emit / async flush (all 6 events)  │
   │  loadConfig         ← pure seam (testable)                    │
   │  db / runtime / profile / migrate  ← thin SQL helpers         │
   └───────────────────────────┬──────────────────────────────────┘
-                              ▼  imperative shell
-  ┌─ cli/ (index · ask · eval) ──────────────────────────────────┐
-  │  wiring only: load env → build objects → run → drain pool    │
+                              ▼  orchestration
+  ┌─ session.ts (createChatSession) ─────────────────────────────┐
+  │  deep: builds pool/agent/memory/conversation; ask() / close() │
+  │  injects PgVectorStore UP into aptkit's createConversationMemory│
+  └───────────────────────────┬──────────────────────────────────┘
+                              ▼  imperative shell + UI
+  ┌─ cli/ (index · eval  ·  chat.tsx = Ink/React UI) ────────────┐
+  │  one-shots: env → build → run → drain pool                   │
+  │  chat.tsx: render loop, input, busy — calls session.ask/close│
   └──────────────────────────────────────────────────────────────┘
                               ▼
   ┌─ Storage ────────────────────────────────────────────────────┐
@@ -54,9 +69,12 @@ buffr's design quality is downstream of that one decision.
    inversion, and the meta-shape rebuild that keeps citations working. Big
    behavior, tiny surface. `src/pg-vector-store.ts`.
 
-2. **The CLIs are a clean imperative shell over a pure-ish core.** `loadConfig`
-   is pure (env in, config out — `src/config.ts:9`); the `cli/*` files do all the
-   I/O, env-loading, and pool teardown. The dirty work is pushed to the edges.
+2. **A clean imperative shell over a pure-ish core, now with a UI seam.**
+   `loadConfig` is pure (env in, config out — `src/config.ts:9`); the one-shot
+   `cli/*` commands and `session.ts` do the I/O, env-loading, and pool lifecycle.
+   The new `chat.tsx` adds a presentation seam on top — Ink/React render loop that
+   touches only `session.ask`/`session.close`, never a pool. Dirty work at the
+   edges, UI quarantined above orchestration.
 
 3. **One real leak, and it's a dead knob.** `loadConfig` computes
    `schema` from `AGENT_DB_SCHEMA` (`src/config.ts:13`), but every SQL string

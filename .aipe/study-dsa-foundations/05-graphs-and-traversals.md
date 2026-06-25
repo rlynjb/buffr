@@ -239,9 +239,11 @@ The whole HNSW search, from SQL to graph walk to result, in one frame.
 
 ## Implementation in codebase
 
-**Use cases.** This graph walk fires on *every* `npm run ask` (the
+**Use cases.** This graph walk fires on *every* `npm run chat` turn (the
 `search_knowledge_base` tool calls `pipeline.query` → `store.search`) and every
-`npm run eval` query. It is the hot path of the entire RAG system — and it's one
+`npm run eval` query. It also fires on every memory write — `@aptkit/memory`
+embeds each chat exchange into the same store, so its recall reuses this exact
+walk (no new DSA, same HNSW path). It is the hot path of the entire RAG system — and it's one
 SQL line in buffr's source, with the graph algorithm itself inside pgvector.
 
 ```
@@ -377,3 +379,6 @@ query goes from milliseconds to seconds." Anchor: `sql/001_agents_schema.sql:28`
   other in vector space (what makes proximity meaningful).
 - `study-database-systems` → how Postgres's planner chooses the HNSW index and the
   on-disk graph layout.
+
+
+Updated: 2026-06-24 — purged `npm run ask` / `src/cli/ask-cmd.ts` references; re-grounded the agent loop on `src/session.ts` (built `:57`, invoked `:62`) and the chat entrypoint `src/cli/chat.tsx`; noted `@aptkit/memory` reuses the same HNSW walk (no new DSA).

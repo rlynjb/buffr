@@ -206,7 +206,11 @@ The full upsert path, transaction and statement granularity labelled.
 ## Implementation in codebase
 
 **Use cases.** Reached on every `pipeline.index(...)` call — i.e. once per
-document during `npm run index`. It's the only write path into `agents.chunks`.
+document during `npm run index`. As of `chat`, it's *also* the write path for
+episodic memory: each turn's `memory.remember` (`src/session.ts:66`) embeds the
+exchange and upserts it through this same `PgVectorStore.upsert`, so the per-chunk
+loop now runs once per indexed document *and* once per chat turn (a 1–2 chunk
+upsert per turn). Still the only write path into `agents.chunks`.
 
 **The upsert — `src/pg-vector-store.ts:38-65`:**
 
@@ -299,3 +303,12 @@ drop the `begin`/`commit` too — but the atomicity is the *correctness* guarant
 - `02-embedding-http-roundtrip.md` — the embed call that dominates this write
 - `04-connection-pool-reuse.md` — the warm connection the loop runs on
 - `study-database-systems` — multi-row INSERT, `COPY`, transaction mechanics
+
+---
+
+Updated: 2026-06-24 — Re-verified UNCHANGED: the per-chunk INSERT loop, the
+transaction wrapper, and the `on conflict do update` upsert
+(`pg-vector-store.ts:38-65`) are identical; lowest-consequence finding stands.
+Noted one new caller: the per-turn episodic-memory write
+(`memory.remember`, `session.ts:66`) now drives this same upsert once per chat
+turn, on top of once per indexed document.

@@ -20,11 +20,13 @@ The whole storage story fits on one page. Every read and write in buffr flows th
 
   ┌─ Application layer (TypeScript, ESM) ───────────────────────────┐
   │                                                                  │
-  │  index-cmd     ask-cmd        eval-cmd                           │
+  │  index-cmd     chat (session)  eval-cmd                          │
   │     │             │              │                               │
   │     ▼             ▼              ▼                               │
   │  indexDocumentRow PgVectorStore  PgVectorStore                   │
   │  (runtime.ts)   .upsert/.search  .search                         │
+  │                 + memory chunks                                  │
+  │                 (createConversationMemory → same .upsert)        │
   │     │             │              │                               │
   └─────┼─────────────┼──────────────┼───────────────────────────────┘
         │             │              │     all share one pg.Pool
@@ -36,6 +38,8 @@ The whole storage story fits on one page. Every read and write in buffr flows th
   │                                                                     │
   │  agents.documents   ── heap (8KB pages) ── PK btree on id           │
   │  agents.chunks      ── heap ── PK btree on id                       │
+  │                       └ knowledge chunks   id "<docId>#<n>"         │
+  │                       └ memory chunks       id "memory:<conv>:<n>"  │
   │                       └ embedding vector(768) ── HNSW graph index   │
   │                       └ app_id ── btree index                       │
   │  agents.conversations / messages / profiles ── heap + PK btree      │
@@ -56,7 +60,7 @@ The interesting surface area is small and worth knowing cold: a vector column, a
 
 **3. Exactly one write path is transactional, and it's the right one.** `upsert()` wraps a batch of chunk inserts in `begin … commit … rollback` (`src/pg-vector-store.ts:40-64`); `runMigration()` does the same for the whole schema (`src/migrate.ts:11-19`). Every *other* write — `indexDocumentRow`, `startConversation`, `persistMessage`, the trace sink — is a bare `pool.query()` running in its own implicit single-statement transaction. That means the documents row and its chunks are **not** written atomically together. → `05-transactions-isolation-and-anomalies.md`
 
-**4. The schema deliberately dropped the chunks→documents foreign key.** `sql/001_agents_schema.sql:16-17` documents the choice in a comment, and line 27 actively drops any pre-existing FK (`alter table … drop constraint if exists chunks_document_id_fkey`). `document_id` is a *soft* link — a plain `text` column with no referential integrity — so the VectorStore contract (which upserts chunks with no notion of a documents row) keeps drop-in parity. This is a real integrity tradeoff made on purpose. → `05-transactions-isolation-and-anomalies.md`, cross-link `study-data-modeling`
+**4. The schema deliberately dropped the chunks→documents foreign key.** `sql/001_agents_schema.sql:16-17` documents the choice in a comment, and line 27 actively drops any pre-existing FK (`alter table … drop constraint if exists chunks_document_id_fkey`). `document_id` is a *soft* link — a plain `text` column with no referential integrity — so the VectorStore contract (which upserts chunks with no notion of a documents row) keeps drop-in parity. This is a real integrity tradeoff made on purpose. The dropped FK now does double duty: episodic **memory chunks** (written by aptkit's `createConversationMemory` into the *same* table via `memory.remember`, `src/session.ts:53,67`, with ids like `memory:<conv>:<n>` and `meta.kind='memory'`) have no documents row at all — a hard FK would reject every one of them. → `05-transactions-isolation-and-anomalies.md`, cross-link `study-data-modeling`
 
 **5. Durability, isolation, concurrency, recovery, and replication all run on untouched Postgres defaults.** READ COMMITTED isolation, MVCC, WAL with `synchronous_commit=on`, no replicas, no backup script in the repo. For a single-device laptop agent with one writer at a time, the defaults are correct — but the code makes no isolation or durability *decisions*, so several mechanisms below are taught against defaults, not against repo configuration. → `06`, `07`, `08`
 
@@ -101,3 +105,7 @@ The repo is a single-device laptop agent. These mechanisms exist in Postgres but
 - **`study-performance-engineering`** — owns the latency budget and profiling. This guide explains *why* the HNSW index and connection pooling matter to that budget; the measurement work lives there.
 - **`study-networking`** — owns the TCP/connection transport between `pg.Pool` and Postgres. This guide treats the pool as a storage seam; the socket lifecycle and timeouts live there.
 - **`study-runtime-systems`** (already generated) — owns the event loop and async lifecycle that drives `await pool.query()`. This guide owns what Postgres does once the query lands.
+
+---
+
+Updated: 2026-06-24 — reconciled against current code: `ask`/`ask-cmd` replaced by the `chat` REPL over a long-lived warm pool (`src/session.ts`); memory chunks now arrive via aptkit's `createConversationMemory` (library, not inline) into `agents.chunks` (`memory:<conv>:<n>`, `meta.kind='memory'`); pinned the `memory.remember` line ref to `src/session.ts:67`. The `<=>`/`vector_cosine_ops` alignment (finding 1) and the cross-transaction document+chunk write (finding 3) re-verified — both unchanged.

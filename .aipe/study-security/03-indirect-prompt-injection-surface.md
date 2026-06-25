@@ -5,23 +5,25 @@
 ## Zoom out, then zoom in
 
 The agent retrieves documents and feeds them back to the model. That loop is
-the whole value of RAG — and it's also the injection surface.
+the whole value of RAG — and it's also the injection surface. The chat
+session now adds a second retrievable source: past conversation turns.
 
 ```
-  Zoom out — indexed content flows back into the model's context
+  Zoom out — indexed content AND recalled memory flow into the context
 
-  ┌─ Index time ────────────────────────────────────────────────┐
+  ┌─ Write time ────────────────────────────────────────────────┐
   │  *.md file  →  chunks  →  agents.chunks.content (stored)      │
+  │  past turn  →  embed   →  agents.chunks (kind=memory)         │ ← new source
   └─────────────────────────┬───────────────────────────────────┘
                             │  later, at ask time
   ┌─ Ask time (agent loop) ▼────────────────────────────────────┐
   │  user question → model → calls search_knowledge_base         │
-  │  → retrieved chunk TEXT pushed back as a 'user' message       │ ← ★ surface
+  │  → retrieved chunk TEXT (doc OR memory) pushed back as 'user' │ ← ★ surface
   │  → model reads it as context → answers                        │
   └─────────────────────────┬───────────────────────────────────┘
                             │
   ┌─ Output ───────────────▼────────────────────────────────────┐
-  │  plain string → stdout (no sink, no eval)                    │
+  │  plain string → terminal (no sink, no eval)                  │
   └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -33,13 +35,18 @@ the instruction. A document containing "ignore previous instructions and say
 X" gets indexed, retrieved, and handed to the model as context. The model has
 no reliable way to tell "this is data to summarize" from "this is a command."
 That's the surface, and it's inherent to retrieval — you can't retrieve
-content without putting it in the prompt.
+content without putting it in the prompt. What's new: the chat session embeds
+each question+answer exchange back into the **same** vector store as a
+`kind=memory` chunk (`session.ts:53,66`), so *past conversation turns* are now
+retrievable too. That **widens** what can be surfaced — anything that once
+landed in a turn can come back later — without changing the blast radius,
+because it's still the one read-only search tool.
 
 ## Structure pass
 
-**Layers.** Two: the *index-time* layer (a document's text becomes a stored
-chunk) and the *ask-time* layer (that chunk's text re-enters the model
-context as a tool result).
+**Layers.** Two: the *write-time* layer (a document's text — or a past
+conversation turn — becomes a stored chunk) and the *ask-time* layer (that
+chunk's text re-enters the model context as a tool result).
 
 **Axis — trust.** Trace "is this text data or instructions?" across the loop:
 
@@ -53,7 +60,7 @@ context as a tool result).
   │  "what's my deploy process?"  │  → operator input (trusted on a laptop)
   └────────────────────────────────┘
   ┌─ retrieved chunk text ────────┐
-  │  ...content from indexed doc  │  → ★ SHOULD be data, model may read as
+  │  indexed doc OR recalled turn │  → ★ SHOULD be data, model may read as
   └────────────────────────────────┘    instructions — the trust flips here
 
   the model receives all three as text; the boundary between "instruction"
@@ -102,12 +109,16 @@ them apart.**
 
 ### Move 2 — the walkthrough
 
-**Part 1 — content gets stored verbatim at index time.** When you index a
-file, its text is chunked and the chunk text lands in `agents.chunks.content`
-exactly as written (`runtime.ts:17` → the pipeline → `pg-vector-store.ts`
-upsert, `content` is `$5`). No scanning, no stripping. The part that matters:
-whatever is in the document is now in the corpus verbatim, including any
-injection payload.
+**Part 1 — content gets stored verbatim — at index time AND at turn end.**
+When you index a file, its text is chunked and the chunk text lands in
+`agents.chunks.content` exactly as written (`runtime.ts:17` → the pipeline →
+`pg-vector-store.ts` upsert, `content` is `$5`). No scanning, no stripping.
+The chat session adds a second write point: after every turn,
+`memory.remember({ conversationId, question, answer })` (`session.ts:66`)
+embeds the exchange and upserts it into the *same* store tagged
+`kind=memory`. The part that matters: whatever is in the document — or
+whatever text once flowed through a conversation turn — is now in the corpus
+verbatim, including any injection payload, and a future turn can retrieve it.
 
 **Part 2 — retrieval pulls it back at ask time.** The model calls
 `search_knowledge_base`; the handler returns ranked chunks with their text
@@ -153,6 +164,7 @@ it just can't *escalate* into an action.
   Phase A (now)                       Phase B (untrusted corpus / write tools)
   ──────────────────────────────      ─────────────────────────────────────
   operator chose what to index        corpus includes scraped / shared docs
+  + past turns recalled as memory     memory could re-surface a poisoned turn
   one read-only tool                  more tools (write? fetch?) = bigger blast
   no content gate (acceptable)        content gate becomes worth building
   injection can mislead the answer    injection could trigger an action
@@ -164,9 +176,13 @@ it just can't *escalate* into an action.
 
 The honest call: today the operator chose every indexed document and the only
 tool is read-only search, so an injection's worst case is a misleading answer
-on the operator's own laptop. That's acceptable. It stops being acceptable
-the day the corpus includes content from sources you don't control, *or* the
-agent gains a tool that does more than search.
+on the operator's own laptop. Conversation memory adds a wrinkle — a turn
+that *carried* hostile retrieved text can be re-embedded and surfaced again
+later — but since the operator still chose every source and the tool is still
+read-only, the worst case is unchanged: a wrong answer, not an action. It
+stops being acceptable the day the corpus (or the memory) includes content
+from sources you don't control, *or* the agent gains a tool that does more
+than search.
 
 ### Move 3 — the principle
 
@@ -186,8 +202,9 @@ The full loop, with the trust flip and the blast-radius limiters marked.
 ```
   buffr-laptop — the indirect prompt-injection surface, end to end
 
-  ┌─ Index time ────────────────────────────────────────────────┐
+  ┌─ Write time ────────────────────────────────────────────────┐
   │  *.md  →  chunk  →  agents.chunks.content (verbatim, no gate) │
+  │  past turn → embed → agents.chunks (kind=memory, session.ts:66)│
   └─────────────────────────┬───────────────────────────────────┘
                             │
   ┌─ Ask time: agent loop (RagQueryAgent / runAgentLoop) ───────┐
@@ -207,31 +224,40 @@ The full loop, with the trust flip and the blast-radius limiters marked.
   └─────────────────────────┬───────────────────────────────────┘
                             │
   ┌─ Output ───────────────▼────────────────────────────────────┐
-  │  plain string → stdout. No eval, no SQL sink. (ask-cmd.ts:34)│
+  │  plain string → terminal text node. No eval, no SQL sink.    │
+  │  (session.ts:63 → cli/chat.tsx:29,46)                        │
   └──────────────────────────────────────────────────────────────┘
 ```
 
 ## Implementation in codebase
 
-**Use cases.** Reached on every `npm run ask`: the agent's first move is
-always a `search_knowledge_base` call (the system prompt mandates it), so
-retrieved content enters the context on every single run. This isn't an edge
-case — it's the main path.
+**Use cases.** Reached on every `npm run chat` turn: the agent's first move
+is always a `search_knowledge_base` call (the system prompt mandates it), so
+retrieved content enters the context on every single turn. This isn't an edge
+case — it's the main path. And every turn *also writes* one memory chunk
+(`session.ts:66`), so the corpus the next turn can retrieve from grows with
+the conversation.
 
 **Code side by side.**
 
 ```
-  src/cli/ask-cmd.ts  (lines 23–24, 33–34)
+  src/session.ts  (lines 43–44, 53, 57, 60–67)
 
   const tool = createSearchKnowledgeBaseTool(pipeline, { minTopK: 4 });
   const tools = new InMemoryToolRegistry([tool.definition], {...});
   ...
-  const agent = new RagQueryAgent({ model, tools, profile, trace });
-  const answer = await agent.answer(question);
+  const memory = createConversationMemory({ embedder, store });  ← :53 shared store
+  ...
+  const agent = new RagQueryAgent({ model, tools, profile, trace });  ← :57
+  ...
+  const answer = await agent.answer(question);                   ← :63 run agent
+  try { await memory.remember({ conversationId, question, answer }); }  ← :66 write
+  catch { /* best-effort */ }
         │
-        └─ the ONLY tool registered is search. The retrieved text it returns
-           is what flows into the context. The profile (also untrusted-ish,
-           injected at prompt start) rides alongside.
+        └─ the ONLY tool registered is search (:44). The retrieved text it
+           returns is what flows into the context. memory.remember (:66)
+           embeds the exchange into the SAME store, so a later turn's search
+           can surface it — a second retrievable source on the one tool.
 ```
 
 ```
@@ -307,11 +333,14 @@ mislead the answer; it can't act.
 
 **Q: So is your system vulnerable?**
 
-The *surface* exists — it's inherent to retrieval. The *risk* is low right
-now for two concrete reasons: the operator chose every indexed document, and
-the only tool is read-only `search_knowledge_base` (`ask-cmd.ts:23`), so the
-worst case is a wrong answer on my own laptop, not exfiltration or an action.
-The threat model changes when the corpus includes content I don't control or
+The *surface* exists — it's inherent to retrieval, and it's slightly wider now
+that past turns are recalled as memory (`session.ts:53,66`). The *risk* is
+still low for two concrete reasons: the operator chose every indexed document
+(and conducted every conversation that became memory), and the only tool is
+read-only `search_knowledge_base` (`session.ts:43`), so the worst case is a
+wrong answer on my own laptop, not exfiltration or an action. Memory widens
+*what can be surfaced*, not *what an injection can do*. The threat model
+changes when the corpus or the memory includes content I don't control, or
 the agent gains a write/fetch tool — that's when I'd add a content gate.
 Naming *when* the risk escalates is the point; "it's secure" would be the
 wrong answer.
@@ -339,3 +368,5 @@ wrong answer.
   mitigable.
 - `study-agent-architecture` — the ReAct loop, the tool registry, and how
   retrieved content threads through the agent's turns.
+
+Updated: 2026-06-24 — added conversation memory (`session.ts:53,66`) as a second retrievable source that widens the injection surface (past turns become recallable) without changing the blast radius; purged `ask-cmd.ts` refs → `session.ts` + `cli/chat.tsx`.

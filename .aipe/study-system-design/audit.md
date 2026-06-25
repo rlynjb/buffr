@@ -6,8 +6,9 @@ finding earns a Pass 2 pattern file, the lens cross-links rather than
 restating.
 
 Scope: `buffr-laptop` — TS ESM, single device, Postgres + pgvector,
-consuming `@rlynjb/aptkit-core@^0.4.0`. The toolkit is a dependency; this
-audit covers buffr's code and the boundary, not aptkit internals.
+consuming `@rlynjb/aptkit-core@^0.4.1` (which now bundles `@aptkit/memory`).
+The toolkit is a dependency; this audit covers buffr's code and the boundary,
+not aptkit internals.
 
 ---
 
@@ -16,15 +17,22 @@ audit covers buffr's code and the boundary, not aptkit internals.
 Three buffr-owned layers sit on top of one imported toolkit, one datastore,
 and one local model server.
 
-- **CLI entrypoints** — `src/cli/index-cmd.ts`, `src/cli/ask-cmd.ts`,
-  `src/cli/eval-cmd.ts`. Each is a top-level module that runs on import
-  (`loadEnv()` at `ask-cmd.ts:13`), builds wiring, does one job, calls
-  `pool.end()`. No server, no router.
+- **CLI entrypoints** — two shapes now. Three *one-shot* modules
+  (`src/cli/index-cmd.ts`, `src/cli/eval-cmd.ts`, `src/migrate.ts`) run on
+  import (`loadEnv()` at `index-cmd.ts:10`), build wiring, do one job, call
+  `pool.end()`. And one *long-lived* session: `src/cli/chat.tsx` renders an
+  Ink TUI over `createChatSession()` (`src/session.ts:34`), which holds ONE
+  warm pool and ONE conversation across every turn until `/exit`. (The old
+  one-shot `ask` CLI is deleted; `chat` is now the only interactive surface.)
+  No server, no HTTP router.
 - **Adapter layer** — `PgVectorStore` (`src/pg-vector-store.ts:19`)
   implements aptkit's `VectorStore`; `SupabaseTraceSink`
-  (`src/supabase-trace-sink.ts:23`) implements `CapabilityTraceSink`;
+  (`src/supabase-trace-sink.ts:49`) implements `CapabilityTraceSink`;
   `indexDocumentRow` (`src/runtime.ts:5`) writes the `documents` row;
-  `loadProfile` (`src/profile.ts:4`) reads the prompt profile.
+  `loadProfile` (`src/profile.ts:4`) reads the prompt profile. The same
+  `PgVectorStore` is also injected *down* into aptkit's memory engine
+  (`createConversationMemory({ embedder, store })`, `session.ts:53`) — see
+  the round-trip note below and `04-library-as-dependency-boundary.md`.
 - **Pure config + db factory** — `loadConfig(env)` (`src/config.ts:9`) is
   pure (env in, config out); `createPool(databaseUrl)` (`src/db.ts:4`) is a
   one-line `pg.Pool` factory. These two have zero side effects and are the
@@ -65,21 +73,31 @@ The documents source-of-truth row is written by buffr (`runtime.ts:11-17`)
 notion of a documents row — the store only ever sees chunks. → see
 `02-retrieval-pipeline.md`.
 
-**Ask flow** (`ask-cmd.ts:29-37`):
+**Chat flow** — built once at `createChatSession` (`session.ts:34-57`),
+then re-entered per turn via `session.ask()` (`session.ts:60-71`):
 
 ```
-  startConversation → persist user msg → RagQueryAgent.answer(question)
-     └─ agent loop: model decides → search_knowledge_base tool
-            └─ pipeline.query → embed question → PgVectorStore.search (cosine)
-     └─ trace.emit() per step  (sync, queued)
-  trace.flush()  (await all queued writes) → print answer → pool.end()
+  createChatSession (ONCE): pool → … → startConversation → trace → agent
+  per turn (session.ask):
+    persist user msg → RagQueryAgent.answer(question)
+       └─ agent loop: model decides → search_knowledge_base tool
+              └─ pipeline.query → embed question → PgVectorStore.search (cosine)
+       └─ trace.emit() per step  (sync, queued, all 6 event types)
+    trace.flush()  (await all queued writes)
+    memory.remember({conversationId, question, answer})  (best-effort, try/catch)
+    return answer  (Ink renders it; pool stays open for the NEXT turn)
 ```
 
 The flow is a **waterfall, not parallel** — embed, then search, then
-generate, then persist. Single user, no fan-out. The one piece of
-deferred-write concurrency is the trace sink: `emit()` is sync and pushes
-promises onto a queue (`supabase-trace-sink.ts:27-35`), `flush()` awaits
-them all (`:37-39`). → see `03-trajectory-capture.md`.
+generate, then persist. Single user, no fan-out. The lifecycle shift from the
+old `ask`: the pool and conversation are no longer torn down per call; they
+live for the whole session, so a turn's cost is just `ask()`, not re-wiring.
+The one piece of deferred-write concurrency is the trace sink: `emit()` is
+sync and pushes promises onto a queue (`supabase-trace-sink.ts:53-85`),
+`flush()` awaits them all (`:91-93`). A second persistence path now runs after
+flush: `memory.remember` embeds the exchange into the SAME store (best-effort,
+wrapped in try/catch so a memory failure never loses the answer,
+`session.ts:65-69`). → see `03-trajectory-capture.md`, `05-cli-as-entrypoints.md`.
 
 **Eval flow** (`eval-cmd.ts:24-33`) — loop over labeled queries,
 `pipeline.query(query, K)`, map hits to `docId`, score P@1 and R@k with
@@ -98,9 +116,13 @@ state, no cache. Ownership by table:
   `on conflict (id) do update` (`:50`) — re-indexing is idempotent.
 - **`agents.conversations` / `messages`** — trajectory. `conversations`
   owned by `startConversation` (`supabase-trace-sink.ts:4`); `messages`
-  written from two places: the CLI for the `user` turn (`ask-cmd.ts:30`)
-  and the trace sink for `assistant`/`tool` turns
-  (`supabase-trace-sink.ts:29-34`).
+  written from two places: the session for the `user` turn
+  (`session.ts:61`) and the trace sink for every other turn
+  (`supabase-trace-sink.ts:53-85`). The sink now persists all six
+  `CapabilityEvent` variants (step, tool_call_start, tool_call_end,
+  model_usage, warning, error), ordered by `event.timestamp` into
+  `created_at`. Episodic memory chunks (kind=memory) also land in
+  `agents.chunks` via `memory.remember` (`session.ts:53, 66`).
 - **`agents.profiles`** — the me.md profile. Read-only here via
   `loadProfile` (`profile.ts:4`); "most recent wins"
   (`order by updated_at desc limit 1`). No write path in the repo — rows are
@@ -161,9 +183,9 @@ Schema shape (the FK that was dropped, `app_id` denormalization, the
 
 What is exercised:
 
-- **Loud config failure** — every CLI throws if `DATABASE_URL` is unset
-  (`index-cmd.ts:12`, `ask-cmd.ts:15`, `eval-cmd.ts:11`, `migrate.ts:26`).
-  Fail fast, no partial run.
+- **Loud config failure** — every entrypoint throws if `DATABASE_URL` is
+  unset (`index-cmd.ts:12`, `eval-cmd.ts:11`, `migrate.ts:26`, and
+  `createChatSession` at `session.ts:37`). Fail fast, no partial run.
 - **Dimension mismatch throws** — `assertDim` (`pg-vector-store.ts:32-36`)
   on both `upsert` and `search`. A 3-element vector against a 768 store
   raises before touching the DB (test: `pg-vector-store.test.ts:42-46`).
@@ -173,7 +195,7 @@ What is exercised:
 - **Weak-model robustness fixes** — the design doc records two real
   failures with a local Gemma: it passed `top_k: 1` (starving multi-part
   questions) and a hallucinated `filter` key that zeroed retrieval. Both
-  fixed in aptkit (`minTopK` floor wired at `ask-cmd.ts:23`;
+  fixed in aptkit (`minTopK` floor wired at `session.ts:43`;
   `createSearchKnowledgeBaseTool(pipeline, { minTopK: 4 })`). Named in
   `laptop-supabase-graduation-design.md:209-212`.
 
@@ -229,24 +251,27 @@ deliberately-scoped v1b.
    the boundary it's gated behind. → `07-deferred-body.md`.
 2. **No timeouts or retries on external hops.** Ollama embed/generate and
    every `pg` query run with no timeout and no retry (`pg-vector-store.ts`,
-   `ask-cmd.ts`). A hung Ollama hangs the CLI. Acceptable for an interactive
-   single-user CLI; would be a defect in a service.
+   `session.ts`). A hung Ollama hangs the chat turn. Acceptable for an
+   interactive single-user TUI; would be a defect in a service.
 3. **Trace writes are fire-and-forget until flush.** `emit()` pushes
-   promises and never inspects them individually (`supabase-trace-sink.ts:27-35`);
-   only `flush()`'s `Promise.all` surfaces a rejection (`:37-39`). If a
+   promises and never inspects them individually (`supabase-trace-sink.ts:53-85`);
+   only `flush()`'s `Promise.all` surfaces a rejection (`:91-93`). If a
    message insert fails mid-run, the failure appears only at flush, after
-   the answer is computed. Trajectory loss is non-fatal to the answer — an
-   acceptable ordering, but worth naming. → `03-trajectory-capture.md`.
+   the answer is computed. Memory-write failure is even softer — swallowed in
+   a try/catch by design (`session.ts:65-69`), since the turn already
+   succeeded. Trajectory loss is non-fatal to the answer — an acceptable
+   ordering, but worth naming. → `03-trajectory-capture.md`.
 4. **`document_id` has no FK** (`sql/001_agents_schema.sql:16-17, 27`). A
    chunk can reference a non-existent document. This is a *deliberate*
    deviation to keep `VectorStore` drop-in parity (the store upserts chunks
    with no documents row) — the as-built note explains it
    (`laptop-supabase-graduation-design.md:202-207`). Referential integrity
    traded for contract purity. Schema-shape detail → `study-data-modeling`.
-5. **CLI wiring is duplicated three times.** `index`, `ask`, `eval` each
-   rebuild pool → embedder → store → pipeline (`index-cmd.ts:17-20`,
-   `ask-cmd.ts:19-22`, `eval-cmd.ts:13-16`). Minor; a shared `buildPipeline`
-   factory would dry it up. Not load-bearing. → `05-cli-as-entrypoints.md`.
+5. **CLI wiring is duplicated three times.** `index`, `eval`, and
+   `createChatSession` each rebuild pool → embedder → store → pipeline
+   (`index-cmd.ts:17-20`, `eval-cmd.ts:13-16`, `session.ts:39-42`). Minor; a
+   shared `buildPipeline` factory would dry it up. Not load-bearing. →
+   `05-cli-as-entrypoints.md`.
 
 ---
 
@@ -255,10 +280,18 @@ deliberately-scoped v1b.
 | Lens | Verdict |
 | --- | --- |
 | 1. system-map-and-boundaries | Three buffr layers + toolkit + pg + Ollama; one trust domain |
-| 2. request-response-and-data-flow | Two waterfall flows (index, ask) + read-only eval |
-| 3. state-ownership | Postgres sole source of truth; meta reconstructed on read |
+| 2. request-response-and-data-flow | Two waterfall flows (index one-shot, chat long-lived) + read-only eval |
+| 3. state-ownership | Postgres sole source of truth; meta reconstructed on read; +episodic memory chunks |
 | 4. caching-and-invalidation | `not yet exercised` (tool cache deferred) |
 | 5. storage-choice-and-durability | pgvector colocated; `vector(768)` one-way door; HNSW; txn upsert |
 | 6. failure-handling | fail-fast config + dim guard + txn rollback; no retries/timeouts |
 | 7. scale-bottlenecks | built for N=1; sync index + 768 door named; reuse-on-scale thesis |
 | 8. red-flags | convention-tenancy, no timeouts, fire-and-forget trace, no-FK, dup wiring |
+
+---
+
+Updated: 2026-06-24 — `ask` CLI removed (one-shot) → `chat` long-lived Ink
+session (`session.ts`/`chat.tsx`); aptkit `@rlynjb/aptkit-core` 0.4.0→0.4.1
+(bundles `@aptkit/memory`); trace sink now 6/6 events ordered by
+`event.timestamp`; episodic memory via `createConversationMemory` injecting
+`PgVectorStore`; re-anchored all `ask-cmd.ts:*` line refs to `session.ts:*`.

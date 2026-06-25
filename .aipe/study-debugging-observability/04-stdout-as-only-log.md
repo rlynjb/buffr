@@ -3,6 +3,12 @@
 **Industry names:** print-debugging / unstructured stdout / no-logger.
 **Type:** Project-specific (the CLI-prints-results-is-the-log shape).
 
+> Updated: 2026-06-24 — `ask-cmd.ts`'s `stdout.write(answer)` is gone; the answer now
+> renders in the Ink TUI (`src/cli/chat.tsx`), which also *catches* errors and renders
+> `error: <message>` instead of crashing to a stack trace. The remaining stdout-only
+> commands are `index`, `eval`, and `migrate`. Print sites and `npm run ask` references
+> updated below.
+
 ## Zoom out, then zoom in
 
 You know how during early development you reach for `console.log` instead of wiring a
@@ -15,11 +21,16 @@ program produces; there's no second channel.
 ```
   Zoom out — where the "logs" live
 
-  ┌─ CLI layer (src/cli/*, src/migrate.ts) ──────────────────────┐
+  ┌─ CLI layer (src/cli/{index,eval}-cmd.ts, src/migrate.ts) ────┐
   │  ★ process.stdout.write(...) ★                               │ ← we are here
-  │  "indexed X" · the answer · P@1/R@3 · "migration applied"    │
+  │  "indexed X" · P@1/R@3 · "migration applied"                 │
   └───────────────────────────┬──────────────────────────────────┘
                               │ (no logger between)
+  ┌─ Chat TUI (src/cli/chat.tsx) ▼───────────────────────────────┐
+  │  renders answer via Ink · catches errors → "error: <msg>"    │
+  │  (not stdout-print; React-rendered, but still no logger)     │
+  └───────────────────────────┬──────────────────────────────────┘
+                              │
   ┌─ Agent / storage layers ──▼──────────────────────────────────┐
   │  emit traces to the DB (01) · throw raw Errors on failure    │
   │  no log lines at all                                         │
@@ -86,13 +97,13 @@ formatted English.
 `stdout.write` (or two for eval) and it prints the result:
 
 ```
-  the four print sites — pseudocode
+  the print sites — pseudocode
 
   index:    for each path:  stdout.write("indexed " + path)      // progress
-  ask:      stdout.write("\n" + answer + "\n")                    // the answer itself
   eval:     per query:      stdout.write(query + " P@1 .. R@3 ..") // scores
             then:           stdout.write("mean P@1 .. R@3 ..")
   migrate:  stdout.write("migration applied")                     // done marker
+  chat:     (no stdout.write — answer rendered via Ink <Text>)    // TUI, not a print
 ```
 
 These are *results*, not log events. `indexed foo.md` is the closest thing to an
@@ -102,25 +113,26 @@ from the output whether `indexed foo.md` means "embedded and stored 12 chunks" o
 "upserted a documents row and the embed silently returned nothing" — the line reports
 the attempt, not the outcome.
 
-**The failure path — bare throws, no context.** Errors are `throw new Error(...)` with
-no logging and no wrapping. A missing `DATABASE_URL` throws a clear message
-(intentional guard). But a *runtime* failure — Ollama down, Postgres unreachable, an
-embed returning the wrong dimension — throws from deep inside `pg` or the embedding
-provider, and the user sees that library's stack trace with no buffr context around
-it.
+**The failure path — split by surface.** The stdout commands (`index`, `eval`,
+`migrate`) still fail by bare `throw` with no logging and no wrapping: a missing
+`DATABASE_URL` throws a clear message (intentional guard), but a *runtime* failure —
+Ollama down, Postgres unreachable, a wrong-dim embed — throws from deep inside `pg` or
+the embedding provider, and the user sees that library's stack trace with no buffr
+context. The chat TUI is the one surface that's different: `chat.tsx` wraps each
+`session.ask` in a try/catch and renders `error: <message>` as a buffr turn instead of
+crashing, so a per-turn failure no longer takes down the session.
 
 ```
-  failure path — what the user actually sees
+  failure path — two surfaces now
 
-  ollama is down
-        │
-  embedder.embed() throws (fetch ECONNREFUSED)
-        │
-  no catch, no log, no "while answering question X"
-        │
-  ▼
-  Node prints the raw stack trace and exits non-zero
-        └─ honest (it crashed) but uncontextualized (which step? which input?)
+  index/eval/migrate:  ollama down → embed throws (ECONNREFUSED)
+        │  no catch, no log
+        ▼  Node prints the raw stack trace, exits non-zero
+           └─ honest but uncontextualized (which step? which input?)
+
+  chat.tsx:  session.ask throws → catch → setTurns(error: <message>)
+        │  the session survives; the next turn still works
+        └─ contained, but still just the message string — no level, no run id
 ```
 
 The one *good* failure boundary is the dimension guard in the vector store
@@ -155,13 +167,14 @@ Every output site in one frame.
 
   ┌─ Commands (success path) ─────────────────────────────────────────┐
   │  src/cli/index-cmd.ts:25   stdout.write("indexed " + path)        │
-  │  src/cli/ask-cmd.ts:37     stdout.write("\n" + answer + "\n")     │
   │  src/cli/eval-cmd.ts:31    stdout.write(query + " P@1 .. R@.. ")  │
   │  src/cli/eval-cmd.ts:33    stdout.write("mean P@1 .. R@.. ")      │
   │  src/migrate.ts:31         stdout.write("migration applied")     │
+  │  src/cli/chat.tsx          (Ink <Text> render, not stdout.write)  │
   └───────────────────────────────────────────────────────────────────┘
   ┌─ Failure path ────────────────────────────────────────────────────┐
-  │  throw new Error(...)  → Node stack trace, no buffr context       │
+  │  index/eval/migrate: throw → Node stack trace, no buffr context   │
+  │  chat.tsx: catch → render "error: <message>" (contained per turn) │
   │  EXCEPT: PgVectorStore.assertDim → contextual "dimension mismatch"│
   └───────────────────────────────────────────────────────────────────┘
 
@@ -170,22 +183,27 @@ Every output site in one frame.
 
 ## Implementation in codebase
 
-**Use cases.** Every command run from the terminal. The output is read live by the
-operator; nothing persists it (the `messages` trace is a separate, DB-side mechanism —
-see `01`). Reached for as both progress indicator and result delivery.
+**Use cases.** Every batch command (`index`, `eval`, `migrate`) run from the terminal:
+the output is read live by the operator; nothing persists it (the `messages` trace is a
+separate, DB-side mechanism — see `01`). Reached for as both progress indicator and
+result delivery. The chat answer is *not* on this surface — it's rendered in the TUI.
 
-**The answer print — `src/cli/ask-cmd.ts:37`.**
+**The answer render — `src/cli/chat.tsx:28-34,42-47`.** No `stdout.write`; the answer
+is React state painted by Ink.
 
 ```
-  src/cli/ask-cmd.ts  (lines 35–38)
+  src/cli/chat.tsx  (lines 28–34)
 
-  await trace.flush();
-  process.stdout.write(`\n${answer}\n`);   ← the answer IS the output AND the "log"
-  await pool.end();
+  const answer = await session.ask(q);
+  setTurns((t) => [...t, { role: 'buffr', text: answer }]);   ← answer → UI state
+  ...
+  catch (err) {
+    setTurns((t) => [...t, { role: 'buffr', text: `error: ${(err as Error).message}` }]);
+  }                                                            ← errors contained per turn
        │
-       └─ note: the answer is printed, and (when non-empty) also persisted as an
-          assistant row via the trace (01). but a FALLBACK_ANSWER is printed here
-          and NOT persisted — stdout and the trace store disagree (see 01, R4).
+       └─ the answer is rendered, and (when non-empty) also persisted as an
+          assistant row via the trace (01). but a FALLBACK_ANSWER is shown here
+          and NOT persisted — the screen and the trace store disagree (see 01 Move 3).
 ```
 
 **The index progress — `src/cli/index-cmd.ts:22-26`.**
@@ -226,9 +244,9 @@ doesn't need log levels because the human *is* the level filter. The migration t
 real logger becomes worth it at the first unattended run. The natural correlation key
 already exists (`conversations.id`) — a structured logger would stamp it on every line
 and suddenly two interleaved runs are separable. What to read next: `01` (the trace
-store, the *other* evidence channel buffr does have) and `02` (why even that channel
-is lossy). The `not yet exercised` log-level / structured-log / redaction story is in
-`audit.md` lens 3.
+store, the *other* evidence channel buffr does have) and `02` (the now-complete signal
+that channel records). The `not yet exercised` log-level / structured-log / redaction
+story is in `audit.md` lens 3.
 
 ## Interview defense
 
@@ -245,29 +263,32 @@ human is the filter. The day it runs as a cron job or a service, it's blind.
 ```
 
 **Q: What's the asymmetry between your success and failure output?**
-Success prints an intentional, formatted line. Failure is a bare `throw` that surfaces
-as a raw Node stack trace from inside `pg` or the embedder, with no buffr context —
-which step, which input. The one place I got it right is the vector store's
-`assertDim`, which throws a contextual `dimension mismatch: got X, store is 768`.
-That's the model the rest of the failure path should follow: wrap the throw with the
-operation and the input.
+On the batch commands, success prints an intentional, formatted line and failure is a
+bare `throw` that surfaces as a raw Node stack trace from inside `pg` or the embedder,
+with no buffr context — which step, which input. The chat TUI is asymmetric the other
+way: it *catches* per-turn errors and renders `error: <message>`, so it stays up but
+gives you only the message string. The one place the throw is right is the vector
+store's `assertDim`, which throws a contextual `dimension mismatch: got X, store is
+768`. That's the model the rest of the failure path should follow: wrap the throw with
+the operation and the input.
 
 ## Validate
 
-1. **Reconstruct.** Name buffr's five stdout write sites and what each reports.
-   (`index-cmd.ts:25`, `ask-cmd.ts:37`, `eval-cmd.ts:31`+`:33`, `migrate.ts:31`.)
+1. **Reconstruct.** Name buffr's stdout write sites and what each reports, plus the one
+   surface that renders instead of printing. (`index-cmd.ts:25`, `eval-cmd.ts:31`+`:33`,
+   `migrate.ts:31`; `chat.tsx` renders via Ink.)
 2. **Explain.** Why does `indexed foo.md` fail to distinguish a real index from a
    silent no-op? (`index-cmd.ts:25` — reports the attempt, no chunk count/outcome.)
-3. **Apply.** Ollama is down during `ask`. Walk what the operator sees and what's
-   missing from it. (Raw fetch/`pg` stack trace; missing: the question, the step, a
-   run id.)
+3. **Apply.** Ollama is down during a chat turn vs during `eval`. Walk what each shows
+   and what's missing. (chat: caught → `error: <msg>` rendered, session survives, no run
+   id; eval: raw fetch/`pg` stack trace, exits non-zero — both miss level/structure.)
 4. **Defend.** Argue whether buffr should adopt a structured logger now or stay on
-   stdout. Name the single trigger that flips your answer. (Stay; flip at the first
+   stdout/TUI. Name the single trigger that flips your answer. (Stay; flip at the first
    unattended/scheduled run, where nobody reads the result-as-log.)
 
 ## See also
 
 - `01-trajectory-capture-as-observability.md` — the DB-side evidence channel.
-- `02-discarded-trace-signal.md` — why the trace channel is also lossy.
+- `02-discarded-trace-signal.md` — the full signal the DB trace channel now records.
 - `05-eval-numbers-as-quality-signal.md` — the eval scores, another stdout-only signal.
 - `audit.md` lens 3 — the `not yet exercised` structured-log / level / redaction notes.

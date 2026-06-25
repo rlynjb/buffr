@@ -17,8 +17,8 @@ concern that *does* apply to this repo lives.
 ```
   Zoom out — where this boundary lives
 
-  ┌─ Local process (one Node CLI run) ──────────────────────┐
-  │  src/cli/ask-cmd.ts                                      │
+  ┌─ Local process (one Node session) ──────────────────────┐
+  │  src/session.ts (ChatSession, via cli/chat.tsx)         │
   │     RagQueryAgent → PgVectorStore.search                 │
   │     SupabaseTraceSink → persistMessage                   │
   └───────────────────────────┬─────────────────────────────┘
@@ -52,9 +52,9 @@ seam between the other two.
 ```
   One question down the layers: "remote is down — who handles it?"
 
-  ┌─ call site (ask-cmd.ts) ─────────────┐
-  │  awaits the query; on reject → throws │  → DOES NOT handle: propagates
-  └───────────────────┬───────────────────┘
+  ┌─ call site (session.ts: ChatSession.ask) ─┐
+  │  awaits the query; on reject → throws      │  → DOES NOT handle: propagates
+  └───────────────────┬────────────────────────┘
                       │  the answer flips here
   ┌─ pg.Pool ─────────▼───────────────────┐
   │  acquires a connection or rejects      │  → DETECTS: surfaces the error
@@ -213,8 +213,8 @@ The full recap: one process, one pool, three failure modes, all propagated.
 ```
   App-to-Postgres boundary — the complete picture
 
-  ┌─ Process (one CLI run) ─────────────────────────────────────┐
-  │  ask-cmd.ts ─► PgVectorStore.search ─┐                       │
+  ┌─ Process (one session / CLI run) ───────────────────────────┐
+  │  session.ts ─► PgVectorStore.search ─┐                       │
   │            ─► SupabaseTraceSink ─────┤ all share ONE pool    │
   │            ─► runMigration ──────────┘                       │
   └────────────────────────────┬────────────────────────────────┘
@@ -235,9 +235,10 @@ The full recap: one process, one pool, three failure modes, all propagated.
 
 **Use cases.** Every durable operation in buffr reaches for this pool: indexing
 a corpus (`index` CLI → `indexDocumentRow` + `upsert`), answering a question
-(`ask` CLI → `search` + trace writes), running migrations (`migrate`), and
-loading the profile (`profile.ts`). One pool, created per process, passed by
-reference to all of them.
+(`chat` CLI → `ChatSession.ask` → `search` + trace writes), running migrations
+(`migrate`), and loading the profile (`profile.ts`). One pool per process — held
+warm across every turn of a chat session and closed only on `session.close()` —
+passed by reference to all of them.
 
 **The pool factory — `src/db.ts` (lines 1-6).**
 
@@ -357,7 +358,7 @@ be cargo-culting — there's no second resource manager to coordinate with.
 2. **Explain.** Why does `upsert` use `pool.connect()` while `persistMessage`
    uses `pool.query()`? (Transaction needs one physical connection across
    multiple statements; a single insert doesn't.) Cite `pg-vector-store.ts:40`
-   vs `supabase-trace-sink.ts:14`.
+   vs `supabase-trace-sink.ts:27`.
 3. **Apply.** A second concurrent caller appears. Walk what breaks first
    (pool exhaustion with no acquire timeout → indefinite wait) and the
    one-line fix (`connectionTimeoutMillis` on `src/db.ts:4`).
@@ -375,6 +376,14 @@ be cargo-culting — there's no second resource manager to coordinate with.
   second writer shares the datastore.
 - `audit.md` — Lens 1 (coordination map), Lens 2 (partial failure), Lens 8
   (local vs distributed transactions).
+
+---
+
+Updated: 2026-06-24 — entry point `ask-cmd.ts` (deleted) → `session.ts`
+(`ChatSession`, via `cli/chat.tsx`); the pool is now held warm across a
+long-lived chat session and closed on `session.close()` (still one pool per
+process). `persistMessage` `pool.query` anchor `:14` → `:27`. The boundary,
+failure semantics, and fail-fast verdict are unchanged.
 - `.aipe/study-database-systems/` — what happens *inside* Postgres past this
   boundary (transactions, isolation, HNSW).
 - `.aipe/study-system-design/` — the local-first architecture this boundary sits in.

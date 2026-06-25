@@ -191,8 +191,9 @@ production is the validate-and-log, not the prompt.
 
 ## Implementation in codebase
 
-**Use case in buffr: not yet wired.** buffr's `ask-cmd.ts` returns the
-RAG agent's free-prose answer (`:34-37`); it never calls
+**Use case in buffr: not yet wired.** buffr's `session.ts` ask path
+returns the RAG agent's free-prose answer (`:60-71`, via
+`agent.answer(question)` at `:62`); it never calls
 `generateStructured`. The honest finding (audit lens 5): the
 schema-validated structured-output loop is **present in the consumed
 library** and is the natural home for any future buffr capability that
@@ -309,3 +310,10 @@ fail loud; the fence-strip at `json-output.js:2` is the cheap insurance."
 - [`02-grounding-and-citation-instruction.md`](02-grounding-and-citation-instruction.md)
   — where an output-schema lock would harden grounding (and injection)
 - [`audit.md`](audit.md) — lens 5, the library-present / buffr-not-wired finding
+
+---
+
+Updated: 2026-06-24 — Re-pointed the "returns free prose" reference from
+the deleted `ask-cmd.ts` to the `session.ts` ask path
+(`agent.answer(question)` at `:62`). The validate-retry loop is still
+library-present / buffr-not-wired — unchanged.

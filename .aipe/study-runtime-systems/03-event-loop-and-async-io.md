@@ -98,21 +98,24 @@ loop runs the actual write later, when the call stack is clear.
 
 ### Move 2 — the loop, one part at a time
 
-**The call stack and `await`.** When `ask-cmd` hits `await agent.answer(...)`,
+**The call stack and `await`.** When `session.ask` hits `await agent.answer(...)`,
 the function suspends, the stack unwinds, and the event loop is free. When the
 agent's promise settles, the continuation (everything after the `await`) is
 queued as a *microtask* and runs as soon as the stack is empty. Every `await`
-in `ask-cmd.ts` is one of these suspend-resume points.
+in `session.ts:60-70` is one of these suspend-resume points. In `chat` this
+matters extra: while that turn is parked, the event loop is free to run Ink's
+render loop — that's why the `thinking…` spinner (`chat.tsx:48-51`) animates
+*during* the await instead of freezing.
 
 ```
   await as suspend/resume — the loop's core move
 
-  stack:  [ask-cmd] ──await agent.answer──► (suspend, stack empty)
+  stack:  [session.ask] ──await agent.answer──► (suspend, stack empty)
                                                   │
-            event loop idle, free to run other tasks
+            event loop idle, free to run other tasks (incl. Ink render)
                                                   │
-          agent promise settles ──► microtask: resume ask-cmd after the await
-  stack:  [ask-cmd continues] ──► await trace.flush ...
+          agent promise settles ──► microtask: resume session.ask after the await
+  stack:  [session.ask continues] ──► await trace.flush ...
 ```
 
 **Microtasks vs macrotasks.** Two queues, strict priority. Resolved promises
@@ -142,17 +145,31 @@ is now "in flight" on the event loop. `emit` returns. The kernel of the pattern:
    • drop flush          → process may exit with writes unfinished → DATA LOSS
 ```
 
-The load-bearing part people forget is **`flush()`**. Without it the agent
-finishes, the await chain reaches `pool.end()`, and the process exits while
-trace writes are still settling — the rows silently never land. `ask-cmd.ts:35`
-calls `await trace.flush()` *before* `pool.end()` for exactly this reason.
+The load-bearing part people forget is **`flush()`**. Without it the turn
+returns, `session.ask` resolves the answer to the UI, and the next turn (or
+`/exit` → `pool.end()`) can fire while trace writes are still settling — the rows
+silently never land. `session.ts:63` calls `await trace.flush()` *after*
+`agent.answer` and *before* returning the answer for exactly this reason. (In a
+long-lived chat there's no `pool.end()` per turn, so the risk shifts from
+"process exits mid-write" to "pool closed at `/exit` mid-write" — same seam, same
+fix.)
 
 **Optional hardening (absent).** A real system would catch per-write failures
 (`Promise.allSettled` instead of `Promise.all` so one failed write doesn't
 reject the whole flush), and would cap how many writes can be in flight. buffr
-does neither — `flush` uses `Promise.all` (`:38`), so a single failed trace
-write rejects `flush` and throws past `pool.end()`. That's a real edge, named
-in `08`.
+does neither — `flush` uses `Promise.all` (`:92`), so a single failed trace
+write rejects `flush` and throws out of `session.ask` — which `chat.tsx`'s
+`try/catch` (`:30-31`) catches and renders as an error turn, so the *session*
+survives even though that turn's trace is lost. That's a real edge, named in
+`08`.
+
+**Ordering inside the row, not just between calls.** A subtlety the trace sink
+now adds: because all 6 event types are fired into `pending[]` as concurrent
+writes, their *insert* order races. So `emit()` threads `event.timestamp` into
+each row's `created_at` (`coalesce($8::timestamptz, now())`,
+`supabase-trace-sink.ts:30,55`). Replay order then follows emit order, not the
+flush race — the event loop decides *when* each write lands, the timestamp
+decides how the trajectory reads back.
 
 ### Move 3 — the principle
 
@@ -185,60 +202,74 @@ must not forget to await, or the runtime exits out from under your I/O.
   │  agents.messages rows — guaranteed written only AFTER flush    │
   └───────────────────────────────────────────────────────────────┘
 
-  exit order in ask-cmd:  agent.answer → trace.flush → pool.end → exit
-  reorder these and you lose data or close the pool mid-write
+  per-turn order in session.ask:  agent.answer → trace.flush → memory.remember → return
+  exit (once, at /exit):          session.close() → pool.end()
+  reorder flush after the return and you race the next turn against unwritten rows
 ```
 
 ---
 
 ## Implementation in codebase
 
-**Use cases.** The queue-and-drain pattern is reached for exactly once: capturing
-the agent's trajectory during `ask-cmd`. aptkit emits `step` and `tool_call_end`
-events synchronously as the agent reasons; buffr persists each as a row without
+**Use cases.** The queue-and-drain pattern is reached for once per chat turn:
+capturing the agent's trajectory. aptkit emits all 6 `CapabilityEvent` types
+synchronously as the agent reasons — `step`, `tool_call_start`, `tool_call_end`,
+`model_usage`, `warning`, `error` — and buffr persists each as a row without
 blocking the agent loop.
 
-**The seam, line by line** (`src/supabase-trace-sink.ts`, lines 27–39):
+**The seam, line by line** (`src/supabase-trace-sink.ts`, lines 53–93):
 
 ```
-  src/supabase-trace-sink.ts  (lines 27–39)
+  src/supabase-trace-sink.ts  (lines 53–93)
 
   emit(event: CapabilityEvent): void {                ← SYNC: returns void, not Promise
     const { pool, conversationId } = this.opts;
-    if (event.type === 'step' && event.role === 'assistant' && event.content) {
-      this.pending.push(                              ← enqueue, do NOT await
-        persistMessage(pool, conversationId, 'assistant', event.content));
-    } else if (event.type === 'tool_call_end') {       ← tool result → a row too
-      this.pending.push(
-        persistMessage(pool, conversationId, 'tool', event.toolName,
-                       { toolResults: event.result }));
+    const at = event.timestamp;                        ← thread the emit time in
+    switch (event.type) {                              ← all 6 variants persisted
+      case 'step':
+        if (event.content)
+          this.push(persistMessage(..., event.role, event.content, { createdAt: at }));
+        return;
+      case 'tool_call_start':                          ← args (the cause) — was dropped before
+        this.push(persistMessage(..., 'tool_call', event.toolName, {...args, createdAt: at }));
+        return;
+      case 'tool_call_end':                            ← result + durationMs + error
+      case 'model_usage':                              ← fills tokens_used column
+      case 'warning': case 'error':                    ← operational signals → rows too
+        this.push(...);
+        return;
     }
   }                                                    ← returns NOW; writes still pending
+
+  private push(p) { this.pending.push(p); }            ← enqueue, do NOT await
 
   async flush(): Promise<void> {
     await Promise.all(this.pending);                   ← drain: park until all settle
   }
        │
-       └─ emit can't be async (aptkit's contract, see the class doc-comment
-          lines 21-22). So the write is fired into pending[] and the awaiting
-          is deferred to flush(). Promise.all means one rejected write rejects
-          the whole flush — see 08 for that edge.
+       └─ emit can't be async (aptkit's contract, doc-comment lines 39-48). So
+          each write is fired into pending[] via push() and the awaiting is
+          deferred to flush(). createdAt threads event.timestamp so replay order
+          survives the concurrent-insert race. Promise.all means one rejected
+          write rejects the whole flush — see 08 for that edge.
 ```
 
-**The drain ordering that protects the data** (`src/cli/ask-cmd.ts`, lines 34–38):
+**The drain ordering that protects the data** (`src/session.ts`, lines 60–70):
 
 ```
-  src/cli/ask-cmd.ts  (lines 34–38)
+  src/session.ts  (lines 60–70)
 
-  const answer = await agent.answer(question);  ← agent runs, emit() fires writes
-  await trace.flush();                          ← ★ DRAIN before exit — load-bearing ★
-  process.stdout.write(`\n${answer}\n`);
-  await pool.end();                             ← only now safe to close the pool
+  await persistMessage(pool, conversationId, 'user', question);  ← user turn first
+  const answer = await agent.answer(question);  ← agent runs, emit() fires trace writes
+  await trace.flush();                          ← ★ DRAIN before returning — load-bearing ★
+  try { await memory.remember({ conversationId, question, answer }); }
+  catch { /* best-effort: memory failure must not lose the answer */ }
+  return answer;                                ← only now hand the answer back to the UI
        │
-       └─ flush() BEFORE pool.end() is the whole correctness argument. Swap the
-          two lines and Promise.all may still be awaiting writes against a pool
-          that's mid-teardown. Drop flush() entirely and the process exits with
-          rows unwritten (see 07 for graceful-shutdown framing).
+       └─ flush() BEFORE return is the correctness argument. The pool is NOT
+          closed here (it's held warm for the next turn) — close()/pool.end()
+          happens once at /exit. memory.remember is wrapped so a failed memory
+          write can't reject the turn the user already has. (see 07.)
 ```
 
 ---
@@ -282,11 +313,13 @@ before exit — without it the process dies with writes pending and the rows
 silently never land.
 
 **Q: Why `Promise.all` and not `Promise.allSettled` in `flush`?** It's the
-weaker choice — `Promise.all` rejects on the first failed write, throwing past
-`pool.end()` and leaking the pool. `allSettled` would drain everything and let
-you inspect failures. buffr uses `all` (`:38`); for a single-user laptop that's
-acceptable, but it's the honest weak spot. *Anchor:* `all` = fail-fast,
-`allSettled` = drain-everything.
+weaker choice — `Promise.all` rejects on the first failed write, throwing out of
+`session.ask`. In chat that throw is caught by `chat.tsx`'s `try/catch`
+(`:30-31`) and rendered as an error turn, so the session survives but that turn's
+whole trace is lost. `allSettled` would drain everything and let you inspect
+failures. buffr uses `all` (`:92`); for a single-user laptop that's acceptable,
+but it's the honest weak spot. *Anchor:* `all` = fail-fast, `allSettled` =
+drain-everything.
 
 ---
 
@@ -294,10 +327,11 @@ acceptable, but it's the honest weak spot. *Anchor:* `all` = fail-fast,
 
 1. **Reconstruct:** draw the queue-and-drain skeleton and name what breaks if
    you remove `pending[]`, the `push`, or `flush`.
-2. **Explain:** why can't `emit` (`supabase-trace-sink.ts:27`) be `async`? What
-   in aptkit's contract forbids it (see the doc-comment, lines 21–22)?
-3. **Apply:** you move `await trace.flush()` to *after* `pool.end()` in
-   `ask-cmd.ts`. What goes wrong at runtime?
+2. **Explain:** why can't `emit` (`supabase-trace-sink.ts:53`) be `async`? What
+   in aptkit's `CapabilityTraceSink` contract forbids it (doc-comment 39-48)?
+   And why does it now thread `event.timestamp` into `created_at`?
+3. **Apply:** you move `await trace.flush()` to *after* `return answer` in
+   `session.ts`. What races the next turn at runtime?
 4. **Defend:** argue for switching `flush` to `Promise.allSettled`. What does
    the repo gain, what does it give up, and is it worth it for a laptop CLI?
 
@@ -305,7 +339,11 @@ acceptable, but it's the honest weak spot. *Anchor:* `all` = fail-fast,
 
 ## See also
 
-- `02-processes-threads-and-tasks.md` — the single thread the loop drives
+- `02-processes-threads-and-tasks.md` — the single thread the loop drives (and the Ink loop)
 - `05-memory-stack-heap-gc-and-lifetimes.md` — what `pending[]` costs while it fills
 - `07-backpressure-bounded-work-and-cancellation.md` — flush as graceful shutdown
 - `08-runtime-systems-red-flags-audit.md` — the `Promise.all` fail-fast edge
+
+---
+
+Updated: 2026-06-24 — re-grounded emit() on the 6-type switch + `event.timestamp`→`created_at`; moved drain ordering from `ask-cmd.ts` to `session.ts:60-70` (flush before return, pool held warm); added the Ink render loop running during the parked `await`.

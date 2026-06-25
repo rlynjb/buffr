@@ -212,9 +212,14 @@ The full adapter, both directions, with the seam marked.
 ## Implementation in codebase
 
 **Use cases.** Reached for every time the agent stores or retrieves
-knowledge: `index` writes corpus through `upsert`; `ask` and `eval` read
-through `search` (via the pipeline). It is the single point where aptkit's
-storage contract meets Postgres.
+knowledge: `index` writes corpus through `upsert`; the `chat` session and
+`eval` read through `search` (via the pipeline). It is the single point where
+aptkit's storage contract meets Postgres. As of 0.4.1 the SAME store instance
+has a *second* consumer: aptkit's memory engine
+(`createConversationMemory({ embedder, store })`, `session.ts:53`) writes
+episodic memory chunks through the same `upsert`/`search`, so conversation
+memory surfaces via the existing `search_knowledge_base` tool — the adapter
+serves two callers through one contract.
 
 **The class and contract** — `src/pg-vector-store.ts:19-30`
 
@@ -346,6 +351,14 @@ Anchor: `src/pg-vector-store.ts:80-84`.
 ## See also
 
 - `02-retrieval-pipeline.md` — what calls `upsert` and `search`.
-- `04-library-as-dependency-boundary.md` — why aptkit owns the port.
+- `04-library-as-dependency-boundary.md` — why aptkit owns the port; the
+  memory engine is the store's new second consumer.
 - `study-data-modeling` — the `agents.chunks` column shape and dropped FK.
 - `study-database-systems` — `<=>` cosine execution and HNSW internals.
+
+---
+
+Updated: 2026-06-24 — noted the store's second consumer: aptkit's
+`createConversationMemory` (0.4.1) writes episodic memory chunks through the
+same `PgVectorStore` (`session.ts:53`); `ask`/`eval` read path now reads
+`chat`/`eval`. Adapter contract itself unchanged.

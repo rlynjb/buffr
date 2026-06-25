@@ -172,8 +172,8 @@ The full picture: one `VectorStore` contract, two cost curves underneath it.
 ## Implementation in codebase
 
 **Use cases.** You reach for the cost model whenever you decide *which store to
-wire*. The eval CLI (`src/cli/eval-cmd.ts`) and ask CLI (`src/cli/ask-cmd.ts`)
-both wire `PgVectorStore` — the sublinear, on-disk curve — because the whole
+wire*. The eval CLI (`src/cli/eval-cmd.ts`) and the chat session (`src/session.ts`,
+driven by `src/cli/chat.tsx`) both wire `PgVectorStore` — the sublinear, on-disk curve — because the whole
 point of buffr is graduating off the in-memory store. The library's
 `InMemoryVectorStore` is the "zero-cloud, tiny-corpus" curve you'd use in a unit
 test.
@@ -282,3 +282,6 @@ The interface is what lets the caller not care." Anchor:
 - `06-sorting-searching-and-selection.md` — selection vs sorting, the core waste.
 - `study-database-systems` → how Postgres plans `order by ... limit` and chooses
   the HNSW index over a sequential scan.
+
+
+Updated: 2026-06-24 — purged `npm run ask` / `src/cli/ask-cmd.ts` references; re-grounded the agent loop on `src/session.ts` (built `:57`, invoked `:62`) and the chat entrypoint `src/cli/chat.tsx`; noted `@aptkit/memory` reuses the same HNSW walk (no new DSA).

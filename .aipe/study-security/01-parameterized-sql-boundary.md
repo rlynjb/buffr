@@ -179,8 +179,11 @@ to Postgres.
 
 **Use cases.** Reached for on every database touch in the repo: indexing a
 document's chunks (upsert), answering a question (search), reading the
-profile, and writing the trajectory. There is no code path that builds SQL
-by string concatenation — the pattern is uniform.
+profile, writing the trajectory, and — new — persisting conversation memory.
+The memory write (`session.ts:66`, `memory.remember`) embeds the exchange
+and calls the **same** `PgVectorStore.upsert`, so it inherits this exact
+parameterized sink rather than adding a new one. There is no code path that
+builds SQL by string concatenation — the pattern is uniform.
 
 **Code side by side.**
 
@@ -221,13 +224,14 @@ by string concatenation — the pattern is uniform.
 
 ```
   src/runtime.ts  (document insert, lines 11–16)
-  src/profile.ts  (profile read, line 5–6)
-  src/supabase-trace-sink.ts  (message insert, lines 14–18)
+  src/profile.ts  (profile read, lines 5–6)
+  src/supabase-trace-sink.ts  (message insert, lines 27–36)
 
   ...where app_id = $1            ← profile.ts
   values ($1, $2, 'markdown', $3, $4)  ← runtime.ts, note the literal
                                           'markdown' is repo-authored, not input
-  values ($1, $2, $3, $4, $5)     ← trace-sink.ts
+  values ($1..$7, coalesce($8::timestamptz, now()))  ← trace-sink.ts, the
+                                          event timestamp is bound as $8
         │
         └─ same discipline in all three. The only string literals inside
            the SQL text ('markdown', table names) are authored by the repo.
@@ -308,3 +312,5 @@ the control's edge.
   principle at the LLM boundary, where it does *not* hold cleanly.
 - `study-data-modeling` — the schema these queries hit (`agents.chunks`,
   the JSONB `meta` column, the missing FK).
+
+Updated: 2026-06-24 — re-verified all sinks; conversation-memory writes (`session.ts:66`) reuse the same parameterized `PgVectorStore.upsert`, no new SQL; corrected trace-sink insert line range (27–36) and noted bound `$8` timestamp.

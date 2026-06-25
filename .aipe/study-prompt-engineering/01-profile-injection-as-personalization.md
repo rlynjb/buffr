@@ -41,9 +41,9 @@ agent loop.
 
 ## Structure pass
 
-**Layers.** Storage (the `profiles` row) → buffr CLI (`loadProfile`) →
-aptkit agent (`injectProfile` + render) → provider (the final system
-string).
+**Layers.** Storage (the `profiles` row) → buffr CLI (`loadProfile`, in
+`createChatSession`) → aptkit agent (`injectProfile` + render) → provider
+(the final system string).
 
 **Axis — *who controls whether this text is present?*** Trace it down:
 
@@ -105,10 +105,11 @@ it's what the truthy gate downstream checks. Without the `?? ''`, a
 missing profile would be `undefined` and the gate's behavior would hinge
 on that distinction. Here it's normalized to falsy-but-defined.
 
-**Hand it to the agent.** `ask-cmd.ts:27` calls `loadProfile`, then
-`:33` passes it as `{ profile }` into `RagQueryAgent`. buffr's job ends
-here — it loaded a string and handed it over. Everything else is the
-library.
+**Hand it to the agent.** `session.ts:47` calls `loadProfile`, then `:57`
+passes it as `{ profile }` into `RagQueryAgent` — all inside
+`createChatSession`, which builds the agent **once** for the whole chat
+session (`chat.tsx` drives it per turn). buffr's job ends here — it
+loaded a string and handed it over. Everything else is the library.
 
 **Inject before render.** This is the subtle ordering decision.
 `rag-query-agent.js:29-32`:
@@ -164,9 +165,9 @@ The full path, one frame.
   │  select content … order by updated_at desc limit 1           │
   └───────────────────────────┬──────────────────────────────────┘
                               │ profile.ts:4  →  string | ''
-  ┌─ ask-cmd.ts ──────────────▼──────────────────────────────────┐
-  │  const profile = await loadProfile(pool, cfg.appId)   :27     │
-  │  new RagQueryAgent({ model, tools, profile, trace })  :33     │
+  ┌─ session.ts (createChatSession) ──▼──────────────────────────┐
+  │  const profile = await loadProfile(pool, cfg.appId)   :47     │
+  │  new RagQueryAgent({ model, tools, profile, trace })  :57     │
   └───────────────────────────┬──────────────────────────────────┘
                               │ profile string
   ┌─ RagQueryAgent ctor ──────▼──────────────────────────────────┐
@@ -223,7 +224,7 @@ run so editing your profile row changes the next answer with no redeploy.
 
 **The wiring — `rag-query-agent.js:29-32`** prepends with the
 `# About the person you are assisting` heading at `position: 'start'`,
-then renders. buffr passes `profile` in at `ask-cmd.ts:33`; it never
+then renders. buffr passes `profile` in at `session.ts:57`; it never
 passes a custom `prompt`, so the default BASE_SYSTEM template
 (`:12-19`) is what the profile gets prepended to.
 
@@ -236,7 +237,14 @@ personalization." The canonical version in the literature is the
 persona/role line ("You are a financial analyst"); the document form
 buffr uses scales that up to a whole `me.md`. The reader has shipped this
 shape before — AdvntrCue's MemoRAG session memory is the retrieval cousin
-(context the model *fetches*); this is the *always-present* cousin.
+(context the model *fetches*); this is the *always-present* cousin. buffr
+now has *both* cousins in one system: the profile is the always-present
+one (this file), and `createConversationMemory` (`session.ts:53,66`) is
+the fetched one — recalled past exchanges that ride in as tool results
+through the retrieval path of [`02`](02-grounding-and-citation-instruction.md),
+not the standing path here. Same "who is this user" goal, opposite
+injection mechanism: the profile is prepended unconditionally; a recalled
+exchange only appears when the search tool surfaces it.
 
 The design tension worth naming: standing context costs tokens on every
 call (it rides in the system prompt the context guard measures —
@@ -288,8 +296,8 @@ the model about an empty "about the user" section.
 - **Explain.** Why does `profile.ts:7` return `''` instead of letting a
   missing row propagate as `undefined`? Trace what the gate at
   `rag-query-agent.js:29` does with each.
-- **Apply.** A user's profile is 4,000 tokens and `ask-cmd.ts` sets the
-  guard to 8192 (`:26`). On a long retrieval, the guard throws
+- **Apply.** A user's profile is 4,000 tokens and `session.ts` sets the
+  guard to 8192 (`:46`). On a long retrieval, the guard throws
   (`context-window-guard.js:37`). Where do you cut — profile or chunks —
   and why?
 - **Defend.** Someone proposes moving the profile to `position: 'end'`
@@ -305,3 +313,10 @@ the model about an empty "about the user" section.
 - [`00-overview.md`](00-overview.md) — the full assembled prompt
 - [`study-agent-architecture/06-profile-as-standing-context.md`](../study-agent-architecture/06-profile-as-standing-context.md)
   — the same injection viewed as agent memory
+
+---
+
+Updated: 2026-06-24 — Re-pointed the profile hand-off from the deleted
+`ask-cmd.ts` to `session.ts` (`loadProfile:47` → `RagQueryAgent:57`,
+assembled once in `createChatSession`); noted conversation memory as the
+fetched-cousin context path now present in buffr itself.

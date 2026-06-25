@@ -83,8 +83,11 @@ JWT claim.** There is no auth in the system at all — it's single-device. So
 (`pg-vector-store.ts:75`, `where app_id = $2`), profile load
 (`src/profile.ts:5`, `where app_id = $1`). Writes stamp it: chunk upsert
 (`pg-vector-store.ts:55`), document insert (`src/runtime.ts:12`), conversation
-start (`src/supabase-trace-sink.ts:6`). The discipline is consistent — every
-current query does include it.
+start (`src/supabase-trace-sink.ts:6`), and memory writes — which go through
+the same `PgVectorStore.upsert` (`src/session.ts:53,67`), so each
+`memory:<conv>:<n>` row is stamped with the store's `appId` exactly like a
+corpus chunk. The discipline is consistent — every current write path stamps
+it, every read filters it.
 
 **Where the boundary isn't.** There is no `enable row level security`, no
 `create policy` anywhere in `sql/001_agents_schema.sql`. So the only thing
@@ -237,3 +240,8 @@ entirely `pg-vector-store.ts:75` / `profile.ts:5` — app-side, bypassable.
 - `audit.md` §7 — RLS and token-derivation under "not yet exercised."
 - `study-security` — the trust-boundary / data-exposure analysis.
 - `study-system-design` — why single-device defers the tenancy work.
+
+---
+Updated: 2026-06-24 — no-RLS / not-token-derived findings unchanged; noted
+memory writes (`@aptkit/memory` via the shared `PgVectorStore`) also stamp
+`app_id` on `memory:<conv>:<n>` rows.

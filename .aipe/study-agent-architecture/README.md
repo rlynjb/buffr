@@ -38,7 +38,7 @@ has no native tool API.
 | `01-bounded-react-loop.md` | ReAct loop + turn/tool budget + **forced synthesis** | single-agent |
 | `02-single-tool-capability-scope.md` | Allowlist policy → one read-only tool, small blast radius | single-agent |
 | `03-agentic-retrieval.md` | Model decides whether/what to search vs static RAG | single-agent |
-| `04-trajectory-as-memory.md` | Per-run capture to Postgres; **not** yet cross-session recall | single-agent |
+| `04-trajectory-as-memory.md` | Full-signal capture to Postgres + relevance recall via shared vector store; **no** in-prompt history yet | single-agent |
 | `05-emulated-tool-calling.md` | Prompt-render + JSON-parse tool calls on stock Gemma | single-agent |
 | `06-profile-as-standing-context.md` | `me.md` profile injected into the system prefix | single-agent |
 | `07-orchestration-templates.md` | 3 interview templates; multi-agent refactor targets | multi-agent (design-only) |
@@ -55,8 +55,10 @@ current code:
   planner, critic, branching, or router stage (`audit.md` Lens 1).
 - **Self-corrective RAG, query decomposition, retrieval routing** — single
   source, no relevance grader (`audit.md` Lens 2).
-- **Cross-session memory** — trajectories are *written* but never *read back*
-  into a later run (`04-trajectory-as-memory.md`, Phase A/B split).
+- **Sequential in-prompt history** — relevance recall now works (past exchanges
+  are embedded into the shared store and surface by similarity, cross-session —
+  `04-trajectory-as-memory.md`), but `RagQueryAgent.answer()` still threads no
+  running transcript into the prompt. That's the remaining memory gap.
 - **MCP, trajectory eval, cross-turn caching, per-tool circuit breaking** —
   `audit.md` Lenses 7-8. (Retrieval eval *is* present: `src/cli/eval-cmd.ts`.)
 
@@ -81,3 +83,11 @@ cross-linked there, not re-taught.
   structured outputs, agent memory. Cross-referenced by canonical path.
 - **Prompt engineering** (sibling generator, not yet generated):
   `.aipe/study-prompt-engineering/` — structured-output / self-critique craft.
+
+---
+
+Updated: 2026-06-24 — `04` re-titled and reframed (capture + relevance recall;
+no in-prompt history). Moved cross-session memory out of the "not yet exercised"
+inventory (now exercised via `createConversationMemory`); the remaining gap is
+sequential in-prompt history. Entry point is `npm run chat` (long-lived session,
+`ask-cmd.ts` deleted).

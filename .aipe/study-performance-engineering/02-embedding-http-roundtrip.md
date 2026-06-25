@@ -206,9 +206,18 @@ The full index path with both batchings marked.
 
 ## Implementation in codebase
 
-**Use cases.** Reached on `npm run index -- <files>` (the only write path into the
-corpus) and once per `query` on the read path (`pipeline.query` embeds the single
-query string — one chunk, one call).
+**Use cases.** Reached on `npm run index -- <files>` (the main write path into the
+corpus) and on the read path during `chat`: each turn embeds the query string once
+(`pipeline.query` — one chunk, one call). New as of the `chat` session: **each
+turn also pays a second embed round-trip** for episodic memory. After the agent
+answers, `memory.remember({ conversationId, question, answer })`
+(`src/session.ts:66`, via `createConversationMemory` at `src/session.ts:53`)
+embeds the exchange and upserts it into the *same* PgVectorStore (tagged as
+memory). So a chat turn is two `/api/embed` calls, not one — the query embed
+(before the answer) plus the memory embed (after it). It's a small added per-turn
+cost: one more Ollama inference call and one more pg upsert, dominated by the
+gemma2 generation between them, but worth naming because it scales with turn
+count, not corpus size.
 
 **The serial loop — `src/cli/index-cmd.ts:22-26`:**
 
@@ -310,6 +319,15 @@ the transport (`input: texts` proves the per-doc batch) before you read the loop
 
 - `audit.md` § io-network-and-database-bottlenecks, § caching-batching-and-backpressure
 - `03-per-chunk-insert-loop.md` — the write that follows each embed
-- `04-connection-pool-reuse.md` — the pool the inserts ride on
+- `04-connection-pool-reuse.md` — the pool the inserts ride on; carries the
+  per-turn memory upsert across the whole chat session
 - `study-runtime-systems` — `for…await` serialization vs bounded `Promise.all`
 - `study-networking` — the `/api/embed` transport, timeouts, retries
+
+---
+
+Updated: 2026-06-24 — Re-verified: chunks-batch-per-doc / serial-across-files
+correction still holds (`index-cmd.ts:22-26` unchanged). Added the new per-turn
+memory embed: each `chat` turn now makes a SECOND `/api/embed` call +
+upsert via `memory.remember` (`session.ts:53,66`) on top of the query embed —
+a small added per-turn cost. Read path reframed from `ask` to `chat`.

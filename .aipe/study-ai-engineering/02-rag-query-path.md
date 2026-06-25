@@ -1,5 +1,7 @@
 # RAG query path — embed → ANN cosine → rank → ground
 
+> Updated: 2026-06-24 — `ask-cmd.ts` references retargeted to `src/session.ts` (the `chat` surface); noted that this same path now also surfaces recalled memory rows (see `08-conversation-memory.md`).
+
 **Industry name(s):** RAG retrieval / dense retrieval over a vector index · Language-agnostic pattern.
 
 ## Zoom out, then zoom in
@@ -10,7 +12,7 @@ This is the read side of RAG — what runs every time the agent decides to searc
   Zoom out — where the query path lives
 
   ┌─ CLI / Agent layer ──────────────────────────────────────┐
-  │  ask-cmd.ts → agent → search_knowledge_base tool          │
+  │  session.ts → agent → search_knowledge_base tool          │
   └───────────────────────────┬──────────────────────────────┘
                               │  query string
   ┌─ Library layer ───────────▼──────────────────────────────┐
@@ -109,7 +111,7 @@ The full query path, every layer labeled.
 ```
   buffr query path — full recap
 
-  ┌─ Agent/CLI: ask-cmd.ts ───────────────────────────────────┐
+  ┌─ Agent/Session: session.ts ───────────────────────────────┐
   │  search_knowledge_base({query, top_k})  →  pipeline.query  │
   └───────────────────────────┬────────────────────────────────┘
                               │  embedder.embed([query]) → q(768)
@@ -128,7 +130,7 @@ The full query path, every layer labeled.
 
 ## Implementation in codebase
 
-**Use cases.** Runs inside `ask` every time the agent calls the search tool, and inside `eval` once per labeled query to score retrieval. Both go through the same `pipeline.query` → `PgVectorStore.search` path — the eval measures the exact retrieval the agent uses.
+**Use cases.** Runs inside `chat` every time the agent calls the search tool, inside `eval` once per labeled query to score retrieval, and inside memory `recall` (`08-conversation-memory.md`). All go through the same `pipeline.query` → `PgVectorStore.search` path — the eval measures the exact retrieval the agent uses, and memory rows ride the same ranked results.
 
 **Code side by side.**
 
@@ -154,7 +156,7 @@ The full query path, every layer labeled.
 ```
 
 ```
-  src/cli/ask-cmd.ts  (line 23)
+  src/session.ts  (line 43)
 
   const tool = createSearchKnowledgeBaseTool(pipeline, { minTopK: 4 });
        │
@@ -200,7 +202,7 @@ What to read next: `05-embedding-model-choice.md` (why query and corpus must sha
 - **What to build:** Wrap `PgVectorStore.search` to record embed time vs SQL time and emit it to the trace sink.
 - **Why it earns its place:** Shows you can find the slow link in a RAG request (the "spans" pillar of LLM observability).
 - **Files to touch:** `src/pg-vector-store.ts`, `src/supabase-trace-sink.ts` (handle a timing event).
-- **Done when:** an `ask` run writes per-search embed-ms and query-ms into `agents.messages` or a sibling table.
+- **Done when:** a `chat` turn writes per-search embed-ms and query-ms into `agents.messages` or a sibling table.
 - **Estimated effort:** 1–4hr.
 
 ## Interview defense
@@ -222,9 +224,9 @@ The score is `1 - (embedding <=> $1)` — the same operator is used twice, once 
 ## Validate
 
 - **Reconstruct:** Write the `search` SQL from memory, including the `where app_id` scope and both framings of `<=>`. (`src/pg-vector-store.ts:70`)
-- **Explain:** Why must `embedder.embed` be the same provider for query and corpus? What enforces it? (`pipeline.js` `assertWiring`; `src/cli/ask-cmd.ts:20`)
+- **Explain:** Why must `embedder.embed` be the same provider for query and corpus? What enforces it? (`pipeline.js` `assertWiring`; `src/session.ts:40`)
 - **Apply:** A query for an exact error code `"E_DIM_768"` returns nothing useful. Diagnose why dense-only retrieval struggles here and name the fix. (`src/pg-vector-store.ts:67`)
-- **Defend:** `minTopK: 4` overrides the model's requested `top_k`. Defend that guardrail and name what it costs. (`src/cli/ask-cmd.ts:23`)
+- **Defend:** `minTopK: 4` overrides the model's requested `top_k`. Defend that guardrail and name what it costs. (`src/session.ts:43`)
 
 ## See also
 

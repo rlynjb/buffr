@@ -156,7 +156,7 @@ Every index on `chunks`, what query reaches it, exact vs approximate.
 
 ## Implementation in codebase
 
-**Use cases.** The HNSW index is hit on every `ask` and every `eval` query — it's the retrieval hot path. The PK btree is hit on every chunk upsert (dedup) and every document upsert. The `app_id` btree is hit on every search filter.
+**Use cases.** The HNSW index is hit on every `chat` turn and every `eval` query — it's the retrieval hot path, and it now also serves episodic-memory recall (memory chunks live in the same `chunks` table and are queried by the same `search_knowledge_base` tool). The PK btree is hit on every chunk upsert (dedup — including memory writes via `memory.remember`, `src/session.ts:67`) and every document upsert. The `app_id` btree is hit on every search filter.
 
 ```
   sql/001_agents_schema.sql  (lines 28–30)  — the indexes declared
@@ -253,3 +253,7 @@ Anchor: *"Operator and opclass are a matched pair; mismatch them and you scan ev
 - `09-database-systems-red-flags-audit.md` — untuned ef_search ranked as a risk
 - `study-performance-engineering` — the latency side of the ef_search dial
 - `study-ai-engineering` — retrieval recall's effect on answer quality
+
+---
+
+Updated: 2026-06-24 — `every ask` → `every chat turn`; noted the HNSW + PK btrees now also serve episodic-memory chunks written via `memory.remember` (`src/session.ts:67`), which share the same `chunks` table.
