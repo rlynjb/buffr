@@ -8,7 +8,6 @@
     "test": "npm run build && node --test --test-concurrency=1 dist/test/*.test.js",
     "migrate": "npm run build && node dist/src/migrate.js",
     "index": "npm run build && node dist/src/cli/index-cmd.js",
-    "ask": "npm run build && node dist/src/cli/ask-cmd.js",
     "eval": "npm run build && node dist/src/cli/eval-cmd.js",
     "chat": "npm run build && node dist/src/cli/chat.js"
   },
