@@ -2,6 +2,7 @@ import { config as loadEnv } from 'dotenv';
 import {
   OllamaEmbeddingProvider, createRetrievalPipeline, createSearchKnowledgeBaseTool,
   InMemoryToolRegistry, GemmaModelProvider, ContextWindowGuardedProvider, RagQueryAgent,
+  createConversationMemory,
 } from '@rlynjb/aptkit-core';
 import { loadConfig } from './config.js';
 import { createPool } from './db.js';
@@ -17,10 +18,10 @@ import { startConversation, persistMessage, SupabaseTraceSink } from './supabase
  *
  * Memory model:
  * - Knowledge (indexed docs) and profile are recalled every turn (RAG + system prompt).
- * - Retrievable conversation memory: after each turn the exchange is embedded into
- *   the SAME vector store (tagged kind=memory), so future turns surface relevant past
- *   exchanges via the existing search_knowledge_base tool — across sessions, not just
- *   within one. This is the "knows me over time" loop.
+ * - Retrievable conversation memory via @aptkit/memory: after each turn the exchange is
+ *   embedded into the SAME vector store (tagged kind=memory), so future turns surface
+ *   relevant past exchanges via the existing search_knowledge_base tool — across sessions.
+ *   The memory engine is aptkit's; buffr only injects its PgVectorStore.
  * - Still missing: sequential in-prompt turn history (RagQueryAgent.answer() treats each
  *   question independently). That's an aptkit-side change; retrieval-based recall above
  *   gives relevance-based memory without it.
@@ -45,31 +46,27 @@ export async function createChatSession(): Promise<ChatSession> {
   const model = new ContextWindowGuardedProvider(new GemmaModelProvider({ host: cfg.ollamaHost }), { maxTokens: 8192 });
   const profile = await loadProfile(pool, cfg.appId);
 
+  // Retrievable episodic memory over buffr's own store. The engine (embed, tag,
+  // recall) is aptkit's; buffr injects the PgVectorStore. Sharing the document
+  // store means memory surfaces via the existing search_knowledge_base tool — and
+  // memory chunks live with no documents row, which the dropped FK allows.
+  const memory = createConversationMemory({ embedder, store });
+
   const conversationId = await startConversation(pool, cfg.appId);
   const trace = new SupabaseTraceSink({ pool, conversationId });
   const agent = new RagQueryAgent({ model, tools, profile, trace });
 
-  let turn = 0;
   return {
     async ask(question: string): Promise<string> {
       await persistMessage(pool, conversationId, 'user', question);
       const answer = await agent.answer(question);
       await trace.flush();
-      // Retrievable memory: embed this exchange into the same store so future
-      // turns recall it via search_knowledge_base, exactly like a document. The
-      // dropped chunks->documents FK is what lets a memory chunk live here with
-      // no documents row. Best-effort: a memory-write failure must not lose the
-      // answer the user already has.
+      // Best-effort: a memory-write failure must not lose the answer the user has.
       try {
-        await pipeline.index({
-          id: `mem:${conversationId}:${turn}`,
-          text: `Past exchange — you asked: "${question}"\nbuffr answered: "${answer}"`,
-          meta: { kind: 'memory', conversationId },
-        });
+        await memory.remember({ conversationId, question, answer });
       } catch {
         // swallow: memory is best-effort, the turn already succeeded
       }
-      turn += 1;
       return answer;
     },
     async close(): Promise<void> {
