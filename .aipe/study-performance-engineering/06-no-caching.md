@@ -1,249 +1,154 @@
-# No Caching
+# No Caching — an identical query re-embeds every time
 
-**Industry names:** memoization · embedding cache · result cache · the absent cache layer.
-**Type:** Industry standard (studied here by its *absence*).
+**Industry name(s):** result caching / memoization; embedding cache. **Type:** Industry standard.
 
----
+There is no cache anywhere in buffr's retrieval path. Ask the same question twice — or re-run the eval set unchanged — and you pay the full embedding roundtrip and HNSW search both times. This is an *absent* mechanism; the file teaches the shape of the cache that isn't there and when it would start to matter.
 
 ## Zoom out, then zoom in
 
-Embeddings are deterministic: the same text through the same model gives the same 768-dim
-vector, every time. buffr never exploits that. The same question typed twice re-embeds
-twice; the eval harness re-embeds every labeled query on every run. There's no cache
-anywhere — not for embeds, not for query results. This file studies the cache buffr
-*doesn't* have, because the absence is the finding.
+Caching turns "compute it again" into "look it up." buffr never makes that trade. Every query string, every time, goes the long way: embed → search → (generate).
 
 ```
-  Zoom out — where a cache would sit, and doesn't
+  Zoom out — where a cache WOULD sit (but doesn't)
 
-  ┌─ Session / CLI layer ───────────────────────────────────────┐
-  │  ask(q)  /  pipeline.query(q)                                │
-  │     │                                                        │
-  │     ▼   ┌─ ✗ NO CACHE HERE ✗ ────────────────────┐          │ ← we are here
-  │     │   │  (deterministic embed(q) recomputed     │          │   (the gap)
-  │     │   │   every call)                           │          │
-  │     │   └─────────────────────────────────────────┘          │
-  │     ▼                                                        │
-  └─────┼────────────────────────────────────────────────────────┘
-        │ embed │ HTTP :11434 (every time)
-  ┌─ Ollama ───▼──────────────────────────────────────────────────┐
-  │  nomic-embed-text:v1.5 — recomputes the same vector on repeat  │
-  └────────────────────────────────────────────────────────────────┘
+  ┌─ Session / Eval ─────────────────────────────────────────────┐
+  │  query string                                                │
+  └───────────────────────────┬───────────────────────────────────┘
+                  ┌───────────┴── (no cache check here) ──┐
+                  │  ✗ no embedding cache                  │
+                  ▼                                        │
+  ┌─ embed (Ollama) ──────────┐                            │
+  │  always recomputed        │  ✗ no query-result cache ──┘
+  └───────────┬────────────────┘
+  ┌─ HNSW search ▼────────────┐
+  │  src/pg-vector-store.ts:67 │  always re-run
+  └────────────────────────────┘
 ```
 
-Zoom in: the pattern is a **missing memoization layer** over a deterministic, idempotent
-function. The question this file answers: what is recomputed that could be cached, how
-trivially cacheable it is, and why "no cache" is — for now — the right call anyway.
+Zoom in: the pattern is **result caching** — and its absence. Two cache layers could exist and neither does: an *embedding cache* (string → vector, skipping the Ollama roundtrip) and a *query-result cache* (string → hits, skipping embed *and* search). buffr has neither.
 
----
+## The structure pass
 
-## Structure pass
-
-**Layers.** The cacheable work lives at one layer: embedding. Two call sites recompute it —
-the chat path (`session.ts`, via `agent.answer` → query embed) and the eval path
-(`eval-cmd.ts:26`, `pipeline.query` per labeled query).
-
-**Axis — cost (redundant recomputation).** Hold "is this work repeated for identical input?":
+Axis: **cost** — work done on a *repeated* input.
 
 ```
-  One question — "is identical work recomputed?" — across the call sites
+  axis = "cost of asking the SAME query twice"
 
-  ┌─ chat turn (session.ts) ────────────────────────────┐
-  │  same question twice → embed(q) computed TWICE       │  redundant, cacheable
-  └──────────────────────────────────────────────────────┘
-  ┌─ eval run (eval-cmd.ts) ────────────────────────────┐
-  │  re-run the suite → every query re-embedded          │  redundant across runs
-  └──────────────────────────────────────────────────────┘
-  ┌─ the embed function itself ─────────────────────────┐
-  │  pure for fixed (model, text) → SAME vector out      │  ← the cacheable property
-  └──────────────────────────────────────────────────────┘
-
-  the function is pure; the call sites don't dedupe. that's the whole gap.
+  ┌─ first ask ─────────────────────────────────────────────────┐
+  │  embed (Ollama roundtrip) → HNSW search → hits              │
+  └─────────────────────────────────────────────────────────────┘
+  ┌─ second ask (identical string) ─────────────────────────────┐
+  │  embed AGAIN → HNSW AGAIN → same hits                       │ ← no flip
+  │      ▲ a cache would flip this to: lookup → hits            │   (work repeats)
+  └─────────────────────────────────────────────────────────────┘
+   seam that DOESN'T exist: nothing intercepts the repeated input
 ```
 
-**Seam — the call boundary at `embed(text)`.** The load-bearing seam is the embed call
-itself: a deterministic function with no memo wrapper. A cache slots in *exactly here* — key
-on `(model, text)`, return the stored vector on hit. Nothing else in the system needs to know
-the cache exists; it's a transparent interposition at one seam.
-
----
+**The missing seam:** a cache *is* a seam — a place to intercept a repeated input and short-circuit the work behind it. buffr has no such interception point. The cost axis doesn't flip on repetition because nothing notices the repetition.
 
 ## How it works
 
 ### Move 1 — the mental model
 
-You know `useMemo(() => expensive(input), [input])` — recompute only when the input changes,
-otherwise hand back the stored result? A cache for embeddings is exactly that, keyed on the
-text. buffr has the perfect candidate for it (a pure function over text) and the wrapper
-nowhere. The mental model: **a deterministic function called repeatedly with repeating
-inputs, and no memo between the call and the computation.**
+You know how memoizing a pure function — same input, cached output — turns the second call into a map lookup? An embedding is pure in exactly that sense: the same string with the same model always produces the same vector. So `embed(query)` is a textbook memoization candidate, and buffr never memoizes it.
 
 ```
-  Cache — the interposition that isn't there
+  memoization — the shape that's missing
 
-  WITHOUT (now):
-    embed("what is X") ──► Ollama ──► [vector]   ← every call, full HTTP + GPU
-    embed("what is X") ──► Ollama ──► [vector]   ← again, identical work
-
-  WITH (a Map keyed on text):
-    embed("what is X") ──► cache MISS ──► Ollama ──► store ──► [vector]
-    embed("what is X") ──► cache HIT  ──────────────────────► [vector]   ← no HTTP, no GPU
+  embed("what is X?")  ── first time ──► [compute] ──► vector ──┐
+                                                                │ store
+  embed("what is X?")  ── again ───────► [lookup] ◄─────────────┘
+                                          ▲ buffr skips this branch
+                                            and recomputes every time
 ```
 
-### Move 2 — the walkthrough
+### Move 2 — the step-by-step walkthrough
 
-**Where the redundant embed lives, on the chat path.** Each `ask()` runs the agent, which
-embeds the query to search. `session.ts:60-71` calls `agent.answer(question)` fresh every
-turn — no dedupe. Ask the same thing twice in a session and the query is embedded twice,
-each a full Ollama HTTP roundtrip plus GPU dispatch. And recall from `05`: `memory.remember`
-adds a *second* embed per turn — also uncached.
+**Where the recompute happens — chat.** Every `search` re-embeds upstream and re-runs the HNSW query (`src/pg-vector-store.ts:67-78`). There's no `if cached return cached` before it. The query string isn't even hashed. Two identical questions in one session are two full embed+search cycles.
 
-**Where it's most obviously wasteful — the eval harness.** `eval-cmd.ts:24-32`:
+**Where it bites hardest — the eval harness.** This is the concrete cost. `src/cli/eval-cmd.ts:24-31`:
 
 ```ts
 for (const { query, relevant } of queries) {
-  const hits = await pipeline.query(query, K);   // ← embeds `query` EVERY run, from scratch
-  ...
+  const hits = await pipeline.query(query, K);   // embed + HNSW, EVERY run
+  // ... score precision / recall ...
 }
 ```
 
-The eval set (`eval/queries.json`) is *fixed*. Every time you run `npm run eval` to check
-whether a tuning change helped, every labeled query is re-embedded from zero. The inputs
-never change between runs — this is the textbook case for a persistent embed cache, and it's
-the place the absence stings most because eval is the loop you run *repeatedly* while tuning.
-
-**The cache that isn't there — the skeleton of the fix:**
+Run the eval set today, tweak the HNSW `ef_search`, run it again to compare — every query re-embeds from scratch both runs, even though the *query strings never changed*. Only the index changed. An embedding cache keyed on `(model, string)` would make the second eval run skip every embed roundtrip and isolate the variable you're actually testing. The eval loop is where repeated identical inputs are *guaranteed*, which makes it the clearest place caching would pay.
 
 ```
-  pseudocode — the embed memo (the missing layer)
+  layers-and-hops — the eval re-run, with vs without an embed cache
 
-  cache = Map<string, number[]>            // key: `${model}:${text}`, value: the vector
-  function cachedEmbed(text):
-    key = model + ":" + text
-    if cache.has(key):                     // HIT — no HTTP, no GPU
-      return cache.get(key)
-    vector = ollamaEmbed(text)             // MISS — pay once
-    cache.set(key, vector)                 // store for next time
-    return vector
-
-  in-process Map for a session; a `embeddings` table or Redis to persist across runs.
+  ┌─ eval run 1 ─────────────────────────────────────────────────┐
+  │  for query: embed(Ollama) → HNSW → score                     │
+  └───────────────────────────┬───────────────────────────────────┘
+            tune ef_search, re-run to compare
+  ┌─ eval run 2 (NOW) ────────▼───────────────────────────────────┐
+  │  for query: embed(Ollama) AGAIN → HNSW → score               │ ✗ wasted embeds
+  └───────────────────────────────────────────────────────────────┘
+  ┌─ eval run 2 (WITH cache) ─────────────────────────────────────┐
+  │  for query: cache hit → vector → HNSW → score                │ ✓ embed skipped
+  └───────────────────────────────────────────────────────────────┘
 ```
 
-**What breaks without it — and why that's fine here:**
+**What a cache would cost you back.** Caching isn't free — name the trade honestly. An embedding cache needs invalidation when the model changes (key on model name, which `PgVectorStore` already tracks at `src/pg-vector-store.ts:28`). A query-*result* cache needs invalidation when the corpus changes — index a new doc and a cached hit list goes stale. That second one is the harder trade, which is exactly why the embedding cache (pure, model-keyed, no corpus dependency) is the one to reach for first.
 
-```
-  no-cache consequences — named, then judged
-
-  1. repeated query re-embeds      → wasted HTTP+GPU on dup input    cost: low (rare dups)
-  2. eval re-embeds every run      → slow tuning loop                cost: low-moderate
-  3. memory embed never deduped    → second embed per turn always    cost: low (dwarfed)
-  ── but ──
-  no cache = no invalidation, no staleness, no extra moving part     benefit: simplicity
-```
-
-**Does it matter at laptop scale? No — and that's why it's correct for now.** A cache buys
-you nothing on *cold* queries (every new question is a miss), and buffr's traffic is one
-user asking mostly-novel questions. The hit rate on real chat would be low. The one place a
-cache clearly pays is the eval loop — fixed inputs, run repeatedly — and even there it's
-seconds saved, not a capability unlocked. Meanwhile a cache *adds* a moving part: an
-invalidation story, a memory ceiling, a staleness question if the model version changes. At
-this scale the simplicity of "always recompute, never stale" is worth more than the
-milliseconds a cache would save. The honest verdict: **no-cache is the right call today, and
-the first cache to add — when it's worth it — is a persistent embed cache for the eval loop.**
-
-### Move 2.5 — current state vs future state
-
-```
-  Phase A — now (no cache)              Phase B — embed cache (when it pays)
-  ────────────────────────────          ─────────────────────────────────────
-  every embed recomputed                Map (session) or table/Redis (cross-run)
-  zero staleness, zero invalidation     key on (model, text); invalidate on model change
-  simple; correct; fine for 1 user      eval loop stops re-embedding fixed queries
-  + low-dup chat traffic                cost: an invalidation + memory-bound story
-```
-
-What *doesn't* change: the embedder, the store, the search. The cache is a transparent
-wrapper at one seam — `embed(text)` — and nothing downstream knows it's there.
+**Does it matter at laptop scale?** For chat, barely — a single user rarely asks the exact same string twice in a row, so the chat hit-rate is low and unmeasured. For eval, yes — re-running the labeled set is the one workload with a *guaranteed* 100% repeat rate, and that's where an embedding cache earns the most. The honest verdict: caching helps the *eval* loop more than it helps chat, and neither is on fire because, again, the embed roundtrip is small next to `gemma2:9b` generation.
 
 ### Move 3 — the principle
 
-A cache is only worth its invalidation cost when the hit rate is high enough to pay for the
-complexity. The discipline isn't "always cache deterministic work" — it's "measure the hit
-rate first." buffr's chat traffic is mostly-novel (low hit rate → skip), its eval loop is
-fixed-input (high hit rate → the one place to cache). Knowing the difference is the lesson;
-adding a cache everywhere a pure function exists is the mistake the absence here avoids.
-
----
+A cache is a bet that inputs repeat. buffr makes no such bet, which is defensible for single-user chat where they mostly don't — but leaves the one workload where they *always* repeat (eval re-runs) paying full cost every time. The general lesson: before adding a cache, ask where the repeated inputs actually are. Here they're in the eval harness, not the chat path, so that's where a cache should land first — and the embedding cache (pure function, model-keyed) is the cheap, safe one to start with.
 
 ## Primary diagram
 
 ```
-  No caching — the recompute that repeats, and where a memo would slot in
+  No caching — the repeated work, and where a cache would cut it
 
-  ┌─ Call sites ──────────────────────────────────────────────────────┐
-  │  chat:  ask(q) → agent.answer → embed(q)   ← recomputed per turn    │
-  │  memory: remember → embed(exchange)        ← second embed per turn  │
-  │  eval:  pipeline.query(q) per labeled query ← re-embedded per RUN   │
-  └──────────────────────────────────┬────────────────────────────────┘
-                                      │
-              ┌───────── ✗ NO CACHE (the gap) ✗ ─────────┐
-              │  would key on (model, text); HIT → return │
-              │  stored vector, skip HTTP + GPU entirely  │
-              └──────────────────────────┬────────────────┘
-                                         │ embed │ HTTP :11434 (every time)
-  ┌─ Ollama: nomic-embed-text:v1.5 ─────▼──────────────────────────────┐
-  │  deterministic: same text → same vector → safe to cache            │
-  │  best ROI: the fixed-input eval loop (eval-cmd.ts:26)              │
-  └────────────────────────────────────────────────────────────────────┘
+  ┌─ caller (chat OR eval re-run) ───────────────────────────────┐
+  │  query string  ── (no cache check) ──►                       │
+  └───────────────────────────┬───────────────────────────────────┘
+        ╎ embedding cache      │  ← MISSING: string→vector, model-keyed
+        ╎ would intercept here │     (pure, safe, first to add)
+  ┌─ embed (Ollama) ──────────▼───────────────────────────────────┐
+  │  always recomputed  ── 768-dim vector                        │
+  └───────────────────────────┬───────────────────────────────────┘
+        ╎ result cache         │  ← MISSING: string→hits
+        ╎ would intercept here │     (harder: invalidate on corpus change)
+  ┌─ HNSW search ─────────────▼───────────────────────────────────┐
+  │  src/pg-vector-store.ts:67  always re-run                    │
+  └───────────────────────────────────────────────────────────────┘
+   biggest guaranteed-repeat workload: eval re-runs (eval-cmd.ts:24)
 ```
-
----
 
 ## Elaborate
 
-Caching is the canonical "make it faster by not doing the work twice," and embeddings are an
-unusually clean target because they're pure and idempotent — no invalidation needed unless
-the model version changes. The reason buffr *doesn't* have one is the right reason: a cache
-is a liability when the hit rate is low (it's pure overhead + a staleness surface), and chat
-queries are mostly unique. The eval harness is the exception worth carving out — fixed inputs
-run on every tuning iteration, exactly the high-hit-rate shape a cache wants.
+Caching is the most over-applied performance pattern — added reflexively, often before there's a measured hit rate to justify it. buffr's *absence* of caching is arguably the correct default for a single-user chat app: you don't pay the invalidation complexity for a hit rate you haven't measured. The place that flips the calculus is the eval harness, where repeat rate is 100% by construction. So the disciplined move isn't "add a cache" — it's "measure the chat repeat rate, and meanwhile add an embedding cache scoped to the eval runner where the win is certain."
 
-This connects to `01-hnsw-approximate-search` (the eval loop that re-embeds is the same loop
-you'd use to verify an HNSW tuning change — caching its embeds makes that verification loop
-tight) and `05-per-turn-memory-and-trace-cost` (the per-turn second embed is one more
-uncached deterministic call).
-
----
+For the embedding model whose output would be cached and why it's deterministic, see **`study-ai-engineering`**. For the HTTP roundtrip a cache would eliminate, see **`study-networking`**. For the eval harness this would most help, see **`study-testing`** (the eval seam). This file owns the *caching-tradeoff* read.
 
 ## Interview defense
 
-**Q: Embeddings are deterministic. Why don't you cache them?**
+**Q: Do you cache anything in your retrieval path?**
 
-Because the hit rate doesn't justify it — yet. Chat traffic is mostly-novel questions, so a
-cache would mostly miss and just add an invalidation surface and a memory ceiling for no
-real saving. A cache is only worth its complexity when the hit rate is high.
+> No — and that's a deliberate default for single-user chat. The same query embeds and searches from scratch every time. There's no embedding cache and no result cache. For chat that's fine: one user rarely repeats the exact string, so the hit rate would be low and I haven't measured it. Where it actually bites is the eval harness — re-running the labeled set to compare, say, two `ef_search` settings re-embeds every query both runs even though only the index changed.
 
 ```
-  chat queries:  mostly unique → low hit rate → cache = overhead   → skip
-  eval queries:  fixed set, re-run → high hit rate → cache pays     → the one to add
+  same query twice → embed + search twice (no interception)
+  guaranteed-repeat workload = eval re-runs → cache pays there
 ```
 
-The place it *does* pay is the eval loop (`eval-cmd.ts:26`): the labeled query set never
-changes, but every run re-embeds all of it from scratch. A persistent embed cache keyed on
-`(model, text)` would make that tuning loop tight. So my answer isn't "caching is bad" — it's
-"I measured where the hit rate is, and the first cache I'd add is a persistent embed cache for
-eval, not a general one for chat." The invalidation story is easy too: bust on model-version
-change, since that's the only thing that alters the output.
+**Q: If you added one, what and where?**
 
-**Anchor:** `eval-cmd.ts:24-32` (re-embeds every run), `session.ts:60-71` (per-turn embed,
-uncached). The cache is absent by design, not by oversight.
+> An embedding cache keyed on `(model, string)`, scoped to the eval runner first. It's a pure function — same model, same string, same vector — so no corpus-change invalidation, just bust it when the model name changes, which the store already tracks. I'd avoid a query-*result* cache initially because that one goes stale every time I index a doc, and that invalidation is the harder, more bug-prone trade. Start with the safe pure-function cache where the repeat rate is 100%.
 
----
+> Anchor: `src/pg-vector-store.ts:67` (re-embeds + re-searches), `src/cli/eval-cmd.ts:24-31` (the guaranteed-repeat loop).
 
 ## See also
 
-- `02-embedding-roundtrip.md` — the embed roundtrip that a cache would skip on a hit.
-- `01-hnsw-approximate-search.md` — the eval loop (uncached embeds) is the tuning gauge.
-- `05-per-turn-memory-and-trace-cost.md` — the per-turn second embed, also uncached.
-- `audit.md` §6 (caching absent), §2 (eval as the repeated loop), §8 (red flag #4).
-- `study-ai-engineering` — embeddings and the retrieval pipeline these calls go through.
+- `00-overview.md` — finding #5
+- `audit.md` — lens 6 (caching), lens 8 (red flags #4)
+- `01-hnsw-approximate-search.md` — the search a result cache would skip
+- `02-embedding-roundtrip.md` — the embed an embedding cache would skip
+- **`study-ai-engineering`** — the deterministic embedding model
+- **`study-testing`** — the eval harness where caching pays most

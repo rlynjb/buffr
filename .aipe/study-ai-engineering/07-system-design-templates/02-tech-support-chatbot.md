@@ -1,72 +1,97 @@
-# Tech support chatbot system design
+# Tech-Support Chatbot — interview reframe
 
-- **The prompt:** "Design a tech support chatbot that answers customer questions, escalates when it can't, and learns from agent corrections."
+## The prompt
 
-- **Standard architecture:**
+> Design a tech-support chatbot that answers user questions, escalates to a human when it can't, and learns from corrections.
 
-  ```
-  User message
-    │
-    ▼
-  ┌──────────────────────────────────┐
-  │ Intent classification            │
-  │  (heuristic + LLM)               │
-  └──────────────┬───────────────────┘
-                 │
-                 ▼
-  ┌──────────────────────────────────┐
-  │ RAG over knowledge base          │
-  │  (docs, past tickets, runbooks)  │
-  └──────────────┬───────────────────┘
-                 │  retrieved context
-                 ▼
-  ┌──────────────────────────────────┐
-  │ Constrained LLM response         │
-  │  (grounded, cite-or-refuse)      │
-  └──────────────┬───────────────────┘
-                 │
-                 ▼
-  ┌──────────────────────────────────┐
-  │ Escalate  ◄──── confidence gate  │
-  │  or respond                      │
-  └──────────────┬───────────────────┘
-                 │
-                 ▼
-  ┌──────────────────────────────────┐
-  │ Feedback loop                    │
-  │  (agent corrections → eval set)  │
-  └──────────────────────────────────┘
-  ```
+## Standard architecture
 
-- **Data model:**
-  - Knowledge base — docs, past tickets, runbooks chunked + embedded; in buffr this is `chunks` with a 768-dim vector, queried by `search_knowledge_base`.
-  - Conversation log — full message trajectory `{role, content, tool_calls, tool_results}`; buffr has exactly this in `agents.messages`, persisted by `src/supabase-trace-sink.ts`.
-  - Intent labels — `{message, intent, confidence}`; buffr has none.
-  - Correction store — `{conversation_id, agent_correction, original_response}`; buffr has none, but the trajectory in `agents.messages` is the substrate one would attach corrections to.
+```
+            Tech-support chatbot — answer · escalate · learn
+┌──────────────────────────────────────────────────────────────────────┐
+│                          user message                                  │
+│                                │                                       │
+│                                ▼                                       │
+│                      ┌──────────────────┐                              │
+│                      │ intent classifier │  FAQ? account? bug? chitchat │
+│                      └──────────────────┘                              │
+│                                │                                       │
+│              ┌─────────────────┼─────────────────┐                     │
+│              ▼                 ▼                 ▼                      │
+│        ┌──────────┐     ┌──────────────┐   ┌──────────┐                │
+│        │ canned /  │     │  RAG answer   │   │  action / │                │
+│        │ FAQ path  │     │  over KB      │   │  tool API │                │
+│        └──────────┘     └──────────────┘   └──────────┘                │
+│                                │                                       │
+│                                ▼                                       │
+│                      ┌──────────────────┐                              │
+│                      │ confidence gate   │  grounded? confident?        │
+│                      └──────────────────┘                              │
+│                          │            │                                │
+│                  yes ────┘            └──── no                          │
+│                   ▼                          ▼                          │
+│            answer to user           ┌──────────────────┐               │
+│                   │                 │  ESCALATE to human │               │
+│                   ▼                 │  (handoff + ctx)   │               │
+│         ┌──────────────────┐        └──────────────────┘               │
+│         │ feedback / thumbs │◄────────────┘                            │
+│         │ + agent correction │ ──► correction log ──► KB / fine-tune    │
+│         └──────────────────┘                                          │
+└──────────────────────────────────────────────────────────────────────┘
+```
 
-- **Key components:**
-  - *Intent classification*: routes a message to KB-lookup vs account-action vs escalate. Decision: heuristic-first (keyword + length), LLM only on ambiguous messages — cheaper and faster on the common case.
-  - *RAG over KB*: retrieves grounding context for the answer; buffr's `PgVectorStore.search` in `src/pg-vector-store.ts` and the bounded loop in `src/session.ts` are this core. Decision: cosine HNSW retrieval, top-k bounded.
-  - *Constrained response*: cite-or-refuse — answer only from retrieved context, refuse below a relevance threshold. Decision: a relevance-threshold refusal gate, because hallucinating a support answer is worse than admitting ignorance.
-  - *Escalate-or-respond*: hands off to a human when confidence is low. Decision: gate on retrieval confidence + answer-faithfulness, not on the LLM's self-reported certainty (it's unreliable).
-  - *Feedback loop*: agent corrections become labeled eval rows. Decision: turn every correction into a regression case so the system can't re-break a fixed answer.
+Three jobs, three subsystems: a router that picks a path, a grounded answerer with a confidence gate in front of escalation, and a correction loop that turns human fixes back into system knowledge.
 
-- **Scale concerns:**
-  - At ~10k convos/day: repeated questions dominate; cache common Q→A pairs to cut both latency and token cost. The buffr trace table (`agents.messages`) grows fast — every turn, tool call, and tool result is persisted by `src/supabase-trace-sink.ts`.
-  - At ~100k convos/day: the trace table becomes the storage and query bottleneck. Solution: partition by day, roll cold trajectories to cheap storage, keep a hot index for the feedback loop.
-  - At rising load: the LLM generation step (`gemma2:9b` locally) is the throughput ceiling. Solution: batch, queue with backpressure, escalate to humans when the queue exceeds an SLA threshold.
+## Data model
 
-- **Eval framing:**
-  - Offline: answer faithfulness (is the answer grounded in retrieved context?), retrieval recall@k over a labeled ticket set, escalation precision/recall. buffr has precision@1/recall@3 wired in `src/cli/eval-cmd.ts` but **faithfulness (RubricJudge) is unwired**.
-  - Online: deflection rate (resolved without a human), escalation rate, agent-correction rate, CSAT. buffr measures none — it's single-user.
-  - The correction rate *is* the learning signal: a falling correction rate over time is the system learning from agent fixes.
+- **Knowledge base** — chunked + embedded support docs / past tickets; the answer path retrieves over this. This is buffr's `agents.chunks`.
+- **Conversation transcript** — per-session message history with roles, tool calls, and tool results. This is buffr's `agents.conversations` + `agents.messages`.
+- **Intent labels / routing config** — the classifier's class set and per-class routing rules (which path, which tools, escalate-by-default flags). Absent in buffr.
+- **Escalation/handoff record** — `(conversation_id, reason, snapshot, assigned_human, status)`; the ticket handed to a human with full context. Absent in buffr.
+- **Correction log** — `(message_id, user_thumb | human_correction, corrected_answer, created_at)`; the supervised signal that feeds KB updates or fine-tuning. Absent in buffr.
 
-- **Common failure modes:**
-  - Confident hallucination → the bot invents a fix that doesn't exist. Mitigation: the relevance-threshold refusal gate buffr is missing — refuse rather than answer below a retrieval-confidence floor.
-  - Over-escalation → everything goes to a human, the bot adds no value. Mitigation: tune the confidence gate, track deflection rate as the counter-metric.
-  - Stale KB → the bot answers from a deprecated runbook. Mitigation: re-embed on doc edit, version the KB.
-  - Feedback loop poisoning → a bad correction becomes a bad eval row. Mitigation: review corrections before they enter the eval set; weight by agent seniority.
+## Key components
 
-- **Applies to this codebase:** **partially.** buffr's RAG-over-corpus plus the bounded agent loop in `src/session.ts` (one tool, `search_knowledge_base`, maxTurns/maxToolCalls bounds, forced synthesis) is structurally a chatbot's RAG core — the retrieve-then-ground-then-answer spine is identical. But buffr is a single-user personal-knowledge tool, not a support system. There is no intent classification, no escalation path, no human-in-the-loop, and no feedback or correction logging. Critically there is also no relevance-threshold refusal: buffr will synthesize an answer even when retrieval returns weak context, where a support bot must refuse. The one thing buffr *does* have for free is the substrate a feedback loop needs — the full trajectory trace in `agents.messages`, persisted by `src/supabase-trace-sink.ts`, is exactly where corrections would attach.
+- **Intent classifier / router** — labels each message and routes it to FAQ, RAG, an action tool, or straight to a human; choice: a cheap heuristic/keyword pass *before* any LLM call for the obvious classes, because routing every message through the model wastes latency and money on traffic a regex settles (this is the heuristic-before-LLM rule).
+- **Grounded RAG answerer** — retrieves KB chunks and answers strictly from them, refusing when the KB lacks the answer; choice: an explicit grounding instruction ("ground every answer in retrieved chunks; if the KB lacks the answer, say so") rather than free generation, because an ungrounded support bot confidently invents policy and that is the worst failure mode here. **buffr already does exactly this.**
+- **Confidence / escalation gate** — decides answer-vs-handoff from retrieval score, grounding, and model self-report; choice: gate on *retrieval signal* (top-k cosine score, whether any chunk cleared a threshold) not just model-reported confidence, because the model's stated confidence is uncalibrated and a low-recall retrieval is the honest "I don't know this" trigger.
+- **Correction loop** — captures thumbs/edits and writes them back as new KB entries or fine-tune pairs; choice: write corrections as new *retrievable KB documents* first (cheap, immediate) before reaching for fine-tuning, because adding a corrected doc fixes the next identical question tonight while a fine-tune is a weeks-long batch with regression risk.
 
-- **How to make it apply:** Three concrete additions. (1) Add intent gating before the loop in `src/session.ts` — cheap heuristic routing to decide whether to retrieve at all. (2) Add a relevance-threshold refusal: after `PgVectorStore.search` in `src/pg-vector-store.ts` returns, refuse to synthesize below a cosine-distance floor (cross-link the refusal exercise in `03-retrieval-and-rag/11-rag.md`). (3) Wire the unwired RubricJudge faithfulness scoring (cross-link `05-evals-and-observability/`) into `src/cli/eval-cmd.ts` as the "learn from corrections" eval — every trajectory in `agents.messages` is a correction-log candidate, and a faithfulness score per turn is the signal that closes the loop.
+## Scale concerns
+
+Ordered by what bites first:
+
+- **Escalation routing capacity, first.** The gate's job is to protect humans. If it escalates too eagerly, humans drown; too rarely, users get wrong answers. At **>~20% escalation rate** human capacity is the bottleneck, not the model. Mitigation: tune the gate threshold against human load and track escalation precision/recall.
+- **KB coverage / staleness, second.** Support KBs go stale as products change. At **any product release** answers grounded in old docs become confidently wrong. Mitigation: freshness metadata on chunks + a re-index trigger on doc change (the stale-embeddings problem from `../03-retrieval-and-rag/09-stale-embeddings.md`).
+- **Conversation context growth, third.** Multi-turn support threads grow the prompt. At **>~8k tokens** of accumulated history you blow buffr's `ContextWindowGuardedProvider({ maxTokens: 8192 })` budget; you must summarize or window the transcript. Note buffr's `RagQueryAgent.answer()` treats each question independently today, so it doesn't even hit this yet — a real support bot must.
+- **Correction-loop poisoning, fourth.** As correction volume rises, bad corrections enter the KB. At **any unmoderated write-back** a single wrong "fix" gets retrieved and repeated. Mitigation: review-gate corrections before they become retrievable KB docs.
+
+## Eval framing
+
+- **Offline, per-deploy:** answer faithfulness/groundedness (does the answer cite retrieved chunks?) and retrieval recall@k on a judged support set — buffr's `recall@3` in `src/cli/eval-cmd.ts` is the seed; faithfulness is the named gap (`[B2A.8]` in `../03-retrieval-and-rag/`).
+- **Offline gate metrics:** escalation precision/recall on a labeled "should-have-escalated" set — does the gate hand off the questions a human actually needed to take?
+- **Online, per-deploy:** containment rate (answered without escalation and the user didn't re-ask), CSAT/thumbs-up rate, and post-answer escalation rate (user accepted, then escalated anyway = silent failure).
+- **The trap:** containment rate is gameable — a bot that confidently answers everything has 100% containment and is dangerous. Pair it with thumbs-down and post-answer escalation, never report it alone.
+
+## Common failure modes
+
+- **Hallucinated policy.** Probe: "user asks about a refund window you don't have a doc for — what happens?" Failure: ungrounded generation invents a policy. Mitigation: grounding prompt + refuse-when-uncovered. **buffr's grounding prompt already mitigates this.**
+- **No escalation path.** Probe: "the bot can't answer — then what?" Failure: it answers anyway or dead-ends. Mitigation: a confidence gate that routes low-retrieval-signal queries to a human with full context.
+- **Correction loop that never closes.** Probe: "a human corrects an answer — does the bot get it right next time?" Failure: corrections are logged and ignored. Mitigation: write corrections back as retrievable KB docs (immediate) before considering fine-tuning.
+- **Intent misroute.** Probe: "a billing question hits the bug path." Failure: a single monolithic prompt fakes routing. Mitigation: an explicit classifier with measured per-class accuracy, cheap heuristic first.
+
+## Applies to this codebase
+
+**Partially — leaning no, by intent.** buffr is a **journaling / personal-KB Q&A tool**, not a support system. There is no customer to support, no agent to escalate to, no product whose docs go stale. So at the level of *purpose*, the answer is no. But the **answer path** maps cleanly and honestly: buffr runs RAG over a knowledge base (`RetrievalPipeline` + `search_knowledge_base` tool, `minTopK: 4` in `src/session.ts`), with the exact grounding discipline this prompt demands — "ground every answer in retrieved chunks; if the KB lacks the answer, say so." It is a bounded tool-calling agent (`RagQueryAgent`) with least-privilege tooling, retrieval-based episodic memory (`createConversationMemory`, `meta.kind='memory'`), and full trajectory capture (`SupabaseTraceSink` → `agents.messages`). That trajectory table is genuinely the substrate a correction loop would write to. What's missing is the entire control structure around the answer: **no intent classification** (every message goes to the same RAG agent), **no confidence/escalation gate** (it answers or says "not found," never hands off — there's no human to hand to), and **no feedback/correction loop** (memory is recalled, never *corrected*). The RAG-over-KB core is structurally a chatbot's answer path; the support-system scaffolding around it does not exist and, for a personal journal, mostly shouldn't.
+
+## How to make it apply
+
+This is largely a **thought-experiment reframe**, and you should say so in the interview: *"I built personal-KB RAG with grounding and full trajectory capture; here's how I'd extend that exact code into a support bot."* The honest framing is the strength. The concrete moves, in buffr's real files:
+
+1. **Add intent routing in front of the agent.** Today `createChatSession().ask()` in `src/session.ts` sends every question straight to `agent.answer()`. Insert a router that classifies first — and start with a cheap heuristic pass before any model call, which ties directly to the heuristic-before-LLM file in `../01-llm-foundations/`. Obvious classes (greetings, "clear my notes") never need the agent. This is one branch added at the top of `ask()`.
+
+2. **Add a confidence / escalation gate on retrieval signal.** The retrieval scores are already in hand — `PgVectorStore.search` returns `1 - distance` per hit (`src/pg-vector-store.ts:80`). Read the top-k score in `ask()`; if no chunk clears a threshold, return an explicit "I don't have this in your notes" instead of letting the model paper over a low-recall retrieval. In a real support deployment this same branch is the human-handoff trigger; in buffr it's an honest refusal. Either way it reuses the score buffr already computes and throws away.
+
+3. **Add a correction-logging table.** `sql/001_agents_schema.sql` has `messages` but no place for a user's "that's wrong, it's actually X." Add a migration for `agents.corrections (message_id uuid, corrected_answer text, created_at timestamptz)`, persisted with the same `pool.query` pattern as `persistMessage` in `src/supabase-trace-sink.ts`. Then close the loop the cheap way: re-index accepted corrections as new KB documents via the existing `indexDocumentRow` path (`src/cli/index-cmd.ts`) so the next identical question retrieves the fix — no fine-tuning needed.
+
+Defended this way: *"buffr's answer path already does grounded RAG with refuse-when-uncovered — the hard, dangerous part. The support scaffolding is three additions to real files: a heuristic-first intent router in `session.ts`, an escalation gate on the cosine score I already compute, and a corrections table that re-indexes back into the KB. The intent of buffr is personal Q&A, not support — but the bones transfer, and I can point at the line each piece bolts onto."*

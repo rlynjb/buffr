@@ -1,195 +1,270 @@
-# Deferred: Two-Brain Shared Memory — **DESIGN, NOT CODE**
+# 03 — Deferred: two-brain shared memory  ⚠ DESIGN-NOT-CODE
 
-> **Read this banner first.** Nothing in this file exists in the repo. Zero lines of code implement it. It describes a *future* phase captured in `docs/superpowers/specs/2026-06-19-laptop-supabase-graduation-design.md` and `agent-layer-plan.md`, both explicitly marked **deferred**. Every diagram below is the **planned** shape, labeled as such. This file exists because the deferred phase is the *only* genuine distributed-systems problem in this project's future, and naming the problem now — before it's built — is the honest thing to do. Where today's code touches the future plan, that's flagged inline.
+> **This file describes design, not code.** Nothing in here is implemented.
+> The source is two design documents — `agent-layer-plan.md` and
+> `docs/superpowers/specs/2026-06-19-laptop-supabase-graduation-design.md`
+> (status: *"Design — approved to capture, implementation not started"*). It is
+> in this guide because it's where the `not yet exercised` lenses *become*
+> exercised, and because two of today's design choices (the physical-clock sort
+> key, the convention-only `app_id` isolation) are load-bearing prerequisites
+> that have to be retired *before* this ships. Read it as a forward-looking RFC
+> seed, not a description of the repo.
 
-**Industry names:** multi-writer shared store · centralized agent layer · tenant isolation via token claims · cross-device memory sync. **Type:** Industry standard (the *plan*; not yet a project pattern).
+## Subtitle
+
+**Multi-writer shared storage** with **convention-vs-enforced tenant
+isolation** and **cross-device event ordering** — *Industry standard* problems,
+*deferred design*. The local name for the future shape: laptop + phone sharing
+one `agents` schema in Supabase.
 
 ## Zoom out, then zoom in
 
-Today `buffr-laptop` has one writer. The deferred design adds a **second brain** — a phone (React Native, on-device model) — that writes the *same* `agents.*` tables through the *same* Supabase, behind an HTTP gateway. The instant that second writer lands, this stops being a single-device program and becomes a real distributed system: shared mutable state, two clocks, isolation-by-token, ordering under partition. Here's where the future seam sits relative to today.
+Today there is one writer. The parent vision is several: laptop, phone, and
+other apps (`buffr`, `blooming`, `contrl`) all writing into one centralized
+`agents` schema, reached over an HTTP/Edge-Function gateway with RLS
+(`agent-layer-plan.md` architecture, lines 59-86).
 
 ```
-  Zoom out — the DEFERRED two-brain shape (NOT BUILT)
+  Zoom out — the deferred topology (DESIGN-NOT-CODE)
 
-  ┌─ Client layer ───────────────────────────────────────────────┐
-  │  laptop brain (EXISTS today)      phone brain (DEFERRED)       │
-  │  app_id='laptop'                  app_id='phone' (planned)     │
-  └─────────┬───────────────────────────────────┬─────────────────┘
-            │ today: direct pg                    │ planned: HTTPS + JWT
-            │                                     │
-            │            ┌─ ★ DEFERRED gateway ★ ─┘  ← THIS FILE (design only)
-            │            │  Edge Functions, app_id from JWT claim, RLS
-            ▼            ▼
-  ┌─ Storage layer (shared, multi-writer in the plan) ───────────┐
-  │  reindb · agents schema                                       │
-  │  documents · chunks · conversations · messages · profiles     │
-  │  TWO writers in Phase B → consistency, ordering, isolation    │
-  └───────────────────────────────────────────────────────────────┘
+  ┌─ Clients (MANY — future) ──────────────────────────────────┐
+  │   laptop brain        phone brain        other apps         │
+  │   (this repo, today)  (RN, deferred)     (deferred)         │
+  └───────┬───────────────────┬──────────────────┬─────────────┘
+          │  HTTPS (app_id in JWT) — deferred gateway            │
+          ▼                   ▼                  ▼
+  ┌─ Service: Supabase Edge Functions (deferred) ──────────────┐
+  │   /search /documents /conversations /messages              │
+  └───────────────────────────┬────────────────────────────────┘
+                              │
+  ┌─ Storage: one Postgres / agents schema ──▼─────────────────┐
+  │   shared across ALL writers, keyed by app_id               │
+  │   ★ this is where the coordination problems wake up ★       │
+  └─────────────────────────────────────────────────────────────┘
 ```
 
-Zoom in: the pattern is a **centralized agent layer with multiple tenant writers, isolated by a token claim, coordinating over one shared Postgres.** The distributed-systems question it raises — the one today's repo never has to answer — is *"when two brains write and read the same store, what stays correct under skew, staleness, and partition?"* The plan answers some of it (isolation via JWT-derived `app_id` + RLS) and explicitly leaves the rest open (cross-device ordering, conflict on shared memory).
+Zoom in: the moment storage is shared by more than one writer, three
+distributed-systems lenses that are `not yet exercised` today all activate at
+once — **multi-writer consistency**, **enforced tenant isolation**, and
+**cross-device event ordering**. This file walks each as a *prerequisite to
+solve*, with the today-code that has to change.
 
-## The structure pass
+## Structure pass — what flips when the writer count goes from 1 to N
 
-**Layers (planned).** Three: two client brains (laptop today, phone deferred), an HTTP gateway (Edge Functions, deferred), one shared Postgres. The gateway is the new joint that doesn't exist yet.
-
-**The axis: trust / isolation — what can each writer see or tamper with?** This is the axis the plan is most explicit about, so trace it.
+One axis — **"how many writers touch `agents.*`?"** — and every guarantee that
+rides on the answer being "one."
 
 ```
-  One axis — "what can each writer touch?" — across the DEFERRED gateway
+  axis = "how many writers?"   1 (today)  →  N (deferred)
 
-  ┌─ today (1 writer) ─┐                  ┌─ planned (N writers) ─────────┐
-  │ laptop writes      │   gateway seam   │ each app: JWT carries app_id  │
-  │ app_id='laptop'    │ ═════╪═════════► │ RLS: USING (app_id =          │
-  │ direct pg, no RLS  │  (trust flips)   │   jwt.claim.app_id)           │
-  │ isolation: NONE    │                  │ app_id NEVER from request body│
-  │ (1 tenant, fine)   │                  │ isolation: enforced by DB     │
-  └────────────────────┘                  └───────────────────────────────┘
+  ┌─ ordering ────────────────┐   1: physical clock IS a total order
+  │ created_at = event.ts     │   N: two clocks → ORDER BY created_at can lie
+  └───────────────────────────┘      → needs a LOGICAL clock
+
+  ┌─ isolation ───────────────┐   1: app_id='laptop' by convention, fine
+  │ app_id tag, no RLS        │   N: convention ≠ boundary
+  └───────────────────────────┘      → needs RLS, app_id from JWT not body
+
+  ┌─ consistency ─────────────┐   1: single writer, read-your-writes free
+  │ same process reads+writes │   N: stale reads, write conflicts appear
+  └───────────────────────────┘      → needs a conflict/merge story
+
+  the boundary "1 → N writers" is where all three flip. it does not
+  exist in code today; it's the first thing the deferred phase crosses.
 ```
 
-**The gateway is the load-bearing future seam because trust flips across it.** Today there's no trust boundary — one writer, `app_id` hardcoded `'laptop'`, no RLS (the design says so outright: "No RLS this phase"). In the plan, the gateway is where `app_id` stops being a trusted constant and becomes a *claim derived from a token*, with RLS as defense-in-depth. That flip — from "trusted single writer" to "untrusted multi-tenant, isolation enforced by the database" — is the entire reason the deferred phase is hard. The open question the design flags: until app #2 writes, "that isolation is by convention only" (`...graduation-design.md`, Open questions).
-
-## How it works (the PLANNED mechanism)
+## How it works (the design, walked as future-state)
 
 ### Move 1 — the mental model
 
-You know the shape from any multi-tenant SaaS backend: many clients, one database, and the thing standing between them is "which rows are *yours*." Today buffr skips that entirely because there's one tenant. The plan reintroduces it the standard way — a token per client carrying a tenant id, and a row-level rule that filters every query to that id. The new distributed wrinkle on top: the two tenants here aren't just isolated, they may want to **share** memory (laptop learns something, phone should recall it), which means reads must converge across writers.
+You already shipped this shape's *opposite*. buffr today is the single-writer
+case: one process, one clock, one tenant, and every distributed-systems
+guarantee falls out for free. The deferred design removes the "one" from each of
+those, and each removal is a known problem with a known fix. The mental model is
+just: **count the writers, then check every guarantee that assumed the count was
+one.**
 
 ```
-  The PLANNED pattern — multi-writer, isolated, partly-shared
+  the prerequisite kernel — three guarantees that assumed "1 writer"
 
-   laptop ──┐  JWT{app_id:laptop}    ┌── RLS filters to app_id
-            ▼                        ▼
-        ┌─ gateway ─┐  ──►  ┌─ agents.* ─┐
-            ▲                        ▲
-   phone ──┘  JWT{app_id:phone}     └── shared memory: cross-app read = explicit policy
-            (DEFERRED)                   (default in plan: NO cross-app, strict isolation)
+   guarantee            holds because (today)      breaks when (N writers)
+   ─────────            ──────────────────────     ──────────────────────
+   ordering        ◄── one clock stamps all    ── two clocks disagree
+   isolation       ◄── one tenant, convention  ── a second tenant writes
+   read-your-write ◄── one reader = the writer ── a remote writer raced you
 ```
 
-Name the load-bearing parts by what breaks without each (in the *plan*):
-- **JWT-derived `app_id`** — without it, a client could write another tenant's rows by lying in the body. The plan's rule: "`app_id` is **always** derived from the token, never the request body."
-- **RLS on every `agents.*` table** — without it, isolation is convention only; one bug leaks tenants.
-- **A cross-device ordering key that isn't wall-clock** — without it, the two brains' writes to a shared conversation interleave wrong under clock skew (the gap inherited from `02`).
+### Move 2 — the three prerequisites
 
-### Move 2 — how today's code already half-prepares for this
-
-The honest, repo-grounded part: **the current code is built to make this future cheap, and you can see the seams already cut.** Three concrete touchpoints where today's single-device code is shaped by the deferred multi-writer plan:
-
-**1. `app_id` exists on every write, hardcoded to one value.** `startConversation` and `persistMessage` already thread `appId` through (`src/supabase-trace-sink.ts:4`, and `session.ts:55` passes `cfg.appId`):
-
-```ts
-// src/supabase-trace-sink.ts:4 — appId already a parameter, today always 'laptop'
-export async function startConversation(pool, appId, agentName = 'rag-query-agent') {
-  await pool.query(
-    'insert into agents.conversations (app_id, agent_name) values ($1, $2) returning id',
-    [appId, agentName]);   // ← app_id is data today; becomes a JWT claim in the plan
-}
-```
-
-The column is populated now so adding a second app "needs no migration" (`...graduation-design.md`). What's *missing* for the distributed version: `app_id` here comes from config (`cfg.appId`), trusted. In Phase B it must come from a verified token. Today's `appId` parameter is the seam where that swap happens — the shape is right, the trust source is not yet.
-
-**2. The dropped FK that makes shared memory possible.** `agents.chunks.document_id` has **no foreign key** (`context.md`, "As-built deviations"). That was done for VectorStore drop-in parity — but it's also exactly what lets conversation memory ride the `chunks` table with no `documents` row (`session.ts:53` comment: "memory chunks live with no documents row, which the dropped FK allows"). In the two-brain plan, *shared* memory across devices rides this same mechanism. The decision that looked like a local convenience is load-bearing for the future shared-memory store.
-
-**3. `created_at` from emit timestamp — the single-clock assumption, written down.** Covered in depth in `02-trace-sink-write-buffering.md`. Restated here because it's *the* distributed correctness gap this phase activates: today one clock makes `created_at`-ordering sound; the phone brain is the second clock that breaks it.
+**Prerequisite 1 — a logical clock (today's physical one breaks).** This is
+the direct continuation of `02`. Today `created_at = event.timestamp`
+(`src/supabase-trace-sink.ts:54`, `src/session.ts:30`) is a valid total order
+because one machine stamps everything. Two devices stamping from two clocks can
+disagree by seconds, so `ORDER BY created_at` can interleave events wrong.
 
 ```
-  Layers-and-hops — TODAY vs the PLANNED two-writer flow
+  Comparison — ordering under 1 vs N clocks
 
-  TODAY (built):                          PLANNED (deferred, NOT built):
-  ┌─ laptop ─┐                            ┌─ laptop ─┐   ┌─ phone ─┐
-  │ cfg.appId│                            │ JWT      │   │ JWT     │
-  └────┬─────┘                            └────┬─────┘   └────┬────┘
-       │ pg.Pool (trusted)                     │ HTTPS       │ HTTPS
-       ▼                                       ▼             ▼
-  ┌─ agents.* ┐                           ┌─ gateway (RLS, app_id from JWT) ┐
-  │ 1 writer  │                           └──────────────┬──────────────────┘
-  └───────────┘                                          ▼
-                                                  ┌─ agents.* (2 writers) ┐
-                                                  │ shared, 2 clocks      │
-                                                  └───────────────────────┘
+  Phase A (code today)              Phase B (deferred)
+  ──────────────────────            ──────────────────────
+  laptop clock ─► created_at        laptop clock ─► created_at
+                                    phone  clock ─► created_at
+  one clock = total order           two clocks = partial order at best
+  ORDER BY created_at ✓             ORDER BY created_at can lie ✗
+                                    → per-conversation sequence number,
+                                      or server-assigned monotonic id
 ```
 
-### Move 2.5 — current state vs future state
+The fix is a **logical clock** — a monotonic sequence per conversation, or a
+server-assigned ordering id at insert — so order never depends on two machines
+agreeing on wall-clock time. The today-code that changes: the
+`created_at`-as-sort-key contract in `persistMessage` and the
+`event.timestamp` capture in the sink. Everything else (the buffer, the
+per-event persistence) stays.
 
-This whole file *is* a current-vs-future treatment, so here's the consolidated ledger of what changes and — more usefully — what doesn't.
+**Prerequisite 2 — RLS turns convention into a boundary.** Today every row
+carries `app_id` (default `'laptop'`, `context.md`), but isolation is **by
+convention only — no RLS this phase** (`context.md`; design open-questions lines
+191-195). With one writer, `app_id` is a label nobody can violate because nobody
+else writes. With a second writer reachable over HTTP, `app_id` has to become an
+*enforced* boundary:
 
 ```
-  Phase A (BUILT, today)          Phase B (DEFERRED, this file)        Has to change?
-  ──────────────────────          ─────────────────────────────        ──────────────
-  1 writer (app_id='laptop')      N writers (laptop, phone, ...)        yes — add writers
-  app_id from cfg (trusted)       app_id from JWT claim                 yes — trust source
-  no RLS                          RLS on every agents.* table            yes — add policies
-  direct pg.Pool                  HTTP gateway (Edge Functions)          yes — new layer
-  created_at = wall clock         logical/server sequence for ordering   yes — ordering key
-  ── what stays ──
-  agents schema + columns          same schema (app_id/user_id ready)    NO
-  PgVectorStore / VectorStore      same contract                         NO
-  trajectory capture (sink)        same sink, same events                NO
-  dropped-FK shared-memory store   same mechanism, now cross-device      NO
+  Layers-and-hops — app_id must come from the token, not the body
+
+  ┌─ Client (phone) ─┐  hop 1: POST /messages   ┌─ Edge Fn (deferred) ─┐
+  │  JWT{app_id:buffr}│ ───────────────────────► │ derive app_id from   │
+  │  body{app_id:???} │   (body app_id IGNORED)   │ JWT claim, NOT body  │
+  └──────────────────┘                           └──────────┬───────────┘
+                                                  hop 2: SQL  │ with RLS
+                                                              ▼
+                                            ┌─ Postgres agents.* ──────┐
+                                            │ RLS: USING (app_id =      │
+                                            │   jwt.claim.app_id)       │
+                                            └───────────────────────────┘
 ```
 
-The payoff is the right-hand column: the **schema, the store contract, the capture discipline, and the shared-memory mechanism all survive untouched.** The design built them forward-compatible on purpose ("forward-compat columns, no RLS"). What genuinely has to be built new is the gateway, the RLS, the token-derived `app_id`, and a skew-proof ordering key. That's the real distributed-systems work, and it's all still open.
+The design states this as a hard prerequisite: RLS + always-derive-`app_id`-
+from-token is required *before* a second app writes (design lines 191-195;
+`agent-layer-plan.md` line 85, "Don't trust `app_id` from clients"). The
+today-gap: there is no RLS and no JWT — `app_id` arrives as a plain function
+argument (`startConversation(pool, appId)`, `src/session.ts:55`). That's safe
+with one writer and a trust boundary the day there are two.
+
+**Prerequisite 3 — multi-writer consistency and memory sync.** Today
+read-your-writes is free: the same process that wrote `chunks` (memory) reads
+them next turn (`src/session.ts:53,66`). With laptop and phone both writing
+memory into the shared store, a turn on the phone might not yet see memory the
+laptop wrote a second ago (replication/visibility lag over the network), and two
+devices could write conflicting profile updates. The design names "laptop↔phone
+memory sync" explicitly as deferred (design out-of-scope, lines 184-189;
+`agent-layer-plan.md` "single agent" framing). No conflict-resolution or merge
+strategy is designed yet — which is correct, because the writers don't exist
+yet.
+
+### Move 2.5 — what does NOT have to change (the payoff)
+
+The reassuring half. The design was built forward-compatible *on purpose* so
+this transition is additive, not a rewrite:
+
+- The schema already carries `app_id`, `user_id`, `embedding_model` as
+  forward-compat columns precisely so adding apps needs no migration (design
+  lines 27-33, 127-130).
+- `PgVectorStore` implements aptkit's `VectorStore` contract, so swapping the
+  direct-`pg` path for an HTTP/Edge-Function path is behind a seam the agent
+  never sees (design lines 49-52, 184-189).
+- The deferred HTTP gateway "wraps the same SQL" — the queries don't change,
+  the access path does (design lines 62-64).
+
+So the load-bearing changes are narrow: **a logical clock**, **RLS + JWT-derived
+`app_id`**, and **a memory-sync/conflict story.** Three named problems, not a
+re-architecture.
 
 ### Move 3 — the principle
 
-The cheapest time to make a system distribute-able is *before* it distributes — by writing the tenant key, the store contract, and the capture discipline forward-compatible while there's still one writer to keep it simple. The principle: **a single-device system that names its future distribution seams (the `app_id` column, the trust-source swap, the clock assumption) pays almost nothing now and avoids a rewrite later — but only if it's honest that those seams are unguarded today.** The danger is the opposite: a single-writer system that *pretends* its `app_id` column is isolation. It isn't, until RLS and JWT-derived claims exist. This file's job is to keep that distinction sharp.
+**Single-writer is a special case where the hard distributed-systems guarantees
+are free — and the discipline is to know exactly which "free" guarantees you're
+spending the day you add the second writer.** buffr's two design docs do this
+well: they don't build the multi-writer machinery early (YAGNI — there's one
+device), but they *name the prerequisites* (RLS-later checkpoint, the clock
+question is implicit in the timestamp choice) so the bill is visible before it's
+due. Naming the deferred cost without paying it early is the judgment, not a gap.
 
 ## Primary diagram
 
-The deferred two-brain system, full planned shape, with today's reality marked.
+The deferred topology with the three prerequisites marked at the boundary they
+guard.
 
 ```
-  Two-brain shared memory — DEFERRED design (full recap)
+  Two-brain shared memory — the prerequisites (DESIGN-NOT-CODE)
 
-  ┌─ Client layer ───────────────────────────────────────────────────┐
-  │  laptop brain (BUILT)            phone brain (DEFERRED, RN)        │
-  │  app_id from cfg                 app_id from JWT claim             │
-  └────────┬──────────────────────────────────┬──────────────────────┘
-           │ today: direct pg                  │ planned: HTTPS + JWT
-           │                                   ▼
-           │                  ┌─ Gateway layer (DEFERRED) ────────────┐
-           │                  │ Edge Functions: /search /documents    │
-           │                  │ /conversations /messages              │
-           │                  │ app_id ALWAYS from token, never body  │
-           │                  └──────────────────┬────────────────────┘
-           ▼                                     ▼
-  ┌─ Storage layer (shared) ─────────────────────────────────────────┐
-  │  reindb · agents schema (pgvector + HNSW)                         │
-  │  • app_id column on every table (BUILT, 1 value today)           │
-  │  • RLS policies (DEFERRED — "no RLS this phase")                 │
-  │  • dropped chunks.document_id FK → shared memory store (BUILT)   │
-  │  • created_at ordering: 1 clock today → needs logical clock w/ 2 │
-  └───────────────────────────────────────────────────────────────────┘
+  ┌─ Clients (N — deferred) ───────────────────────────────────┐
+  │  laptop (today)            phone (deferred)                 │
+  └──────┬──────────────────────────┬──────────────────────────┘
+         │  HTTPS, app_id in JWT     │   ⓶ RLS + JWT-derived app_id
+         ▼                           ▼      (today: plain arg, no RLS)
+  ┌─ Service: Edge Functions (deferred) ───────────────────────┐
+  │   same SQL, new access path                                │
+  └──────────────────────────┬──────────────────────────────────┘
+                             │
+  ┌─ Storage: shared agents schema ──▼─────────────────────────┐
+  │  messages.created_at  ── ⓵ needs a LOGICAL clock           │
+  │                            (today: physical event.timestamp)│
+  │  chunks (memory)      ── ⓷ needs sync/conflict story        │
+  │                            (today: single-writer, free)     │
+  └─────────────────────────────────────────────────────────────┘
+
+  ⓵⓶⓷ all dormant today; all wake at the 1→N writer boundary.
 ```
 
 ## Elaborate
 
-The centralized-agent-layer idea is lifted, explicitly, from Hermes Agent's trajectory-capture discipline minus its platform machinery (`agent-layer-plan.md`: "borrowing Hermes Agent's trajectory-capture discipline but none of its platform"). The systems-design substance — centralize the *agent layer*, not the *data*; existing per-app schemas stay put; apps consume over HTTP only — is `study-system-design`'s to teach (`study-system-design/07-deferred-body.md` walks the deferral decision). This file's narrow job is the **distributed-correctness** slice: what breaks when the second writer arrives.
-
-The two open questions the design itself flags are both distributed-systems questions: (1) the **RLS-later checkpoint** — "isolation is by convention only until app #2," and adding RLS + always-derive-`app_id`-from-token is "a hard prerequisite before a second app writes"; (2) cross-app retrieval defaulting to strict isolation, with sharing as "an explicit policy decision." Both are correctly deferred — building them now would be infrastructure for tenants that don't exist. But both are one-way doors, which is why the columns and the contract were laid down forward-compatible.
-
-The clock question (`02`'s Phase B) is the one the design *doesn't* explicitly flag and this guide adds: cross-device `created_at` ordering needs a logical clock. Flagging it now, while it's free, is exactly the move this whole project is built around.
+This is the classic "scale-up by adding a node" inflection that every
+single-node system eventually faces: the guarantees that were implicit (one
+clock, one tenant, one reader) become explicit engineering. The discipline the
+design docs show — forward-compat columns, a contract seam (`VectorStore`),
+named-but-unbuilt prerequisites — is how you keep that transition additive
+instead of a rewrite. The parent doc frames the whole thing as a learning +
+portfolio project deliberately *not* building the platform early
+(`agent-layer-plan.md` lines 5-7, "What it is NOT"). For the architectural
+shape of this migration go to `study-system-design`; for what one Postgres
+guarantees under the hood go to `study-database-systems`.
 
 ## Interview defense
 
-**Q: "Today this is one device. What actually changes when you add the phone brain — what's the hard part?"**
+**Q: You store trajectory order as a wall-clock timestamp. Doesn't that break
+the moment you add a second device?**
 
-> Three things flip, and one trap to avoid. The flips: `app_id` goes from a trusted config value to a JWT-derived claim; you add RLS on every `agents.*` table (there's none today, by design); and you front it with an HTTP gateway instead of direct `pg`. The trap: the trajectory ordering. Today `created_at` comes from `event.timestamp` on one clock, so replay order is sound. With a second writer you have two clocks — wall-clock ordering silently interleaves wrong on skew. So the hard part isn't the gateway plumbing, it's that I now need a logical clock or a server-assigned sequence for ordering, not `now()`.
+Yes — and that's the headline prerequisite, named not hidden. Verdict: on one
+device the physical clock is a valid total order; on two it's not.
 
 ```
-  flips:  app_id cfg→JWT  ·  no-RLS→RLS  ·  direct-pg→gateway
-  trap:   created_at (1 clock, sound) ──► 2 clocks ──► needs logical clock
-  free:   schema, VectorStore contract, trace sink, shared-memory store  (all survive)
+  1 clock → ORDER BY created_at ✓ total order
+  2 clocks → ORDER BY created_at ✗ → logical clock (per-conv sequence)
 ```
 
-> The thing I'd lead with: most of the schema and contracts survive untouched — the `app_id` column, the store contract, the capture discipline were all built forward-compatible while there was one writer. The new work is small and well-scoped. What I would *not* claim is that today's `app_id` column gives isolation — it doesn't, until RLS and token-derived claims exist. It's convention only right now, and the design says so.
+The signal here is knowing *which* free guarantee I'm spending: single-writer
+made the physical clock a total order; the second writer retires that, so the
+fix is a logical clock, designed in *before* the phone ships, not after it
+corrupts a trajectory. Anchor: `src/supabase-trace-sink.ts:54`,
+`src/session.ts:30` — the exact two lines that change.
 
-**Anchor:** *"app_id→JWT, add RLS, add a gateway — but the real distributed gotcha is the single-clock created_at ordering breaking on a second writer."*
+**Q: `app_id` isolates tenants today. Is that secure?**
+
+Today it's not a security boundary — it's a convention, and that's fine because
+there's exactly one writer. The design names RLS + JWT-derived `app_id` as a
+hard prerequisite before app #2 (design lines 191-195). The load-bearing rule:
+derive `app_id` from the token, never the request body — otherwise a client just
+claims another tenant's id. That's a *deferred* control, correctly not built for
+a single trusted writer.
 
 ## See also
 
-- `02-trace-sink-write-buffering.md` — the single-clock ordering this phase breaks (Phase B).
-- `01-app-to-postgres-boundary.md` — the direct-pg seam the gateway would replace.
-- `audit.md` — lenses 4 (consistency), 7 (clocks), 8 (sagas/outbox); all `not yet exercised` and all activated by this phase.
-- `study-system-design/07-deferred-body.md` — the deferral decision from the architecture side.
-- `study-database-systems/08-replication-and-read-consistency.md` — datastore-local consistency the shared store would lean on.
+- `00-overview.md` — the "what's deferred" section.
+- `02-trace-sink-write-buffering.md` — prerequisite 1 (the clock) set up in
+  today's code.
+- `audit.md` — lens 4 (consistency), lens 5 (replication), lens 7 (clocks).
+- `study-system-design` — the architectural shape of this migration.
+- `study-database-systems` — RLS and what one Postgres guarantees.
+- Source design docs: `agent-layer-plan.md`,
+  `docs/superpowers/specs/2026-06-19-laptop-supabase-graduation-design.md`.

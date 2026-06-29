@@ -1,69 +1,101 @@
-# Search ranking system design
+# Search Ranking — interview reframe
 
-- **The prompt:** "Design a search ranking system that takes a user query and returns the top-k most relevant items from a corpus."
+## The prompt
 
-- **Standard architecture:**
+> Design a search ranking system that takes a user query and returns the top-k most relevant items from a large corpus.
 
-  ```
-  Query
-    │
-    ▼
-  ┌──────────────────────────────────┐
-  │ Query understanding              │
-  │  (tokenize, expand, rewrite)     │
-  └──────────────┬───────────────────┘
-                 │
-                 ▼
-  ┌──────────────────────────────────┐
-  │ Candidate retrieval              │
-  │  (dense ANN + sparse BM25, top-N)│
-  └──────────────┬───────────────────┘
-                 │  N candidates (N≈500)
-                 ▼
-  ┌──────────────────────────────────┐
-  │ Ranking                          │
-  │  (cross-encoder / learned model) │
-  └──────────────┬───────────────────┘
-                 │  top-k (k≈10)
-                 ▼
-  ┌──────────────────────────────────┐
-  │ Serving + logging                │
-  │  (cache, instrument, click logs) │
-  └──────────────┬───────────────────┘
-                 │
-                 ▼
-              Results
-  ```
+## Standard architecture
 
-- **Data model:**
-  - Corpus rows `{id, text, metadata, embedding}` — one per item; in buffr this is `chunks` with a 768-dim `nomic-embed-text` vector.
-  - Vector index — embedding → doc IDs, ANN via HNSW cosine; buffr has this (HNSW index in `sql/001_agents_schema.sql`).
-  - Inverted index — BM25 term → doc IDs for sparse retrieval; buffr does **not** have this.
-  - Click/interaction logs `{query, doc_id, position, clicked, dwell_time}` — the training signal for a learned ranker; buffr has none.
+```
+            Search ranking system — two-stage retrieve-then-rank
+┌──────────────────────────────────────────────────────────────────────┐
+│                              query                                     │
+│                                │                                       │
+│                                ▼                                       │
+│                      ┌──────────────────┐                              │
+│                      │  query understand │  rewrite / expand / embed   │
+│                      └──────────────────┘                              │
+│                                │                                       │
+│                                ▼                                       │
+│        ┌───────────────────────────────────────────────┐              │
+│        │            CANDIDATE RETRIEVAL (recall)         │              │
+│        │   dense ANN ──┐                                 │              │
+│        │               ├──► union ──► ~hundreds of cands │              │
+│        │   sparse BM25 ┘                                 │              │
+│        └───────────────────────────────────────────────┘              │
+│                                │                                       │
+│                                ▼                                       │
+│        ┌───────────────────────────────────────────────┐              │
+│        │             RANKING (precision)                 │              │
+│        │   feature build ──► learned ranker (LTR/cross-  │              │
+│        │   encoder) ──► score & sort ──► top-k           │              │
+│        └───────────────────────────────────────────────┘              │
+│                                │                                       │
+│                                ▼                                       │
+│                       top-k results ──► UI                             │
+│                                │                                       │
+│                                ▼                                       │
+│              ┌──────────────────────────────────┐                     │
+│              │  interaction log (impressions,    │                     │
+│              │  clicks, dwell) ──► training data │◄── feeds the ranker │
+│              └──────────────────────────────────┘                     │
+└──────────────────────────────────────────────────────────────────────┘
+```
 
-- **Key components:**
-  - *Query understanding*: rewrites the raw query for better recall (synonym expansion, typo correction, HyDE). Decision: rule-based on the hot path for latency, LLM-rewrite only for low-confidence queries.
-  - *Candidate retrieval*: hybrid dense + sparse fused with RRF. Decision: keep both — sparse catches exact tokens (error codes, proper nouns), dense catches paraphrase.
-  - *Ranking*: cross-encoder rerank over the top-N candidates. Decision: gate the reranker on the bi-encoder margin so cheap queries skip it and latency stays bounded.
-  - *Serving*: cache top-k per query, instrument per-stage latency and recall@k. Decision: cache key is the normalized query so paraphrases miss — acceptable until QPS forces semantic caching.
+The load-bearing shape is two stages — cheap high-recall retrieval, then expensive high-precision ranking — plus a closed loop where interactions become the ranker's training signal.
 
-- **Scale concerns:**
-  - At ~100k chunks: a single-node HNSW index fits comfortably in RAM and exact-enough ANN holds; nothing to do — this is roughly where buffr lives.
-  - At ~10M docs: the ANN index exceeds single-node RAM. Solution: shard by `app_id` (buffr already scopes every query by `app_id`), query shards in parallel, merge top-k.
-  - At ~1k QPS: the cross-encoder reranker becomes the latency bottleneck. Solution: cache reranks for popular queries, distill the cross-encoder to a smaller model for cold queries.
-  - Embedding-model upgrade is a one-way door: changing `nomic-embed-text` means re-embedding the entire corpus, because old and new vectors are not comparable. Solution: store `embedding_version` per chunk and dual-serve during migration.
+## Data model
 
-- **Eval framing:**
-  - Offline: hit@k, MRR, NDCG over a held-out query→relevant-doc set. buffr ships precision@1 and recall@3 — but over only **three rows** in `eval/queries.json`, which is a smoke test, not a ranking eval.
-  - Online: click-through rate at positions 1–3, dwell time, query-reformulation rate (it drops when ranking is good). buffr logs none of this.
-  - "No-click is not a negative label" — a user who reads the snippet and leaves got their answer; treating that as negative poisons the ranker.
+- **Inverted index (sparse)** — term → posting list of doc IDs; serves BM25 lexical candidate retrieval.
+- **Vector index (dense)** — `(doc_id, embedding)` under an ANN structure (HNSW); serves semantic candidate retrieval. This is buffr's `agents.chunks.embedding vector(768)` with `chunks_embedding_hnsw`.
+- **Document/feature store** — per-doc static features (length, freshness, popularity, source authority) used at ranking time.
+- **Interaction log** — append-only `(query_id, doc_id, position, action, timestamp)` rows; impressions and clicks/dwell. This is what buffr does **not** have.
+- **Learned-ranking model artifact** — versioned weights (LTR tree / cross-encoder) loaded by the ranking stage; retrained from the interaction log.
 
-- **Common failure modes:**
-  - Stale index → query returns a deprecated chunk. Mitigation: track `embedding_stale_at`, re-embed on edit (buffr's `index-cmd.ts` re-runs embedding on re-index but has no staleness trigger).
-  - Cold queries with no click history → nothing to learn from. Mitigation: fall back to sparse-only retrieval and similarity-to-known-queries.
-  - Position bias in training data → the ranker learns "position 1 is good," not "this doc is good." Mitigation: inverse-propensity scoring or randomized result ordering in a fraction of sessions.
-  - Dense-only blind spot → exact-token queries (an error code, an API name) get paraphrase-matched and miss. Mitigation: add the sparse leg; this is buffr's most concrete gap here.
+No markdown tables here on purpose — the relationships are flow, not a grid.
 
-- **Applies to this codebase:** **partially.** buffr's `embed → ANN → cosine top-k` path in `src/pg-vector-store.ts` *is* the candidate-retrieval layer of a search-ranking system, and the HNSW cosine index in `sql/001_agents_schema.sql` is exactly the dense index this template calls for. But that is only the bottom of the stack. There is no learned ranker over the candidates, no click or interaction logging, no query understanding or rewrite, and retrieval is dense-only — no sparse/BM25 leg. buffr's queries are question-style (feeding an agent loop) rather than search-style (returning a ranked list to a human), and the eval is precision@1/recall@3 over three rows in `eval/queries.json`, which can't measure ranking quality. buffr owns the retrieval spine and is missing everything above it.
+## Key components
 
-- **How to make it apply:** Add a "search my corpus" surface that calls the existing `PgVectorStore.search` in `src/pg-vector-store.ts` and returns a ranked list directly to the user instead of into the agent. Log clicks (which result the user opens, at what position) into a new table — the existing `agents`-schema migration pattern in `sql/001_agents_schema.sql` is the template. Then add a reranker over the cosine top-50 before showing top-10, and cross-link the reranking + hybrid-retrieval concepts in `03-retrieval-and-rag/`. The dense index, the `app_id` scoping for sharding, and the re-embed path in `src/cli/index-cmd.ts` are already there — what's missing is the ranking layer and the click signal to train it.
+- **Query understanding** — normalizes, rewrites, and embeds the query before retrieval; choice: rewrite/expand *before* embedding so the dense query vector matches search intent, not raw phrasing, because a bi-encoder embeds whatever string it's handed.
+- **Candidate retrieval** — fans out to dense ANN and sparse BM25 and unions the result for high recall; choice: hybrid not pure-dense, because lexical and semantic miss different documents and the union recovers exact-term matches that cosine alone drops.
+- **Ranking stage** — re-scores the few hundred candidates with a model that sees the (query, doc) pair jointly; choice: a cross-encoder or learned-to-rank model rather than reusing the bi-encoder cosine score, because the recall encoder is tuned to separate-then-compare, not to order a small set precisely.
+- **Interaction logging** — records impressions and clicks as the ground-truth relevance signal; choice: log *impressions* (what was shown but not clicked) as well as clicks, because clicks without their impression set give you no negatives and you cannot train a ranker on positives alone.
+
+## Scale concerns
+
+Ordered by what breaks first for a system on buffr's trajectory:
+
+- **Ranker latency, first.** At a few hundred candidates per query a cross-encoder pass is ~1 model call per candidate. At **~200 candidates and >10 QPS** the ranking stage dominates p99. Mitigation: cap the candidate set fed to the ranker (rerank tens, not hundreds) and cache rankings for hot queries.
+- **ANN recall degradation, second.** HNSW recall and build cost degrade as the index grows. At **~1–10M vectors** default HNSW parameters (`m`, `ef_construction`) start trading recall for memory; you must tune `ef_search` per query. buffr is single-device and nowhere near this — but state the threshold.
+- **Index freshness, third.** As ingest rate rises, the time between a doc landing and being searchable grows. At **>10k new docs/hour** a synchronous embed-on-write path (buffr's `index-cmd.ts`) blocks; you need an async indexing queue. Below that, synchronous is fine.
+- **Training-data volume, fourth.** A learned ranker needs enough labeled interactions to beat the cosine baseline. Below **~10k–100k logged clicks** the learned ranker overfits and loses to plain cosine; don't ship the ranker until the log is large enough to validate it.
+
+## Eval framing
+
+- **Offline, per-deploy:** NDCG@k and MRR over a held-out judged set; for buffr today the proxy is **precision@1 / recall@3** over `eval/queries.json` (`scorePrecisionAtK` / `scoreRecallAtK` in `src/cli/eval-cmd.ts`). NDCG is the upgrade once you have graded (not binary) relevance.
+- **Offline ranker gate:** does the learned ranker beat the cosine baseline on the same golden set? If not, don't deploy it — this is the literal hit@k before/after measurement the reranking exercise demands.
+- **Online, per-deploy:** click-through-rate at position, time-to-first-click, and the rate of queries with zero clicks (abandonment). These need the interaction log buffr lacks.
+- **The trap:** offline NDCG can rise while online CTR falls if your judged set doesn't match real query distribution. Buffr's golden queries are paraphrase-style, not search-style — so even buffr's offline metric is measuring a slightly different task than "search ranking."
+
+## Common failure modes
+
+- **Single-stage retrieval marketed as ranking.** Interviewer probe: "your cosine `order by` *is* your ranking?" Failure: bi-encoder cosine orders for recall, not precision. Mitigation: name the two-stage split out loud and add a reranking stage over the over-fetched candidate pool.
+- **Position bias in the click log.** Probe: "users click position 1 because it's position 1." Failure: training on raw clicks teaches the ranker to reproduce its own current ordering. Mitigation: log impressions, model position bias (e.g. inverse-propensity weighting), or randomize within the top slot to collect unbiased pairs.
+- **Pure-dense retrieval missing exact-match queries.** Probe: "user searches a SKU / an exact phrase — does cosine find it?" Failure: dense embeddings smear exact tokens. Mitigation: add sparse BM25 to the candidate union (hybrid) and fuse with RRF.
+- **Query/eval distribution mismatch.** Probe: "are your eval queries what users actually type?" Failure: paraphrase-style golden queries flatter a paraphrase-tuned retriever. Mitigation: sample real queries from the interaction log into the judged set.
+
+## Applies to this codebase
+
+**Partially.** buffr's `RetrievalPipeline` + `PgVectorStore` is exactly the **candidate-retrieval stage** of this design and nothing more. It embeds the query (`OllamaEmbeddingProvider`, `nomic-embed-text:v1.5`), runs a cosine ANN over an HNSW index (`order by embedding <=> $1::vector ... limit $3` in `src/pg-vector-store.ts:67`), and returns ranked-by-distance chunks with a `1 - distance` score. That is a real, working, single-stage retriever with a real offline eval (`precision@1` / `recall@3` in `src/cli/eval-cmd.ts`). But the parts that make this a *search ranking system* are absent: there is no learned ranker (the ordering is pure cosine distance, no second-stage model), no interaction/click logging (`agents.messages` captures the agent trajectory, never search impressions or clicks), no sparse/hybrid retrieval (pure dense), and no query rewriting (it embeds the raw question). And the queries in `eval/queries.json` are paraphrase-style "ask my notes a question," not lexical search queries. So buffr is the bottom third of the diagram, honestly built, with the top two-thirds and the feedback loop missing. Claim it as the retrieval layer; do not claim it as a ranking system.
+
+## How to make it apply
+
+Three refactors, in dependency order, each in buffr's real files:
+
+1. **Add a "search my notes" surface over the existing retrieval.** `pipeline.query(query, K)` already returns ranked hits — expose them directly as a result list (a new CLI command alongside `src/cli/index-cmd.ts`, or a thin wrapper in `src/session.ts`) instead of only feeding them to the agent. This is the impressions surface; it changes no retrieval code, it just stops hiding the ranked list inside the answer path.
+
+2. **Log opens as a click signal.** When a user opens/expands a returned chunk, write an interaction row. The schema gap is real: `sql/001_agents_schema.sql` has `chunks`, `documents`, `conversations`, `messages` — no interaction table. Add `agents.search_interactions (query text, doc_id text, position int, action text, created_at timestamptz)` as a new migration. Persist via the same `pool.query` pattern `persistMessage` already uses in `src/supabase-trace-sink.ts`. Now you have negatives (shown-not-opened) and positives (opened).
+
+3. **After enough clicks, add a learned reranker over the cosine candidates.** This is the same gap already scoped as exercise **[B2B.6]** in `../03-retrieval-and-rag/07-reranking.md`: over-fetch top-N by cosine (the `search_knowledge_base` tool already over-fetches via `minTopK`), score each (query, chunk) pair with a `gemma2:9b` judge pass — or, once the interaction log is large, a model trained on those clicks — reorder, keep top-k. Gate it on the offline eval in `src/cli/eval-cmd.ts`: measure hit@k before and after, ship only if it beats the cosine baseline. Pair with **[B2B.7]** if you also want to place the top result for the agent's context window.
+
+Defended this way, "design a search ranking system" becomes: *"I built the candidate-retrieval stage — embed, HNSW cosine ANN, offline precision@1/recall@3. To make it a ranking system I'd surface the ranked list, log opens as clicks into a new interactions table, and add the [B2B.6] reranker gated on hit@k. Here's the file for each."* That is a strong partial, not a weak yes.

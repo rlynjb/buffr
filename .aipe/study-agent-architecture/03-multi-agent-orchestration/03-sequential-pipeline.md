@@ -1,139 +1,215 @@
-# Sequential pipeline — each agent's output feeds the next
+# Sequential Pipeline
 
-**Industry name(s):** sequential pipeline · agent chain · stage
-pipeline. **Type label:** Industry standard.
+*Industry names: **sequential pipeline** / **agent chain** / **pipeline orchestration** / **prompt chaining (agent-level)**. Type label: Industry standard. In this codebase: **Not yet implemented** as an agent pipeline. (buffr's *session* outer flow is pipeline-shaped, but those stages are functions, not agents.)*
 
-**In this codebase: Not yet implemented at the agent layer.** buffr has
-no chain of agents. It *does* have a fixed chain at the session layer
-(persist → answer → remember, `src/session.ts:60-70`) — but those are
-function calls, not agents. An agent pipeline would be each stage an
-autonomous loop.
+## Zoom out, then zoom in
 
-## Zoom out, then zoom in — lead with the shape
+This is the simplest multi-agent topology: agents in a line, each feeding the next. Here is the
+SHAPE first.
 
 ```
-  Sequential pipeline topology (lead with it)
+  THE TOPOLOGY — a straight line, output→input (★ = the whole chain)
 
-  ┌─────────┐  draft   ┌─────────┐ reviewed ┌─────────┐
-  │ Agent A │ ───────► │ Agent B │ ───────► │ Agent C │
-  │ (write) │          │ (edit)  │          │ (format)│
-  └─────────┘          └─────────┘          └─────────┘
-   latency = sum of all stages (no parallelism)
+  ┌──────────┐    ┌──────────┐    ┌──────────┐
+  │ ★ AGENT 1 │──▶│ ★ AGENT 2 │──▶│ ★ AGENT 3 │──▶ answer
+  │ extract   │   │ transform │   │ summarize │
+  └──────────┘    └──────────┘    └──────────┘
+   each output is the next's input · fixed order · no routing, no branches
+   each box = its own runAgentLoop (Section A skeleton)
 ```
 
-Zoom in: this is a `.then()` chain where each step is an agent instead
-of a function. Output of one feeds the next. Same benefit as a
-single-purpose function chain — isolated failures, you know which stage
-broke — and same cost: latency is the sum of every stage.
+The topology is the mental model: **a straight line, no branches.** Unlike supervisor–worker,
+nobody routes — the order is fixed at design time. The honest sentence: buffr runs no agent
+pipeline. It *does* have a pipeline-shaped outer flow in `session.ts`, but those stages are
+plain functions, which is a different thing — that distinction is the lesson of this file.
 
 ## Structure pass
 
-**Layers.** N stages in series. Each stage is the agent-loop skeleton.
+One axis: **state** — what flows down the line, and what happens when a stage fails?
 
-**Axis — "where does latency come from?"** The sum of the stages — a
-pipeline is inherently serial, so total latency is additive. That's the
-defining cost.
+```
+  Axis = STATE · what passes between stages, and the SEAM where failure stops the line
 
-**Seam.** Each stage boundary is a seam where the contract is the
-output schema one agent passes to the next. A bug there (stage B
-misreads stage A's output) is the pipeline's characteristic failure.
+  stage 1 → output A ─▶ stage 2 sees ONLY output A (not the original input, unless passed)
+  stage 2 → output B ─▶ stage 3 sees output B
+  ──────────── ★ SEAM: a stage fails → the WHOLE line halts ★ ──────────
+  stage N fails        → no answer; there is no fallback branch (it's a line, not a tree)
+```
+
+The defining property of a pipeline is *narrowing state*: each stage typically sees only the
+previous stage's output, not the full history (unless you explicitly thread the original input
+through). That's the strength — each agent has a clean, small context — and the weakness — a
+stage can't recover information an earlier stage dropped. And because it's a *line*, a single
+stage failure halts everything; there's no sibling to fall back to. That seam is why pipelines
+want a validation step between stages (see `09`'s synthesis failure).
 
 ## How it works
 
-#### Move 1 — the mental model
+### Move 1 — mental model
 
-You've built `parse().then(validate).then(save)` — each function
-transforms the data and hands it on. An agent pipeline is that, where
-each `.then` is a full ReAct loop with its own specialty.
-
-```
-  Pattern — agents in series
-
-  input → [Agent A] → A's output → [Agent B] → B's output → [Agent C] → result
-           each stage is its own loop; runs strictly in order
-```
-
-#### Move 2 — the walkthrough (what it would take in buffr)
-
-**buffr's session chain is the function version, not the agent
-version.** Look at `src/session.ts:60-70`: persist, answer, remember.
-That's a real pipeline shape — but the stages are functions, and only
-the middle one (`agent.answer`) is an agent. An *agent* pipeline would
-make each stage autonomous: e.g. a retrieval agent → a synthesis agent
-→ a citation-checking agent, each a `RagQueryAgent`-style loop, each
-consuming the prior stage's output.
-
-**Why you'd pick it: isolated, debuggable stages.** A pipeline lets you
-run a cheaper model on early stages (retrieval doesn't need the strong
-model) and reserve the expensive one for synthesis — and when output is
-wrong, you know which stage produced it. buffr's trajectory capture
-(`src/supabase-trace-sink.ts`) already gives per-step visibility; a
-pipeline would extend that to per-stage.
-
-**The cost: additive latency.** Three agent stages in series is three
-sequential model calls' worth of wall-clock. On local Gemma that's
-slow. A pipeline is only worth it when the stages are genuinely
-sequential (each needs the prior's output) — if they're independent,
-it should be a fan-out instead (`04-parallel-fan-out.md`).
+A `.then()` chain where each link is a whole agent. Bridge from frontend: it's exactly
+`fetchUser().then(enrich).then(format)` — a promise chain of single-purpose functions — except
+each `.then()` is a model loop, not a pure function, so each link can be slow, expensive, and
+*wrong* in a way a pure function can't.
 
 ```
-  Comparison — function chain (buffr) vs agent pipeline
+  THE SHAPE — a .then() chain of agents
 
-  buffr session (functions):       agent pipeline (would-be):
-    persist → answer → remember      retrieve-agent → synth-agent → cite-agent
-    (1 agent in the middle)          (3 agents, latency = sum)
+   input
+     │ .then(agent1)   ── agent1's loop runs, returns output A
+     ▼
+   output A
+     │ .then(agent2)   ── agent2's loop runs on A, returns output B
+     ▼
+   output B
+     │ .then(agent3)
+     ▼
+   answer
 ```
 
-#### Move 3 — the principle
+### Each link is a full agent loop, not a function
 
-A pipeline buys isolated, individually-debuggable stages and the
-ability to run cheap models early, at the cost of additive latency.
-Reach for it only when the stages are genuinely sequential. buffr's
-sequential work is function-shaped, not agent-shaped — which is why its
-chain is a chain, not a pipeline of agents.
+The thing that makes this *multi-agent* (not just function composition) is that each stage is
+its own `runAgentLoop` with its own prompt, tools, and budget. Stage 2 can search, reason, and
+fail independently of stage 1.
+
+```
+  Each link = a Section-A loop, chained
+
+  ┌─ AGENT 1 (own loop) ─┐ out  ┌─ AGENT 2 (own loop) ─┐ out  ┌─ AGENT 3 ─┐
+  │ runAgentLoop(...)     │─────▶│ runAgentLoop(out1)    │─────▶│ ...        │
+  │ prompt+tools+budget A │      │ prompt+tools+budget B │      │            │
+  └───────────────────────┘      └───────────────────────┘      └────────────┘
+```
+
+```
+pseudocode — agent pipeline (each .then is a loop, not a pure fn)
+out1 = await runAgentLoop(agent1, input)      # full loop: model + tools + budget
+out2 = await runAgentLoop(agent2, out1)       # sees out1, not the raw input
+out3 = await runAgentLoop(agent3, out2)
+return out3
+```
+
+Annotation: the cost adds linearly — three agents is roughly 3x the model calls and 3x the
+latency of one, in *series* (no parallelism, unlike fan-out in `04`). That's the price of the
+clean, narrow context each stage gets.
+
+### What buffr has instead — a FUNCTION pipeline, not an agent pipeline
+
+buffr's `session.ts` `ask()` is pipeline-shaped: persist → answer → remember. But only the
+middle stage is an agent; the bookends are plain async functions.
+
+```ts
+// session.ts:60-71 — ask() is pipeline-shaped, but only the middle stage is an agent
+async ask(question: string): Promise<string> {
+  await persistMessage(pool, conversationId, 'user', question);  // STAGE 1: a function
+  const answer = await agent.answer(question);                   // STAGE 2: the ONE agent
+  await trace.flush();
+  try { await memory.remember({ conversationId, question, answer }); }  // STAGE 3: a function
+  catch { /* best-effort */ }
+  return answer;
+}
+```
+
+```
+  buffr's session flow vs. an agent pipeline
+
+  persist ──▶ answer ──▶ remember        (buffr today: session.ts:60-71)
+  (fn)        (AGENT)    (fn)
+   └─ only ONE box is an agent ─┘ → this is FUNCTION composition, not multi-agent
+
+  vs.
+
+  extract ──▶ analyze ──▶ summarize      (an agent pipeline: NOT YET)
+  (AGENT)     (AGENT)     (AGENT)
+   └─ every box is its own loop ─┘
+```
+
+Annotation: this distinction matters in an interview. buffr's outer flow *looks* like a
+pipeline, and you should name it as pipeline-shaped — but it's a function chain with one agent
+in the middle, not a multi-agent pipeline. Calling it "multi-agent" would be wrong. The
+multi-agent version (every stage a loop) is not yet built, because buffr's single answer-stage
+hasn't hit a ceiling that would justify splitting it into staged specialists.
+
+### Move 3 — the principle
+
+**A pipeline trades flexibility for clarity: fixed order, narrow per-stage context, linear
+cost — and one stage's failure halts the line.** Reach for it when a task has *genuinely
+sequential* sub-steps where each stage's output is a clean input to the next (extract → then
+analyze the extraction → then summarize the analysis). Don't reach for it when stages need to
+see each other's *mid-results* — that's not a line, that's shared state (`08`). And put a
+validation step between stages, or a bad stage-1 output silently poisons the whole line.
 
 ## Primary diagram
 
-```
-  Sequential pipeline (would-be agent version in buffr)
+Full recap: the topology, the function-vs-agent distinction, the verdict.
 
-  question → [retrieve-agent] → chunks
-                                  → [synth-agent] → draft
-                                                     → [cite-agent] → answer
-  total latency = retrieve + synth + cite  (strictly serial)
 ```
+  Sequential pipeline — the line, and buffr's function-shaped echo of it
+
+  AGENT PIPELINE (not yet):   extract ─▶ analyze ─▶ summarize   each a loop
+                                (AGENT)   (AGENT)    (AGENT)
+                              · fixed order · narrow context · linear cost
+                              · one stage fails → whole line halts (seam)
+
+  buffr's session (today):    persist ─▶ answer  ─▶ remember     session.ts:60-71
+                                (fn)     (AGENT)    (fn)
+                              · pipeline-SHAPED, but only the middle is an agent
+
+  refactor template: SECTION F · agentic-coding template
+```
+
+Verdict in one line: **the simplest topology; buffr's session flow is pipeline-shaped but those
+are functions, not agents — the multi-agent pipeline is not yet built and isn't yet
+justified.**
 
 ## Elaborate
 
-The sequential pipeline is supervisor-worker with the workers laid out
-in series and no central supervisor merging — the handoff *is* the
-data flow. When stages can run independently, the parallel fan-out
-(`04-parallel-fan-out.md`) trades the serial latency for a merge step.
-When you want explicit, checkpointed control over the stages, graph
-orchestration (`07-graph-orchestration.md`) expresses the same pipeline
-as a state machine you can pause and resume.
+Sequential pipelines are LangChain's original `SequentialChain` and the agent-level version of
+"prompt chaining" (Anthropic's "Building Effective Agents" lists it as the first composable
+pattern). The production lesson is the validation gate: because each stage narrows context, an
+early stage that drops or distorts information dooms the rest of the line with no recovery — so
+mature pipelines insert a schema-validation or critic step between agents (which is also where
+pipelines start borrowing from `05`'s critic pattern). The other lesson is latency: pipeline
+stages run in *series*, so a three-agent pipeline is three sequential round-trips — if the
+stages are actually independent, you want `04`'s fan-out instead, not a pipeline.
+
+To adopt an agent pipeline for buffr, see SECTION F's agentic-coding template — it shows
+splitting one agent's work into ordered stages, each a `runAgentLoop`, with a validation step
+between them.
 
 ## Interview defense
 
-**Q: Does buffr use an agent pipeline?**
-No — it has a *function* pipeline at the session layer (persist →
-answer → remember), but only the middle stage is an agent. An agent
-pipeline would make each stage an autonomous loop. I'd reach for it only
-if buffr's work were genuinely sequential across specialties; today it's
-one retrieval-and-answer step, so a pipeline would just add additive
-latency.
+**Q: "Is buffr's flow a multi-agent pipeline?"**
+
+Model answer: "No — and the distinction is the point. buffr's `session.ts` `ask()` is
+*pipeline-shaped* — persist, then answer, then remember (`session.ts:60-71`) — but only the
+middle stage is an agent; the bookends are plain async functions. That's function composition,
+not multi-agent orchestration. A true agent pipeline makes *every* stage its own
+`runAgentLoop` — extract, then analyze, then summarize — chained `.then()`-style, with narrow
+per-stage context and a validation gate between stages so an early bad output doesn't poison
+the line. buffr's single answer-stage hasn't hit a ceiling, so there's nothing to split into
+staged specialists. Not yet."
 
 ```
-  function chain (buffr) ≠ agent pipeline (each stage a loop)
+  The defense in one picture
+
+  function chain (buffr):  persist ─▶ [AGENT] ─▶ remember   one agent, two functions
+  agent pipeline (not yet): [AGENT] ─▶ [AGENT] ─▶ [AGENT]    every stage a loop + gate
 ```
 
-**Anchor:** "A pipeline is a `.then()` chain of agents — worth it only
-when the stages are genuinely sequential."
+Anchor: *A pipeline is a `.then()` chain where every link is a full agent loop — buffr's
+session flow is pipeline-shaped but function-based, with only one agent in the middle.*
 
 ## See also
 
-- `02-supervisor-worker.md` — pipeline is its serial form
-- `04-parallel-fan-out.md` — the parallel alternative for independent
-  stages
-- `.aipe/study-system-design/04-long-lived-chat-session.md` — buffr's
-  function-level session chain
+- `02-supervisor-worker.md` — add routing and you get a supervisor; a pipeline is the
+  no-routing case.
+- `04-parallel-fan-out.md` — when the stages are *independent*, run them in parallel instead of
+  in a line.
+- `05-debate-verifier-critic.md` — the critic that belongs *between* pipeline stages.
+- `08-shared-state-and-message-passing.md` — when stages need each other's mid-results, you've
+  outgrown a pipeline.
+- `../01-reasoning-patterns/01-chains-vs-agents.md` — the chain-vs-agent boundary this file
+  leans on (`session.ts` is the chain half).
+- `../06-orchestration-system-design-templates/` (SECTION F) — the agent-pipeline refactor.

@@ -1,212 +1,225 @@
-# Stale embeddings — text changed, vector didn't (untracked)
+# Stale Embeddings
 
-*Industry standard (NOT yet tracked). The freshness gap buffr can fix but can't detect.*
+### *industry: embedding freshness / staleness tracking · type: the consistency gap between a document and its vectors*
 
-## Zoom out, then zoom in
+## Zoom out
 
-Pull up the storage layer and ask a question buffr can't currently answer: *is this embedding still in sync with its source text?* A chunk's `embedding` is derived from its `content` at index time. If the source changes but you don't re-index, the vector now describes *old* text — it's stale. buffr has no column, no flag, no timestamp tracking this.
+Every other file assumes the vectors are *current*. This one questions that. A chunk's embedding is a snapshot of the document text *at index time*. Edit the document and the vector doesn't move on its own — it now describes text that no longer exists. buffr has no mechanism to notice.
+
+**buffr's retrieval stack, the freshness gap marked**
 
 ```
-  Zoom out — the freshness signal buffr doesn't store
-
-  ┌─ Source of truth ───────────────────────────────────────────┐
-  │  agents.documents.content   (or the file on disk)            │
-  └───────────────────────────┬─────────────────────────────────┘
-                              │ derived at index time
-  ┌─ Storage ─────────────────▼─────────────────────────────────┐
-  │  agents.chunks.embedding (768)  +  content                  │
-  │  ★ NO embedding_stale_at / no dirty flag (MISSING) ★         │ ← here
-  │  → can't tell which embeddings drifted from their source     │
-  └─────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│  search_knowledge_base  returns chunks (assumes fresh)         │
+├──────────────────────────────────────────────────────────────┤
+│  agents.chunks          embedding = snapshot at index time     │
+├──────────────────────────────────────────────────────────────┤
+│  ★ FRESHNESS ★          is the vector still the doc's truth?   │  ◄── this file
+│                         NO staleness tracking in buffr         │
+├──────────────────────────────────────────────────────────────┤
+│  documents              content can change AFTER indexing      │
+└──────────────────────────────────────────────────────────────┘
 ```
 
-Zoom in. You know the cache-invalidation problem — derived data goes stale when its source changes, and the hard part isn't *recomputing*, it's *knowing when to*. An embedding is a cache of meaning over text. buffr can *fix* staleness (re-index overwrites via `on conflict do update`), but it has no way to *detect* that a re-index is due. This file builds the staleness problem, shows buffr's partial mitigation (upsert), and names the gap: no `embedding_stale_at`, no detection. Case B adds the tracking.
+You probably hit this on your last RAG app and patched it by "just re-run the indexer." That works until the corpus is big enough that re-indexing everything is wasteful and you need to know *which* docs drifted. This file is about that gap — and it's a real, present risk in buffr, not a hypothetical.
 
 ## Structure pass
 
-Read the skeleton: a derived value, its source, and the missing link between them.
+The axis is **time**: the document at index-time vs. the document now. The seam is the edit that happens *after* indexing and before the next re-index.
 
-**Layers:** source text → derived embedding. The arrow only flows one way, and nothing watches it.
-
-**Axis traced — "how does a change in source reach the embedding?"**
+**The drift window**
 
 ```
-  one axis: how does source-change propagate to the vector?
-
-  ┌─ source (content) ──────┐   MUTABLE — edit the file / documents row
-  │  agents.documents.content│   any time; nothing fires on change
-  └────────────┬────────────┘
-               │ seam: NO change-detection, NO staleness column
-  ┌─ derived (embedding) ───┐   FROZEN AT INDEX TIME — only a manual
-  │  agents.chunks.embedding │   re-index updates it; until then, stale
-  └─────────────────────────┘
+   index time                  edit                    query time
+   ──────────                  ────                    ──────────
+   doc v1 ──► chunk ──► embed   doc v1 → doc v2         search hits the
+   ┌──────────────┐            (content changes)        v1 embedding
+   │ vector(v1)   │  ════════════ DRIFT WINDOW ════════►  for v2 text
+   └──────────────┘            │                          │
+        the vector             stale: describes v1,        answer cites
+        is correct             but doc is now v2            text that's gone
 ```
 
-**The seam that matters:** the source→derived boundary, where a change *should* trigger a re-embed but nothing does. The embedding is computed once and never told its source moved. buffr's only mitigation lives on the *fix* side, not the *detect* side: `on conflict do update` means *when* you re-index, staleness is cleanly overwritten — but nothing tells you *when* that is. Hold that: buffr can repair staleness but is blind to it.
+Before the edit: the vector faithfully represents the document. After the edit, until the next re-index: the vector is a lie — it describes text that's been changed or deleted. Consequence: buffr can confidently retrieve and *cite* a passage that no longer exists in the source document, with no signal that anything is wrong.
 
 ## How it works
 
-### Move 1 — the mental model
+### Move 1 — Mental model: a cache with no invalidation
 
-You know the two hard problems joke — cache invalidation is one of them. An embedding is a cache: an expensive-to-compute derived value (meaning) over a source (text). The easy part is recomputing it. The hard part is *knowing it's stale* — that the source changed since you last computed. buffr has the recompute (re-index) but not the staleness signal.
+The vector is a cache of the document's meaning. Every cache has the same hard problem: invalidation. Edit the source, and the cache is stale until something refreshes it. buffr's cache has *no invalidation signal at all* — nothing marks a vector dirty when its document changes.
+
+**Vector-as-cache, no invalidation**
 
 ```
-  the staleness kernel — derived value drifts from its source
-
-  t0:  content = "renew by mail"   ──embed──►  vector_A   (in sync ✓)
-  t1:  content edited to "renew online"        vector_A   (STALE ✗)
-                                               └ still describes "by mail"
-  t2:  re-index ──► vector_B (in sync ✓)   ← upsert fixes it... IF you run it
-       └ but NOTHING at t1 flagged that t2 was needed
+  documents.content (source of truth)
+        │  cached as
+        ▼
+  agents.chunks.embedding (the cache)
+        │
+   edit the doc ──► cache is now STALE
+        │
+        ▼
+   nothing marks it dirty, nothing triggers refresh
+   only a MANUAL `npm run index` rebuilds it
 ```
 
-The kernel: a derived value + its source + a *freshness signal* linking them. buffr has the first two. The missing third — "is this still fresh?" — is the whole gap.
+Frontend bridge: it's a memoized selector whose dependency changed but whose cache key didn't — you keep serving the old computed value because nothing told the memo to recompute. The fix in both worlds is a freshness signal (a dependency, a dirty flag, a timestamp) that says "recompute."
 
-### Move 2 — the step-by-step walkthrough
+### Move 2 — Walk the mechanism
 
-**Step 1 — the mitigation buffr HAS: re-index overwrites cleanly.** When you do re-index, staleness is repaired because the upsert overwrites the embedding in place under the same chunk id:
+**Part A — Re-indexing replaces vectors, but only when you run it**
+
+buffr's upsert *does* correctly overwrite a doc's chunks when you re-index — by id, idempotently. The gap isn't the overwrite; it's that nothing *triggers* the overwrite. It's manual.
+
+**Refresh is correct but manual**
+
+```
+  npm run index -- work.md     ◄── YOU must run this after editing work.md
+        │
+        ▼ indexDocumentRow: upsert documents row, re-chunk, re-embed
+        ▼ store.upsert: insert … on conflict (id) do update
+  agents.chunks updated         ◄── vectors now fresh again
+        ▲
+   but until you run it, the old vectors stand
+```
 
 ```ts
-// src/pg-vector-store.ts:50-54
-on conflict (id) do update set
-  ..., content = excluded.content,
-  embedding = excluded.embedding, ...     -- new content AND new vector, atomically
+// src/runtime.ts:11-17 — re-index overwrites content + re-runs the pipeline
+await pool.query(
+  `insert into agents.documents (…) values (…)
+   on conflict (id) do update set content = excluded.content, …`, …);
+await pipeline.index({ id: doc.id, text: doc.text });   // re-chunk, re-embed, upsert
 ```
 
-So there's no *duplicate* stale vector, no orphaned old embedding for an edited chunk — a re-index makes `content` and `embedding` consistent again. That's the partial mitigation: the *fix* is clean. (The shrink-orphan exception from `10-incremental-indexing.md` still applies — chunks that vanish aren't deleted.)
+The mechanism is sound: re-running `npm run index` on an edited file replaces its chunks cleanly (chunk ids are `"<docId>#<i>"`, stable across re-index, so `on conflict` updates in place). The *risk* is entirely about the trigger: there is no scheduler, no file-watcher, no dirty flag. A doc edited a month ago still serves month-old vectors until a human remembers to re-index it.
 
-**Step 2 — the gap buffr HAS: no detection.** Look at the chunks schema. There's no timestamp, no hash, no flag tying the embedding to a version of its source:
+**Part B — There is no `embedding_stale_at`, and no way to find drifted docs**
+
+The schema records *when* a document was created (`documents.created_at`) but never *when its chunks were embedded* or *whether the content changed since*. So you cannot query "which docs are stale."
+
+**What the schema can and can't tell you**
+
+```
+  documents:  id · content · created_at        ◄── created, but not "edited since embed"
+  chunks:     id · content · embedding · …      ◄── NO embedded_at, NO stale flag
+                                                     NO content-hash to compare
+
+  CAN ask:  what's indexed?
+  CANNOT ask: which indexed docs no longer match their source? ← the gap
+```
 
 ```sql
--- sql/001_agents_schema.sql:14-25 — what's NOT here
-create table if not exists agents.chunks (
-  id text primary key,
-  ...
-  content text not null,
-  embedding vector(768) not null,
-  embedding_model text not null default 'nomic-embed-text:v1.5',
-  meta jsonb not null default '{}'
-  -- ⚠ NO embedding_stale_at, NO content_hash, NO indexed_at
+-- sql/001_agents_schema.sql:4-25 — note what's absent
+create table if not exists agents.documents (
+  id text primary key, …, content text not null,
+  created_at timestamptz not null default now()      -- created, not "fresh-as-of"
 );
+create table if not exists agents.chunks (
+  …, content text not null, embedding vector(768) not null,
+  embedding_model text …, meta jsonb …               -- NO embedding_stale_at,
+);                                                    --  NO content_hash
 ```
 
-Without any of those, there is no query you can run to answer "which embeddings are out of date?" The information simply isn't recorded. You'd only discover staleness by noticing a *wrong retrieval* — far too late, and indistinguishable from other retrieval bugs.
+The absent columns are the whole story. Without an `embedding_stale_at` (or a content hash to compare source-vs-indexed), staleness is *undetectable* — buffr can't even report the problem, let alone fix it. The risk is real and silent.
+
+### Move 2.5 — Current vs. future
+
+**Case B: buffr has no staleness tracking. Re-index is manual and undetectable-when-needed.**
 
 ```
-  Comparison — fix side vs detect side
-
-  ┌─ FIX (buffr HAS) ────────┐    ┌─ DETECT (buffr LACKS) ─────┐
-  │ on conflict do update     │    │ embedding_stale_at column   │
-  │ re-index overwrites clean │    │ content_hash to compare     │
-  │ no duplicate stale vector │    │ a query: "which are stale?" │
-  └───────────────────────────┘    └────────────────────────────┘
-  buffr can repair staleness; it cannot SEE it
+  TODAY                              STALENESS TRACKING (the gap)
+  ─────                              ───────────────────────────
+  manual `npm run index`             ① store content_hash at index time
+  no signal a doc drifted            ② on doc edit ──► mark embedding_stale_at
+  silent: vector ≠ source            ③ background/idle job re-embeds stale docs
+  ┌──────────────────┐               ┌──────────────────────────────┐
+  │ overwrite works, │               │ detect drift ──► auto-refresh │
+  │ trigger doesn't  │               └──────────────────────────────┘
+  └──────────────────┘                stale vectors become visible + fixable
 ```
 
-**Step 3 — the Case-B move: track freshness.** Add an `embedding_stale_at` (or a `content_hash` + `indexed_at`) to the chunks/documents rows. On a source edit, mark stale; on re-index, clear it. Now staleness is a *query*, not a guess:
+The fix is two parts: *detection* (a content hash or a `stale_at` timestamp set on edit) and *refresh* (an idle/background job that re-embeds whatever's marked stale). buffr has the refresh *primitive* (idempotent upsert) but neither the detection nor the trigger.
 
-```
-  // staleness tracking (the Case-B addition)
-  on source edit (documents.content changes):
-      set documents.embedding_stale_at = now()     // flag it dirty
-  on re-index:
-      ... existing upsert (content + embedding) ...
-      set documents.embedding_stale_at = null       // clear the flag
-  // now you can ASK:
-  select id from agents.documents where embedding_stale_at is not null
-```
+### Move 3 — The principle
 
-```
-  Layers-and-hops — adding the freshness signal
-
-  ┌─ edit ───────┐ hop 1: content changes       ┌─ agents.documents ──┐
-  │ file/row edit│ ─────────────────────────────►│ set stale_at=now()  │
-  └──────────────┘                                │ (NEW column)        │
-  ┌─ reindex ────┐ hop 2: upsert + clear flag     │                     │
-  │ npm run index│ ─────────────────────────────►│ embedding refreshed │
-  └──────────────┘                                │ stale_at = null     │
-                                                  └─────────────────────┘
-  hop 3: a query lists stale docs → a re-index job knows what to do
-```
-
-**Step 4 — the boundary condition: detection without a watcher is half a fix.** A `stale_at` column only flips if *something writes to it on edit*. If edits happen outside buffr (you edit the markdown file directly), buffr never sees the change to flag it — so detection also needs either a file-watcher/`mtime` check or a content-hash compared on every re-index. The honest version: a hash on the documents row, recomputed at index time, is the most robust detector because it needs no live watcher.
-
-### Move 3 — the principle
-
-Derived data is a cache, and a cache without an invalidation signal silently serves stale answers. The expensive part of embeddings isn't recomputing them — it's knowing *when* to. buffr solved the cheap half (clean overwrite) and skipped the hard half (detection), which is the classic shape of the cache-invalidation trap. The general lesson: whenever you store a value derived from a mutable source, store *something* that lets you tell whether the two still agree — a timestamp, a hash, a version — or you've built a cache you can never trust.
+**An embedding is a cache, and an un-invalidated cache eventually lies.** The dangerous part of stale embeddings isn't that vectors go out of date — all caches do — it's that buffr can serve a confident, *cited* answer from a vector whose source text is gone, with no signal of wrongness. Silent staleness is worse than a missing answer. The honest state: buffr's refresh is correct but manual and undetectable-when-stale. Making freshness *visible* (a timestamp, a hash) is the prerequisite to making it automatic.
 
 ## Primary diagram
 
-The staleness gap, one frame:
+The drift window and the tracking that would close it.
+
+**From edit to stale answer, and where detection belongs**
 
 ```
-  stale embeddings — buffr can fix, can't detect
-
-  documents.content (mutable source)
-     │ derived at index time
-     ▼
-  chunks.embedding (768)  ── frozen until re-indexed ──
-     │
-     ├─ FIX (HAS):  re-index → on conflict do update → clean overwrite
-     │
-     └─ DETECT (MISSING): no embedding_stale_at / content_hash / indexed_at
-                          → no way to ASK "which embeddings drifted?"
-  ───────────────────────────────────────────────────────────
-  Case B: add content_hash (+ stale_at); flag on edit, clear on reindex
-          → staleness becomes a query, not a guess
+  doc v1 ──► index ──► vector(v1)        [content_hash stored?  NO]
+                          │
+  EDIT doc v1 → v2 ───────┼──────────────────────────────────────
+                          │   ★ no signal fires (no stale_at)      ★
+                          ▼
+  query ──► search ──► returns vector(v1) ──► cites v1 text
+                          │
+                          ▼
+  answer grounded in text that no longer exists  ◄── silent failure
+  ───────────────────────────────────────────────────────────────
+  FIX: hash content at index; on edit set embedding_stale_at;
+       idle job re-embeds stale docs (refresh primitive already exists)
 ```
+
+After the box: the upsert that would refresh the vector already works — the entire gap is *knowing which vectors need it*.
 
 ## Elaborate
 
-Embedding staleness is a specific instance of the materialized-view / cache-invalidation problem: any precomputed value over changing source data drifts unless something tracks the relationship. In a vector store it's especially insidious because a stale embedding doesn't error — it just quietly returns the *old* meaning, so a query about updated content matches against text that no longer exists. You find out via a wrong answer, which is the worst feedback loop.
-
-The robust detector is a content hash stored alongside the source (e.g. on `agents.documents`): at index time, compare the new file's hash to the stored one — if different, re-embed and update the hash; if same, skip. That single column buys you both staleness *detection* and the change-detection that `10-incremental-indexing.md` wants for skipping unchanged files — they're the same mechanism viewed from two angles. A `stale_at` timestamp is a lighter alternative but only works if every edit path writes to it, which fails when files are edited outside buffr. Hash-on-reindex is the version that doesn't rely on a watcher.
+- **buffr's corpus hides the risk.** The eval docs are static files you index once. A live corpus — notes you edit, a synced folder, an app DB — drifts constantly, and that's where silent staleness bites. The risk scales with edit frequency.
+- **Detection is cheap; a content hash is enough.** Store a hash of each doc's content at index time. On the next index pass (or an edit hook), compare; if the hash differs, the vector is stale. That's a single column and a comparison — far cheaper than re-embedding to check.
+- **`embedding_model` is already a staleness axis.** The column records which model embedded each chunk. A model upgrade makes *every* vector stale in a different sense (file 02's one-way door). Same column, two freshness questions: stale content, stale model.
+- **Refresh should be idle, not in-path.** Re-embedding is expensive; you don't do it on the query path. A background or idle-time job that drains the `stale_at` queue keeps queries fast while keeping vectors converging toward fresh.
 
 ## Project exercises
 
-> No `aieng-curriculum.md` is present in this repo, so Build-item IDs are not cited. Exercises are derived directly from the codebase and the spec's concept set.
+### Add content-hash staleness detection
 
-### Add staleness detection via content hash
+- **Exercise ID:** [B2B.10] (cite [C2.8], Phase 2B) — Case B: buffr has **no staleness tracking**. This is the primary target (the detection half).
+- **What to build:** Store a `content_hash` (and/or `embedded_at`) per document at index time. On re-index, compare the source hash to the stored one and report which docs drifted *before* re-embedding them. Add an `embedding_stale_at` column set when a doc's content changes.
+- **Why it earns its place:** Staleness is currently *undetectable* — the schema can't answer "which docs drifted." This makes the silent risk visible, which is the prerequisite for any automated fix.
+- **Files to touch:** `sql/001_agents_schema.sql` (add `content_hash` / `embedding_stale_at`), `src/runtime.ts` (compute + compare on `indexDocumentRow`).
+- **Done when:** Editing a doc and re-running index reports it as stale-before-refresh, and you can query the set of stale documents.
+- **Estimated effort:** 1 day.
 
-- **Exercise ID:** STL-1 (Case B — buffr can't detect staleness; add tracking).
-- **What to build:** add a `content_hash` (and optional `embedding_stale_at`) column to `agents.documents`; compute the hash at index time; expose a query/command that lists documents whose on-disk content hash no longer matches the stored hash — the stale set.
-- **Why it earns its place:** it converts staleness from an invisible bug into a queryable fact, and the same hash powers the unchanged-file skip in `10`.
-- **Files to touch:** `sql/001_agents_schema.sql:4-12` (add column to `agents.documents`), `src/runtime.ts:11-17` (compute/compare hash in `indexDocumentRow`), new `src/cli/stale-cmd.ts` listing stale docs.
-- **Done when:** editing a file and re-running the check lists it as stale until re-indexed; re-indexing clears it.
-- **Estimated effort:** half a day.
+### Add an idle re-embed job that drains the stale set
 
-### A re-index-stale command
-
-- **Exercise ID:** STL-2 (Case B — close the loop from detect to fix).
-- **What to build:** a `npm run reindex:stale` that finds all stale documents (via STL-1) and re-indexes only those — so the freshness signal drives an action, not just a report.
-- **Why it earns its place:** detection is only useful if it triggers the cheap, targeted fix; this wires the loop end to end.
-- **Files to touch:** new `src/cli/reindex-stale-cmd.ts`, reusing `indexDocumentRow` (`src/runtime.ts:5-18`) over the stale set from STL-1.
-- **Done when:** running it re-embeds exactly the stale documents and leaves fresh ones untouched (no embedding calls for them).
-- **Estimated effort:** 1–4hr. Cross-link `10-incremental-indexing.md`.
+- **Exercise ID:** [B2B.11] (cite [C2.8], Phase 2B) — Case B: the refresh-trigger half (depends on [B2B.10]).
+- **What to build:** A background/idle command that finds documents with `embedding_stale_at` set, re-chunks and re-embeds them via the existing pipeline, and clears the flag — off the query path.
+- **Why it earns its place:** Detection without refresh just surfaces the problem; this closes the loop using buffr's existing idempotent upsert as the refresh primitive. Keeps queries fast while vectors converge to fresh.
+- **Files to touch:** a new CLI command reusing `indexDocumentRow`/`pipeline.index` (`src/runtime.ts`, `src/cli/`), clearing `embedding_stale_at` after success.
+- **Done when:** Marking docs stale then running the job re-embeds exactly those docs and clears the flags, with queries unaffected during the run.
+- **Estimated effort:** 1–2 days (after [B2B.10]).
 
 ## Interview defense
 
-**Q: How does buffr handle stale embeddings?**
-Answer: it *fixes* them but can't *detect* them. Re-indexing overwrites cleanly — `on conflict (id) do update` replaces both `content` and `embedding` atomically, so there's no duplicate or orphaned stale vector for an edited chunk. But there's no `embedding_stale_at`, no `content_hash`, no `indexed_at` on the chunks or documents — so there's no way to ask "which embeddings drifted from their source?" You'd only notice staleness via a wrong retrieval, which is far too late.
+**Q: "What's the stale-embeddings risk in buffr?"**
+
+A chunk's embedding is a snapshot of the doc at index time. Edit the doc and the vector still describes the old text — but buffr has no `embedding_stale_at`, no content hash, so it can't even detect the drift. It can serve and cite a passage that no longer exists. Re-index fixes it, but only manually.
 
 ```
-  FIX (has):    re-index → overwrite content+embedding atomically
-  DETECT (lacks): no stale_at / hash → can't query "which are stale?"
-  → buffr repairs staleness but is blind to it
+  edit doc ──► vector describes old text ──► no signal ──► cites gone text
 ```
 
-**Q: What's the most robust way to detect it, and why not just a timestamp?**
-Answer: a content hash stored on the documents row, recomputed and compared at index time — different hash means re-embed, same means skip. A `stale_at` timestamp only works if *every* edit path writes to it, which fails when files are edited outside buffr (no watcher fires). A hash needs no live watcher; it's checked on the next index pass, and it doubles as the change-detection that lets you skip unchanged files. The anchor: **the load-bearing fact people forget is that an embedding is a cache — the hard part is knowing when to recompute, not the recompute itself.**
+Anchor: *"An embedding is an un-invalidated cache."*
+
+**Q: "Is the re-index mechanism itself broken?"**
+
+No — the upsert overwrites a doc's chunks idempotently by id, so re-running index refreshes correctly. The gap is the *trigger* and *detection*: nothing marks a doc dirty on edit, and the schema can't list stale docs. Fix is a content hash plus an idle re-embed job.
 
 ```
-  content_hash on documents → compare at index time
-  differs → re-embed + update hash ; same → skip
-  (also powers the unchanged-file skip in 10)
+  refresh: correct (idempotent upsert)
+  trigger + detection: missing
 ```
+
+Anchor: *"The overwrite works; knowing when to overwrite doesn't."*
 
 ## See also
 
-- `10-incremental-indexing.md` — the same content-hash powers unchanged-file skipping (the other face of this gap).
-- `02-embedding-model-choice.md` — `documents.content` as the source the hash guards.
-- `04-vector-databases.md` — the `on conflict do update` upsert that cleanly repairs staleness.
-- `../05-evals-and-observability/` — staleness surfaces as a retrieval-quality regression.
+- `./10-incremental-indexing.md` — the sibling gap: detecting *which* docs changed, and handling deletes.
+- `./02-embedding-model-choice.md` — model-staleness, the other axis the `embedding_model` column tracks.
+- `./04-vector-databases.md` — the idempotent `on conflict` upsert that is the refresh primitive.
+- `../../study-database-systems/` — cache invalidation, content hashing, change-data-capture patterns.

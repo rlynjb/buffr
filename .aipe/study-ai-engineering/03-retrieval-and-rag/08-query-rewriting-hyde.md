@@ -1,198 +1,220 @@
-# Query rewriting & HyDE — the pre-retrieval step buffr skips
+# Query Rewriting & HyDE
 
-*Industry standard (NOT yet exercised). Transforming the query before it's embedded.*
+### *industry: query rewriting / Hypothetical Document Embeddings (HyDE) · type: closing the query–document vocabulary gap before retrieval*
 
-## Zoom out, then zoom in
+## Zoom out
 
-Pull up the query path and look at what happens to the user's question before it's embedded. In buffr: nothing. The raw query string goes straight into the embedder. Query rewriting (and its cousin HyDE) is a step that *transforms* the query first — to make it match the corpus better. buffr has no such step.
+Every file so far has worked on the *document* side — how docs are chunked, embedded, stored, ranked. This one works on the *query* side. The query you embed is the raw user question, and a question often doesn't look like the answer that answers it. That mismatch is the gap this file closes — and buffr leaves it wide open.
+
+**buffr's retrieval stack, the query-side gap marked**
 
 ```
-  Zoom out — the pre-retrieval transform buffr is missing
-
-  ┌─ Agent layer ───────────────────────────────────────────────┐
-  │  user question  ──►  search_knowledge_base({query})          │
-  └───────────────────────────┬─────────────────────────────────┘
-                              │ raw query (verbatim)
-  ┌─ Retrieval layer ─────────▼─────────────────────────────────┐
-  │  ★ rewrite / HyDE (MISSING) ★  →  embed → cosine ANN         │ ← here
-  │  buffr: NO rewrite — embeds the raw string directly          │
-  └─────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│  RagQueryAgent          embeds the RAW question                │
+├──────────────────────────────────────────────────────────────┤
+│  ★ QUERY REWRITE / HyDE ★  reshape query → doc-space           │  ◄── this file
+│                            NOT IMPLEMENTED — raw question only │
+├──────────────────────────────────────────────────────────────┤
+│  embeddings             embed(query) ──► cosine search         │
+└──────────────────────────────────────────────────────────────┘
 ```
 
-Zoom in. You know how a search box sometimes silently "did you mean…" or expands your terms before searching? Query rewriting is that, done by an LLM, ahead of retrieval. **HyDE** (Hypothetical Document Embeddings) is the sharpest version: instead of embedding the *question*, you have the LLM write a fake *answer*, then embed *that* — because a hypothetical answer looks more like the real answer-chunk than the question does. buffr embeds the raw question, full stop. This file builds rewrite/HyDE and the Case-B move to add the step.
+You embedded raw queries on your last app too — most people do, and it mostly works. This file shows the specific shape of query where it *doesn't*, and the two standard pre-retrieval fixes buffr doesn't have.
 
 ## Structure pass
 
-Read the skeleton: retrieval with vs without a pre-transform.
+The axis is **what you actually embed**: the user's words, or a transformed version closer to the answer's words. The seam is the transformation step that buffr skips.
 
-**Layers:** raw query → (optional transform) → embed → search. buffr's transform layer is empty.
-
-**Axis traced — "what text gets embedded?"**
+**Raw query vs. rewritten/hypothetical query**
 
 ```
-  one axis: what actually gets turned into the query vector?
-
-  ┌─ buffr today ───────────┐   THE RAW QUESTION — verbatim user string
-  │  embed(query)            │   ("how do I renew it?") embedded as-is
-  └────────────┬────────────┘
-               │ seam: the missing transform lives here
-  ┌─ rewrite / HyDE ────────┐   A TRANSFORMED STRING — a cleaned-up query,
-  │  embed(LLM-rewritten)    │   OR a hypothetical ANSWER (HyDE) that looks
-  └─────────────────────────┘   like the chunk you're hoping to retrieve
+   RAW (buffr)                       REWRITTEN / HyDE (missing)
+   ──────────                        ──────────────────────────
+   embed the question verbatim       transform first, then embed:
+   "how do I caffeinate"             • rewrite: "coffee preparation
+        │                              method, brewing, espresso"
+        ▼ may sit far from            • HyDE: draft a fake answer,
+   the answer's vocabulary             embed THAT (it looks like a doc)
+   ┌──────────────────┐              ┌──────────────────────────────┐
+   │ embed(question)  │   ──seam──►  │ embed(transform(question))    │
+   └──────────────────┘              └──────────────────────────────┘
+        the seam: do you embed what was asked, or what an answer looks like?
 ```
 
-**The seam that matters:** the boundary between the user's words and the embedded text. A raw question is often a *bad* query — vague, pronoun-laden ("how do I renew *it*?"), phrased unlike the documents. The transform layer's job is to close the gap between *how people ask* and *how documents are written*. buffr's transform layer is empty, so that gap is never closed. Hold that: the question and the answer-chunk are different *kinds* of text, and embedding the question hopes they're close anyway.
+Left of the seam: a question and its answer are different *shapes of text* — "how do I X?" is interrogative, the answer is declarative. Their embeddings can sit a measurable angle apart. Right of the seam: you first reshape the query toward answer-space (rewrite) or generate a fake answer and embed *that* (HyDE), so the search vector lands in the neighbourhood of real answers. Consequence: buffr embeds a question into a space organized by *answers*, and eats whatever angle that mismatch costs.
 
 ## How it works
 
-### Move 1 — the mental model
+### Move 1 — Mental model: search with the answer's words, not the question's
 
-You know how a good search query isn't how you'd *say* it to a friend — you reword it to match what the page probably says? Query rewriting does that automatically. HyDE goes further with a clever inversion: it asks the LLM to *hallucinate the answer*, then searches for chunks similar to that fake answer — because a fake answer is shaped like a real answer-chunk, while the question is shaped like a question.
+If you wanted to find a paragraph about espresso, you wouldn't search "how do I caffeinate" — you'd search "espresso oat milk no sugar," words that *appear in the answer*. HyDE does this automatically: it has the LLM write a plausible answer first, then searches with that, because a fake answer shares vocabulary with the real one far better than the question does.
+
+**HyDE: draft an answer, search with it**
 
 ```
-  the HyDE kernel — embed a fake answer, not the question
-
-  question: "how do I renew it?"
-     │ (1) ask LLM for a hypothetical answer
-     ▼
-  fake answer: "To renew a passport, submit form DS-82 with two photos..."
-     │ (2) embed the FAKE ANSWER (not the question)
-     ▼
-  query vector  ── now lands near REAL answer-chunks ──►  cosine ANN
-  why: answer-shaped text ≈ answer-chunk text  (question-shaped text isn't)
+  question: "how does the author take their coffee"
+        │ LLM drafts a HYPOTHETICAL answer (may be wrong on facts!)
+        ▼
+  "The author drinks espresso with oat milk, no sugar, every morning."
+        │ embed THIS (it's answer-shaped, like real docs)
+        ▼
+  search ──► lands near the REAL coffee chunk
+            (shared vocabulary: espresso, oat milk, morning)
 ```
 
-The kernel: transform the query (rewrite or generate-a-fake-answer) → embed the *transformed* text → search. The load-bearing insight is the type-match: embed text that's the same *kind* as what you want to retrieve.
+Frontend bridge: it's autocomplete that rewrites a typo'd, vague search into the canonical query before hitting the index — "stripe refund api" expanded to the terms your docs actually use. You search the *normalized* query, not the raw keystrokes.
 
-### Move 2 — the step-by-step walkthrough
+### Move 2 — Walk the mechanism
 
-**Step 1 — what buffr does today: embed the raw query.** The query string is embedded verbatim, with zero pre-processing:
+**Part A — buffr embeds the raw question (the honest state)**
+
+The query path takes the user's question and embeds it directly. No rewrite, no HyDE, no expansion.
+
+**The raw-query path**
+
+```
+  user question ──► embed([query]) ──► search(vector, k)
+                    ▲
+          the EXACT question text becomes the search vector
+          (no transformation step)
+```
 
 ```ts
-// aptkit packages/retrieval/src/pipeline.ts:55-58 (queryKnowledgeBase)
-const [vector] = await wiring.embedder.embed([query]);   // ← raw query, no rewrite
-if (!vector) return [];
-return wiring.store.search(vector, topK);
+// aptkit pipeline.ts:50-58 — query path embeds the raw string
+export async function queryKnowledgeBase(query, wiring, topK = 5) {
+  const [vector] = await wiring.embedder.embed([query]);   // raw question
+  if (!vector) return [];
+  return wiring.store.search(vector, topK);
+}
 ```
 
-`query` is whatever the agent passed into `search_knowledge_base`. There's no LLM call to clean it, expand it, or turn it into a hypothetical answer. Vague or pronoun-heavy queries embed exactly as vaguely as they're phrased.
-
-**Step 2 — where the raw query hurts.** A query like *"what about the second one?"* (a follow-up referring to earlier context) embeds to a vector about "second" and "one" — useless. Even a clean question is *question-shaped*, not *answer-shaped*, so it sits a little off from the chunks that answer it. The gap is small but real, and it's pure upside to close.
-
-```
-  Comparison — raw query vs transformed query
-
-  ┌─ buffr (raw) ────────────┐    ┌─ rewrite / HyDE ───────────┐
-  │ embed("how renew it?")    │    │ rewrite: "passport renewal  │
-  │ vague, pronoun, question- │    │   process and requirements" │
-  │ shaped → off from chunks  │    │ HyDE: embed a fake ANSWER   │
-  │                           │    │   → answer-shaped, on target│
-  └───────────────────────────┘    └────────────────────────────┘
+```ts
+// aptkit rag-query-agent.ts:62-80 — the agent passes the question through unchanged
+async answer(question: string, …) {
+  …
+  userPrompt: question,   // raw; the tool embeds it verbatim
+}
 ```
 
-**Step 3 — the Case-B move: add a rewrite/HyDE step before embedding.** Insert one LLM call between "get the query" and "embed it." buffr already has a local generation model (`gemma2:9b`), so the transform is in-stack:
+The question travels from `RagQueryAgent.answer(question)` to `search_knowledge_base` to `embed([query])` *unmodified*. Whatever vocabulary mismatch exists between the question and the answer is carried straight into the search vector. There is no stage that would reshape it.
+
+**Part B — Where a rewrite chain would slot in**
+
+A pre-retrieval LLM call transforms the question before it's embedded — either rewriting it toward doc-vocabulary or drafting a hypothetical answer to embed.
+
+**The rewrite-before-retrieve chain**
 
 ```
-  // query rewrite / HyDE (the Case-B step to add)
-  function transformQuery(rawQuery, mode):
-      if mode == "rewrite":
-          return llm.generate("Rewrite this as a search query: " + rawQuery)
-      if mode == "hyde":
-          return llm.generate("Write a short passage answering: " + rawQuery)
-      // then the EXISTING path embeds the transformed string
-  ...
-  vector = embed( transformQuery(query, "hyde") )   // embed transformed, not raw
-  hits   = store.search(vector, topK)               // unchanged downstream
+  question
+    │ STAGE 0 (missing): LLM rewrite / HyDE
+    ▼ transformed query (answer-shaped vocabulary)
+    │
+    ▼ embed ──► search ──► chunks ──► answer
+  ───────────────────────────────────────────
+  one extra LLM call BEFORE retrieval,
+  feeding the existing query path unchanged
 ```
 
+The plug point is clean: the transformation produces a *string*, and the existing path already takes a string. So a rewrite stage is a prompt-chain link *in front of* `search_knowledge_base` — it doesn't touch embeddings, the store, or the agent loop. This is the same prompt-chaining shape `../02-context-and-prompts/03-prompt-chaining.md` describes: one call with one job (reshape the query) feeding the next.
+
+### Move 2.5 — Current vs. future
+
+**Case B: buffr does no query transformation. It embeds the raw question, period.**
+
 ```
-  Layers-and-hops — where the transform would slot in
-
-  ┌─ pipeline ───┐ hop 1: transformQuery (NEW)   ┌─ gemma2:9b ──────┐
-  │ query()      │ ─────────────────────────────►│ rewrite / HyDE   │
-  │ (NEW step    │ hop 2: transformed string ◄─── └──────────────────┘
-  │  before embed)│ hop 3: embed(transformed)     ┌─ nomic-embed ────┐
-  └──────┬───────┘ ─────────────────────────────►│ 768-vector       │
-         ▼ hop 4: search(vector, k) → existing path, unchanged
+  TODAY                              REWRITE / HyDE (this is the gap)
+  ─────                              ───────────────────────────────
+  embed(raw question)                STAGE 0: rewrite or HyDE
+                                       │
+  ┌──────────────────┐               ┌──────────────────────────────┐
+  │ question ──► vec │               │ question ──► LLM ──► better    │
+  └──────────────────┘               │ query/fake-answer ──► vec      │
+   vocabulary gap unaddressed        └──────────────────────────────┘
+                                      query lands in answer-space
 ```
 
-Everything downstream (embed, cosine, ANN) is untouched — the transform is a pure prefix.
+The cost is one extra LLM call per query, in the request path — real latency on a local model. So this earns its place only on corpora where the question/answer vocabulary gap is wide. For buffr's short, plain-spoken markdown notes the gap is modest; on a jargon-heavy or multi-domain corpus it'd matter more. Measure the gap before paying the latency.
 
-**Step 4 — the boundary condition: it adds latency and can mislead.** The rewrite is an extra LLM call per query (latency), and HyDE can *hallucinate wrong* — a fake answer about the wrong topic pulls retrieval off course. So like reranking, this needs measurement: does rewrite/HyDE improve precision@k enough to justify the extra generation call? Sometimes the raw query is already good and the transform only adds cost.
+### Move 3 — The principle
 
-### Move 3 — the principle
-
-Retrieval quality starts before retrieval. The query you embed is a knob, not a given — and the cheapest way to improve matches is often to fix the *query*, not the index. The deep idea behind HyDE is type-matching: embed text of the same *kind* as what you want to retrieve. You're searching answer-chunks, so embed an answer-shaped string, not a question-shaped one. The general lesson: when two things don't match well, transform one to look like the other before comparing.
+**Retrieval quality depends on the query as much as the corpus, so the query deserves engineering too.** Every other file optimizes the document side; this one says the *search vector* is also a design surface. A raw question is a convenient default, not an optimal query — it's shaped like a question, and your index is shaped like answers. buffr embedding the raw question is honest and simple, but it's leaving a query-side lever entirely unpulled. The discipline: when retrieval misses, ask whether the *query* was the problem before blaming the index.
 
 ## Primary diagram
 
-The pre-retrieval transform buffr skips, one frame:
+The raw path buffr has, and the transformed path it's missing.
+
+**Two query shapes hitting the same index**
 
 ```
-  query rewriting / HyDE — the step buffr doesn't run
-
-  user question  "how do I renew it?"
-     │
-     │  ★ TRANSFORM (MISSING): rewrite OR generate fake answer ★
-     │     buffr skips this — embeds the raw question
-     ▼
-  embed(query)  ──► cosine ANN ──► top-k
-  ───────────────────────────────────────────────────────────
-  Case B (with gemma2:9b):
-    rewrite → cleaner search string         (cheap fix)
-    HyDE    → embed a hypothetical ANSWER    (answer-shaped → on target)
-  then the EXISTING embed→search path runs unchanged. MEASURE precision@k.
+  RAW (buffr today)                  TRANSFORMED (the gap)
+  ─────────────────                  ─────────────────────
+  question                           question
+     │                                  │ LLM rewrite OR HyDE draft
+     │ embed                            ▼ answer-shaped query
+     ▼                                  │ embed
+  search vector ──┐                     ▼
+                  │                  search vector ──┐
+  ────────────────┴─────────────────────────────────┴────────────
+        both hit:  search(vector, k) over agents.chunks
+        but the transformed vector lands nearer real answers
 ```
+
+After the box: same index, same store, same agent — the only difference is *which vector* you search with, and that vector is something you can engineer instead of accept.
 
 ## Elaborate
 
-Query transformation is a family. *Rewriting* cleans and expands the query (resolve pronouns, add synonyms, split a multi-part question). *Query expansion* adds related terms. *HyDE* (Gao et al., 2022) is the elegant one: generate a hypothetical document answering the query, embed *that*, and retrieve against it — it works because a generated answer, even an imperfect one, shares the vocabulary and shape of real answer-chunks far more than a question does, so it lands closer in embedding space.
-
-For buffr, this is a clean Case-B because the generation model is already in-stack (`gemma2:9b` via Ollama) — the transform is one extra local LLM call, no new dependency. The honest caveat is the same as reranking and hybrid: it adds latency and can mislead (a hallucinated HyDE passage drags retrieval off-topic), so it must be measured, not assumed. It also interacts with buffr's agentic loop — in a multi-turn chat, rewriting to resolve "it"/"the second one" against conversation history is where rewrite earns the most.
+- **HyDE tolerates a factually-wrong draft.** The hypothetical answer doesn't need to be correct — it only needs to be *shaped like* the real answer, with overlapping vocabulary. Its embedding pulls the search toward the right region; the real chunks still supply the actual facts. Wrong-but-answer-shaped beats right-but-question-shaped for *retrieval*.
+- **Rewrite is cheaper and safer than HyDE.** A rewrite ("expand to synonyms, normalize") is a smaller, more controllable transform than generating a whole fake answer. It's the lower-risk first step; HyDE is the heavier hammer.
+- **It composes with multi-part questions.** A rewrite stage can also *split* a compound question ("my work and my coffee?") into sub-queries, each retrieved separately — addressing the same multi-part miss that `minTopK:4` patches from the other side.
+- **The cost is real and in-path.** Unlike chunking (offline) or reranking (over a small set), query rewrite is one LLM call *before every retrieval*. On a local model that's noticeable latency — which is exactly why it should be gated on measured benefit.
 
 ## Project exercises
 
-> No `aieng-curriculum.md` is present in this repo, so Build-item IDs are not cited. Exercises are derived directly from the codebase and the spec's concept set.
+### Add a query-rewrite chain before retrieval
 
-### Add a HyDE pre-retrieval step
+- **Exercise ID:** [B2B.8] (cite [C2.7], Phase 2B) — Case B: buffr embeds the raw question; query rewriting is **not implemented**. This is the primary target.
+- **What to build:** A pre-retrieval LLM step that rewrites the user's question toward answer-vocabulary (synonym expansion, normalization, optional sub-question split), then feeds the rewritten string into the existing query path. A/B against raw on the eval.
+- **Why it earns its place:** It's the unpulled query-side lever, and it's a clean prompt-chain link in front of `search_knowledge_base` — no change to embeddings or the store. Reuses the local model already wired.
+- **Files to touch:** a rewrite step before `pipeline.query` (in `src/session.ts` or around the tool); reuse `GemmaModelProvider` from `src/session.ts`; verify with `src/cli/eval-cmd.ts`.
+- **Done when:** `eval-cmd` shows rewritten-query P@1/R@3 vs. raw, and you can state whether the gain beats the added per-query latency.
+- **Estimated effort:** 1–2 days.
 
-- **Exercise ID:** HYD-1 (Case B — buffr embeds raw queries; add a transform).
-- **What to build:** a `transformQuery(query, mode)` that, in HyDE mode, asks `gemma2:9b` for a short hypothetical answer and returns it to be embedded instead of the raw query; wire it before the embed call in the query path.
-- **Why it earns its place:** it closes the question-shaped-vs-answer-shaped gap using the model already in-stack, with zero new dependency, and downstream stays untouched.
-- **Files to touch:** new `src/retrieval/transform-query.ts` (calls the existing Ollama generation provider), wired into the query path in `src/session.ts` before retrieval; the embed/search path (`aptkit pipeline.ts:55-58`) stays unchanged.
-- **Done when:** a vague query (e.g. with a pronoun) retrieves the correct chunk via its HyDE-transformed form where the raw query missed it.
-- **Estimated effort:** half a day.
+### Prototype HyDE and compare to rewrite
 
-### Add conversation-aware query rewriting
-
-- **Exercise ID:** HYD-2 (Case B — resolve follow-ups against history).
-- **What to build:** a rewrite mode that takes the last few `agents.messages` turns and rewrites a follow-up ("what about the second one?") into a standalone query before embedding — then measure precision@k vs raw on a multi-turn eval set.
-- **Why it earns its place:** in an agentic multi-turn chat, follow-up queries are where rewrite earns the most; it's the most realistic version of the gap.
-- **Files to touch:** `src/retrieval/transform-query.ts` (add history-aware rewrite), reading recent `agents.messages` (schema `sql/001_agents_schema.sql:40-50`), wired in `src/session.ts`.
-- **Done when:** a follow-up referencing earlier context retrieves the right chunk, with a precision@k delta vs raw on multi-turn cases.
-- **Estimated effort:** half a day. Cross-link `../05-evals-and-observability/`.
+- **Exercise ID:** [B2B.9] (cite [C2.7], Phase 2B) — Case B: the heavier query-side transform.
+- **What to build:** A HyDE step — draft a hypothetical answer with gemma2:9b, embed *that*, search with it — run head-to-head against the rewrite from [B2B.8] and raw on the eval set.
+- **Why it earns its place:** HyDE and rewrite attack the same gap differently; only the eval says which buffr's corpus prefers, and at what latency. This is the measurement that picks the right tool.
+- **Files to touch:** a HyDE variant of the [B2B.8] step; `src/cli/eval-cmd.ts` to compare all three modes.
+- **Done when:** A three-way table (raw / rewrite / HyDE) shows P@1/R@3 and latency, and you can defend buffr's choice.
+- **Estimated effort:** 1 day (after [B2B.8]).
 
 ## Interview defense
 
-**Q: Does buffr rewrite queries, and what's HyDE?**
-Answer: no — buffr embeds the raw query string verbatim; there's no transform between the agent's `search_knowledge_base({query})` and the embed call. HyDE (Hypothetical Document Embeddings) is the sharpest version of the missing step: instead of embedding the *question*, you have the LLM write a hypothetical *answer* and embed *that* — because an answer-shaped string lands near real answer-chunks in embedding space, while a question-shaped string sits a little off. It's type-matching: embed the same kind of text you're retrieving.
+**Q: "Why would you transform a query before embedding it?"**
+
+Because a question and its answer are different shapes of text, so their embeddings sit apart in a space organized by answers. Rewriting toward answer-vocabulary — or HyDE, embedding a drafted fake answer — moves the search vector into the answer neighbourhood. buffr embeds the raw question and eats that gap.
 
 ```
-  buffr: embed(raw question)  ← question-shaped, off from answer-chunks
-  HyDE:  embed(LLM fake answer) ← answer-shaped → lands near real answers
+  raw question ──► question-shaped vector ──► gap
+  rewrite/HyDE ──► answer-shaped vector ──► lands near real answers
 ```
 
-**Q: Where would you add it in buffr, and what's the cost?**
-Answer: one `transformQuery` step before the embed call, using the in-stack `gemma2:9b` — so no new dependency, and the embed→cosine→ANN path stays unchanged. The cost is an extra LLM call per query (latency) and the risk that HyDE hallucinates off-topic and drags retrieval astray, so it must be measured with precision@k, not assumed. The anchor: **the load-bearing idea people forget is that the query is a knob — fixing the query is often cheaper than fixing the index.**
+Anchor: *"Search with the answer's words, not the question's."*
+
+**Q: "Why doesn't buffr do this already, and when should it?"**
+
+Because it's one extra in-path LLM call per query — real latency on a local model — and buffr's short markdown notes have a modest vocabulary gap. It earns its place on jargon-heavy or multi-domain corpora. Measure the gap on the eval before paying for it.
 
 ```
-  transformQuery (gemma2:9b) → embed transformed → existing search
-  cost: +1 LLM call, can mislead → measure precision@k before shipping
+  cost: +1 LLM call per query (in-path)
+  worth it when: wide question↔answer vocabulary gap
 ```
+
+Anchor: *"The query is a design surface — but pay for it only when it pays back."*
 
 ## See also
 
-- `01-embeddings.md` — why question-shaped and answer-shaped text land in different places.
-- `07-reranking.md` — the *post*-retrieval quality lever (this one is pre-retrieval).
-- `11-rag.md` — the query path where the raw query is embedded today.
-- `../04-agents-and-tool-use/02-tool-calling.md` — the `{query}` argument the rewrite would transform.
+- `../02-context-and-prompts/03-prompt-chaining.md` — query rewrite is a prompt-chain link in front of retrieval.
+- `./01-embeddings.md` — why question-shaped and answer-shaped text land at an angle.
+- `./11-rag.md` — where the (raw, today) query feeds the grounded answer.
+- `../05-evals-and-observability/` — the eval that decides whether rewrite/HyDE earns its latency.

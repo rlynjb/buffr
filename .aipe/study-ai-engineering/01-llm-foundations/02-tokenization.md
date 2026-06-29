@@ -1,223 +1,210 @@
 # Tokenization
 
-*Subword tokenization · text ↔ token IDs — Industry standard.*
+*Industry name: tokenization / subword tokenizer (BPE-family). Type: **Industry standard.***
 
 ## Zoom out, then zoom in
 
-The model from `01-what-an-llm-is.md` is a function over *tokens*, not characters and not words. Before that function runs, your text gets chopped into tokens; after it runs, tokens get glued back into text. buffr never does this chopping itself — but it estimates it, and it logs the real counts. Here's where both happen.
+The model from file 01 doesn't actually eat characters — it eats integers. Here's where that conversion sits, with the token-budget machinery marked ★.
 
 ```
-  Zoom out — where tokens enter the picture in buffr
-
-  ┌─ Agent layer ───────────────────────────────────────┐
-  │  RagQueryAgent builds {system, messages, tools}      │
-  └──────────────────────────┬───────────────────────────┘
-                             │  text (chars)
-  ┌─ Guard (aptkit local) ───▼───────────────────────────┐
-  │  ★ ContextWindowGuardedProvider ★                    │ ← we estimate tokens HERE
-  │     estimateTextTokens(text, charsPerToken=3)        │   (~3 chars/token, a guess)
-  └──────────────────────────┬───────────────────────────┘
-                             │  HTTP /api/chat
-  ┌─ Provider / Ollama ──────▼───────────────────────────┐
-  │  gemma2:9b tokenizer: text → token IDs → text        │ ← real tokenization HERE
-  │  returns prompt_eval_count + eval_count (real counts)│
-  └──────────────────────────────────────────────────────┘
+buffr stack — the token boundary
+┌───────────────────────────────────────────────────────────┐
+│ session.ask() / RagQueryAgent   assemble prompt as TEXT     │
+├───────────────────────────────────────────────────────────┤
+│ ★ ContextWindowGuardedProvider  estimate tokens vs 8192     │ pre-flight budget
+├───────────────────────────────────────────────────────────┤
+│ GemmaModelProvider.complete()   sends text over HTTP        │
+├───────────────────────────────────────────────────────────┤
+│ ★ Ollama tokenizer              TEXT → token integers       │ the real tokenizer
+├───────────────────────────────────────────────────────────┤
+│ gemma2:9b                       consumes/produces tokens    │
+├───────────────────────────────────────────────────────────┤
+│ ★ usage: prompt_eval_count / eval_count   token counts back │ the receipt
+└───────────────────────────────────────────────────────────┘
 ```
 
-Zoom in: there are **two** token numbers in buffr, and they're different things. One is an *estimate* the guard computes locally to decide whether the prompt fits (`~3 chars/token`). The other is the *real* count Ollama's tokenizer produces and returns after the call (`prompt_eval_count`, `eval_count`). buffr trusts the estimate to gate, and trusts the real count to bill. Confusing the two is the classic tokenization trap.
+Tokenization is the unit conversion between your world (strings) and the model's world (integers). You never see the integers in buffr — Ollama does the conversion behind its HTTP wall. But you *do* see the counts come back, and you *do* spend effort guarding a budget measured in tokens. This file is about that budget and where buffr touches it.
 
-## Structure pass
+## Structure pass — trace *cost* across the boundary
 
-Two layers touch tokens. Trace the axis **how accurate is this token count?** across them.
+Pick one axis: **what is the unit of cost?** Watch it change as you cross from buffr into Ollama.
 
 ```
-  Axis: "how accurate is this count?" — estimate vs ground truth
-
-  ┌─ Guard layer (pre-call) ─────────────────┐
-  │  estimateTextTokens(len/3)               │  accuracy = APPROXIMATE
-  │  purpose: gate before sending            │  (deliberately conservative)
-  └─────────────────────┬─────────────────────┘
-                        │  seam: the HTTP call to Ollama
-  ┌─ Ollama layer (post-call) ▼───────────────┐
-  │  gemma2:9b real tokenizer                 │  accuracy = EXACT
-  │  prompt_eval_count / eval_count           │  (the truth, for billing)
-  └───────────────────────────────────────────┘
+unit of cost, left → right
+  buffr code        │  the wire        │  Ollama
+  characters/string │  bytes of JSON   │  TOKENS  ★
+  ──────────────────┼──────────────────┼──────────────────
+  estimate: len/3   │  (transport)     │  exact: prompt_eval_count
+       ▲                                       ▲
+   the GUESS                              the TRUTH (the seam flips here)
 ```
 
-The seam is the HTTP call. *Before* it, you only have an estimate — you can't run Gemma's tokenizer locally without loading the model, so you approximate. *After* it, Ollama hands back the exact counts. The axis flips from "approximate, conservative, cheap" to "exact, authoritative, free (you already paid for the call)." That flip is why the guard uses `3` chars/token (under-estimates length → over-estimates tokens → fails *safe*), while the ledger persists the real numbers.
+The seam is the HTTP call. On buffr's side, cost is *estimated* in characters-over-three (a cheap proxy). On Ollama's side, cost is *exact*, counted in real tokens. Buffr guards using the guess (before the call) and records using the truth (after the call). The honest fact: **buffr never runs a tokenizer.** It estimates before, reads Ollama's count after, and never sees the integers in between.
 
 ## How it works
 
-#### Move 1 — the mental model
+### Move 1 — the mental model: words are chopped into subword pieces
 
-You know how `"café".length` in JS is 4 but the byte length is 5 because `é` is multibyte? Tokenization is that mismatch, one level up: the unit the model counts in ("tokens") isn't characters and isn't words — it's *subword pieces*, learned from data. Common words are one token; rare words split into several. The strategy: **a fixed vocabulary of subword pieces; greedily match the longest piece at each position.**
-
-```
-  Pattern — subword tokenization (BPE-style, what gemma2:9b uses)
-
-  text:    "tokenization isn't hard"
-            │
-            ▼  longest-match against a learned vocab
-  tokens:  [token] [ization] [ isn] ['t] [ hard]
-            │        │         │     │     │
-            └────────┴─────────┴─────┴─────┘
-           common chunk = 1 token; rare word = many tokens
-           leading spaces often glue onto the next piece
-
-  rough rule of thumb for English: ~4 characters per token
-```
-
-So `~4 chars/token` is the *real-world average* for English text. buffr's guard uses `~3` — a deliberately tighter number, explained below.
-
-#### Move 2 — the step-by-step walkthrough
-
-**The estimate buffr computes before the call.** buffr can't run Gemma's tokenizer without the model loaded, so the guard approximates from string length. This is the only place buffr "tokenizes," and it's a division.
+You already split strings in frontend: `"deploy-now".split("-")`. A tokenizer does the same, but the split points are learned, not on a delimiter — common chunks become single tokens, rare ones get broken up. `"tokenization"` might be `["token", "ization"]`; `"Rein"` might be `["Re", "in"]`. Rough rule of thumb for English: **~4 characters per token, ~0.75 tokens per word.**
 
 ```
-  estimateTextTokens — context-window-guard.ts:100-103 (annotated)
+text → tokens (illustrative; the real ids are Ollama's)
+  "search the knowledge base"
+        │  tokenizer
+        ▼
+  ["search", " the", " knowledge", " base"]   ← 4 tokens
+        │
+        ▼
+  [ 1521  ,  290  ,  6843      ,  2362  ]      ← integer ids the model eats
+```
 
-  export function estimateTextTokens(text: string, charsPerToken = 3): number {
-    if (charsPerToken <= 0) throw new Error('charsPerToken must be greater than 0');
-    return Math.ceil(text.length / charsPerToken);   // ← chars ÷ 3, round UP
+The model has a fixed vocabulary (a fixed set of these integers). Your text is just a sequence drawn from it.
+
+### Move 2 — the moving parts
+
+#### Bridge: the context window is a token budget, like a fixed-height div
+
+In frontend, a fixed-height container clips overflow. The context window is that, for tokens: the model can attend to at most N tokens of input+output combined. Overflow doesn't scroll — it gets refused or truncated. Buffr sets that ceiling explicitly at **8192** in `src/session.ts:46`:
+
+```ts
+const model = new ContextWindowGuardedProvider(
+  new GemmaModelProvider({ host: cfg.ollamaHost }),
+  { maxTokens: 8192 },                 // ← the token budget for the whole call
+);
+```
+
+#### The guard estimates tokens *before* paying for the call
+
+Buffr does not tokenize, so the guard uses a character heuristic to decide whether to even attempt the call. From `ContextWindowGuardedProvider` (`packages/providers/local/src/context-window-guard.ts:57–70` and `:100–103`):
+
+```ts
+async complete(request: ModelRequest): Promise<ModelResponse> {
+  const estimate = estimateContextWindow(request, this.options);
+  if (!estimate.ok) {                              // estimated tokens > budget
+    this.options.trace?.emit({ type: 'warning', /* ...skipping... */ });
+    throw new ContextWindowExceededError(estimate);  // ← refuse before the HTTP call
   }
+  return this.provider.complete(request);
+}
+
+// the heuristic itself:
+export function estimateTextTokens(text: string, charsPerToken = 3): number {
+  return Math.ceil(text.length / charsPerToken);   // ← chars / 3, NOT a tokenizer
+}
 ```
 
-`Math.ceil(text.length / 3)`. Note the `3`, not `4`. Using `3` chars/token instead of the real-world `~4` makes the estimate *larger* than reality — you'll think the prompt has more tokens than it does. That's the point: it's a guard, so it should refuse early rather than let a too-big prompt through. Under-counting tokens here would be the dangerous direction.
-
-**What the estimate is summed over.** It's not just the user's question — it's the whole request: system prompt, every message, and the rendered tool schemas.
+Annotation that matters: `charsPerToken = 3` is deliberately *conservative* (real English is ~4), so the guard over-estimates and refuses early rather than letting Ollama choke. The available input budget is `maxTokens - outputReserve` (`8192 - 768 = 7424`), reserving room for the answer.
 
 ```
-  estimateModelRequestTokens — context-window-guard.ts:91-98 (annotated)
-
-  const text = [
-    request.system ?? '',                                 // the system prompt + profile
-    ...request.messages.map(messageText),                 // every turn so far
-    ...(request.tools ?? []).map((tool) =>                // ← tool schemas count too!
-      `${tool.name} ${tool.description ?? ''} ${JSON.stringify(tool.inputSchema)}`),
-  ].join('\n');
-  return estimateTextTokens(text, charsPerToken);         // one number for the whole request
+the guard's pre-flight math
+  estimatedInputTokens = ceil(len(system+messages+tools) / 3)
+        │
+        ▼
+  available = 8192 − 768(reserve) = 7424
+        │
+   estimated ≤ 7424 ? ──yes──▶ call Ollama
+        │
+        └──no──▶ throw ContextWindowExceededError  (never pays)
 ```
 
-The tool schemas are serialized to JSON and counted — because Gemma's tool-call emulation (`08-provider-abstraction.md`) renders those same schemas into the prompt as text. They are real input tokens. Forget to count them and your estimate is wrong by exactly the schema size.
+#### Ollama returns the *real* counts; buffr surfaces them as usage
 
-**The real counts, after the call.** Ollama runs the actual tokenizer and returns two numbers; aptkit's Gemma provider maps them straight through, marked *not estimated*.
+After the call, Ollama reports the true token counts. The Gemma provider maps them straight into `usage` (`gemma-provider.ts:116–126`):
 
-```
-  toResponse — gemma-provider.ts:116-126 (annotated)
-
-  usage: {
-    inputTokens: response.prompt_eval_count,   // ← real tokens in the prompt
-    outputTokens: response.eval_count,          // ← real tokens generated
-    estimated: false,                           // ← these are GROUND TRUTH, not a guess
-  }
-```
-
-`estimated: false` is the contract that tells the rest of the system "trust these — they came from the tokenizer, not from `len/3`." These are the numbers `06-token-economics.md` persists into `messages.tokens_used`. buffr's honesty here is worth naming: it never pretends its `len/3` guess is real; it gates with the guess and bills with the truth.
-
-```
-  Layers-and-hops — the two token numbers, where each is born
-
-  ┌─ Guard ──────┐  estimate = ceil(len/3)        ┌─ Ollama ─────────┐
-  │ guard.complete│ ──── gate decision ────────────│ gemma2:9b        │
-  └──────┬────────┘  (block if > 8192-768)         │ real tokenizer   │
-         │                                          └────────┬─────────┘
-         │  hop: HTTP only if estimate passes               │ real counts
-         │                                                   ▼
-         │                              prompt_eval_count + eval_count
-         │                                  (estimated: false)
-         ▼                                                   │
-   trace warning if blocked                                  ▼
-                                          messages.tokens_used (the ledger)
+```ts
+private toResponse(content, response): ModelResponse {
+  return {
+    content,
+    usage: {
+      inputTokens: response.prompt_eval_count,   // ← Ollama's exact PROMPT token count
+      outputTokens: response.eval_count,         // ← Ollama's exact GENERATED token count
+      estimated: false,                          // ← these are TRUTH, not a guess
+    },
+  };
+}
 ```
 
-#### Move 3 — the principle
+`estimated: false` is the honest flag — these aren't the chars/3 guess, they're Ollama's tokenizer counting real tokens. That `usage` block is what flows into the trace sink and lands in `messages.tokens_used` (file 06).
 
-Tokens are the model's native unit, and you almost never have the exact count until *after* the call — so you keep two numbers: a cheap conservative estimate to gate, and the provider's authoritative count to account. Never let the estimate masquerade as the truth. buffr models this split cleanly: `len/3` to refuse early, `prompt_eval_count`/`eval_count` (`estimated:false`) to bill.
+```
+the two numbers, before vs after
+  BEFORE call │ estimate = len/3   │ estimated: true  (the guard's guess)
+  AFTER  call │ prompt_eval_count  │ estimated: false (Ollama's truth)
+              │ eval_count         │
+```
+
+### Move 3 — the principle that generalizes
+
+> **You budget in tokens, not characters or words, and you usually pay someone else to count them. Estimate to be safe before the call; record the exact count after.**
+
+The character heuristic is fine for a *guard* (over-estimate, fail safe). It is wrong for a *bill* — for that you wait for the provider's real count. Mixing them up (billing on the estimate, or guarding on the post-hoc truth) is a classic foot-gun. Buffr keeps them in their lanes: chars/3 guards, `prompt_eval_count` records.
 
 ## Primary diagram
 
-```
-  Tokenization in buffr — estimate path vs truth path
+The full round trip of a single call through the token boundary.
 
-  text (chars)
-     │
-     ├─────────────► PRE-CALL: estimateTextTokens(text, 3)        [guard.ts:100]
-     │                   = ceil(text.length / 3)  ← conservative
-     │                   sum over {system, messages, tool schemas} [guard.ts:91]
-     │                   ok if ≤ maxTokens(8192) − outputReserve(768)
-     │                       │ fail → throw + emit 'warning' trace
-     │                       │ pass
-     ▼                       ▼
-  ┌─ HTTP /api/chat → Ollama → gemma2:9b ──────────────────────────┐
-  │   REAL tokenizer: text → token IDs → generate → text           │
-  │   returns prompt_eval_count (in) + eval_count (out)            │
-  └────────────────────────────┬───────────────────────────────────┘
-                               ▼
-        usage { inputTokens, outputTokens, estimated:false }  [gemma:116]
-                               │
-                               ▼
-        messages.tokens_used = in + out  (the real ledger)   [trace-sink:73]
+```
+one call, through the token boundary
+  prompt text (system + chunks + question)
+        │
+        ▼  ESTIMATE: ceil(len/3)  ── > 7424? ──▶ ✗ refuse (ContextWindowExceededError)
+        │                                 ≤ 7424
+        ▼
+  HTTP POST /api/chat  ──────────────────────────────────────┐
+        │                                                     │
+  ┌─────────────────── Ollama (the real tokenizer) ──────────┴────┐
+  │ text → token ids → gemma2:9b → token ids → text                │
+  │ counts: prompt_eval_count (in), eval_count (out)               │
+  └───────────────────────────────────────────────────────────────┘
+        │
+        ▼  usage {inputTokens, outputTokens, estimated:false}
+  trace sink → messages.tokens_used   (file 06)
 ```
 
 ## Elaborate
 
-Subword tokenization (BPE / WordPiece / SentencePiece, depending on the model family) was invented to solve a vocabulary problem: a pure-word vocabulary can't handle words it never saw at training time, and a pure-character vocabulary makes sequences far too long. Subwords are the compromise — frequent words stay whole, novel words decompose into known pieces, nothing is unrepresentable.
-
-For buffr the practical consequences are two. First, *token count drives cost and the context budget*, not character count — so `02` feeds directly into `06-token-economics.md` and into `02-context-and-prompts/`. Second, different tokenizers give different counts for the same text, which is exactly why buffr can only *estimate* before the call and must wait for Ollama's authoritative number. If buffr ever swapped `gemma2:9b` for a model with a different tokenizer, the `len/3` constant would want re-tuning, but the real counts would just update themselves.
+- **Origin.** Byte-Pair Encoding (Sennrich 2016) and its descendants (WordPiece, SentencePiece/Unigram) made subword tokenization standard — small enough vocab to handle any text, large enough to keep common words as single tokens. Gemma uses a SentencePiece tokenizer; Ollama ships it inside the model.
+- **Adjacent concepts.** *Context window* (sub-section 02 of the guide) is the budget; this file is the unit. *Token economics* (06) is what you do with the counts once you have them. *Sampling* (03) operates on the token-probability distribution this file produces.
+- **Honest gap.** Buffr runs **no tokenizer of its own** — not for guarding (it uses chars/3), not for counting (it reads Ollama). If you ever need an exact pre-flight count (e.g. to trim chunks to fit), you'd add a real tokenizer, which buffr currently does not have.
+- **What to read next.** File 03 — once text is tokens with a probability each, *sampling* is how one token gets picked.
 
 ## Project exercises
 
-No curriculum file present; exercises derived from the codebase. This concept is **partially exercised** (Case A for the estimate + real-count logging; the tuning is open).
+### Replace chars/3 with a real tokenizer for the guard
 
-### EX-02-1 — Calibrate the chars-per-token constant against real counts
+- **Exercise ID:** [B1.3] (Phase 1 — LLM foundations)
+- **What to build:** Swap the `charsPerToken` heuristic in the context guard for an actual token count from a Gemma-compatible tokenizer (e.g. `gpt-tokenizer` as an approximation, or call Ollama's tokenize endpoint if available), so the pre-flight estimate matches reality. Buffr currently *only estimates* — this closes the guess-vs-truth gap before the call.
+- **Why it earns its place:** Turns the safe-but-crude guard into an accurate one, and forces you to handle "what if my prompt is 1 token over" honestly instead of with a 30% safety margin.
+- **Files to touch:** `src/session.ts:46` (pass a custom guard or `charsPerToken`); a new `src/token-count.ts`. Note the guard itself lives in aptkit and is consumed, not edited — you wire a real counter through its options.
+- **Done when:** a test prompt of known token length is guarded using the real count, and the `ContextWindowExceededError` fires within ±2 tokens of the true Ollama count.
+- **Estimated effort:** 1–4hr
 
-- **Exercise ID:** EX-02-1
-- **What to build:** A script that runs a handful of representative questions through a session, captures the guard's *estimated* input tokens and Ollama's *real* `prompt_eval_count`, and reports the actual chars/token ratio — telling you whether `3` is too tight, about right, or wastefully conservative for buffr's prompts.
-- **Why it earns its place:** Turns a magic constant into a measured one; directly informs the context budget in `02-context-and-prompts/`.
-- **Files to touch:** new `scripts/calibrate-chars-per-token.ts`; read `src/session.ts:46` and `src/supabase-trace-sink.ts:73-78` (the persisted real counts) — do not edit aptkit's guard.
-- **Done when:** the script prints estimated vs real token counts side by side and a suggested `charsPerToken`.
-- **Estimated effort:** 1-4hr
+### Surface token usage in the chat TUI
 
-### EX-02-2 — Make the guard's charsPerToken configurable from env
-
-- **Exercise ID:** EX-02-2
-- **What to build:** Thread a `CONTEXT_CHARS_PER_TOKEN` env var through `loadConfig` and into the `ContextWindowGuardedProvider` options at session construction (aptkit already accepts `charsPerToken`; buffr just doesn't pass it).
-- **Why it earns its place:** Lets the calibrated value from EX-02-1 actually take effect without editing aptkit; a clean config seam.
-- **Files to touch:** `src/config.ts` (add field), `src/session.ts:46` (pass it into the guard options).
-- **Done when:** setting the env var changes the gate threshold, verified by a test feeding a borderline-size prompt.
-- **Estimated effort:** <1hr
+- **Exercise ID:** [B1.4] (Phase 1 — LLM foundations)
+- **What to build:** After each turn, read the `tokens_used` that buffr already persists and render a dim `[~1,240 tok]` line under the answer in `chat.tsx`.
+- **Why it earns its place:** Makes the token budget visible to the user, which is the first step toward respecting it. Uses real data buffr already captures (`prompt_eval_count + eval_count`).
+- **Files to touch:** `src/cli/chat.tsx`; `src/session.ts` (have `ask()` return tokens alongside the answer); read-only against `src/supabase-trace-sink.ts`.
+- **Done when:** each `buffr` turn shows a token count sourced from Ollama's real counts, not the chars/3 estimate.
+- **Estimated effort:** 1–4hr
 
 ## Interview defense
 
-**Q: "buffr estimates ~3 chars/token but the rule of thumb is ~4. Bug?"**
+**Q: "How does buffr count tokens, and where can that go wrong?"**
 
-No — it's a deliberately conservative gate. Estimating fewer chars per token yields *more* estimated tokens, so the guard refuses borderline-large prompts early rather than letting a too-big one through and failing at the model.
-
-```
-  why 3, not 4 — fail safe
-
-  3 chars/tok → MORE est. tokens → blocks sooner       ✔ safe
-  4 chars/tok → fewer est. tokens → might let too-big   ✗ risky
-```
-
-*Anchor:* `estimateTextTokens(text, charsPerToken = 3)` at `context-window-guard.ts:100`.
-
-**Q: "Does buffr tokenize text itself?"**
-
-No. It *estimates* token count by character length for gating, but the actual tokenization happens inside Ollama/`gemma2:9b`, which returns the real `prompt_eval_count` and `eval_count` marked `estimated:false`.
+Model answer: Two different ways for two different jobs. Before the call, the context guard *estimates* with `chars/3` — deliberately conservative so it over-estimates and fails safe, refusing the call rather than overflowing the 8192 window. After the call, it reads Ollama's *exact* counts, `prompt_eval_count` and `eval_count`, flagged `estimated:false`. The trap is using the wrong number for the wrong job — billing on the chars/3 guess, or trying to guard with a count you only get after paying. Buffr keeps them separate.
 
 ```
-  estimate (buffr) ≠ tokenize (Ollama)
-
-  buffr: len/3 ─► gate
-  Ollama: real tokenizer ─► real counts ─► ledger
+two counts, two jobs
+  GUARD (before)  │  chars/3, conservative  │  fail-safe, may over-refuse
+  RECORD (after)  │  Ollama eval counts     │  exact, billable
+  ★ never cross the streams
 ```
 
-*Anchor:* real counts mapped at `gemma-provider.ts:116-126`; the estimate never claims to be them.
+Anchor: *Estimate to guard, count to bill — chars/3 before, `eval_count` after.*
 
 ## See also
 
-- `01-what-an-llm-is.md` — why the model counts in tokens at all.
-- `06-token-economics.md` — where the real `prompt_eval_count`/`eval_count` get persisted.
-- `../02-context-and-prompts/` — the context-window budget those token counts feed.
-- `08-provider-abstraction.md` — why tool schemas count as input tokens (they're rendered into the prompt).
+- `01-what-an-llm-is.md` — the string this file tokenizes is the model's only input.
+- `06-token-economics.md` — the `usage` counts produced here become `messages.tokens_used`.
+- `03-sampling-parameters.md` — how one token is chosen from the distribution over the vocabulary.

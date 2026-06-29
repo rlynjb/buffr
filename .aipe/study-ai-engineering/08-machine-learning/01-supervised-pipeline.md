@@ -1,250 +1,259 @@
-# The supervised ML pipeline — Data → Features → Split → Train → Deploy
+# The Supervised Pipeline
 
-*Industry standard (the classical supervised-learning lifecycle). buffr trains no supervised model — it's a pure LLM app consuming pre-trained Ollama models. Not yet implemented.*
+### *industry: supervised machine-learning pipeline · type: the five stages from raw data to a serving model*
 
-## Zoom out, then zoom in
+## Zoom out
 
-Every classical ML system that learns from labeled examples is the same five-stage assembly line, and this file is the spine the rest of `08-machine-learning/` hangs off — features, splits, selection, drift all live inside one of these five boxes. buffr has none of them, so the diagram below marks where each stage *would* attach if buffr ever trained a model on the one labelable signal it owns: its conversation trajectories.
+Every classical-ML system you've ever shipped or read about is the same five-stage assembly line. buffr lives at the very end of it — and only the end. It serves pre-trained models (gemma2:9b, nomic-embed-text) but builds none of the machinery that produces a model. This file walks the whole line so you can see exactly which half buffr has and which half you've never built.
+
+**The supervised pipeline, with the whole line marked ★ — buffr only touches the last box**
 
 ```
-  Zoom out — where a supervised pipeline would sit in buffr (it doesn't, today)
-
-  ┌─ Provider layer (Ollama, pre-trained) ───────────────────────┐
-  │  gemma2:9b (generation) · nomic-embed-text:v1.5 (embeddings)  │
-  │  buffr CONSUMES these — never trains them                     │
-  └───────────────────────────────┬───────────────────────────────┘
-                                  │ produces signal buffr stores
-  ┌─ Storage layer (Supabase) ───▼────────────────────────────────┐
-  │  agents.messages  ← full trajectory of every run (the corpus) │
-  │  agents.chunks.embedding ← vector(768) per chunk              │
-  └───────────────────────────────┬───────────────────────────────┘
-                                  │ a supervised pipeline WOULD attach here
-  ┌─ ML layer — ★ NOT PRESENT ★ ─▼────────────────────────────────┐ ← we are here
-  │  DATA → FEATURES → SPLIT → TRAIN → DEPLOY                      │
-  │  (no labeled set · no features · no split · no model)         │
-  └───────────────────────────────────────────────────────────────┘
+┌────────┐   ┌──────────┐   ┌────────┐   ┌────────┐   ┌──────────┐
+│  DATA  │──►│ FEATURES │──►│ SPLIT  │──►│ TRAIN  │──►│  DEPLOY  │
+│ raw    │   │ raw→     │   │ train/ │   │ fit    │   │ serve    │
+│ rows + │   │ numeric  │   │ val/   │   │ params │   │ predict  │
+│ labels │   │ vectors  │   │ test   │   │ to data│   │ on live  │
+└────────┘   └──────────┘   └────────┘   └────────┘   └──────────┘
+★            ★              ★            ★              ★ buffr is HERE
+└──────────────── buffr has NONE of this ──────────────┘  (Ollama serves)
+         the exact half Rein has never built
 ```
 
-Zoom in: a **supervised pipeline** is the path a labeled dataset walks to become a deployed predictor — five stages, each owning exactly one promise. **Data** owns label correctness and coverage. **Features** own representation. **Split** owns honest measurement. **Train** owns the model. **Deploy** owns inference parity. buffr stops at "Storage" — it has signal, no pipeline. You've actually built this shape once (the contrl pose pipeline: pose signal → landmark features → on-device rep decision), so the skeleton isn't foreign; what's new ground is owning each stage's contract deliberately.
+You built one of these end-to-end once — contrl, the pose-landmarking model: frames in, landmark coordinates out, a real supervised vision pipeline. So you know the *shape*. The point of this file is that buffr is the photographic negative of contrl: it has the Deploy box (a model answering queries) and nothing upstream of it. Naming that gap precisely is the whole job.
 
 ## Structure pass
 
-**Layers:** the five pipeline stages, stacked Data (bottom, closest to truth) → Deploy (top, closest to the user).
+The axis is **who produces the model's parameters**. In contrl, *you* did — gradient descent over labeled frames. In buffr, *someone else* did — Google trained gemma2, Nomic trained the embedder. The seam is the moment a model's weights are frozen: everything left of it is training, everything right is inference.
 
-**Axis — "who owns correctness at this stage, and what breaks if they're wrong?"** Trace that one question up the stack and the stages stop looking interchangeable.
+**One axis: trained-by-you vs trained-by-someone-else**
 
 ```
-  trace "what does this stage OWN — and what breaks if it's wrong?"
-
-  ┌─ DATA ──────────┐  owns: label correctness + coverage
-  │  labeled rows   │  breaks: wrong labels → model learns the wrong thing
-  └────────┬────────┘           (no model choice survives this)
-  ┌─ FEATURES ──────┐  owns: representation
-  │  signal→vector  │  breaks: leaky feature → fake accuracy, real failure
-  └────────┬────────┘
-  ┌─ SPLIT ─────────┐  owns: honest measurement
-  │  train/val/test │  breaks: leakage → numbers lie, prod underperforms
-  └────────┬────────┘
-  ┌─ TRAIN ─────────┐  owns: the fitted model
-  │  fit on train   │  breaks: wrong model/overfit → underperforms (recoverable)
-  └────────┬────────┘
-  ┌─ DEPLOY ────────┐  owns: inference parity
-  │  serve preds    │  breaks: train≠serve features → silent prod regression
-  └─────────────────┘
-
-  same pipeline; each stage owns a DIFFERENT correctness promise
+   TRAINING SIDE (contrl)              INFERENCE SIDE (buffr)
+   ──────────────────────              ──────────────────────
+   you own the labels                  weights arrive frozen
+   you own the features                you send tokens, get tokens
+   you own the loss/optimizer          you tune prompts, not params
+   ┌────────────────────┐              ┌────────────────────┐
+   │ data→features→     │   ──seam──►  │ load weights →     │
+   │ split→train        │   (freeze)   │ predict / generate │
+   └────────────────────┘              └────────────────────┘
+        the seam: the moment weights stop changing
 ```
 
-**The seam that matters most:** the boundary between **Data/Features** and everything above. The axis-answer flips hard here — below the seam you're responsible for *truth* (are the labels right? is the feature honest?); above it you're responsible for *fit* (did the model learn well?). The load-bearing line of this whole section lives at that seam: **most AI bugs in classical ML are data/feature bugs, not model bugs.** A perfect model trained on garbage labels is garbage; a leaky feature gives you 0.99 AUC in the notebook and a faceplant in prod. You can swap models in an afternoon; you can't out-model a broken label set.
+Left of the seam: the four stages that *make* a model — and buffr has zero of them. Right of the seam: Deploy, the one stage buffr has, where Ollama loads frozen weights and serves predictions. Consequence: every concept in this whole `08-machine-learning` section is new ground for buffr, taught as a thing you'd build in a new `ml/` directory, not a thing buffr already does.
 
 ## How it works
 
-### Move 1 — the mental model
+### Move 1 — Mental model
 
-You already know this shape as a build pipeline. Source code → bundle → minify → test → ship. Each stage transforms the artifact and hands it forward; a defect introduced early (a bad import) survives every later stage and only surfaces in prod. A supervised pipeline is that exact conveyor belt, except the artifact is *a dataset becoming a predictor*, and the early-stage defects are bad labels and leaky features — invisible until deploy.
+A supervised pipeline is a factory that turns labeled examples into a function. You feed it `(input, correct_answer)` pairs; it emits a function that maps `input → predicted_answer` and generalizes to inputs it never saw. The five stages are the stations on the line, and — this is the thesis — **the model station is the least likely place a defect was introduced.** Most ML bugs are data bugs or feature bugs that entered upstream and the model faithfully learned.
 
-```
-  PATTERN — the five-stage conveyor (defects flow downhill)
-
-  raw world          known answers        honest yardstick
-     │                    │                     │
-     ▼                    ▼                     ▼
-  ┌──────┐   ┌──────────┐   ┌───────┐   ┌───────┐   ┌────────┐
-  │ DATA │──►│ FEATURES │──►│ SPLIT │──►│ TRAIN │──►│ DEPLOY │──► predictions
-  └──────┘   └──────────┘   └───────┘   └───────┘   └────────┘
-   labels      represent       fit/test     learn       serve
-   + coverage   the signal      cleanly      model       SAME features
-
-  a bad label here ─────────────────────────────────────► fails here
-  (defect introduced early survives every downstream stage)
-```
-
-The whole discipline is: stop defects at the stage that owns them, because no later stage can fix them.
-
-### Move 2 — the step-by-step walkthrough
-
-We walk the five stages bottom-up, one per sub-heading. For each, the question is the same: *what does this stage own, and what breaks if it's wrong?*
-
-**Stage 1 — DATA owns label correctness and coverage.** This is the stage that decides whether the model can succeed at all. You need labeled examples — rows where you know the answer — and they have to be *correct* (the label matches reality) and *cover* the input distribution you'll actually see at inference. Get either wrong and nothing downstream recovers.
+**Where defects actually enter the line**
 
 ```
-  DATA stage — labeled rows, correct + covering
+  DATA ████████████  ◄── mislabels, leakage, sampling bias    (most bugs)
+  FEAT ███████████   ◄── wrong scaling, encoding, leakage     (most bugs)
+  SPLIT ████         ◄── leaky split → metrics lie            (silent bugs)
+  TRAIN ██           ◄── wrong loss, overfit                  (fewer bugs)
+  DEPLOY █           ◄── skew, stale model                    (fewer bugs)
 
-  example (label)        is the label right?   covered at inference?
-  ─────────────────      ──────────────────     ────────────────────
-  trajectory_1 → "good"        ✓                     ✓
-  trajectory_2 → "good"        ✗ actually bad   ← poisons training
-  trajectory_3 → "bad"         ✓                     ✓
-  (rare: tool-error run)    no example           ← coverage gap: model
-                                                    never learns this case
+  the bar = how often the real root cause lives there
 ```
 
-Here's the buffr-specific truth: **buffr has no labeled set.** The closest thing is `eval/queries.json` — but that's three rows of *query → relevant-doc* for an information-retrieval eval, not a training set, and it labels relevance, not a target class. The *labelable* signal buffr owns is `agents.messages`: every conversation's full trajectory, persisted by `src/supabase-trace-sink.ts`. A row there carries `role`, `content`, `tool_calls`, `tool_results`, `model`, `tokens_used`, `created_at`. None of it is labeled "good answer / bad answer" yet — but it's the only data in the repo you *could* attach labels to. The DATA stage for buffr is "go label trajectories."
+Frontend bridge: it's the render pipeline. When the UI is wrong, the bug is almost never in React's reconciler — it's in the data you passed or the props you shaped. Same here: when the model is wrong, suspect the data and features first, the optimizer last.
 
-**Stage 2 — FEATURES own representation.** A model can't eat a raw conversation; it eats a fixed-width numeric vector. The FEATURES stage turns each labeled example into that vector — turn count, tool-call count, total tokens, error flags. Owning representation means owning *what the model is even allowed to notice*. (Full treatment in `02-feature-engineering.md`.)
+### Move 2 — Walk the mechanism
 
-```
-  FEATURES stage — raw trajectory → fixed-width vector
+The code blocks below are **illustrative pseudocode** — buffr contains none of this. They show the shape of a pipeline you'd build, using contrl's category (a supervised model) as the reference.
 
-  agents.messages rows (one conversation)        feature vector
-  ─────────────────────────────────────          ─────────────────
-  role/content × N turns                    ───►  [ turns=6,
-  tool_calls (2 search calls)               ───►    tool_calls=2,
-  tokens_used summed                        ───►    tokens=1840,
-  error event present?                      ───►    had_error=0,
-  durationMs from tool_results              ───►    dur_ms=920 ]
-                                                    (the model sees ONLY this)
-```
+**Stage 1 — Data: rows plus a label column**
 
-The boundary condition: a **leaky** feature — one that secretly encodes the label — gives spectacular training scores and useless predictions. If you accidentally include "did this run get flagged by a human" as a feature for predicting "is this run good," you've leaked the answer.
-
-**Stage 3 — SPLIT owns honest measurement.** Before you fit anything, you carve the labeled data into train / validation / test. Train teaches the model, validation tunes it, test gives the one honest number you trust. Owning honest measurement means owning the *unit* you split on — and getting that wrong (rows from the same conversation in both train and test) leaks context and inflates every number. (Full treatment in `03-train-val-test.md`.)
+Supervised learning needs a label per row — the correct answer the model will be graded against. No labels, no supervision.
 
 ```
-  SPLIT stage — carve labeled data, no row crosses sets
-
-  all labeled trajectories
-        │ split BY conversation_id (the unit seen as NEW at inference)
-        ▼
-  ┌─ train (70%) ─┐  ┌─ val (15%) ─┐  ┌─ test (15%) ─┐
-  │  fit model    │  │  tune/select │  │  final number │
-  └───────────────┘  └──────────────┘  └───────────────┘
-   never touch test until the very end ──────────┘
+  ┌─────────────────────────────────────────────┐
+  │  X (features)                    │  y (label)│
+  │  ────────────────────────────────│───────────│
+  │  frame_pixels, joint_angles...   │  pose_id  │  ◄── contrl shape
+  │  ────────────────────────────────│───────────│
+  │  the label column is what makes  │  REQUIRED │
+  │  this "supervised"               │           │
+  └─────────────────────────────────────────────┘
 ```
 
-**Stage 4 — TRAIN owns the model.** Now you fit. Pick a model family (logistic regression, gradient-boosted trees — `04-model-selection.md`), fit it on the train split, tune on val. This is the stage everyone *thinks* is the whole job; it's the recoverable one. A wrong model choice or an overfit underperforms, and you fix it by trying another — in an afternoon.
-
-```
-  TRAIN stage — fit on train, tune on val, NEVER on test
-
-  train split ──► fit model parameters
-  val split   ──► measure → adjust (depth, regularization, threshold)
-                  repeat until val stops improving
-  test split  ──► (sealed — not touched here)
+```python
+# ILLUSTRATIVE PSEUDOCODE — not buffr code. The shape of a labeled dataset.
+rows = load("examples.parquet")        # one row per example
+X = rows.drop(columns=["label"])       # inputs
+y = rows["label"]                      # the supervision signal
 ```
 
-**Stage 5 — DEPLOY owns inference parity.** The model now scores live inputs. The promise it owns is *parity*: the features computed at serve time must be computed *identically* to training time. Break parity — train on "tokens summed correctly," serve on "tokens off by one because a different code path computes them" — and you get a silent regression no metric in the notebook predicted.
+The label is the entire premise. buffr's closest real artifact is `eval/queries.json` — `{query → relevant docs}` is a labeled set — but buffr uses it to *grade retrieval*, never to *fit parameters*. That distinction is the whole section.
+
+**Stage 2 — Features: raw signal becomes numbers**
+
+Models consume numeric vectors, not raw rows. Feature engineering turns `"Tuesday"`, `"premium"`, free text, timestamps into floats. This is stage 02's entire subject.
 
 ```
-  DEPLOY stage — the train/serve parity contract
-
-  TRAIN-time features  ═══ must equal ═══  SERVE-time features
-  ┌──────────────────┐                   ┌──────────────────┐
-  │ turns, tool_calls │   same code,      │ turns, tool_calls │
-  │ tokens, had_error │ ◄═══ same units ══►│ tokens, had_error │
-  └──────────────────┘                   └──────────────────┘
-        if these diverge → "training/serving skew" → silent prod failure
+  raw row ──► feature transform ──► numeric vector the model can multiply
+  "premium" ─► one-hot [0,1,0] ─┐
+  "Tuesday" ─► day_of_week 2   ─┼─► [0,1,0, 2, 1.7, ...]  ◄── model input
+  free text ─► embedding/tfidf ─┘
 ```
 
-The standard fix is one feature-computation function called by *both* the training job and the serving path — no second implementation to drift.
+```python
+# ILLUSTRATIVE PSEUDOCODE — not buffr code.
+X_num = encode_categoricals(X)         # strings → numbers
+X_num = scale(X_num)                   # comparable ranges
+X_num = add_text_features(X_num, text) # text → vectors
+```
 
-### Move 3 — the principle
+**Stage 3 — Split: carve out data the model never trains on**
 
-The pipeline is five stages, but the correctness budget isn't spread evenly across them. **Data and features sit at the bottom and own truth; everything above owns fit.** Defects flow downhill and no upstream stage can repair a downstream one, so a bad label or a leaky feature costs you the entire pipeline while a bad model costs you an afternoon. That's why "most classical-ML bugs are data/feature bugs" isn't a slogan — it's a direct consequence of the conveyor's geometry. Spend your attention at the bottom of the stack.
+You partition into train (fit), validation (tune), test (report once). Get the split wrong — leak future or grouped rows across the boundary — and every metric downstream lies. Stage 03's subject.
+
+```
+  all rows  ───────────────────────────────────►
+  ┌──────────────────┬──────────┬──────────┐
+  │      TRAIN        │   VAL    │   TEST   │
+  │   fit params      │  tune    │ report×1 │
+  └──────────────────┴──────────┴──────────┘
+   the wall between TRAIN and TEST must be airtight
+```
+
+**Stage 4 — Train: fit parameters by minimizing loss**
+
+The optimizer adjusts parameters to shrink the gap between predictions and labels on the *train* split, checking *val* to avoid memorizing.
+
+```
+  predict ─► compare to label ─► loss ─► nudge params ─► repeat
+     ▲                                        │
+     └──────────── until val loss stops improving
+```
+
+```python
+# ILLUSTRATIVE PSEUDOCODE — not buffr code.
+model = Classifier()
+for epoch in range(N):
+    loss = loss_fn(model(X_train), y_train)
+    model.step(loss)                   # gradient update
+    if val_loss(model) stops improving: break
+```
+
+This is the stage contrl had and buffr will never have for gemma2 — Google ran it on TPU clusters; you just download the result.
+
+**Stage 5 — Deploy: serve frozen weights for inference**
+
+Weights freeze; the model answers live inputs. **This is the only stage buffr implements** — Ollama loads frozen gemma2/nomic weights and serves predictions over HTTP.
+
+```
+  frozen weights ──► Ollama ──► query in ──► tokens/embedding out
+                       ▲
+              buffr's whole ML footprint lives in this box
+```
+
+### Move 2.5 — Current vs future
+
+**Case B: buffr trains nothing.** It has Deploy and only Deploy. The four upstream stages don't exist in the repo.
+
+```
+  TODAY (buffr)                      IF YOU BUILT TRAINING (new ml/)
+  ─────────────                      ───────────────────────────────
+  ┌────────┐                         ┌────┬────┬─────┬─────┐ ┌────────┐
+  │ DEPLOY │  Ollama serves          │DATA│FEAT│SPLIT│TRAIN│►│ DEPLOY │
+  │ frozen │  pre-trained            └────┴────┴─────┴─────┘ └────────┘
+  └────────┘                          new ml/ dir owns these  same box
+   no upstream                        e.g. classify chunk-type, route queries
+```
+
+What you *could* build: a small supervised model that classifies incoming queries (route to coffee.md vs work.md) using `eval/queries.json` patterns as seed labels, or a model that predicts chunk usefulness. None exists. The home for it is a new `ml/` directory.
+
+### Move 3 — The principle
+
+**The model is the cheapest stage to get right and the rarest place a bug hides; the data and feature stages are where quality and defects are actually decided.** buffr stands at the Deploy end of a line it never built — which is exactly why this whole section is new ground. Having built contrl means you've stood at the *other* end once. The interview signal is being able to walk both ends of the line, honestly, and say which one buffr occupies and why.
 
 ## Primary diagram
 
-The whole pipeline, every stage's owned-promise and failure mode labelled, with buffr's reality marked at each.
+The five stages, what each owns, and the hard truth about buffr's coverage.
+
+**The pipeline buffr half-occupies**
 
 ```
-  The supervised pipeline — stages, ownership, buffr's reality
-
-  Provider (Ollama, pre-trained)   gemma2:9b · nomic-embed-text:v1.5
-        │ produces signal
-        ▼
-  ┌─ DATA ───────────┐ owns: label correctness + coverage
-  │ labeled examples │ breaks: wrong labels → unrecoverable
-  │ buffr: NONE      │ (eval/queries.json = IR eval, not labels;
-  └────────┬─────────┘  agents.messages = labelable, unlabeled)
-  ┌─ FEATURES ───────┐ owns: representation
-  │ signal → vector  │ breaks: leaky feature → fake accuracy
-  │ buffr: NONE      │ (nomic-embed gives features for free — see 02)
-  └────────┬─────────┘
-  ┌─ SPLIT ──────────┐ owns: honest measurement
-  │ train/val/test   │ breaks: leakage → numbers lie
-  │ buffr: NONE      │ (natural unit = conversation_id — see 03)
-  └────────┬─────────┘
-  ┌─ TRAIN ──────────┐ owns: the model (recoverable)
-  │ fit + tune       │ breaks: overfit/wrong family → underperform
-  │ buffr: NONE      │ (cosine ranker is the de-facto baseline — see 04)
-  └────────┬─────────┘
-  ┌─ DEPLOY ─────────┐ owns: inference parity
-  │ serve predictions│ breaks: train≠serve features → silent regression
-  │ buffr: NONE      │
-  └──────────────────┘
-
-  ★ buffr stops at Storage: it has signal, not a pipeline ★
+  DATA      FEATURES    SPLIT       TRAIN       DEPLOY
+  labels    raw→numeric train/val/  fit params  serve frozen
+  ┌────┐    ┌────┐      ┌────┐      ┌────┐       ┌────┐
+  │ ?? │───►│ ?? │─────►│ ?? │─────►│ ?? │──────►│ ✔  │
+  └────┘    └────┘      └────┘      └────┘       └────┘
+  buffr: ✗  buffr: ✗    buffr: ✗    buffr: ✗     buffr: ✔ (Ollama)
+  └──────── most bugs live here ────┘            └ fewest bugs
+  contrl: ✔ ✔ ✔ ✔ ✔  (Rein built this whole line once)
 ```
+
+After the box: buffr is one box out of five. Everything left of Deploy is the half you'd build new — and the half where contrl proves you can.
 
 ## Elaborate
 
-This five-stage shape is the backbone of essentially every applied-ML course and production ML platform (it's what tools like scikit-learn pipelines, TFX, and Vertex/SageMaker pipelines formalize). The framing that "data and features dominate" is the empirical heart of the field — it's why "data-centric AI" became a named movement: holding the model fixed and improving labels routinely beats holding labels fixed and chasing models. The contrl pose pipeline you built was a real instance of this conveyor (pose landmarks were the features, the rep-count threshold was a trivial "model," and the camera frame was the live deploy input) — so you've felt the train/serve parity problem before, even if you didn't name it. Where this section goes next: `02` opens the FEATURES box, `03` opens SPLIT, `04` opens TRAIN, and the later files (`14`–`16`) cover what DEPLOY needs to stay honest over time — run-logging, drift, retraining. Read them as zoom-ins on the boxes above.
+- **Why "most bugs are data/feature bugs" is the load-bearing claim.** A model is a faithful mirror: it learns whatever pattern the data presents, including the wrong ones. Mislabeled rows, a leaked column, a feature scaled wrong — the optimizer dutifully fits them and the model looks confidently incorrect. Engineers new to ML reach for hyperparameters; veterans audit the data first. contrl taught you this the hard way if a single bad-frame batch ever poisoned a training run.
+- **buffr's Deploy-only footprint is not a weakness — it's a category.** AI-application engineering (consuming pre-trained models) is a legitimate, large discipline. The mistake is *calling it ML training*. buffr does inference, prompt-shaping, retrieval, eval. It does not do supervised learning. Say so plainly in interviews.
+- **The latent training corpus buffr already collects.** `agents.messages` logs every turn — role, content, tool_calls, tokens_used. That's a trajectory dataset. It's not training anything today, but it's the raw material a fine-tune or a routing classifier would draw on. Naming it shows you see the pipeline buffr *could* feed.
+- **Inference can have bugs too — just fewer, and different.** Train/serve skew (features computed differently at serve time than train time) and stale models are the Deploy-side defects. buffr's analog is stale embeddings (see 03-retrieval-and-rag/09). So Deploy isn't bug-free; it's just not where *most* classical-ML bugs originate.
 
 ## Project exercises
 
-> No curriculum file present; exercises derived from the codebase.
+### Build a minimal supervised pipeline that classifies query intent
 
-### Build a tiny "is-this-answer-grounded" classification pipeline over trajectories
+Not yet implemented — buffr trains nothing. This exercise builds the four missing upstream stages end-to-end on a tiny, honest target, so you've stood at the data end of buffr's own line, not just contrl's.
 
-- **Exercise ID:** PIPE-1 (Case B — supervised pipeline not yet implemented). **The spine exercise: it instantiates all five stages on real buffr data.**
-- **What to build:** a minimal end-to-end supervised pipeline that classifies a conversation as *grounded* (answer supported by retrieved chunks) vs *ungrounded*. DATA: label ~50 trajectories by hand. FEATURES: extract turn/tool/token/error features (see FEAT-1). SPLIT: by `conversation_id`. TRAIN: a logistic-regression baseline. DEPLOY: a scorer that runs the same feature function live.
-- **Why it earns its place:** it forces you to *own each stage's promise* on the only labelable data buffr has — and surfaces immediately that the hard part is labels, not the model. The "I stood up a real supervised pipeline on my agent's own trajectories" story.
-- **Files to touch:** read trajectories from `agents.messages` (via the schema written by `src/supabase-trace-sink.ts`); put the pipeline + scorer alongside `src/cli/eval-cmd.ts` as a sibling CLI command; a new `eval/labels.json` for the hand labels.
-- **Done when:** the pipeline runs end-to-end, reports a test-set accuracy, and the *same* feature function is provably called by both train and serve paths (no second implementation).
-- **Estimated effort:** 2–3 days.
+- **Exercise ID:** [B2C.1] (cite [B2C.1], Phase 2C) — Case B: buffr has no training code; this is the primary buildable target.
+- **What to build:** A new `ml/intent_classifier.py` that takes labeled `(query → target_doc)` pairs (seeded from `eval/queries.json`), engineers text features, splits train/val/test, trains a simple classifier (logistic regression), and reports test accuracy. All five stages, smallest honest version.
+- **Why it earns its place:** It is the half of the pipeline buffr lacks. Running Data→Features→Split→Train on buffr's *own* data turns the abstract gap into a thing you built.
+- **Files to touch:** new `ml/` dir (`ml/intent_classifier.py`, `ml/dataset.py`), reads `eval/queries.json` as the seed label set.
+- **Done when:** `python ml/intent_classifier.py` prints train/val/test sizes and a single held-out test accuracy, and you can name which stage was hardest.
+- **Estimated effort:** 1 day.
 
-### Stand up eval-cmd.ts as the reusable "measurement stage" for a future classifier
+### Audit buffr's Deploy stage for train/serve skew risk
 
-- **Exercise ID:** PIPE-2 (Case B — measurement stage not generalized). 
-- **What to build:** refactor the scoring core of `src/cli/eval-cmd.ts` (currently P@1/R@3 over `eval/queries.json`) into a reusable measurement harness that any model — the IR ranker *or* a future trajectory classifier — can be scored through, with the metric pluggable.
-- **Why it earns its place:** the SPLIT/measurement stage is where honesty lives; making it reusable means every future model in buffr gets measured the same disciplined way instead of ad-hoc. It's the cheapest way to make the pipeline's most-skipped stage real.
-- **Files to touch:** `src/cli/eval-cmd.ts` (extract the scoring loop); `eval/queries.json` (stays the IR set); new caller for the classifier from PIPE-1.
-- **Done when:** the same harness scores both the cosine retrieval ranker and a stub classifier, switching only the metric and the dataset.
-- **Estimated effort:** 4–8hr.
+Not yet implemented — buffr trains nothing, but it *deploys*, so the Deploy-side failure mode is real and inspectable today.
+
+- **Exercise ID:** [B2C.2] (cite [B2C.2], Phase 2C) — Case B: training stages absent; Deploy stage present and auditable.
+- **What to build:** A short written audit (in `ml/DEPLOY_NOTES.md`) of where buffr's inference-time feature computation (embedding the query) must exactly match index-time computation (embedding chunks), and what would break if the embedding model version drifted.
+- **Why it earns its place:** Train/serve skew is the canonical Deploy bug. buffr's embed-query-vs-embed-chunk path is a real instance, and `embedding_model` is already a column in `agents.chunks`.
+- **Files to touch:** new `ml/DEPLOY_NOTES.md`, references `sql/001_agents_schema.sql` (`embedding_model` column).
+- **Done when:** The note names the exact skew risk (query embedded by a different model/version than the chunks) and the existing guard or gap.
+- **Estimated effort:** 1–4hr.
 
 ## Interview defense
 
-**Q: Walk me through a supervised pipeline and tell me which stage you'd worry about most.**
-Answer: five stages — Data → Features → Split → Train → Deploy — and each owns one promise: data owns label correctness and coverage, features own representation, split owns honest measurement, train owns the model, deploy owns inference parity. I worry most about the bottom: data and features. Defects flow downhill and nothing upstream can fix a downstream one, so a bad label or a leaky feature costs me the whole pipeline while a bad model costs me an afternoon. Most classical-ML bugs are data/feature bugs, not model bugs.
+**Q: "Walk me through a supervised ML pipeline — and where does buffr sit on it?"**
+
+Five stages: Data, Features, Split, Train, Deploy. buffr sits in Deploy only — Ollama serves pre-trained gemma2 and nomic-embed. The four upstream stages don't exist in buffr; that's AI-application engineering, not ML training. I've built the full line once, in contrl, a supervised pose-landmarking model — so I can speak to both ends honestly.
 
 ```
-  DATA → FEATURES → SPLIT → TRAIN → DEPLOY
-  └── own TRUTH ──┘   └──────── own FIT ────────┘
-   (unrecoverable)        (recoverable)
+  DATA→FEAT→SPLIT→TRAIN→[DEPLOY]
+   contrl: all five      buffr: this box only
 ```
 
-**Q: buffr trains no model — so where would a pipeline even attach?**
-Answer: at `agents.messages`. The trace sink (`src/supabase-trace-sink.ts`) persists every conversation's full trajectory — all six event types, with `tokens_used`, tool calls, errors. That's the only labelable signal in the repo. `eval/queries.json` looks like a dataset but it's a 3-row IR eval, not a training set. **The part people forget: having data isn't having a pipeline — you still owe every one of the five stages, and the unlabeled trajectory corpus means the DATA stage (labeling) is the unbuilt long pole, not the model.**
+Anchor: *"buffr deploys models; it doesn't make them."*
+
+**Q: "When an ML model is performing badly, where do you look first?"**
+
+Data and features, not the model. The model faithfully learns whatever the data presents — mislabels, leakage, a feature scaled wrong. Most root causes live upstream of training. Hyperparameters are the last thing I touch, not the first.
 
 ```
-  agents.messages (signal exists) ─► label it ─► then the other 4 stages
-  eval/queries.json ─► NOT a training set (IR eval, 3 rows)
+  bug suspected in: TRAIN █  ◄── least likely
+  real root cause:  DATA/FEAT ████████  ◄── most likely
 ```
+
+Most candidates have only consumed pre-trained models — having trained one (contrl) means I've debugged the data end, where the real bugs are. That's the signal.
+
+Anchor: *"Suspect the data before the model."*
 
 ## See also
 
-- `02-feature-engineering.md` — opens the FEATURES box: raw trajectory → engineered vector.
-- `03-train-val-test.md` — opens the SPLIT box: split by `conversation_id`, leakage discipline.
-- `04-model-selection.md` — opens the TRAIN box: logistic regression vs gradient-boosted trees.
-- `../05-evals-and-observability/01-eval-set-types.md` — golden/adversarial/regression sets feed the DATA stage.
-- `../05-evals-and-observability/04-llm-observability.md` — the trajectory trace that is the labelable corpus.
+- `./02-feature-engineering.md` — the Features stage in depth (where 60–80% of quality is decided).
+- `./03-train-val-test.md` — the Split stage and the leakage rule that keeps metrics honest.
+- `./04-model-selection.md` — the Train stage's first real decision: which baseline.
+- `../03-retrieval-and-rag/` — buffr's actual Deploy-side work (inference, retrieval).
+- `../05-evals-and-observability/` — `eval/queries.json` as a labeled held-out set, P@1/R@3 as ML metrics.
+- `../09-ml-system-design-templates/` — assembling these stages into a full system design.

@@ -1,77 +1,72 @@
-# Frontend Engineering — Overview
+# Overview — the frontend in one page
 
-One page. If you read only this, you know what the frontend layer of `buffr-laptop` is.
+The frontend of `buffr-laptop` is a **terminal React UI (Ink)**, not a browser app. One component, one set of hooks, one data seam. If you skim only this file, here's the whole thing.
 
-**The one-sentence rendering mode:** a single long-lived React component (`<Chat>`,
-`src/cli/chat.tsx:9`) rendered to the *terminal* by Ink instead of to the DOM by
-react-dom — same reconciler, same hooks, same controlled inputs, different host.
+## The rendering mode, in one sentence
 
-This is the one topic in the whole study set where you are the expert. Every primitive
-here — `useState`, the controlled-input loop, the loading-state triad, `.map()` with a
-`key` — is something you have shipped for seven years. The only new idea is that the
-render target is stdout, not a document. Read the rest of this guide as "my React
-knowledge, applied to a terminal."
+Single-component **client-rendered SPA-equivalent** that reconciles through a virtual-DOM diff (Ink) and commits to the **terminal grid** instead of the browser DOM — no SSR, no hydration, no routing, no bundler. React renders; Ink's renderer paints text cells (`src/cli/chat.tsx:63`).
 
 ## The state architecture, in one diagram
 
-```
-  All state lives in <Chat>, all transitions in onSubmit
-
-  ┌─ <Chat session=… >  src/cli/chat.tsx:9 ─────────────────────┐
-  │                                                             │
-  │   useState turns: Turn[]   ← append-only transcript  :11    │
-  │   useState input: string   ← controlled buffer       :12    │
-  │   useState busy:  boolean  ← in-flight flag          :13    │
-  │                                                             │
-  │   onSubmit(value)  :15 ──────────────────────────────┐      │
-  │     guard busy / /exit / empty        :17-24          │      │
-  │     setInput('')                      :24             │      │
-  │     setTurns(+you)  ; setBusy(true)   :25-26          │      │
-  │     try   answer = await session.ask  :28  ──────────┼──┐   │
-  │     then  setTurns(+buffr)            :29             │  │   │
-  │     catch setTurns(+error)            :31             │  │   │
-  │     finally setBusy(false)            :33             │  │   │
-  │                                                       │  │   │
-  │   render: header / turns.map / (Spinner | TextInput) │  │   │
-  └──────────────────────────────────────────────────────┘  │   │
-                                                             │   │
-                          session.ask(q)  src/session.ts:60 ◄┘   │
-                          persist → agent.answer → flush → remember
-```
-
-## The network seam, in one diagram
-
-There is no HTTP client in the UI. The seam is a single awaited function call that fans
-out to a database, a model server, and the aptkit agent loop — but from `<Chat>`'s view
-it is exactly a `fetch()` with loading/success/error states.
+The entire state graph is three `useState` hooks in one component. No store, no context, no lifted state, no URL state.
 
 ```
-  The async seam — one await, three sinks
+  State graph — all local, all in <Chat>   (src/cli/chat.tsx:11–13)
 
-  ┌─ UI ─────────────┐  await session.ask(q)   ┌─ Data layer ───────────┐
-  │ <Chat> onSubmit  │ ──────────────────────► │ ChatSession.ask()      │
-  │ chat.tsx:28      │                         │ session.ts:60          │
-  │ busy=true ───────┤                         │  1 persistMessage (pg) │
-  │ <Spinner/>       │                         │  2 agent.answer(q)     │
-  │                  │  answer string          │     → Ollama + pgvector │
-  │ busy=false ◄─────┤ ◄────────────────────── │  3 trace.flush (pg)    │
-  │ setTurns(+buffr) │                         │  4 memory.remember     │
-  └──────────────────┘                         └────────────────────────┘
+  ┌─ <Chat> component (the only stateful node) ─────────────────┐
+  │                                                              │
+  │   turns:  Turn[]    ← the transcript (append-only log)       │
+  │   input:  string    ← controlled value of the text field    │
+  │   busy:   boolean   ← is a turn in flight? (loading state)   │
+  │                                                              │
+  │   every render reads these; every setState schedules         │
+  │   a reconcile → terminal repaint                             │
+  └──────────────────────────────────────────────────────────────┘
+        no Redux · no Zustand · no Context · no URL state
+        source of truth for the conversation lives BELOW, in session.ts
 ```
 
-## The three highest-leverage patterns (with files)
+## The data seam, in one diagram
 
-1. **react-without-the-dom** — the reconciler runs; Ink is the host renderer painting to
-   a TTY. `src/cli/chat.tsx:2,63`. → `01-react-without-the-dom.md`
-2. **async-ui-with-a-busy-flag** — `try/catch/finally` + `busy` + `<Spinner>`, the
-   loading-state triad. `src/cli/chat.tsx:26-33,48-50`. → `03-async-ui-with-a-busy-flag.md`
-3. **session-as-the-data-layer** — `<Chat>` owns display state; `session.ts` owns the
-   canonical persisted state; the seam between them is one `ask()` call.
-   `src/cli/chat.tsx:5,28` ↔ `src/session.ts:34,60`. → `04-session-as-the-data-layer.md`
+Server state (the agent's answer, pulled from the DB + Ollama) crosses into client state through one façade call: `session.ask()`. The component never touches pg, the embedder, or the agent — it `await`s one method. This is the container/presentational seam, drawn as a vertical boundary.
 
-## What is NOT here (named honestly)
+```
+  Data seam — UI never touches the backend directly
 
-Routing, CSS/styling beyond color props, DOM/browser APIs, SSR/hydration, bundlers,
-HTTP client-fetch, web accessibility, design tokens, state stores. The terminal has no
-analog for most of these, and the surface is one screen. See `audit.md` lenses 5–7 for
-the `not yet exercised` entries.
+  ┌─ Presentation (UI layer) ──────────────────────────┐
+  │  <Chat>  (src/cli/chat.tsx)                         │
+  │    renders turns · owns input/busy · calls ↓        │
+  └───────────────────────┬─────────────────────────────┘
+                          │  session.ask(q)   ← the ONLY hop
+                          │  returns Promise<string>
+  ┌─ Data layer (the container) ─▼─────────────────────┐
+  │  createChatSession()  (src/session.ts:34)          │
+  │    warm pg Pool · one conversation · agent built    │
+  │    once · per-turn persist → answer → remember      │
+  └───────────────────────┬─────────────────────────────┘
+                          │  pg protocol · Ollama HTTP
+  ┌─ Storage / Provider ──▼─────────────────────────────┐
+  │  Postgres + pgvector (reindb)  ·  Ollama (gemma2)   │
+  └──────────────────────────────────────────────────────┘
+```
+
+## The three highest-leverage frontend patterns
+
+1. **The container/presentational seam** (`session.ts` ↔ `<Chat>`) — `src/session.ts:34` ↔ `src/cli/chat.tsx:55`. The component is presentational; all data acquisition hides behind `ChatSession`. Strip it and the UI grows a pg pool and an agent loop inside a React component. → `04-session-as-the-data-layer.md`
+
+2. **The loading state** (the `busy` flag) — `src/cli/chat.tsx:13,16,26,32`. The loading/success/error machine around `await session.ask()`, closed with `try/finally`. It guards re-entrancy (`if (busy) return`) and swaps the input for a spinner. → `03-async-ui-with-a-busy-flag.md`
+
+3. **The reconciler (Ink)** — `src/cli/chat.tsx:63`. React's component model and diffing, paint target swapped from DOM to terminal. Your `key={i}` on the `.map()`, your conditional render, your `<Box>`/`<Text>` — all the same instincts, a different commit phase. → `01-react-without-the-dom.md`
+
+## What this repo does NOT exercise (honest inventory)
+
+- **Routing / navigation** — `not yet exercised`. One screen, no routes, no history.
+- **CSS / styling / design system** — `not yet exercised` beyond Ink color/`bold`/`dimColor` props. No tokens, no theming, no responsive strategy.
+- **DOM / browser platform** — `not yet exercised`. The platform is the TTY, not the web.
+- **SSR / hydration / RSC** — `not yet exercised`. Pure client render.
+- **Bundler** — `not yet exercised`. `tsc` only; no Vite/Webpack, no tree-shaking, no code-splitting.
+- **HTTP client-fetch from the UI** — `not yet exercised`. The component never fetches; the data layer does, below the seam.
+- **Web a11y** (ARIA, focus management, screen readers) — `not yet exercised`; the platform is a terminal.
+- **Data-fetch cache layer** (react-query / SWR / optimistic updates) — `not yet exercised`. One direct `await`, no client cache, no invalidation.
+
+See `audit.md` for the full 8-lens walk with `file:line` grounding.

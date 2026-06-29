@@ -1,235 +1,251 @@
-# Model selection — baselining and the compare-on-val loop
+# Model Selection
 
-*Industry standard (model selection / baselining). buffr selects no model — its retrieval ranker is a parameter-free cosine baseline. Not yet implemented.*
+### *industry: model selection · type: choosing the baseline, then earning anything fancier*
 
-## Zoom out, then zoom in
+## Zoom out
 
-The TRAIN stage of the pipeline (`01-supervised-pipeline.md`) is where you pick a model — and the discipline isn't "pick the best," it's "train a couple, compare on the *validation* set, and pick the simpler one if it's close." buffr selects nothing, but it does ship a de-facto baseline model: the cosine-similarity ranker in `src/pg-vector-store.ts`, a parameter-free function that any learned reranker would have to *beat on the eval set* to justify its complexity.
+This is the Train stage's first real decision, and it's smaller than beginners think: there are two default baselines, you train both, and you pick the simpler one unless the complex one clearly earns its keep. buffr makes no such choice — it trains nothing, so it never selects a model in the ML sense. It only *picks which pre-trained model to call* (gemma2, nomic), which is a serving decision, not model selection.
+
+**The pipeline, with TRAIN marked ★ — model selection is the first choice inside it**
 
 ```
-  Zoom out — where model selection sits; buffr's de-facto baseline
-
-  ┌─ Storage (Supabase) ─────────────────────────────────────────┐
-  │  agents.chunks.embedding  vector(768)                        │
-  └───────────────────────────────┬───────────────────────────────┘
-                                  │ ranked by
-  ┌─ Retrieval (src/pg-vector-store.ts) ─▼────────────────────────┐
-  │  cosine ranker: 1 - (embedding <=> $1::vector)  ← BASELINE    │
-  │  parameter-free · no training · the model to BEAT            │
-  └───────────────────────────────┬───────────────────────────────┘
-                                  │ model SELECTION WOULD attach here
-  ┌─ ML SELECTION — ★ NOT PRESENT ★ ─▼────────────────────────────┐ ← we are here
-  │  logistic regression  vs  gradient-boosted trees             │
-  │  compare on VAL · pick simpler if comparable                 │
-  │  buffr: no learned model selected (cosine baseline only)     │
-  └───────────────────────────────────────────────────────────────┘
+┌────────┐   ┌──────────┐   ┌────────┐   ┌────────┐   ┌────────┐
+│  DATA  │──►│ FEATURES │──►│ SPLIT  │──►│ TRAIN  │──►│ DEPLOY │
+│        │   │          │   │        │   │ ★ which│   │        │
+│        │   │          │   │        │   │ model? │   │        │
+└────────┘   └──────────┘   └────────┘   └────────┘   └────────┘
+                                         ◄── this file
+                          two baselines, pick the simpler if scores tie
 ```
 
-Zoom in: **model selection** is choosing the model family and settings by comparing candidates on held-out data. The two workhorse baselines are **logistic regression** (linear, interpretable, fast, well-calibrated-ish) and **gradient-boosted trees** (nonlinear, handles interactions automatically, usually wins on tabular data — but heavier and harder to read). The discipline: train both, compare on the **validation** set (not train, not test), and pick the *simpler* one if scores are comparable — a 0.5% AUC gain rarely justifies losing interpretability and serving simplicity. The contrl pose pipeline rhymes faintly here: a threshold on a joint angle was a parameter-free baseline, exactly like buffr's cosine score — the simplest "model" that works, beaten only if something complex earns it.
+In contrl you eventually settled on a model — but you'd have started by trying the cheapest thing that could work and only adding capacity when it paid for itself. That discipline — baseline first, complexity only when justified — is the whole file. buffr's "model choice" is selecting `gemma2:9b` in a config; that's choosing a vendor, not selecting a trained model from candidates you fit.
 
 ## Structure pass
 
-**Layers:** the candidate models (bottom) → the comparison loop → the selection decision (top).
+The axis is **interpretability vs flexibility**. Logistic regression is interpretable and rigid — a weighted sum, a straight boundary. Gradient-boosted trees are flexible and opaque — they carve nonlinear boundaries but you can't read them. The seam is the moment their scores are close enough that simplicity should win.
 
-**Axis — "what's the cost of this model beyond its accuracy?"** Trace it across the two families and the choice stops being "just pick the higher number."
+**One axis: the two default baselines**
 
 ```
-  trace "what does this model COST beyond accuracy?"
-
-  ┌─ logistic regression ─┐  cost: low — interpretable, fast, calibrated-ish
-  │  linear               │  weakness: misses interactions unless engineered
-  └───────────┬───────────┘
-  ┌─ gradient-boosted ────┐  cost: high — opaque, heavier to serve, tune-hungry
-  │  trees (nonlinear)    │  strength: finds interactions, usually higher AUC
-  └───────────┬───────────┘
-  ┌─ cosine baseline ─────┐  cost: ~zero — parameter-free, one SQL expression
-  │  (buffr today)        │  weakness: can't learn; pure geometric similarity
-  └───────────────────────┘
-
-  higher accuracy is one axis; interpretability + serving cost is another
+   LOGISTIC REGRESSION                GRADIENT-BOOSTED TREES
+   ───────────────────                ──────────────────────
+   linear, weighted sum               nonlinear, many small trees
+   interpretable (read the weights)   opaque (feature importances only)
+   fast, few failure modes            slower, more knobs, can overfit
+   ┌────────────────────┐             ┌────────────────────┐
+   │ straight boundary  │   ──seam──► │ wiggly boundary    │
+   └────────────────────┘             └────────────────────┘
+        the seam: if scores tie, the simpler model wins
 ```
 
-**The seam:** the boundary between train-set scores and validation-set scores. This is where selection either works or fools you. On the train side, a flexible model (GBT) always looks better — it can memorize. On the val side, you see *generalization*, and the gap between the two is overfitting. The axis-answer flips across that seam: "which model is better?" reverses depending on which set you ask. Selection that compares on *train* picks the overfitter; selection that compares on *val* picks the generalizer. That seam is the whole game.
+Left: the simple baseline you reach for first. Right: the flexible one that often scores higher but costs interpretability, latency, and failure surface. Consequence: buffr sits off this axis entirely — it selects no trained model — so the whole comparison is new ground, taught as the choice you'd make in a new `ml/` trainer.
 
 ## How it works
 
-### Move 1 — the mental model
+### Move 1 — Mental model
 
-You already do this when you A/B two implementations: you don't pick the one that's faster on the dev machine you built it on, you pick the one that's faster on a *fresh* benchmark — and if they're a wash, you keep the simpler code. Model selection is that, with one hard rule: the "fresh benchmark" is the validation set, *never* the training data the model already saw, and *never* the test set you're saving for the final number.
+Model selection is a bake-off with a tiebreaker that favors simplicity. You enter two contestants — a linear model and a tree ensemble — score them fairly with cross-validation, and award the win to trees *only if* they beat linear by enough to justify the cost. A near-tie goes to logistic regression, because simple models are cheaper to serve, easier to debug, and harder to break.
 
-```
-  PATTERN — the compare-on-val selection loop
-
-  ┌─ candidates ─┐
-  │ A: logistic  │──┐
-  │ B: GBT       │  │ fit each on TRAIN
-  └──────────────┘  ▼
-              ┌─ score each on VALIDATION (not train, not test) ─┐
-              │  A: AUC 0.84      B: AUC 0.845                    │
-              └───────────────────────┬──────────────────────────┘
-                                      ▼
-              gap ≤ tolerance? ──► pick SIMPLER (A)
-              gap large?       ──► pick STRONGER (B)
-                                      │
-                                      ▼
-              report the WINNER's number on TEST (once)
-```
-
-The strategy: fit on train, choose on val, report on test — and let interpretability break ties.
-
-### Move 2 — the step-by-step walkthrough
-
-Four moves: the two baseline families, the bias/variance lens, the compare-on-val loop, and the simpler-if-comparable rule.
-
-**Logistic regression — the linear, interpretable baseline.** It fits a weighted sum of features through a sigmoid to produce a probability. Its virtues are exactly its limits: every feature has one readable weight (you can *explain* a prediction), it trains in milliseconds, it serves as a dot product, and its outputs behave roughly like probabilities. Its weakness: it's linear, so it can't see interactions unless you hand-engineer them (`02-feature-engineering.md`).
+**The bake-off and its tiebreaker**
 
 ```
-  Logistic regression — weighted sum → sigmoid → probability
-
-  features          weights (READABLE)
-  tokens_scaled ───► w1=0.4 ┐
-  tool_calls ──────► w2=0.9 ├─ sum ─► sigmoid ─► P(good)=0.73
-  had_error ───────► w3=-1.2┘         (each w explains its feature)
-  strength: interpretable, fast, calibrated-ish
-  weakness: linear — needs engineered interactions to see combos
+  logistic regression ──┐
+                        ├──► cross-validate both ──► compare scores
+  gradient-boosted trees┘
+                                    │
+                        ┌───────────┴───────────┐
+                   scores close?            trees clearly ahead?
+                        │                        │
+                   pick LOGISTIC             pick TREES
+                   (simpler wins)            (earned the cost)
 ```
 
-**Gradient-boosted trees — the nonlinear workhorse.** It builds many small decision trees in sequence, each correcting the last one's errors. It finds feature interactions *automatically* (a tree can branch on `tool_calls` then on `had_error` without you engineering the product), and it usually wins on tabular data. The cost: it's opaque (no single weight per feature), heavier to serve, and has more knobs to tune.
+Frontend bridge: it's reaching for plain CSS before a heavyweight UI library. If flexbox does the job, you don't pull in a layout engine — fewer dependencies, fewer failure modes. You add the heavy tool only when the simple one provably can't do it.
+
+### Move 2 — Walk the mechanism
+
+Code below is **illustrative pseudocode** — buffr trains nothing, so none of this is in the repo.
+
+**Part A — Baseline one: logistic regression**
+
+A linear model: each feature gets a weight, you sum them, squash to a probability. The boundary is a straight line (hyperplane). Its gift is interpretability — the weights tell you which features drive the prediction.
 
 ```
-  Gradient-boosted trees — sequential trees, each fixes the last
-
-  tree_1 (rough) ─► residuals ─► tree_2 (fixes them) ─► ... ─► tree_N
-                                                              │
-  prediction = sum of all trees' outputs ◄────────────────────┘
-  strength: finds interactions itself · usually highest AUC on tabular
-  weakness: opaque · heavier serving · more hyperparameters
+  features ─► w1·x1 + w2·x2 + ... ─► sigmoid ─► P(class)
+              ▲
+              read the weights = read the model's reasoning
+  boundary:  a straight line through feature space
 ```
 
-**The bias/variance lens — why GBT looks better on train.** This is the trap selection exists to avoid. Logistic regression is high-bias / low-variance: it underfits a bit but is stable. GBT is low-bias / high-variance: it can fit anything, *including the training noise*. So GBT almost always wins on the train set — and that tells you nothing, because the win might be memorization.
-
-```
-  Bias/variance — why train-set scores mislead
-
-  model        train score   val score    gap = overfit signal
-  ──────────   ───────────   ─────────    ────────────────────
-  logistic     0.83          0.84         small  (stable, underfits a touch)
-  GBT (deep)   0.99          0.81         HUGE   (memorized train → worse on val)
-  GBT (tuned)  0.88          0.845        small  (regularized → generalizes)
-
-  → never select on train; the flexible model always "wins" there
+```python
+# ILLUSTRATIVE PSEUDOCODE — not buffr code.
+lr = LogisticRegression()
+lr.fit(X_train, y_train)
+print(lr.coef_)            # ◄── the model's reasoning, in plain weights
 ```
 
-The boundary condition: a big train-vs-val gap is the alarm — it means the model fit noise, and you regularize (shallower trees, fewer of them) until the gap closes.
+**Part B — Baseline two: gradient-boosted trees**
 
-**The compare-on-val loop and the simpler-if-comparable rule.** You fit both on train, score both on val, and apply a decision rule *with a tolerance*. If GBT beats logistic by a hair, you keep logistic — because interpretability and serving simplicity are worth more than a rounding-error AUC gain.
+Many shallow decision trees, each correcting the last one's errors. The combined boundary is nonlinear and can capture interactions logistic regression can't. The cost: you can't read it, it has more knobs, and it overfits if untended.
 
 ```
-  pseudocode — select with a simpler-if-comparable rule
-
-  fit logistic on TRAIN ; fit gbt on TRAIN
-  auc_lr  = score(logistic, VAL)            // e.g. 0.840
-  auc_gbt = score(gbt,      VAL)            // e.g. 0.845
-  if (auc_gbt - auc_lr) <= TOLERANCE:       // TOLERANCE e.g. 0.01
-      pick logistic                         // simpler wins ties
-  else:
-      pick gbt                              // complexity earned its place
-  report pick.score on TEST  (once)         // the honest final number
+  tree1 (rough) ─► residual ─► tree2 (fix) ─► residual ─► tree3 ...
+       sum of trees = a wiggly, nonlinear boundary
+  you get feature_importances, NOT a readable rule
 ```
 
-For buffr, this loop has a concrete shape: the **cosine ranker in `src/pg-vector-store.ts` is the baseline**, and a learned reranker is the "GBT" you'd compare against it.
-
-```ts
-// src/pg-vector-store.ts:70-77 — buffr's de-facto baseline "model"
-`select id, content, ...,
-        1 - (embedding <=> $1::vector) as score   // parameter-free ranker
- from agents.chunks
- where app_id = $2
- order by embedding <=> $1::vector                // pure cosine, nothing learned
- limit $3`
+```python
+# ILLUSTRATIVE PSEUDOCODE — not buffr code.
+gbt = GradientBoostingClassifier()
+gbt.fit(X_train, y_train)
+gbt.feature_importances_   # ◄── importances, not interpretable weights
 ```
 
-A learned reranker (taking FEAT-2's features) only earns its place if it beats this cosine baseline on `eval/queries.json` by more than your tolerance — otherwise you keep the one-line SQL expression that has zero parameters to train, monitor, or drift.
+**Part C — Score both fairly with cross-validation**
 
-### Move 3 — the principle
+A single val score is noisy on small data. k-fold cross-validation rotates which slice is val across k folds and averages, giving a stable score to compare the two models on equal footing.
 
-Model selection isn't "find the highest number" — it's "find the simplest model whose number is good enough, judged on data it didn't train on." Two rules carry it: compare on the validation set, because the flexible model always wins on train by memorizing; and break ties toward simplicity, because interpretability, serving cost, and the ability to debug are real value that a 0.5% AUC gain rarely outweighs. The generalizing version: a parameter-free baseline that's *almost as good* usually beats the learned model that's marginally better — buffr's cosine ranker is that baseline, and the burden of proof sits on any learned thing that wants to replace it.
+```
+  5-fold CV (test stays sealed elsewhere):
+  fold1: [VAL][   TRAIN   ]   ─► score1
+  fold2: [TR][VAL][ TRAIN ]   ─► score2
+  fold3: [ TR ][VAL][ TR  ]   ─► score3
+  fold4: [  TRAIN  ][VAL][T]   ─► score4
+  fold5: [   TRAIN   ][VAL ]   ─► score5
+                                 ───────
+            mean ± std = a fair, stable comparison number
+```
+
+```python
+# ILLUSTRATIVE PSEUDOCODE — not buffr code.
+lr_score  = cross_val_score(lr,  X_train, y_train, cv=5).mean()
+gbt_score = cross_val_score(gbt, X_train, y_train, cv=5).mean()
+```
+
+**Part D — The tiebreaker: simpler wins a near-tie**
+
+Now decide. If the trees beat logistic by a margin that survives the CV noise (the std), they earned it. If it's within the noise, take logistic — fewer failure modes, lower latency, a model you can explain.
+
+```
+  lr_score  = 0.86 ± 0.02
+  gbt_score = 0.87 ± 0.03   ◄── overlapping → effectively a tie
+  decision: pick LOGISTIC (interpretable, faster, fewer ways to break)
+
+  vs.
+
+  gbt_score = 0.93 ± 0.02   ◄── clearly ahead, non-overlapping
+  decision: pick TREES (the gap justifies the cost)
+```
+
+### Move 2.5 — Current vs future
+
+**Case B: buffr selects no trained model.** Its only "model choice" is which pre-trained model to call — a config line, not a bake-off.
+
+```
+  TODAY (buffr)                      IF YOU BUILT TRAINING (new ml/)
+  ─────────────                      ───────────────────────────────
+  pick a vendor model:               train BOTH baselines on your data:
+  gemma2:9b, nomic-embed-text        logistic vs gradient-boosted trees
+  ┌────────────────────┐            ┌─────────────────────────────────┐
+  │ serving decision,  │  ──gap──►   │ cross-validate, compare, pick   │
+  │ not model selection│             │ simpler on a tie                │
+  └────────────────────┘            └─────────────────────────────────┘
+```
+
+What you'd build: train logistic and GBT on the intent-classifier features from file 02, cross-validate both, and pick — most likely logistic, because the dataset is tiny and interpretable wins. buffr does none of this; selecting `gemma2:9b` is choosing a supplier, not selecting from candidates you trained.
+
+### Move 3 — The principle
+
+**Train both default baselines, then pick the simpler one unless the complex one clearly earns its cost in interpretability, latency, and failure surface.** Complexity is a debt you take on only against proven returns. buffr never makes this call — it consumes pre-trained models, which is a serving choice, not model selection. The signal is the discipline: a baseline first, cross-validated comparison, and a bias toward the model you can explain when the scores tie.
 
 ## Primary diagram
 
-The full selection discipline, both families, the val seam, and buffr's baseline.
+The two baselines, the fair comparison, and the simplicity tiebreaker.
+
+**The model-selection bake-off**
 
 ```
-  Model selection — fit on train, choose on val, simpler-if-comparable
+  ┌──────────────────────┐        ┌──────────────────────┐
+  │ LOGISTIC REGRESSION  │        │ GRADIENT-BOOSTED TREES│
+  │ linear · readable    │        │ nonlinear · opaque    │
+  │ fast · few knobs     │        │ slower · many knobs   │
+  └──────────┬───────────┘        └──────────┬───────────┘
+             └────────► 5-fold CV ◄──────────┘
+                        compare mean ± std
+                             │
+              ┌──────────────┴──────────────┐
+         scores overlap                 trees clearly ahead
+              │                              │
+         PICK LOGISTIC                   PICK TREES
+         (simpler wins the tie)          (gap earns the cost)
 
-  ┌─ candidates ──────────────────────────────────────────────┐
-  │ LOGISTIC REGRESSION        GRADIENT-BOOSTED TREES          │
-  │ linear · interpretable     nonlinear · finds interactions  │
-  │ fast · calibrated-ish      heavier · opaque · tune-hungry  │
-  │ (high bias/low variance)   (low bias/high variance)        │
-  └───────────────┬────────────────────────┬───────────────────┘
-       fit on TRAIN                fit on TRAIN
-                  ▼                        ▼
-  ┌─ compare on VALIDATION (the seam — NOT train, NOT test) ───┐
-  │  auc_lr = 0.840        auc_gbt = 0.845                      │
-  │  gap ≤ tolerance? → pick LOGISTIC (simpler wins)           │
-  │  gap large?       → pick GBT (complexity earned it)        │
-  └───────────────────────────┬────────────────────────────────┘
-                              ▼
-                report winner on TEST (once) → honest number
-
-  ★ buffr's baseline = cosine ranker (src/pg-vector-store.ts):       ★
-  ★ parameter-free; a learned reranker must BEAT it on eval to ship  ★
+  buffr: makes NO such choice — it calls gemma2:9b (a serving decision)
 ```
+
+After the box: the default move is two baselines and a tiebreaker for simplicity. buffr is off the board entirely — it selects suppliers, not trained models.
 
 ## Elaborate
 
-"Train both, compare on val, prefer the simpler" is the bread-and-butter of applied ML, and the logistic-vs-GBT pairing is the canonical baseline duel for tabular problems (gradient boosting via XGBoost / LightGBM / CatBoost dominates tabular Kaggle, while logistic regression remains the interpretable reference everyone starts from). The "simpler if comparable" instinct is the practitioner's version of Occam's razor, and it's load-bearing in production for reasons accuracy charts hide: a linear model you can explain to a stakeholder, serve as a dot product, and debug by reading weights is often worth more than a marginally-better black box. This connects forward to calibration (`09-calibration.md` — logistic's probabilities are usually more trustworthy than a tree ensemble's) and back to features (`02` — logistic *needs* engineered interactions that GBT discovers for free). For buffr the honest frame is that it already lives by this principle by default: its retrieval "model" is the simplest possible thing, a parameter-free cosine score, and nothing has earned the right to replace it — which is exactly the right place to start. The reranker exercise below is how you'd *test* whether something has earned it.
+- **Why these two are the defaults.** Logistic regression and gradient-boosted trees bracket the useful range on tabular data: one linear and interpretable, one nonlinear and powerful. If logistic is competitive, your problem is roughly linear and you're done cheaply. If trees crush it, you've learned the problem has real interactions worth the complexity. Two models, and you've mapped the difficulty.
+- **The simplicity bias is an operational argument, not an aesthetic one.** A logistic model has fewer hyperparameters to misconfigure, serves faster, and fails in legible ways (you can read the weight that went wrong). A tree ensemble has more knobs, more overfit risk, and opaque failures. On a near-tie, the simple model is cheaper to *own*, which is what actually matters in production.
+- **Cross-validation, not a single val score, is what makes the comparison honest.** On small data a single split's score swings wildly; one model can "win" on luck. k-fold averages out that luck and gives you a std, so you can tell a real gap from noise. The test set stays sealed (file 03) — CV happens entirely within train+val.
+- **buffr's analog choice is `02-embedding-model-choice` and provider abstraction.** Picking nomic-embed-text over an alternative, or gemma2 over another generator, is a real decision buffr makes — but it's evaluated by serving metrics (latency, P@1/R@3 on `eval/queries.json`), not by training and cross-validating candidates. Calling it "model selection" in the ML sense would be wrong; it's supplier selection. Knowing the difference is the point.
 
 ## Project exercises
 
-> No curriculum file present; exercises derived from the codebase.
+### Train both baselines and pick with cross-validation
 
-### Compare the cosine baseline against a tiny learned reranker on the eval set
+Not yet implemented — buffr trains nothing, so it has never run a model bake-off. This builds the two-baseline comparison on buffr's own intent-classifier task.
 
-- **Exercise ID:** SEL-1 (Case B — model selection not yet implemented). **The core exercise: it runs a real compare-on-val loop with buffr's baseline as the incumbent.**
-- **What to build:** take the cosine ranker in `src/pg-vector-store.ts` as the baseline, train a tiny learned reranker (logistic regression over FEAT-2's per-hit features), and compare both on `eval/queries.json` via `src/cli/eval-cmd.ts` — same metric, same data, head to head.
-- **Why it earns its place:** it forces the discipline of *baselining before complexity* on buffr's one real ML-adjacent path, and usually proves the parameter-free baseline is hard to beat — the most useful lesson in model selection. The "I held my reranker to beating the cosine baseline on the eval set" story.
-- **Files to touch:** `src/pg-vector-store.ts` (baseline scores); the per-hit features from FEAT-2; `src/cli/eval-cmd.ts` (run both, report both numbers); `eval/queries.json` (the comparison set, split per SPLIT-2).
-- **Done when:** the harness prints both models' scores on the eval set, side by side, from the same run.
-- **Estimated effort:** 1–2 days.
+- **Exercise ID:** [B2C.7] (cite [B2C.7], Phase 2C) — Case B: no model selection happens in buffr; this is the primary buildable target.
+- **What to build:** `ml/select_model.py` that trains logistic regression and gradient-boosted trees on the file-02 features, runs 5-fold cross-validation on each, prints mean ± std for both, and applies the simplicity tiebreaker to declare a winner.
+- **Why it earns its place:** It is the Train-stage decision buffr never makes, executed on buffr data, and it forces the cross-validation + tiebreaker discipline rather than just calling `.fit()` once.
+- **Files to touch:** new `ml/select_model.py`, uses `ml/features.py` and `ml/split.py`.
+- **Done when:** The script prints both CV scores with std and a justified pick, and you can defend why the winner won (gap survives noise, or simplicity broke the tie).
+- **Estimated effort:** 1 day.
 
-### Pick a metric and a simpler-if-comparable decision rule, and record both models' val scores
+### Write the model-selection record as a decision note
 
-- **Exercise ID:** SEL-2 (Case B — selection rule not yet implemented).
-- **What to build:** define the selection metric (e.g. P@1 or R@3) and an explicit decision rule with a tolerance ("keep the cosine baseline unless the reranker beats it by ≥ X"), then have the harness print the rule's verdict alongside both models' validation scores.
-- **Why it earns its place:** it turns "which is better?" from a vibe into a written rule applied to recorded numbers — the difference between selecting a model and guessing. It also documents *why* buffr keeps the simple ranker, which is the honest answer.
-- **Files to touch:** `src/cli/eval-cmd.ts` (metric + decision rule + verdict print); a small record of both models' val scores next to `eval/`.
-- **Done when:** the harness outputs both val scores and a one-line verdict ("keep baseline" / "ship reranker") derived from the written tolerance rule.
-- **Estimated effort:** 4–8hr.
+Not yet implemented — buffr trains nothing, so there's no selection to document. This produces the artifact that proves you reasoned, not just ran.
+
+- **Exercise ID:** [B2C.8] (cite [B2C.8], Phase 2C) — Case B: documents a selection buffr does not perform.
+- **What to build:** `ml/MODEL_SELECTION.md` recording the two candidates, their CV scores, the tiebreaker logic, and the final pick — plus an honest line distinguishing this from buffr's real choice (calling gemma2:9b is supplier selection, not model selection).
+- **Why it earns its place:** The decision record is the interview artifact. It also forces you to write the distinction that this whole file turns on.
+- **Files to touch:** new `ml/MODEL_SELECTION.md`, references `ml/select_model.py` output.
+- **Done when:** The note states both scores, the rule applied, the winner, and one sentence separating ML model selection from buffr's serving-model choice.
+- **Estimated effort:** 1–4hr.
 
 ## Interview defense
 
-**Q: You've got logistic regression and gradient-boosted trees both fitted — how do you choose?**
-Answer: compare on the validation set, never on train. GBT almost always wins on train because it can memorize, so a train comparison picks the overfitter — the train-vs-val gap is my overfitting alarm. On val I see generalization. Then I apply a simpler-if-comparable rule: if GBT only beats logistic by a hair, I keep logistic, because interpretability and serving simplicity outweigh a rounding-error AUC gain. I report the winner's number on test, once.
+**Q: "How do you choose a model for a classical-ML task?"**
+
+Train two baselines — logistic regression and gradient-boosted trees — cross-validate both, and pick the simpler one unless trees beat logistic by a margin that survives the CV noise. Simple wins ties because it's faster, interpretable, and has fewer failure modes. Complexity is debt I only take on against a proven gain.
 
 ```
-  fit on TRAIN ──► choose on VAL ──► report on TEST
-  ties broken toward the simpler model
+  scores tie    ─► logistic (simpler)
+  trees clearly ahead ─► trees (earned it)
 ```
 
-**Q: buffr selects no model — so what's its "model," and what would replace it?**
-Answer: its model is the cosine-similarity ranker in `src/pg-vector-store.ts` — `1 - (embedding <=> vector)` — a parameter-free baseline with nothing to train. The thing that *could* replace it is a learned reranker, which is the "GBT" in the compare-on-val loop: it'd have to beat the cosine baseline on `eval/queries.json` by more than my tolerance to earn its complexity. **The part people forget: a parameter-free baseline that's almost as good usually beats the learned model that's marginally better — the burden of proof is on the complex thing, not the simple one.** Today nothing has met that burden, so the one-line SQL ranker stays.
+Anchor: *"Two baselines, and a tiebreaker for simplicity."*
+
+**Q: "buffr uses gemma2 — isn't that model selection?"**
+
+No — that's supplier selection. I'm choosing which pre-trained model to *call*, evaluated by serving metrics like P@1/R@3 and latency. Model selection in the ML sense means training multiple candidates on my own data and comparing them with cross-validation. buffr trains nothing, so it never does that.
 
 ```
-  baseline: cosine (0 params) ──── must be BEATEN on eval ────► learned reranker
-  burden of proof sits on the complex challenger
+  buffr: pick a vendor model (config line) ─► serving decision
+  ML:    train candidates, cross-validate ─► selection
 ```
+
+Most candidates have only ever picked a vendor model from a dropdown; having trained two baselines and chosen between them on cross-validated scores (contrl-shaped work) is the signal.
+
+Anchor: *"Calling gemma2 is choosing a supplier, not selecting a model."*
 
 ## See also
 
-- `01-supervised-pipeline.md` — the TRAIN stage this file opens up.
-- `02-feature-engineering.md` — logistic needs engineered interactions; trees find them; FEAT-2 feeds the reranker.
-- `03-train-val-test.md` — selection happens on VAL, the test set stays sealed.
-- `09-calibration.md` — logistic's probabilities are usually more trustworthy than a tree ensemble's.
-- `../05-evals-and-observability/02-eval-methods.md` — the P@1/R@3 scoring the compare-on-val loop reuses.
+- `./01-supervised-pipeline.md` — where Train (and this choice) sits in the five-stage line.
+- `./02-feature-engineering.md` — good features make logistic competitive, often ending the bake-off.
+- `./03-train-val-test.md` — cross-validation reuses the val role; test stays sealed.
+- `../03-retrieval-and-rag/02-embedding-model-choice.md` — buffr's real supplier-selection decision.
+- `../05-evals-and-observability/` — the metrics (P@1/R@3) that grade buffr's served models.
+- `../09-ml-system-design-templates/` — model selection inside a full system design.

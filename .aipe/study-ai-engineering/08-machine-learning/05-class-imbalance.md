@@ -1,249 +1,250 @@
-# Class imbalance — skewed-class evaluation and the metrics that survive it
+# Class Imbalance
 
-*Industry standard (skewed-class evaluation). buffr trains no classifier, so it has no class imbalance and no metric to mislead — Not yet implemented.*
+### *industry: class imbalance · type: the failure mode where accuracy lies because one class dominates*
 
-## Zoom out, then zoom in
+## Zoom out
 
-Imbalance isn't a model bug — it's an *evaluation* bug waiting to happen. The moment one class is rare (fraud, defects, failed runs), accuracy stops measuring what you think it measures, and a model that does nothing scores 99%. buffr has no classifier today, so there's no imbalance to fight — but the instant you put a "did this agent run fail?" classifier over `agents.messages`, you land in the textbook case: most runs succeed, the failures are rare, and accuracy will lie to you on day one.
+You trained a model. It reports 99% accuracy. You ship it, and it never once catches the thing you built it to catch. That's not a bug in your code — it's the oldest trap in classical ML, and it's invisible to the one metric every beginner reaches for first. Before defining anything, look at where this bites in the pipeline you're learning:
 
+**The supervised pipeline, with the stage class imbalance corrupts marked**
 ```
-  Zoom out — where a classifier WOULD attach, and where imbalance bites
-
-  ┌─ Data layer (exists) ───────────────────────────────────────┐
-  │  agents.messages — every run's trajectory (6 event types)   │
-  │  warning/error events are RARE → most runs succeed          │
-  └───────────────────────────────┬─────────────────────────────┘
-                                  │ label = "did this run fail?"
-  ┌─ ML layer (★ no model here — WOULD attach) ─▼───────────────┐
-  │  ★ run-outcome classifier ★   skewed: ~5% positive          │ ← we are here
-  │  imbalance bites at EVAL: accuracy 95% by guessing "pass"    │
-  └───────────────────────────────┬─────────────────────────────┘
-                                  │ honest metrics ↓
-  ┌─ Metric layer ───────────────▼──────────────────────────────┐
-  │  macro-F1 · per-class recall · confusion matrix (08)        │
-  └──────────────────────────────────────────────────────────────┘
+┌────────┐   ┌──────────┐   ┌────────┐   ┌────────┐   ┌──────────────────────────┐
+│  Data  │──►│ Features │──►│ Split  │──►│ Train  │──►│ ★ EVALUATE / DEPLOY ★    │ ◄── this file
+│ 99% A  │   │  numeric │   │ strat. │   │  fit   │   │ accuracy=0.99 — A LIE    │
+│  1% B  │   │          │   │        │   │        │   │ recall(B)=0.00 — TRUTH   │
+└────────┘   └──────────┘   └────────┘   └────────┘   └──────────────────────────┘
+     │                                                            ▲
+     └── imbalance is born HERE (in the data)──────but only SHOWS HERE (in eval)
 ```
-
-Zoom in: **class imbalance** is when the label distribution is lopsided — one class dominates, the other is rare. The trap is that the *cheap* metric (accuracy) rewards predicting the majority, so it hides total failure on the class you actually care about. This file teaches the metrics that don't lie (macro-F1, per-class precision/recall, the confusion matrix) and the fixes that rebalance the learning signal (class weights, resampling, SMOTE, focal loss, threshold move).
+Imbalance is a property of the **data**, but it does its damage at the **evaluation** seam, where one number quietly papers over a model that learned to do nothing.
 
 ## Structure pass
 
-**Layers:** the labeled data → the metric that scores it → the fix that rebalances it.
+There is one axis that matters here: **prevalence** — what fraction of your labels belong to the rare class. Everything in this file is a response to prevalence dropping toward zero.
 
-**Axis — "does this layer's choice reward predicting the rare class, or ignoring it?"**
-
+**The one axis: minority-class prevalence, and what each band demands**
 ```
-  trace "does this reward catching the rare positive?" down the layers
-
-  ┌─ metric: accuracy ──────┐   NO — rewards all-majority guessing
-  │  (TP+TN)/total          │   99% by predicting "negative" always
-  └─────────────────────────┘
-  ┌─ metric: macro-F1 ──────┐   YES — averages per-class F1 equally
-  │  mean(F1_pos, F1_neg)   │   rare-class failure tanks the score
-  └─────────────────────────┘
-  ┌─ fix: class weights ────┐   YES — penalizes missing a positive more
-  │  loss × weight[class]   │   tells the model the rare class costs more
-  └─────────────────────────┘
-
-  same data; the metric/fix choice decides whether the rare class matters
+ prevalence of positive class (the thing you care about)
+  50% ──────────── 10% ──────────── 1% ──────────── 0.1%
+  │                │                │                │
+  balanced         mild             severe           extreme
+  accuracy OK      watch macro-F1   accuracy USELESS  may need anomaly
+                                    │                 detection, not
+                                    │                 classification
+                                    ▼
+                          ┌──────────────────────┐
+                          │  THE SEAM:            │
+                          │  metric you trust  ◄──┼── changes with prevalence
+                          │  must change here     │
+                          └──────────────────────┘
 ```
-
-**The seam:** the boundary between *accuracy* and *per-class metrics* is where the axis flips. On one side a model can be 99% "correct" and useless; on the other side the same model scores near-zero on the class you built it for. Cross that seam consciously — choosing the metric is the load-bearing decision, not choosing the model.
+The seam is this: the metric you are allowed to trust is a function of prevalence — and accuracy crosses from useful to actively misleading somewhere around the 10% mark. Below it, you switch toolkits.
 
 ## How it works
 
-### Move 1 — the mental model
+### Move 1 — Mental model
 
-You already know this shape from a `try/catch` you never test. If the error path almost never fires, a test suite that only runs the happy path is green forever and proves nothing about the catch block. An imbalanced dataset is the same: the rare class is the catch block, and accuracy is the happy-path-only test that stays green while the thing you care about is broken. The strategy is simple — stop scoring the system as one blob, and score each class on its own.
+The mental model: **a metric that can be maximized by ignoring the input is not measuring your model.** Accuracy on a 99/1 split is exactly that — predict "majority" for every row, touch none of the features, and you score 0.99. You think of contrl pose-landmarking as "data in, fit, predict out"; imbalance is the case where the "predict out" can be a constant and still win the scoreboard.
 
+**The degenerate baseline: a model that reads nothing and still scores 99%**
 ```
-  the all-negative trap — the pattern to paraphrase later
-
-  truth:      950 PASS   ·   50 FAIL   (5% positive)
-  model:      "always PASS"
-                │
-                ▼
-  accuracy = 950/1000 = 95%   ← looks great
-  recall(FAIL) = 0/50 = 0%    ← catches ZERO failures
-                                the metric and the truth disagree
-```
-
-### Move 2 — the step-by-step walkthrough
-
-**Why accuracy lies — the all-negative classifier.** Picture a run-outcome classifier over `agents.messages` where 5% of runs fail. A model that emits "pass" for *every* run — a constant, learning nothing — scores 95% accuracy. It is, by the cheap metric, an A-student. It also catches none of the failures, which is the entire reason you'd build it. Accuracy is `(TP + TN) / total`; when `TN` dwarfs everything, the formula is dominated by the easy negatives and the rare-class result vanishes into rounding.
-
-```
-  the trap, with the arithmetic
-
-  confusion matrix of the all-"pass" model:
-                  pred PASS   pred FAIL
-    actual PASS │    950     │    0     │  ← all majority, correct
-    actual FAIL │     50     │    0     │  ← all minority, MISSED
-                  ─────────────────────
-  accuracy = (950+0)/1000 = 0.95   ← lies
-  recall(FAIL) = 0/(50+0) = 0.00   ← the truth
-```
-
-**The honest views — per-class precision, recall, macro-F1.** Break the score apart per class. **Precision** of "FAIL" asks: of the runs I *called* failures, how many were? **Recall** of "FAIL" asks: of the runs that *actually* failed, how many did I catch? F1 is their harmonic mean. Then **macro-F1** averages the per-class F1s *with equal weight* — so the rare class counts as much as the common one, and a model that ignores it can't hide.
-
-```
-  macro-F1 — equal weight per class (rare class can't hide)
-
-  per-class:   F1(PASS) = 0.97        F1(FAIL) = 0.00
-                    │                       │
-                    └───────── average ─────┘   (NOT weighted by size)
+        input row ─────► [ ALWAYS PREDICT "A" ] ─────► "A"
+                              ▲
+                              │ ignores every feature
                               │
-                              ▼
-  macro-F1 = (0.97 + 0.00) / 2 = 0.485   ← the all-"pass" model's true grade
-  (contrast: micro/accuracy-weighted would report ~0.95 and lie)
+   99% of rows ARE "A"  ──────┘   so it is right 99% of the time
+                                   accuracy = 0.99   recall(B) = 0.00
+                                   ┌──────────────────────────────┐
+                                   │ "high accuracy" can mean      │
+                                   │ "learned absolutely nothing"  │
+                                   └──────────────────────────────┘
+```
+If a constant function beats your model on your headline metric, your headline metric is the problem, not the model.
+
+### Move 2 — Walk the mechanism
+
+**Part 1 — The prevalence collapses the accuracy signal.** Accuracy weights every row equally, so the majority class buys nearly all the score outright.
+
+**Accuracy is a weighted average dominated by the majority**
+```
+ accuracy = (correct on A) * P(A)  +  (correct on B) * P(B)
+          = (correct on A) * 0.99  +  (correct on B) * 0.01
+                                │                          │
+                          99% of the budget          1% of the budget
+                                ▼
+            you can score 0.99 with ZERO skill on B
 ```
 
-In pseudocode, the choice is one line at the end:
+**Part 2 — Switch to per-class recall, which the majority cannot hide.** Per-class recall asks: of the actual B's, how many did you catch? The majority class can't inflate it.
 
+**Per-class recall isolates each class so neither hides behind the other**
 ```
-  // INPUT: y_true[], y_pred[], classes = {PASS, FAIL}
-  for each class c in classes:
-    TP = count(y_true == c AND y_pred == c)
-    FP = count(y_true != c AND y_pred == c)   // predicted c, wasn't
-    FN = count(y_true == c AND y_pred != c)   // was c, missed it
-    precision[c] = TP / (TP + FP)             // col-wise: of predicted-c
-    recall[c]    = TP / (TP + FN)             // row-wise: of actual-c
-    f1[c]        = 2 * precision[c] * recall[c] / (precision[c] + recall[c])
-  // THE load-bearing line — equal weight, not size-weighted:
-  macro_f1 = mean(f1[c] for c in classes)     // rare class counts fully
-  // OUTPUT: macro_f1  (and ALWAYS print per-class recall next to it)
+                    PREDICTED
+                    A        B
+        ┌───────┬────────┬────────┐
+ ACTUAL │   A   │  9800  │   100  │  recall(A) = 9800/9900 = 0.99
+        ├───────┼────────┼────────┤
+        │   B   │    90  │    10  │  recall(B) =   10/100  = 0.10  ◄── the truth
+        └───────┴────────┴────────┘
+                                       accuracy = 9810/10000 = 0.98 (still a lie)
 ```
 
-**The fixes — rebalance the learning signal.** Honest metrics tell you you're failing; these make the model stop. There are four families, and they attack the imbalance at different points in the pipeline.
+**Part 3 — Collapse the per-class numbers with macro-F1.** Macro-F1 averages the F1 of each class *unweighted*, so the rare class counts as much as the common one.
 
+**Macro-F1 gives the rare class an equal vote**
 ```
-  four fixes, by WHERE they intervene
+   F1(A) = 0.99 ─┐
+                 ├─► MACRO-F1 = (0.99 + 0.18) / 2 = 0.59  ◄── unweighted mean
+   F1(B) = 0.18 ─┘                                            (rare class fully counted)
 
-  ┌─ at the DATA ───────────────────────────────────────────────┐
-  │  oversample minority   — duplicate FAIL rows until balanced  │
-  │  undersample majority  — drop PASS rows (cheap, loses data)  │
-  │  SMOTE                 — SYNTHESIZE new FAIL rows            │
-  └──────────────────────────────────────────────────────────────┘
-  ┌─ at the LOSS ───────────────────────────────────────────────┐
-  │  class weights — multiply a missed FAIL's loss by ~19×       │
-  │  focal loss    — down-weight EASY examples the model nails   │
-  └──────────────────────────────────────────────────────────────┘
-  ┌─ at the THRESHOLD (post-training, no retrain) ──────────────┐
-  │  threshold move — lower the 0.5 cutoff to catch more FAILs   │
-  └──────────────────────────────────────────────────────────────┘
+   vs MICRO/weighted-F1 = 0.98  ◄── rare class drowned again — DON'T report this alone
 ```
 
-*Class weights* tell the loss function that missing a rare positive costs more — set the weight inversely proportional to class frequency (`weight[FAIL] = total / (n_classes × count[FAIL])`), and a single missed failure hurts as much as ~19 missed passes. *Oversampling* duplicates minority rows so the model sees them more often; *undersampling* throws away majority rows (cheap, but you discard real signal). *SMOTE* (Synthetic Minority Over-sampling Technique) is the clever one: instead of duplicating a rare row, it manufactures a *new* one by interpolating between a minority example and one of its nearest minority neighbors.
+**Part 4 — Apply a fix, in rough order of cheapness.** None of these are buffr code — this is illustrative pseudocode showing the standard toolkit:
 
-```
-  SMOTE — synthesize, don't duplicate
+**The four standard fixes, cheapest first**
+```python
+# ILLUSTRATIVE ONLY — not buffr code. Standard imbalance toolkit.
 
-  feature space (two FAIL examples, A and B, are k-nearest neighbors):
+# (1) THRESHOLD TUNING — free, do this first. Move the decision boundary.
+pred = (model.predict_proba(X)[:, 1] > 0.18)   # not the default 0.50
 
-      A ●───────────────● B
-          ↑
-       new synthetic point = A + rand(0,1) × (B − A)
-       (a fresh FAIL row ON the line between two real ones)
+# (2) CLASS WEIGHTS — tell the loss the rare class costs more.
+model = LogisticRegression(class_weight="balanced")   # weight ∝ 1/prevalence
 
-  duplication gives the model the SAME point 19×;
-  SMOTE gives it 19 plausible, slightly-different points → less overfit
-```
+# (3) RESAMPLING — rebalance the TRAINING set only (never val/test).
+X_res, y_res = SMOTE().fit_resample(X_train, y_train)  # synth minority rows
 
-*Focal loss* attacks a different angle: it down-weights examples the model already classifies easily (the obvious passes) so gradient updates concentrate on the hard, rare cases — `loss = (1 − p_correct)^γ × cross_entropy`, where a confident-correct prediction (`p_correct ≈ 1`) gets multiplied by nearly zero and stops drowning out the minority.
-
-**The threshold move — the fix that needs no retraining.** Every probabilistic classifier defaults to a 0.5 decision cutoff: predict FAIL if `P(FAIL) > 0.5`. But on imbalanced data the model is shy about the rare class, so its FAIL probabilities cluster *below* 0.5 even when it's onto something. Lower the threshold to, say, 0.2 and you trade precision for recall — catch more failures, at the cost of more false alarms. It's a dial you turn *after* training, often alongside reweighting.
-
-```
-  threshold move — slide the cutoff, no retrain
-
-  P(FAIL) line for actual-FAIL runs (model is under-confident):
-
-   0.0 ──────●──●─●────────●───────●──────── 1.0
-                 ▲                 ▲
-            default 0.5         (only this one caught at 0.5)
-                 │
-      move cutoff to 0.2 ──┐
-   0.0 ──●──●─●────────●───┴───────●──────── 1.0
-         └─ now 4 of 5 FAILs caught; recall ↑, precision ↓
+# (4) FOCAL LOSS — down-weight easy majority examples during training.
+loss = -alpha * (1 - p_t)**gamma * log(p_t)            # gamma focuses on hard cases
 ```
 
-### Move 3 — the principle
+**Where each fix acts in the pipeline**
+```
+   class weights ─────────────┐
+   focal loss ────────────────┼──► TRAIN stage (changes the loss)
+                              │
+   SMOTE / resampling ────────┼──► DATA stage, TRAIN SPLIT ONLY ★ leakage risk if you
+                              │                                  resample before split
+   threshold tuning ──────────┴──► EVAL stage (changes the decision, not the model)
+```
 
-Imbalance is decided at the metric, not the model. The single most expensive mistake in skewed-class work is reporting accuracy and calling it done — because the rarer and more important the positive class, the more accuracy flatters a model that ignores it. Pick a metric that weights the rare class fully (macro-F1, per-class recall), *then* reach for the fixes. buffr's eventual run-failure detector is the canonical case: failures are rare, catching them is the whole point, and the day you score it on accuracy is the day it's silently broken.
+### Move 2.5 — current vs future
+
+**What buffr has today vs what a trained classifier would add**
+```
+   TODAY (real)                          FUTURE (Case B — the exercise)
+   ┌──────────────────────────┐          ┌──────────────────────────────┐
+   │ eval/queries.json        │          │ ml/ classifier over a labeled │
+   │  P@1, R@3 computed   ◄────┼──same────┼──► set, where positives are   │
+   │  (precision / recall      │  metric  │   RARE — and you must NOT     │
+   │   family — already real)  │  family  │   report accuracy alone       │
+   │ NO trained model          │          │ trained model + macro-F1 +    │
+   │ NO imbalance handling     │          │ confusion matrix + threshold  │
+   └──────────────────────────┘          └──────────────────────────────┘
+```
+The vocabulary is already in the repo; the trained model that would force you to *handle* imbalance is not.
+
+### Move 3 — The principle
+
+The principle: **choose the metric before you choose the model, and choose it for the rare class you actually care about.** Imbalance doesn't make the problem harder to model — it makes the problem easy to *fake*. Accuracy is the faker's favorite tool. The fix is never a single trick; it's refusing to let one number stand alone.
 
 ## Primary diagram
 
+**The whole picture: same model, three metrics, only one of them honest**
 ```
-  Class imbalance — the trap, the honest metrics, the fixes (full recap)
-
-  ┌─ DATA (skewed) ─────────────────────────────────────────────┐
-  │  agents.messages → label "fail?"   950 PASS · 50 FAIL (5%)  │
-  └───────────────────────────────┬─────────────────────────────┘
-                                  │
-  ┌─ THE TRAP ───────────────────▼──────────────────────────────┐
-  │  accuracy = 0.95   ←─ "always PASS" model, recall(FAIL)=0   │
-  └───────────────────────────────┬─────────────────────────────┘
-                                  │ replace the metric ↓
-  ┌─ HONEST METRICS ─────────────▼──────────────────────────────┐
-  │  per-class precision (col-wise) · recall (row-wise)         │
-  │  macro-F1 = mean(F1 per class, EQUAL weight)  → 0.485       │
-  │  confusion matrix (see 08) = the per-cell truth             │
-  └───────────────────────────────┬─────────────────────────────┘
-                                  │ then rebalance ↓
-  ┌─ FIXES ──────────────────────▼──────────────────────────────┐
-  │  data:  oversample · undersample · SMOTE (interpolate)      │
-  │  loss:  class weights · focal loss (down-weight easy)       │
-  │  post:  threshold move (slide cutoff, no retrain)           │
-  └──────────────────────────────────────────────────────────────┘
+                         ┌─────────────────────────────────┐
+                         │      99% A / 1% B  test set       │
+                         └─────────────────────────────────┘
+                                       │
+                  ┌────────────────────┼────────────────────┐
+                  ▼                    ▼                    ▼
+         ┌────────────────┐   ┌────────────────┐   ┌──────────────────┐
+         │   ACCURACY     │   │  RECALL(B)     │   │   MACRO-F1       │
+         │     0.98       │   │     0.10       │   │     0.59         │
+         │  "looks great" │   │ "catches none" │   │ "rare class voted"│
+         │   ✗ LIES       │   │   ✓ honest     │   │   ✓ honest       │
+         └────────────────┘   └────────────────┘   └──────────────────┘
+                  │                    │                    │
+                  └──────────► report the right TWO ◄───────┘
+                              (per-class recall + macro-F1),
+                              never accuracy alone, plus PR-AUC
+                              when you also need a threshold-free view
 ```
+One model, three numbers — the one a beginner quotes is the one that's lying.
 
 ## Elaborate
 
-Skewed-class evaluation came out of fraud detection, medical diagnosis, and information retrieval — fields where the positive class is rare *and* the cost of missing it dwarfs the cost of a false alarm. That cost asymmetry is why "just balance the data" isn't always right: undersampling throws away real majority signal, and oversampling can teach the model to memorize the few minority rows. SMOTE (Chawla et al., 2002) was the response — synthesize plausible minority examples instead of duplicating them. Focal loss (Lin et al., 2017, "Focal Loss for Dense Object Detection") came from object detection, where background pixels vastly outnumber objects; it generalized into the standard tool for "the easy examples are drowning the hard ones." The threshold move connects directly to calibration (`09-calibration.md`): you can only move a threshold sensibly if the predicted probabilities mean something, and on imbalanced data they often don't until you calibrate them. The adjacent concept is the confusion matrix (`08-confusion-matrices.md`) — every metric in this file is derived from its cells, which is why the two files are a pair. This rhymes faintly with your contrl pose pipeline: a rep-counter that fired on every frame would have great "accuracy" against mostly-not-a-rep frames and catch no reps — same trap, different domain.
+A few sharp edges worth holding:
+
+- **PR-AUC over ROC-AUC under imbalance.** ROC-AUC can look strong even when the positive class is hopeless, because its x-axis (false-positive rate) has a huge denominator of negatives. Precision-Recall AUC keeps the rare positives in the denominator where you can see them. Under heavy imbalance, report PR-AUC.
+- **SMOTE only on the training split, and only after the split.** Synthesize minority rows *before* you split and synthetic neighbors of a test point leak into train — your eval inflates and you won't know why. This is the imbalance-flavored version of the leakage lesson from `03-train-val-test.md`.
+- **Threshold tuning is free and underused.** Class weights and resampling change the model; moving the decision threshold from 0.50 changes only how you read its probabilities. Always try the free lever first, and tune the threshold on validation, not test.
+- **Resampling distorts calibration.** After SMOTE or class weights, the model's output probabilities no longer match real-world frequencies — see `09-calibration.md`. If you need trustworthy probabilities (not just labels), you may have to recalibrate after rebalancing.
+- **buffr's honest connection.** P@1 and R@3 over `eval/queries.json` are precision and recall — the exact family this file lives in. buffr already computes them; it just computes them over a retrieval rank, not over a trained classifier's predictions. Same arithmetic, no model behind it yet.
 
 ## Project exercises
 
-> No curriculum file present; exercises derived from the codebase.
+### Build a query-intent classifier where the positive class is rare
 
-### Measure buffr's true base rate and pick the metric that survives it
+- **Exercise ID:** [B2C.5] Phase 2C
+- **What to build:** Not yet implemented — buffr trains nothing. Build the first real classifier in a new `ml/` dir: a binary query-intent model (e.g. "is this query answerable from the corpus" vs "out-of-scope") trained on a labeled set you grow from `eval/queries.json`. Engineer the labels so the positive class is genuinely rare (~5–10%), then handle the imbalance: report macro-F1 and per-class recall, never accuracy alone; apply class weights; tune the decision threshold on a validation split.
+- **Why it earns its place:** It forces the one instinct interviews probe and beginners lack — distrusting accuracy. You'll feel the 99% lie firsthand, then fix it with the standard toolkit. It also connects directly to a metric vocabulary already in the repo.
+- **Files to touch:** new `ml/intent_classifier.py` (or `.ts`), new `ml/labels.json` derived from `eval/queries.json`, new `ml/metrics.py` (macro-F1, per-class recall, PR-AUC), a short `ml/README.md` recording the headline numbers.
+- **Done when:** the harness prints accuracy AND macro-F1 AND per-class recall side by side; a one-paragraph note explains why accuracy alone would mislead here; the chosen threshold is justified from a validation PR curve, not left at 0.50.
+- **Estimated effort:** 1–2 days (most of it building the labeled set, which is the realistic ratio).
 
-- **Exercise ID:** IMB-1 (Case B — no classifier exists yet). **The metric-discipline exercise.**
-- **What to build:** a one-off script that queries `agents.messages`, computes the base rate of `warning` and `error` event rows versus total runs (the natural "failed run" label), and reports what the imbalance is. Then write down — with the arithmetic — why accuracy would be the wrong metric for a failure detector at that base rate, and which metric (macro-F1 + per-class recall) you'd report instead.
-- **Why it earns its place:** it forces the load-bearing decision *before* any model exists. You discover the imbalance is real (failures are rare in `agents.messages`) and prove, on buffr's own numbers, that accuracy would lie. The "I checked the base rate before I picked the metric" story.
-- **Files to touch:** new `scripts/base-rate.ts` (or a query you run against `agents.messages`); read the event-type semantics from `src/supabase-trace-sink.ts` (the `warning`/`error` cases of `emit()`).
-- **Done when:** the script prints the positive-class fraction and a one-line justification of macro-F1 over accuracy at that fraction.
-- **Estimated effort:** 2–4 hr.
+### Compare three imbalance fixes on the same model
 
-### Prototype threshold-moving on a rare-event detector over trace metrics
-
-- **Exercise ID:** IMB-2 (Case B — no classifier exists yet).
-- **What to build:** a toy rare-event detector over trace-derived features (e.g. `tokens_used`, tool-call count, presence of an `error` event per conversation) that outputs a probability, plus a threshold sweep that plots precision and recall as you slide the cutoff from 0.5 down. Pick the threshold that hits a target recall on the rare class.
-- **Why it earns its place:** threshold-moving is the fix you can demo with no retraining and no labeled training set — exactly what buffr can afford. It makes the precision/recall trade tangible on buffr's own trajectory data.
-- **Files to touch:** new `scripts/threshold-sweep.ts` reading features from `agents.messages` (columns `tokens_used`, `tool_calls`, `tool_results`); reuse the DB pool pattern from `src/cli/eval-cmd.ts`.
-- **Done when:** the sweep prints a precision/recall pair per candidate threshold and you can name the cutoff that meets a stated recall target.
-- **Estimated effort:** 1 day.
+- **Exercise ID:** [B2C.5b] Phase 2C
+- **What to build:** Not yet implemented — buffr trains nothing. Take the [B2C.5] classifier and run an honest bake-off: baseline (no fix), class weights, SMOTE-on-train-only, and threshold tuning. Hold the model architecture and split fixed; vary only the imbalance treatment. Record macro-F1, per-class recall, and PR-AUC for each.
+- **Why it earns its place:** Teaches that there is no single "balance the classes" button — each fix has a cost (SMOTE distorts calibration, weights shift the threshold) and you must measure, not assume. This is the measurement-driven-decision discipline `agent-layer-plan.md` calls the portfolio separator.
+- **Files to touch:** new `ml/imbalance_bakeoff.py`, reuse `ml/metrics.py`, append a results table to `ml/README.md`.
+- **Done when:** a four-row results table exists with the same train/test split across all rows; one sentence names which fix you'd ship and why; the SMOTE row demonstrably resampled the training split *only*.
+- **Estimated effort:** 1 day on top of [B2C.5].
 
 ## Interview defense
 
-**Q: Your run-failure classifier reports 96% accuracy. Are you happy?**
-Answer: not until I see per-class recall. If failures are ~4% of runs, a model that predicts "pass" for everything scores 96% accuracy and catches zero failures — accuracy is dominated by the easy negatives. I'd report macro-F1 and the recall on the FAIL class specifically; that's the number that tells me whether the thing I built for actually works.
+Most candidates have only consumed pre-trained models — they've never owned the metric. Having trained a classifier under imbalance and *chosen* the metric is the signal.
 
+**Q: Your model reports 95% accuracy. Why might I not be impressed?**
 ```
-  accuracy 96%  ──►  recall(FAIL)?  ──►  if 0% → useless despite 96%
+   "What's the class balance?" ◄── the first question, always
+        │
+        ├─ if 95% of rows are one class:
+        │     a constant predictor scores 95% — accuracy proves nothing
+        │
+        └─ "Show me per-class recall and macro-F1. Accuracy on an
+            imbalanced set rewards ignoring the minority class."
 ```
+Anchor: accuracy is a weighted average the majority class can buy outright.
 
-**Q: You're imbalanced. Walk me through your options.**
-Answer: three points of intervention. At the data: oversample the minority, undersample the majority, or SMOTE (synthesize new minority rows by interpolating between neighbors instead of duplicating). At the loss: class weights (a missed rare positive costs proportionally more) or focal loss (down-weight the easy examples). And the one people forget — **the threshold move: you don't have to retrain at all; slide the 0.5 decision cutoff down to trade precision for recall.** That's the cheapest fix and often the first I reach for.
+**Q: When do you reach for PR-AUC instead of ROC-AUC?**
+```
+   imbalance heavy?
+     │
+     ├─ YES ─► PR-AUC: keeps rare positives in the denominator,
+     │          so it can't be flattered by a sea of true negatives
+     │
+     └─ NO  ─► ROC-AUC is fine; FPR denominator isn't dominated
+```
+Anchor: ROC's false-positive rate hides under a huge negative denominator; PR-AUC doesn't.
 
+**Q: You used SMOTE and your eval scores jumped. Should I trust it?**
 ```
-  data (SMOTE) · loss (weights/focal) · threshold (slide 0.5 → 0.2)
-                                          └─ no retrain — the forgotten one
+   did you resample BEFORE or AFTER the split?
+     │
+     ├─ before ─► LEAKAGE. Synthetic neighbors of test points
+     │             contaminated train. The jump is fake.
+     │
+     └─ after, train-only ─► legitimate; report it
 ```
+Anchor: rebalance the training split only — resampling before the split leaks.
 
 ## See also
 
-- `08-confusion-matrices.md` — every metric here is derived from its cells; read it as the companion.
-- `09-calibration.md` — you can only move a threshold sensibly when the probabilities mean something.
-- `04-model-selection.md` — pick the metric (this file) before you compare models.
-- `14-training-run-logging.md` — log the confusion matrix per run so imbalance is visible over time.
-- `../05-evals-and-observability/02-eval-methods.md` — buffr's existing P@1/R@3 scorers, the nearest real metric code.
+- `./06-domain-gap.md` — the *other* way eval lies: not class ratios, but a train-vs-inference distribution shift.
+- `./08-confusion-matrices.md` — the matrix every per-class recall and macro-F1 number in this file is read off of.
+- `../03-retrieval-and-rag/` — `eval/queries.json` as a labeled set; the P@1/R@3 vocabulary reused here.
+- `../05-evals-and-observability/` — where buffr's precision/recall numbers are actually computed today.
+- `../09-ml-system-design-templates/` — where "which metric do we trust" becomes a system-level decision.

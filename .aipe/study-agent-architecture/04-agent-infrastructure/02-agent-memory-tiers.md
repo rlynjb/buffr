@@ -1,212 +1,297 @@
-# Agent memory tiers — and buffr's honest middle tier
+# Agent Memory Tiers
 
-**Industry name(s):** agent memory tiers · working/episodic/long-term
-memory · retrieval-based memory. **Type label:** Industry standard.
-
-**In this codebase: yes — buffr has episodic memory via `@aptkit/memory`,
-recalled by relevance through the same search tool.** This is the most
-nuanced file in the guide, because buffr's memory has a precise honest
-boundary: **relevance recall across sessions — yes; in-prompt
-conversational threading — no.** Hold that distinction; it's the whole
-file.
+*Industry names: **agent memory** / **the memory hierarchy** / **working vs episodic vs
+long-term**. Type label: Industry standard (the three tiers are universal; buffr's
+shared-store episodic memory is Project-specific). IMPLEMENTED in buffr (partially).*
 
 ## Zoom out, then zoom in
 
-```
-  Zoom out — the three memory tiers, buffr's marked
+An agent has three kinds of memory, distinguished by *how long they last* and *how they're
+recalled*. buffr ships two of the three, and the one it ships across sessions has a sharp,
+load-bearing limitation this file exists to make honest.
 
-  ┌─ Working (in-context) ─────────────────────────┐
-  │  The current task's window. Gone when run ends. │
-  │  buffr: the messages array — BUT only this turn │ ← NO history threaded
-  └─────────────────────────────────────────────────┘
-  ┌─ Episodic (recent sessions) ───────────────────┐
-  │  Past exchanges, retrieved by relevance.        │ ← we are here
-  │  buffr: @aptkit/memory, kind=memory in chunks   │   (THIS is buffr's tier)
-  └─────────────────────────────────────────────────┘
-  ┌─ Long-term (persistent knowledge) ─────────────┐
-  │  Durable facts in a vector DB. Unbounded.       │
-  │  buffr: the indexed documents corpus            │
-  └─────────────────────────────────────────────────┘
+```
+  buffr's stack — memory spans construction, the loop, and storage
+
+  ┌─ Session — src/session.ts ─────────────────────────────────────┐
+  │  createConversationMemory(:53) · memory.remember(...)(:66)     │
+  └──────────────────────────┬─────────────────────────────────────┘
+  ┌─ ★ AGENT MEMORY — what it REMEMBERS ★ ────────────▼────────────┐
+  │  working   = the messages array  (in-context, gone @ return)   │
+  │  episodic  = past exchanges, recalled by relevance  ★ buffr ★  │
+  │  long-term = the indexed document corpus                       │
+  └──────────────────────────┬─────────────────────────────────────┘
+  ┌─ Storage — pgvector (ONE chunks table) ───────────▼────────────┐
+  │  documents AND memory rows share it, tagged meta.kind          │
+  └─────────────────────────────────────────────────────────────────┘
 ```
 
-Zoom in: working memory is the window (and buffr's is amnesiac across
-turns — no history). Episodic memory is past exchanges retrieved by
-relevance — buffr *does* this, via `@aptkit/memory`. Long-term is the
-durable document corpus. The interesting tier is the middle one, and
-its honest limit.
+The surprising part: buffr's episodic memory rides the **same** pgvector table as the documents,
+tagged `meta.kind='memory'`, so a past exchange resurfaces through the **same**
+`search_knowledge_base` tool that finds documents. The cost of that elegance is the honest
+distinction below — and it's the single most important thing in this file.
 
 ## Structure pass
 
-**Layers.** Three tiers, but buffr collapses two of them into one store:
-documents (long-term) and memory (episodic) both live in `chunks`,
-distinguished by `meta.kind`.
+Three tiers, one axis: **lifespan** — how long does this memory survive?
 
-**Axis — "how does a past exchange reach the next answer?"** Two
-possible paths: threaded into the prompt (conversational context) or
-retrieved by relevance (episodic recall). buffr uses *only* the second.
-Tracing this axis is what separates "remembers by retrieving" from
-"remembers by carrying forward."
+```
+  Axis = LIFESPAN · trace it across the three tiers, find the seam
 
-**Seam.** The `memory.remember` / `memory.recall` boundary. `remember`
-embeds the exchange and stores it (`src/session.ts:67`); `recall`
-happens implicitly through the *same* `search_knowledge_base` tool. The
-seam is that memory and documents share a retrieval path.
+  working    lives for ONE answer() call         the messages array, gone on return
+  ───────────────── ★ SEAM: memory crosses the session boundary ★ ─────────────────
+  episodic   lives ACROSS sessions               remembered to pgvector, recalled by relevance
+  long-term  lives forever                       the indexed document corpus
+```
+
+The seam is the session boundary. Above it, working memory dies when `answer()` returns — it's
+the loop's scratchpad. Below it, episodic and long-term memory persist in pgvector and are
+recalled by similarity, not by being in the prompt. buffr's seam line is `session.ts:66`
+(`memory.remember(...)` writes the just-finished exchange to durable storage) versus the working
+memory that lived only inside that `answer()` call.
 
 ## How it works
 
-#### Move 1 — the mental model
+### Move 1 — mental model
 
-You know local-first storage: a canonical local store plus
-context you pull in by relevance. buffr's memory is that instinct
-applied to conversation — past exchanges are stored, and the relevant
-ones are *pulled back* when a new question resembles them. It does *not*
-keep the whole conversation in hand; it retrieves the relevant bits.
+Working memory is a variable; episodic and long-term memory are a database table. Bridge from
+frontend: working memory is `useState` inside a component — it exists while the component is
+mounted and resets on unmount. Episodic and long-term memory are rows in a DB table you query by
+relevance. buffr's twist: both live in the *same* table, told apart by a `kind` column.
 
 ```
-  Pattern — buffr's retrieval-based episodic memory
+  THE SHAPE — three tiers by lifespan and recall mechanism
 
-  turn ends → embed(question + answer) → store tagged kind=memory
-                                              │ (in chunks table)
-  next turn → search_knowledge_base(new question)
-                  │ over-fetches, filters kind=memory
-                  ▼
-            relevant PAST exchanges resurface as retrieved context
-            (across sessions — NOT threaded as conversation history)
+  ┌─ WORKING (variable) ───────────────────────────────────────┐
+  │  messages array · in-context · recalled by BEING there     │
+  │  lifespan: one answer() call                               │
+  └────────────────────────────────────────────────────────────┘
+  ┌─ EPISODIC + LONG-TERM (one DB table, kind column) ─────────┐
+  │  chunks table in pgvector · recalled by RELEVANCE (cosine) │
+  │   meta.kind='memory'   → episodic (past exchanges)         │
+  │   meta.kind=<document> → long-term (indexed corpus)        │
+  │  lifespan: across sessions / forever                       │
+  └────────────────────────────────────────────────────────────┘
 ```
 
-#### Move 2 — the walkthrough
+### Working memory: the messages array, gone when answer() returns
 
-**`remember` embeds each exchange after the turn.** At the end of every
-`ask`, buffr writes the exchange to memory (`src/session.ts:64-69`),
-best-effort so a memory failure never loses the answer:
+Bridge from known: this is `useState` for the conversation — append-only, and unmounted when the
+call ends. The loop seeds it with the question and grows it per turn (covered fully in
+`../01-reasoning-patterns/02-agent-loop-skeleton.md`). The point here: it has no lifespan beyond
+the call.
 
 ```ts
-try {
-  await memory.remember({ conversationId, question, answer });
-} catch {
-  // swallow: memory is best-effort, the turn already succeeded
+// run-agent-loop.ts:94 — working memory is born, lives, and dies inside answer().
+const messages: ModelMessage[] = [{ role: 'user', content: userPrompt }];
+// ...grows via messages.push(...) at :124 and :189 across up to 6 turns...
+// when answer() returns, this array is garbage-collected. Nothing persists it.
+```
+
+Annotation: working memory is the *only* place the model's own reasoning within a turn lives. The
+moment `answer()` returns, it's gone. That's why buffr needs episodic memory at all — without it,
+every question starts from a blank scratchpad.
+
+### Episodic memory: remember the exchange to pgvector
+
+This is buffr's cross-session memory. After each turn, the session embeds the formatted
+question+answer and upserts it into the *same* store the documents live in, tagged so it's
+distinguishable. Bridge from known: this is an `INSERT` into your DB table, where one column
+(`kind`) marks the row's type.
+
+```ts
+// src/session.ts:53,66 — wire the memory engine, then write after each turn.
+const memory = createConversationMemory({ embedder, store });  // :53 — same embedder, same store
+...
+async ask(question) {
+  const answer = await agent.answer(question);
+  await trace.flush();
+  try {
+    await memory.remember({ conversationId, question, answer });  // :66 — write the exchange
+  } catch { /* best-effort: a memory-write fail must not lose the user's answer */ }  // :67-69
+  return answer;
 }
 ```
 
-Inside, `createConversationMemory` formats the exchange ("Past exchange
-— user asked: … assistant answered: …"), embeds it, and upserts it
-tagged `kind=memory` with a per-conversation counter id
-(`conversation-memory.js:29-43`).
-
-**Recall rides the *same* search tool — no second tool.** This is the
-deliberate design. Memory shares the `chunks` store with documents
-(`src/session.ts:50-53`), so a future question's `search_knowledge_base`
-call surfaces relevant past exchanges *alongside* relevant documents.
-The memory engine's `recall` over-fetches then filters by kind
-(`conversation-memory.js:48-53`) because the `VectorStore` contract has
-no metadata filter. aptkit even ships a dedicated `search_memory` tool
-(`memory-tool.js`) — and buffr *doesn't* use it, on purpose, because a
-shared store means the existing search already surfaces memory (the
-memory-tool's own doc comment says exactly this,
-`memory-tool.js:7-9`). One tool, smallest surface.
-
-**The honest limit, stated precisely.** buffr recalls past exchanges by
-*relevance*, across sessions — that's real episodic memory. What it does
-*not* do is thread the sequential conversation into the prompt.
-`RagQueryAgent.answer()` treats each question independently
-(`run-agent-loop.js:22`; `src/session.ts:25-27`). So if you ask "what
-about the second one?" referring to your previous turn, buffr won't have
-that turn in its window — unless the embedding of the prior exchange
-happens to be relevant enough to retrieve. Relevance recall: yes.
-Conversational-context threading: no. Both halves are true and the
-distinction is the point.
-
-```
-  Comparison — the two memory paths, buffr's choice marked
-
-  relevance recall (buffr HAS):     in-prompt threading (buffr LACKS):
-    embed exchange → store            keep prior turns in messages array
-    new Q retrieves relevant past     "what about the 2nd one?" resolves
-    works across sessions             requires sequential history
-    ✓ via search_knowledge_base       ✗ messages = [just this question]
+```ts
+// @aptkit/memory — conversation-memory.ts:74-87 — remember() = embed + tagged upsert.
+async remember(turn) {
+  const text = format(turn);                       // "Past exchange — user asked... assistant..."
+  const [vector] = await embedder.embed([text]);
+  const n = counters.get(turn.conversationId) ?? 0;
+  await store.upsert([{
+    id: `${kind}:${turn.conversationId}:${n}`,      // :80-84 — id namespace "memory:<conv>:<n>"
+    vector,
+    meta: { kind, conversationId: turn.conversationId, text },  // ← meta.kind='memory' is the tag
+  }]);
+}
 ```
 
-#### Move 2.5 — current vs future state
+```
+  remember — the exchange becomes a tagged row in the shared store
 
-**Phase A (now):** retrieval-based episodic memory + amnesiac working
-memory. Past exchanges are recalled by relevance; the current
-conversation is not carried forward in-prompt.
+  {question, answer} ─▶ format ─▶ embed ─▶ upsert
+                                              │
+   id = "memory:<conv>:<n>"                   ▼
+   meta.kind = "memory"          ┌──────────────────────────┐
+                                 │  ONE pgvector chunks table│
+   (documents: meta.kind=doc)   │  documents + memory rows   │
+                                 └──────────────────────────┘
+```
 
-**Phase B (would-be):** thread recent turns into the messages array.
-The session comment marks this as an *aptkit-side* change
-(`src/session.ts:26-27`) — `RagQueryAgent.answer` would need to accept
-prior turns. What *doesn't* have to change: the retrieval memory keeps
-working regardless; threading is additive, not a replacement.
+Annotation two things. First, `remember` is wrapped in try/catch (`session.ts:67-69`) — memory is
+best-effort, because a write failure must never cost the user the answer they already got. Second,
+the id namespace `memory:<conv>:<n>` (`conversation-memory.ts:80-84`) keeps memory ids from
+colliding with document ids in the shared table.
 
-#### Move 3 — the principle
+### Episodic recall: over-fetch, then filter by kind
 
-Long-term memory only works if the right thing is retrieved at the right
-time — which is RAG inside the agent. buffr leans entirely on that:
-memory is retrieval, sharing the document store and the document search
-tool. The cost is the missing conversational thread; the benefit is a
-single read-only tool and memory that works across sessions, not just
-within one. Naming exactly which kind of memory you have — relevance
-recall, not context threading — is the senior move.
+Recall happens through the *same* `search_knowledge_base` tool the model already calls for
+documents — because memory lives in the same table. But the VectorStore contract has no metadata
+filter, so `recall` over-fetches and filters in application code. Bridge from known: it's a
+`SELECT ... LIMIT 20` followed by a `.filter()` in JS, because the query layer can't filter on
+`kind` directly.
+
+```ts
+// @aptkit/memory — conversation-memory.ts:89-106 — recall() = search, then keep only memory rows.
+async recall(query, k = 5) {
+  const [vector] = await embedder.embed([query]);
+  const fetchK = Math.max(k * 4, 20);              // :94 — OVER-FETCH (docs may rank above memory)
+  const hits = await store.search(vector, fetchK);
+  return hits
+    .filter((h) => h.meta?.kind === kind)          // :97 — keep ONLY meta.kind='memory'
+    .slice(0, k)                                    // then trim to k
+    .map((h) => ({ id: h.id, score: h.score, text: h.meta.text, conversationId: ... }));
+}
+```
+
+```
+  recall — relevance search, then filter to memory rows
+
+  query ─▶ embed ─▶ store.search(fetchK = max(k*4, 20))
+                            │ returns docs AND memory, ranked by cosine
+                            ▼
+                     filter meta.kind == 'memory'  ─▶ slice(k)  ─▶ MemoryHit[]
+                     (over-fetch covers docs that outrank memory)
+```
+
+Annotation: the over-fetch is the price of the shared store. Because search can't filter by
+`kind`, memory could be buried under documents; pulling 4× as many and filtering down recovers
+it. A dedicated memory store would skip this, but then memory wouldn't surface through the same
+tool — buffr chose the shared store on purpose.
+
+### Move 3 — the principle (the honest distinction)
+
+This is the load-bearing point of the file. buffr has **relevance-recall across sessions: YES.**
+A past exchange resurfaces when a new question is similar to it, via the same retrieval tool. But
+buffr has **in-prompt conversational-context threading: NO.** `RagQueryAgent.answer()` treats
+every question independently — there is no sequential turn history threaded into the prompt.
+
+```
+  THE DISTINCTION — two things people conflate, only one of which buffr has
+
+  ┌─ relevance-recall (YES) ───────────────────────────────────────┐
+  │  "what did I say about X?" → similar past exchange resurfaces   │
+  │  mechanism: embed + cosine search over memory rows             │
+  │  works ACROSS sessions                                         │
+  └────────────────────────────────────────────────────────────────┘
+  ┌─ conversational-threading (NO) ────────────────────────────────┐
+  │  "what about the second one?" → no idea, no turn history        │
+  │  answer() treats each question independently (session.ts:25-27) │
+  │  follow-ups that depend on the LAST turn do NOT work            │
+  └────────────────────────────────────────────────────────────────┘
+```
+
+The session comment names this directly (`session.ts:25-27`): "*Still missing: sequential
+in-prompt turn history (RagQueryAgent.answer() treats each question independently). Retrieval-
+based recall above gives relevance-based memory without it.*" So buffr can answer "what did I tell
+you about my deploy setup last week?" (relevance recall), but it cannot answer "and what about the
+second option you just mentioned?" (threading). Know which question your memory design actually
+answers.
 
 ## Primary diagram
 
-```
-  buffr's memory model (the honest distinction)
+Full recap: three tiers, the shared store, the two recall mechanisms, the one gap.
 
-  WORKING:   messages = [ just this question ]   ✗ no prior turns
-  EPISODIC:  ┌─ remember(q,a) → embed → chunks[kind=memory] ─┐
-             │                                               │
-             └─ next Q → search_knowledge_base → recalls ────┘
-                relevant past exchanges (cross-session)
-  LONG-TERM: indexed documents in chunks[kind≠memory]
-
-  recall by relevance ✓   |   conversational threading ✗
 ```
+  buffr's memory — three tiers, one store (conversation-memory.ts:60-108, session.ts:53,66)
+
+  WORKING (in-context, per call)
+  ┌────────────────────────────────────────────────────────────────┐
+  │ messages array (run-agent-loop.ts:94) · recalled by BEING there │
+  │ lifespan: one answer() call, then garbage-collected            │
+  └────────────────────────────────────────────────────────────────┘
+  EPISODIC + LONG-TERM (durable, recalled by relevance)
+  ┌────────────────────────────────────────────────────────────────┐
+  │ ONE pgvector chunks table, told apart by meta.kind             │
+  │   remember (:74-87) ─▶ embed + upsert id="memory:<conv>:<n>"   │
+  │   recall   (:89-106) ─▶ search, over-fetch 4×, filter kind     │
+  │   surfaces via the SAME search_knowledge_base tool             │
+  └────────────────────────────────────────────────────────────────┘
+  THE GAP
+  ┌────────────────────────────────────────────────────────────────┐
+  │ relevance-recall: YES · conversational-threading: NO            │
+  │ answer() treats each question independently (session.ts:25-27)  │
+  └────────────────────────────────────────────────────────────────┘
+```
+
+Two tiers shipped, one store shared, two recall paths, one honest gap. That's the whole memory
+story.
 
 ## Elaborate
 
-The three-tier memory model (working/episodic/long-term) maps an agent's
-knowledge onto the local-canonical-plus-retrieved-context instinct from
-local-first apps. The two-layer short/long split would be covered in a
-future `study-ai-engineering` agent-memory file; this file extends it to
-the three-tier model *and* the cross-session retrieval problem buffr
-actually solves. The reason the retrieval path is load-bearing: a stale
-or wrongly-relevant memory chunk can poison an answer — which is why the
-self-corrective-RAG grader (`02-agentic-retrieval/02-self-corrective-rag.md`)
-matters more in a shared doc/memory store.
+Sharing the documents table for memory (`conversation-memory.ts:20-31` makes the store injectable
+precisely so buffr *can* pass the same `PgVectorStore`) is the clever, slightly dangerous choice.
+Upside: memory needs no new tool, no new table, no router — it surfaces through
+`search_knowledge_base` for free. Downside: memory competes with documents for the top-k slots, so
+a flood of remembered exchanges could crowd out real document hits. The over-fetch
+(`fetchK = max(k*4, 20)`) is a partial mitigation, not a fix. A production system at scale would
+likely split the stores and add a router (the multi-source routing in Section B's file 03) — but
+for a personal assistant with a modest history, one store is the right call.
+
+The multi-agent shape of memory is *shared memory as a contended resource*: when five agents read
+and write one memory store, you get write conflicts, stale reads, and the question of which
+agent's memory is authoritative. buffr is single-agent, so its memory is a single writer to a
+single store — no contention, no authority question. That's why the shared-store design is safe
+here and would need rethinking in a fleet.
+
+Cross-ref `study-ai-engineering` for the two-layer agent-memory split mechanics (the
+canonical/retrieved layering) — this file covers only the agent-architecture tiering and buffr's
+honest threading gap.
 
 ## Interview defense
 
-**Q: Does buffr remember past conversations?**
-Yes, but by *retrieval*, not by threading. After each turn it embeds the
-exchange into the same vector store tagged `kind=memory`
-(`src/session.ts:67`), and future questions surface relevant past
-exchanges through the same `search_knowledge_base` tool, across
-sessions. What it does *not* do is keep the sequential conversation in
-the prompt — `RagQueryAgent.answer` treats each question independently.
-So "what about the second one?" only works if that prior exchange is
-relevant enough to retrieve.
+**Q: "Does your agent remember the conversation?"**
+
+Model answer: "It remembers across sessions by relevance, but it does not thread the conversation
+turn-to-turn — and those are different things. After each turn, `memory.remember`
+(`session.ts:66`) embeds the exchange and upserts it into the same pgvector table as the
+documents, tagged `meta.kind='memory'` (`conversation-memory.ts:74-87`). A later question that's
+*similar* resurfaces it through the same `search_knowledge_base` tool — relevance-recall across
+sessions, yes. But `RagQueryAgent.answer()` treats every question independently
+(`session.ts:25-27`): there's no sequential turn history in the prompt, so a follow-up like 'what
+about the second one?' fails. Relevance-recall yes, conversational-threading no. I'd add threading
+by feeding the last N turns into the messages array — that's an aptkit-side change, and I scoped
+it out deliberately because relevance-recall covers the personal-assistant use case."
 
 ```
-  relevance recall (cross-session) ✓   |   in-prompt history ✗
+  The defense in one picture
+
+  "what did I say about X last week?"  → relevance-recall  → WORKS (cosine over memory rows)
+  "what about the second one?"          → needs threading   → FAILS (each Q is independent)
 ```
 
-**Anchor:** "buffr remembers by retrieving, not by carrying the
-conversation forward — relevance recall yes, context threading no."
-
-**Q: Why does memory share the document store and tool?**
-To keep the agent's surface to exactly one read-only tool. A shared
-store means the existing `search_knowledge_base` already surfaces memory
-— aptkit's dedicated `search_memory` tool is deliberately unused
-(`memory-tool.js:7-9`). The cost is over-fetch-then-filter-by-kind since
-the store has no metadata filter.
+Anchor: *Working (messages array, per call), episodic (remember/recall over the shared pgvector
+table, relevance-recall across sessions YES), long-term (the docs); conversational-threading NO —
+answer() treats each question independently.*
 
 ## See also
 
-- `01-context-engineering.md` — why the working tier is amnesiac
-- `02-agentic-retrieval/02-self-corrective-rag.md` — guarding against
-  stale memory poisoning an answer
-- `02-agentic-retrieval/03-retrieval-routing.md` — the one-store,
-  two-kinds design
-- `.aipe/study-system-design/06-retrieval-as-memory.md` — the same
-  pattern from the system-design angle
+- `01-context-engineering.md` — the profile is *unconditional* recall; memory is *relevance*
+  recall. Two ways context enters the window.
+- `03-tool-calling-and-mcp.md` — memory recall rides the same `search_knowledge_base` tool.
+- `../02-agentic-retrieval/03-retrieval-routing.md` — the router buffr would add to separate
+  memory rows from document rows in the shared store.
+- `study-ai-engineering` → the two-layer agent-memory split mechanics.
+- `../01-reasoning-patterns/02-agent-loop-skeleton.md` — working memory is the loop's messages
+  array.

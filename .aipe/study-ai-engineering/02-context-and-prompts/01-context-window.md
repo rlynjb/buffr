@@ -1,402 +1,313 @@
 # The Context Window
 
-**Industry name(s):** context window · context length · token budget · prompt budget.
-**Type:** Industry standard.
+### *industry: the context window · type: a hard runtime constraint*
 
----
+## Zoom out
 
-## Zoom out, then zoom in
+Every layer in buffr eventually funnels into one fixed-size container. Here is the stack, with this concept marked.
 
-Every model call buffr makes is one flat string going into one model. That string has a ceiling — and buffr puts a guard right in front of the model so nothing oversized ever reaches it.
-
-```
-  Zoom out — where the context window lives
-
-  ┌─ CLI / Session layer ───────────────────────────────────┐
-  │  ask("how does X work?")                                 │
-  │      → RagQueryAgent.answer(question)                    │
-  └───────────────────────────────┬─────────────────────────┘
-                                  │  builds one ModelRequest:
-                                  │  system + messages + tools
-  ┌─ Provider layer (aptkit) ─────▼─────────────────────────┐
-  │  ★ ContextWindowGuardedProvider (maxTokens: 8192) ★      │ ← we are here
-  │      estimate tokens → ok? pass : throw                  │
-  └───────────────────────────────┬─────────────────────────┘
-                                  │  only if it fits
-  ┌─ Model layer (Ollama) ────────▼─────────────────────────┐
-  │  GemmaModelProvider → gemma2:9b → text                   │
-  └──────────────────────────────────────────────────────────┘
-```
-
-That `★` box is the whole concept. The context window is the maximum amount of text — measured in **tokens**, not characters — the model can take in for a single call. buffr fixes that ceiling at **8192 tokens** and wraps the real model in a provider that *checks the request size before forwarding it*. The question this answers: **what happens when system prompt + profile + retrieved chunks + question add up to more than the model can hold?** Without a guard, the answer is "the model silently truncates and you get a confidently wrong answer." With buffr's guard, the answer is "it throws a typed error you can catch."
-
-You already know this shape from the frontend: it's a **request payload size limit**. A server that rejects a 5 MB upload with a 413 *before* trying to parse it is doing exactly what `ContextWindowGuardedProvider` does — pre-flight the size, refuse early, fail loud.
-
----
-
-## The structure pass
-
-Before the mechanics, read the skeleton. Three layers stack between your question and the generated text:
+**buffr's request path, top to bottom**
 
 ```
-  Three layers, one axis traced down them
-
-  axis = "who enforces the token budget?"
-
-  ┌─────────────────────────────────────────────┐
-  │ Session layer  — RagQueryAgent / runAgentLoop│  → NOBODY enforces;
-  │   assembles system + messages + tools        │    it just builds the string
-  └───────────────────────┬─────────────────────┘
-       seam ① (the request crosses into the guard)
-  ┌───────────────────────▼─────────────────────┐
-  │ Guard layer — ContextWindowGuardedProvider   │  → CODE enforces;
-  │   estimateContextWindow() → ok / not ok      │    deterministic, pre-flight
-  └───────────────────────┬─────────────────────┘
-       seam ② (the request crosses into Ollama)
-  ┌───────────────────────▼─────────────────────┐
-  │ Model layer — gemma2:9b inside Ollama        │  → THE RUNTIME enforces;
-  │   silently truncates anything over its limit │    lossy, after the fact
-  └──────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│  CLI / ChatSession      ask("what did I ship in May?")         │
+├──────────────────────────────────────────────────────────────┤
+│  RagQueryAgent          builds the system prompt ONCE          │
+├──────────────────────────────────────────────────────────────┤
+│  runAgentLoop           turns: tool-call ↔ tool-result         │
+├──────────────────────────────────────────────────────────────┤
+│  ★ CONTEXT WINDOW ★     gemma2:9b's 8192-token budget          │  ◄── this file
+│     (everything below must FIT inside this box, per call)      │
+├──────────────────────────────────────────────────────────────┤
+│  gemma2:9b              reads the box, emits next tokens       │
+└──────────────────────────────────────────────────────────────┘
 ```
 
-**One axis — who enforces the token budget?** Trace it top to bottom and the answer flips twice. The session layer doesn't enforce anything; it just concatenates text and hopes. Ollama enforces, but *destructively* — it drops tokens to make things fit and tells you nothing. The middle layer is the one buffr inserts on purpose: **deterministic, pre-flight, fail-loud** enforcement that turns silent truncation into a catchable error.
+You spent seven years passing props into components. A render is a pure function of its props — the component sees what you gave it, nothing else. The context window is that, with a ceiling. gemma2:9b is a function of the bytes in its input, and the input has a hard maximum: **8192 tokens**. Go over, and the call doesn't degrade gracefully — in buffr it doesn't even fire. That ceiling is the single most important number in the system, so we start here.
 
-**The seams:**
-- **Seam ①** is where the assembled `ModelRequest` crosses into the guard. This is where the axis-answer flips from "nobody checks" to "code checks." That's the load-bearing boundary — it's the only place you get a chance to refuse before damage is done.
-- **Seam ②** is where (if it passed) the request crosses into Ollama. Past this seam enforcement becomes lossy. buffr's whole bet is to make seam ① do the work so seam ② never has to.
+## Structure pass
 
-The guard exists precisely *because* seam ② is destructive. Map that and the mechanics below are obvious.
+The window has layers too, and one axis decides everything: **when each layer is built.**
 
----
+**The window's contents, ordered by when they're assembled**
+
+```
+            BUILT ONCE (constructor)          REBUILT EVERY TURN
+            ─────────────────────────         ───────────────────────────
+  cheap ◄── │ system prompt template │        │ user question           │ ──► volatile
+            │ + profile (me.md)      │        │ tool results (chunks)   │
+            │ + tool schemas (TEXT!) │        │ truncated @ 16,000 chars│
+            └────────────────────────┘        └─────────────────────────┘
+                       ▲                                  ▲
+                       │                                  │
+              fixed overhead, paid               the part you actually
+              on every single turn               came to ask about
+```
+
+The seam is right there in the middle: **the left block is constant, the right block churns.** That matters because the left block is *not free* — it's spent out of the same 8192 budget on every turn, before your question gets a single token. The expensive surprise: gemma2:9b has **no native tool API**, so the tool schemas can't ride in a separate `tools` field the way they would with a frontier model — they get rendered into the **system prompt text**. Tool definitions are prose now. They eat the budget.
 
 ## How it works
 
-#### Move 1 — the mental model
+### Move 1 — Mental model: a fixed-size buffer
 
-You know how a controlled `<input maxLength={8192}>` won't accept the 8193rd character — it rejects the overflow at the boundary instead of letting it land and corrupt the field. The context window is that, for a model call. buffr's strategy in one sentence: **estimate the request's token size cheaply, compare it to a fixed budget, and refuse the call before it reaches the model if it won't fit.**
+The context window is a fixed-size buffer, like a `Uint8Array(8192)` you must pack by hand. There's no `realloc`. Everything the model considers — instructions, your data, the question, retrieved evidence — shares this one allocation.
 
-```
-  Pattern — pre-flight check, then pass or refuse
-
-         request (system + messages + tools)
-                       │
-                       ▼
-            ┌─────────────────────┐
-            │ estimate tokens     │   text.length / 3, rounded up
-            │ (~3 chars per token)│
-            └──────────┬──────────┘
-                       │
-              estimate ≤ budget ?
-                ┌──────┴───────┐
-              yes              no
-                │                │
-                ▼                ▼
-        forward to model   emit warning trace
-        (Ollama runs)      + throw ContextWindowExceededError
-```
-
-That branch is the entire kernel. Everything below is what fills each side of it.
-
-#### Move 2 — the step-by-step walkthrough
-
-**The window holds four things, and they compete.** Before any code: know what's *in* the 8192-token budget. It is not just the user's question. Every call carries the system prompt, the injected profile, whatever chunks retrieval pulled back, and the question — and they all draw from the same pool.
+**The buffer, conceptually**
 
 ```
-  What competes for 8192 tokens (single call)
-
-  ┌──────────── 8192-token budget ────────────────────────┐
-  │ outputReserve (768) — held back for the answer        │
-  ├───────────────────────────────────────────────────────┤
-  │ system prompt   — "You are a personal knowledge…"     │
-  │ injected profile (me.md) — "About the person…"        │ ← grows
-  │ retrieved chunks — up to minTopK:4 passages           │ ← grows fastest
-  │ tool schemas     — search_knowledge_base definition   │
-  │ the question     — what the user actually asked       │
-  └───────────────────────────────────────────────────────┘
-       available input budget = 8192 − 768 = 7424 tokens
+  ┌─────────────────────────── 8192 tokens ───────────────────────────┐
+  │ system prompt │ profile │ tool schemas │ question │ tool results   │
+  └───────────────┴─────────┴──────────────┴──────────┴────────────────┘
+   └──── fixed overhead, every turn ───────┘ └──── your actual turn ───┘
+                                            ▲
+                            the more the left eats, the less
+                            room the right has to be useful
 ```
 
-The thing to internalize: **a fat profile and fat retrieved chunks come out of the same budget.** A 2000-token `me.md` leaves ~5400 tokens for chunks + question. This is a competition, not four separate allowances.
+Frontend bridge: you've blown a memory budget before — a bundle that ballooned because one dependency dragged in three more. Same shape. Every token of overhead is a token your real payload can't use.
 
-**Step 1 — wire the guard with a fixed budget.** buffr constructs the model provider by wrapping the raw Gemma provider in the guard. This is the line that sets the ceiling.
+### Move 2 — Walk the assembly
+
+**Part A — The budget is a guard, not a suggestion**
+
+buffr wraps the raw Gemma provider in a guard that estimates the input size and refuses to call the model if it won't fit.
+
+**Where the ceiling is set**
+
+```
+  GemmaModelProvider (raw, no limit)
+            │  wrapped by
+            ▼
+  ContextWindowGuardedProvider ── maxTokens: 8192
+            │
+            │  on every complete():
+            ▼
+   estimate input tokens ──► fits? ──► call gemma2:9b
+                              │
+                              └─► no ──► throw ContextWindowExceededError
+                                         (the model never runs)
+```
 
 ```ts
 // src/session.ts:46
 const model = new ContextWindowGuardedProvider(
   new GemmaModelProvider({ host: cfg.ollamaHost }),
-  { maxTokens: 8192 },
+  { maxTokens: 8192 },                 // ◄── the entire budget, declared here
 );
 ```
 
-`GemmaModelProvider` is the thing that actually talks to Ollama. `ContextWindowGuardedProvider` is a **decorator** around it — same `ModelProvider` interface, so the agent can't tell the difference, but every `complete()` call now passes through the size check first. `maxTokens: 8192` is the only knob buffr sets; `outputReserve` and `charsPerToken` fall back to defaults (768 and 3).
+The guard reserves headroom for output, then checks `estimatedInputTokens <= availableInputTokens`. Over budget throws `ContextWindowExceededError` *before* the provider is called — you fail fast with a named error instead of getting silently-truncated garbage from Ollama. This is the difference between a checked array access and a buffer overrun.
+
+**Part B — The system prompt is built once, then frozen**
+
+The constant left block is literally constant: `RagQueryAgent` assembles it in its constructor and never rebuilds it.
+
+**System-prompt assembly (happens once, at agent construction)**
 
 ```
-  Decorator — same interface, guard inserted transparently
-
-  RagQueryAgent ──.complete(req)──► ┌─ Guard ──────────────┐
-                                    │ check size first     │
-                                    │   ok → delegate       │
-                                    └────────┬──────────────┘
-                                             ▼ .complete(req)
-                                    ┌─ GemmaModelProvider ─┐
-                                    │  POST → Ollama        │
-                                    └───────────────────────┘
-   agent never knows a guard is there — it's just a ModelProvider
+  DEFAULT_SYSTEM_TEMPLATE ──┐
+                            ├─► injectProfile(position: 'start') ──┐
+  profile (me.md text) ─────┘                                     │
+                                                                  ▼
+                                              renderPromptTemplate(…, {})
+                                                                  │
+                                                                  ▼
+                                                       this.system  (frozen)
 ```
-
-**Step 2 — estimate the input tokens.** When the agent calls `complete()`, the guard's first move is to count. It doesn't run a real tokenizer (that'd cost a round-trip); it approximates by **character length divided by 3**.
 
 ```ts
-// packages/providers/local/src/context-window-guard.ts:100-103
-export function estimateTextTokens(text: string, charsPerToken = 3): number {
-  if (charsPerToken <= 0) throw new Error('charsPerToken must be greater than 0');
-  return Math.ceil(text.length / charsPerToken);   // ← the whole "tokenizer"
+// aptkit RagQueryAgent constructor — wired from src/session.ts:57
+const withProfile = options.profile
+  ? injectProfile(template, options.profile, { position: 'start', heading: PROFILE_HEADING })
+  : template;
+this.system = renderPromptTemplate(withProfile, {});   // ◄── built ONCE, reused every turn
+```
+
+```ts
+// src/session.ts:47, :57
+const profile = await loadProfile(pool, cfg.appId);     // me.md from agents.profiles
+const agent = new RagQueryAgent({ model, tools, profile, trace });
+```
+
+The profile (your `me.md`) is prepended *at the start* of the system prompt. Position is deliberate — and it's the exact thing the next file (`02-lost-in-the-middle.md`) is about: the start of the window is a high-attention slot. Building once is the right call: re-rendering identical text every turn would be pure waste, like recomputing a constant inside a render loop.
+
+**Part C — Tool schemas are prose, and they're expensive**
+
+gemma2:9b has no tool-calling API. So the `search_knowledge_base` schema can't sit in a structured `tools` channel — it's stringified into the system text.
+
+**Where tool schemas land, frontier model vs. gemma2:9b**
+
+```
+  Frontier model (Claude, GPT)          gemma2:9b (buffr)
+  ──────────────────────────            ────────────────────────────
+  system: "..."                         system: "...
+  tools:  [ {schema} ]  ◄ separate                + RENDERED TOOL SCHEMA
+           channel, not                            as plain text"  ◄ inside
+           in the prompt text                      the 8192 budget
+```
+
+```ts
+// src/session.ts:43-44 — the tool whose schema becomes prose
+const tool = createSearchKnowledgeBaseTool(pipeline, { minTopK: 4 });
+const tools = new InMemoryToolRegistry([tool.definition], { [tool.definition.name]: tool.handler });
+```
+
+Consequence: with a frontier model, tool definitions are nearly free against the prompt budget. With gemma2:9b they're a recurring tax on every turn. The fewer tools and the leaner each schema, the more of your 8192 stays available for actual evidence. buffr keeps exactly one tool — that's not minimalism for its own sake, it's budget discipline.
+
+**Part D — Tool results are truncated at a hard cap**
+
+The volatile right block can flood. A `search_knowledge_base` call returns chunks; the loop caps each result before it re-enters the window.
+
+**Tool-result flow back into the window**
+
+```
+  search_knowledge_base ──► chunks (could be large) ──► JSON.stringify
+                                                              │
+                                                  truncate @ 16,000 chars
+                                                              │
+                                                              ▼
+                                          appended as a tool_result message
+                                          (…[truncated] if it was over)
+```
+
+```ts
+// aptkit run-agent-loop.ts:52 — the cap buffr runs under
+const MAX_TOOL_RESULT_CHARS = 16_000;
+function truncate(value: string): string {
+  if (value.length <= MAX_TOOL_RESULT_CHARS) return value;
+  return `${value.slice(0, MAX_TOOL_RESULT_CHARS)}\n...[truncated]`;
 }
 ```
 
-And the text it measures is *everything in the request joined together* — system prompt, every message, and the tool schemas (name + description + JSON schema), so the `search_knowledge_base` definition counts against the budget too:
+And the loop itself is bounded so the window can't grow unbounded across turns:
 
 ```ts
-// packages/providers/local/src/context-window-guard.ts:91-98
-export function estimateModelRequestTokens(request, charsPerToken = 3): number {
-  const text = [
-    request.system ?? '',
-    ...request.messages.map(messageText),
-    ...(request.tools ?? []).map(
-      (tool) => `${tool.name} ${tool.description ?? ''} ${JSON.stringify(tool.inputSchema)}`),
-  ].join('\n');
-  return estimateTextTokens(text, charsPerToken);
-}
+// aptkit RagQueryAgent.answer() — buffr's settings, src/session.ts wires the agent
+maxTurns: 6,        // ◄── at most 6 model calls
+maxToolCalls: 4,    // ◄── at most 4 tool invocations before forced synthesis
 ```
 
-The boundary condition to respect: **~3 chars/token is a heuristic, not the truth.** Gemma's real tokenizer might pack code or rare words at 2 chars/token, so a request the guard thinks is "fine" could still be larger than estimated. The guard is a safety margin, not a precise gauge — which is exactly why `outputReserve` leaves slack.
+16,000 chars is a backstop, not a strategy. It prevents one fat tool result from blowing the budget, but blind tail-truncation can lop off the most relevant chunk if it sorted last — which is exactly why the *upstream* `minTopK:4` + short chunks matter more than the cap. Defense in depth: keep the result small at the source, and truncate as a last resort.
 
-**Step 3 — compare against the available input budget.** The full 8192 isn't available for input. The guard carves out `outputReserve` (default 768) for the answer the model still has to generate, then checks the estimate against what's left.
+### Move 2.5 — Current vs. future
 
-```ts
-// packages/providers/local/src/context-window-guard.ts:80-88
-const estimatedInputTokens = estimateModelRequestTokens(request, charsPerToken);
-const availableInputTokens = Math.max(0, maxTokens - outputReserve);  // 8192 − 768 = 7424
-return {
-  estimatedInputTokens, maxTokens, outputReserve, availableInputTokens,
-  ok: estimatedInputTokens <= availableInputTokens,   // ← the verdict
-};
-```
+**The honest gap: no per-turn history in the prompt.**
 
 ```
-  Execution trace — a borderline request
-
-  maxTokens          = 8192
-  outputReserve      = 768
-  availableInput     = 8192 − 768            = 7424
-  request text length= 21,900 chars
-  estimatedInput     = ceil(21900 / 3)       = 7300
-  ok                 = 7300 ≤ 7424           = TRUE  → forward
-
-  (same request, profile grew by 600 chars)
-  request text length= 22,500 chars
-  estimatedInput     = ceil(22500 / 3)       = 7500
-  ok                 = 7500 ≤ 7424           = FALSE → refuse
+  TODAY                                  WHAT'S MISSING
+  ─────────────────────────             ──────────────────────────────
+  answer(q1) ─► fresh window            answer(q2) does NOT see q1 in
+  answer(q2) ─► fresh window            the prompt. No "as I said above."
+       │                                       │
+       └─ continuity comes from          ─────┘ sequential turn history
+          RETRIEVAL (memory chunks),            is an aptkit-side change,
+          not from stuffing transcript           not yet wired
+          into the window
 ```
 
-The number that bites you is `availableInputTokens`, not `maxTokens`. People forget the reserve and wonder why a "7800-token" request got rejected against an "8192" budget. It was always 7424.
+`RagQueryAgent.answer()` treats every question independently — there is no rolling transcript packed into the window (documented in `src/session.ts:25-27`). Conversation continuity is real, but it comes from **retrieval-based memory**: after each turn the exchange is embedded into the same vector store (tagged `kind=memory`) and resurfaces later via the *same* `search_knowledge_base` tool. That's a deliberate trade. Stuffing raw history into the window is the obvious thing and the wrong default here — it burns the 8192 budget on transcript and triggers exactly the position-bias problem in the next file. Retrieval gives relevance-based recall without paying that tax. Whether to *also* add a short sequential history is a genuine open design question, not an oversight.
 
-**Step 4 — refuse loudly, or pass through.** This is the branch from Move 1, in real code. When `ok` is false the guard does two things — emits a `warning` trace event (so the trace sink records *why* the call never happened) and throws a typed error. When `ok` is true it simply delegates to the wrapped provider.
+### Move 3 — The principle
 
-```ts
-// packages/providers/local/src/context-window-guard.ts:57-70
-async complete(request: ModelRequest): Promise<ModelResponse> {
-  request.signal?.throwIfAborted();
-  const estimate = estimateContextWindow(request, this.options);
-  if (!estimate.ok) {
-    this.options.trace?.emit({                       // ← seam ①: observable refusal
-      type: 'warning',
-      capabilityId: this.options.capabilityId,
-      message: `Skipping local provider ${this.provider.id}: estimated `
-        + `${estimate.estimatedInputTokens} input tokens exceed `
-        + `${estimate.availableInputTokens}.`,
-      timestamp: timestamp(),
-    });
-    throw new ContextWindowExceededError(estimate);  // ← typed, carries the estimate
-  }
-  return this.provider.complete(request);            // ← the request never reaches
-}                                                    //   Ollama on the failure path
-```
-
-```
-  Layers-and-hops — the refusal path vs the pass path
-
-  ┌─ Agent ───┐  hop 1: complete(request)   ┌─ Guard layer ────────┐
-  │ runAgent  │ ─────────────────────────►  │ estimate + compare   │
-  │ Loop      │  hop 4a: throw ◄──────────  │  not ok →            │
-  └───────────┘  ContextWindowExceeded      │   emit warning trace │
-        ▲                                   │   throw              │
-        │ hop 4b: ModelResponse             └──────────┬───────────┘
-        │ (only on the ok path)              hop 2 (ok)│ delegate
-        │                                              ▼
-        │                                   ┌─ Model layer ────────┐
-        └────────────────────────────────  │ Ollama gemma2:9b      │
-              hop 3: generated text         │ runs only if it fit   │
-                                            └───────────────────────┘
-```
-
-The contrast that makes this worth doing: on the failure path, **Ollama is never called.** Compare that to the no-guard world, where Ollama *is* called, quietly drops the front of your prompt to fit, and returns a fluent answer built on a truncated input. The guard converts a silent-correctness bug into a loud `ContextWindowExceededError` that carries the full `estimate` so you can log exactly how far over you were.
-
-#### Move 2 variant — the load-bearing skeleton
-
-Strip the guard to the smallest thing that's still the guard:
-
-```
-  Kernel:   estimate(request)  →  compare to (budget − reserve)  →  pass | refuse
-```
-
-Name each part by what breaks without it:
-
-- **The estimate.** Drop it and you have no number to compare — the guard degrades to "always pass," i.e. no guard. It's cheap (char count) on purpose; a real tokenizer round-trip per call would cost more than it saves.
-- **The output reserve.** Drop it (`outputReserve = 0`) and a request that fits the *input* budget can still leave Gemma no room to *answer* — the model runs out of window mid-generation. The reserve is the part everyone forgets; it's why the real ceiling is 7424, not 8192.
-- **The refusal (throw + trace).** Drop it and the guard estimates but forwards anyway — back to silent truncation. The *typed* throw is what makes the failure catchable upstream; the *warning trace* is what makes it visible in the trajectory.
-
-Everything else is hardening: `charsPerToken` is a tunable margin, `capabilityId` is for trace attribution, the `ContextWindowEstimate` payload on the error is for diagnostics. The kernel is just estimate → compare → branch.
-
-#### Move 3 — the principle
-
-**Refuse early at the cheap boundary instead of failing late at the expensive one.** A pre-flight size check that costs a string-length division saves you from a silent-truncation bug that costs you a wrong answer and no error to grep for. This generalizes far past LLMs — it's the 413 before parsing, the schema validation before the DB write, the `maxLength` before the keystroke lands. The model's context window is just an unusually unforgiving version: overflow doesn't error, it *lies*. So you guard it yourself.
-
----
+**The context window is a budget you spend, not a context you have.** Frontend taught you state is something the framework holds for you across renders. Here, nothing is held. Every turn you re-justify the cost of every token: overhead first (system + profile + schemas), then evidence, then question. The engineering is allocation under a hard cap — decide what earns its bytes, fail fast when it won't fit, and refuse to pay for things (like raw history) that retrieval can supply more cheaply.
 
 ## Primary diagram
 
-The whole concept in one frame — what's in the window, who checks it, and the two exits.
+The full picture: one turn, from question to a packed, bounded, guarded window.
+
+**One turn through buffr's context window**
 
 ```
-  buffr's context window guard — end to end
-
-  ┌─ Session layer (buffr) ──────────────────────────────────────┐
-  │ RagQueryAgent.answer(question)                               │
-  │   assembles ONE request from four competing inputs:          │
-  │     system prompt · profile(me.md) · chunks(≤4) · question   │
-  └───────────────────────────────┬──────────────────────────────┘
-                                  │ complete(request)
-  ┌─ Guard layer (aptkit) — src/session.ts:46 wires this ────────┐
-  │ ContextWindowGuardedProvider { maxTokens: 8192 }             │
-  │                                                              │
-  │   estimatedInput = ceil(text.length / 3)                     │
-  │   available      = 8192 − 768 (outputReserve) = 7424         │
-  │                                                              │
-  │        estimatedInput ≤ 7424 ?                               │
-  │         ┌──────────┴───────────┐                            │
-  │       yes                      no                            │
-  │         │                       │                            │
-  │         │              emit warning trace                    │
-  │         │              throw ContextWindowExceededError      │
-  └─────────┼───────────────────────────────────────────────────┘
-            │ delegate (request never truncated)
-  ┌─ Model layer (Ollama) ─▼─────────────────────────────────────┐
-  │ GemmaModelProvider → gemma2:9b → generated answer            │
-  └──────────────────────────────────────────────────────────────┘
+  ask("what did I ship in May?")
+            │
+            ▼
+  ┌──────────────────────── ContextWindowGuardedProvider (maxTokens: 8192) ────────────────────────┐
+  │                                                                                                  │
+  │   BUILT ONCE (constructor)                              REBUILT THIS TURN                        │
+  │   ┌────────────────────────────────┐                   ┌──────────────────────────────────┐     │
+  │   │ system template                │                   │ user question                    │     │
+  │   │ + profile (me.md, at START)    │                   │ tool results (chunks)            │     │
+  │   │ + tool schemas (as PROSE)      │                   │   truncated @ 16,000 chars        │     │
+  │   └────────────────────────────────┘                   └──────────────────────────────────┘     │
+  │                                                                                                  │
+  │   estimate tokens ──► fits in 8192? ──► YES ──► gemma2:9b generates                              │
+  │                                  │                                                               │
+  │                                  └──► NO ──► throw ContextWindowExceededError (never calls model)│
+  │                                                                                                  │
+  │   loop bounds:  maxTurns 6  ·  maxToolCalls 4    (window can't grow forever)                     │
+  │   NOT in window: prior turns' transcript — continuity comes from retrieved memory chunks         │
+  └──────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
----
+After the box: gemma2:9b emits the answer, the loop may take another turn (still inside 8192), and at turn/budget exhaustion the synthesis instruction forces a final answer with tools disabled.
 
 ## Elaborate
 
-**Where this comes from.** Transformer attention is quadratic in sequence length, so every model ships with a fixed maximum sequence it was trained and served to handle. Exceed it and there's no graceful path — the serving runtime either errors or, more commonly for local stacks like Ollama, truncates to fit. The "context window" as a first-class budget you manage is a direct consequence of that architectural limit.
-
-**Why 8192 and not bigger.** `gemma2:9b` running locally on a laptop has a real context limit, and bigger windows cost more memory and latency per token. 8192 is a conservative, laptop-friendly ceiling. Note it's a *buffr* choice set in `src/session.ts:46`, not a law — bump `maxTokens` and the guard's math moves with it.
-
-**The honest gap.** The estimator is ~3 chars/token, which is a fine average for English prose but wrong for the tails (dense code, JSON, non-Latin scripts can run hotter). The guard is therefore a *margin*, not a *measurement*. The 768-token output reserve is the slack that absorbs the estimator's error — which is the real reason it exists, beyond just "leave room for the answer."
-
-**What fills the window in practice.** In buffr the biggest variable input is the retrieved chunks. That's why `03-retrieval-and-rag/` matters here: `minTopK: 4` (set in `src/session.ts:43`) is partly a *quality* decision and partly a *budget* decision — fewer, better chunks keep you well under 7424 and leave room for the profile. Chunking strategy upstream directly determines how much of the window each retrieval costs.
-
-**What it connects to.** The profile injection (next door in `02-lost-in-the-middle.md`) competes for this exact budget. Token economics (`01-llm-foundations/06-token-economics.md`) is the cost side of the same tokens. And the whole agent loop (`04-agents-and-tool-use/01-agents-vs-chains.md`) calls `complete()` up to `maxTurns: 6` times — each turn re-pays the system + profile cost against the window.
-
----
+- **Why 8192 and not bigger?** It's gemma2:9b's practical local budget on Rein's laptop. A bigger model or a longer-context variant moves the number, but the *discipline* doesn't change — there is always a ceiling and you always pay overhead first. Code-wise it's one constant (`src/session.ts:46`); the architecture around it stays identical.
+- **Token estimation is approximate.** The guard estimates input tokens by a chars-per-token heuristic, not a real tokenizer pass. That's fine for a guard — you want a cheap conservative check, and the `outputReserve` headroom absorbs the error. Don't read `ContextWindowExceededError` as a precise measurement; read it as "too close, refuse."
+- **Truncation order is content-blind.** `truncate()` keeps the first 16,000 chars and drops the tail. If your store ever returns chunks in a low-value-first order, the cap throws away your best evidence. Today `minTopK:4` keeps results well under the cap, so it rarely fires — but it's a latent footgun the moment results grow. The real fix lives upstream in retrieval, not in a bigger cap.
+- **The profile-at-start choice is load-bearing.** `injectProfile({ position: 'start' })` isn't cosmetic. The next file explains why the start slot is privileged. If you ever move the profile to the middle of a large window, expect the model to under-use it.
 
 ## Project exercises
 
-> **No curriculum file exists in this repo** (`/Users/rein/Public/buffr/.aipe/`), so these carry no `[Bx.y]` IDs — they're named build items, not curriculum-mapped tasks. This concept is **implemented** (the guard is wired and live), so these are **Case A**: deepen and observe an existing mechanism rather than build it from nothing.
+### Surface the live token budget
 
-### Exercise — Surface the guard's refusal to the user
+- **Exercise ID:** [B1.1] (cite [C1.2], Phase 1) — instrumentation prerequisite for the chaining work.
+- **What to build:** Read back and log the guard's per-turn estimate: estimated input tokens, the 8192 ceiling, and the percentage consumed by the fixed left block (system + profile + tool schemas) vs. the volatile right block.
+- **Why it earns its place:** You cannot budget what you can't see. Today the 8192 is a config constant with no observability — you have no idea how much of it the tool-schema prose actually eats. This number drives every later decision in this sub-section.
+- **Files to touch:** `src/session.ts` (wrap/extend the provider to emit the estimate), `src/supabase-trace-sink.ts` (persist it as a trace event).
+- **Done when:** A trace row per turn shows `estimatedInputTokens / 8192` and the overhead-vs-payload split, and you can point at the exact percentage tool schemas cost.
+- **Estimated effort:** 1–4hr.
 
-- **Exercise ID:** CW-A1 (local id; no curriculum)
-- **What to build:** Catch `ContextWindowExceededError` in `ChatSession.ask()` and turn it into a friendly message ("That pulled back too much context to fit — try a narrower question") instead of an unhandled throw, logging the `estimate` payload.
-- **Why it earns its place:** Right now the typed error exists but buffr does nothing buffr-side with it. Catching it proves you understand the failure path is *catchable* — the entire point of the guard over silent truncation.
-- **Files to touch:** `src/session.ts` (the `ask()` body, around lines 60-71).
-- **Done when:** an oversized request (force it with a huge profile) returns a graceful string and the `estimate` is logged, instead of crashing the turn.
-- **Estimated effort:** <1hr
+### Make truncation content-aware
 
-### Exercise — Instrument the window's headroom every turn
-
-- **Exercise ID:** CW-A2 (local id; no curriculum)
-- **What to build:** A small trace/log line per turn recording `estimatedInputTokens` vs `availableInputTokens` (call `estimateContextWindow` yourself, or read it off the trace), so you can see how close each real query runs to 7424.
-- **Why it earns its place:** Turns the abstract "competition for the budget" into a measured number on real traffic — you'll find out whether the profile or the chunks dominate.
-- **Files to touch:** `src/session.ts`, `src/supabase-trace-sink.ts` (to persist the headroom alongside the existing trace tokens).
-- **Done when:** every persisted turn has an `input_tokens_estimate` and `headroom` you can query.
-- **Estimated effort:** 1-4hr
-
-### Exercise — Make the chunk count budget-aware
-
-- **Exercise ID:** CW-A3 (local id; no curriculum)
-- **What to build:** Cap retrieved-chunk inclusion by remaining budget — after the profile is injected, only include as many chunks as fit under `availableInputTokens`, dropping the lowest-scored first.
-- **Why it earns its place:** Directly exercises the "they compete for the same 8192" insight: a fat profile should *shrink* how many chunks you stuff, automatically.
-- **Files to touch:** `src/session.ts:43` (the `minTopK` wiring) and wherever chunks are assembled before `answer()`; may need an aptkit-side hook (note: `@rlynjb/aptkit-core` is never edited, so do this on buffr's side by trimming the tool result).
-- **Done when:** raising the profile size measurably lowers the number of chunks that reach the model, with no `ContextWindowExceededError`.
-- **Estimated effort:** 1-2 days
-
----
+- **Exercise ID:** [B1.2] (cite [C1.2], Phase 1) — Case B: today truncation is blind tail-cut; this is the next step.
+- **What to build:** Before the 16,000-char cap, sort retrieved chunks by score so truncation drops the *least* relevant tail, not whatever sorted last. (buffr currently relies on `minTopK:4` keeping results small; this hardens the path for when they aren't.)
+- **Why it earns its place:** `MAX_TOOL_RESULT_CHARS` is content-blind (`aptkit run-agent-loop.ts:52`). The fix belongs in buffr's tool result assembly, where you control ordering before it re-enters the window.
+- **Files to touch:** `src/pg-vector-store.ts` (`search()` already returns `score` — guarantee descending order), and verify the search tool wiring in `src/session.ts:43`.
+- **Done when:** A synthetic oversized result set truncates the lowest-scoring chunks first, proven by a test that asserts the kept chunks are the top-scored ones.
+- **Estimated effort:** 1–4hr.
 
 ## Interview defense
 
-**Q: What actually happens if a request exceeds the context window, and what does buffr do about it?**
+**Q: "gemma2:9b has no tool API. Where do the tool schemas go, and why is that expensive?"**
 
-Without a guard, the serving runtime (Ollama here) silently truncates the prompt to fit and returns a fluent but ungrounded answer — a correctness bug with no error. buffr inserts `ContextWindowGuardedProvider` as a decorator that estimates the request size and *refuses before forwarding*, emitting a warning trace and throwing a typed `ContextWindowExceededError`.
-
-```
-  silent truncation        vs        loud refusal (buffr)
-  ┌──────────────┐                   ┌──────────────┐
-  │ overflow →   │                   │ overflow →   │
-  │ Ollama cuts  │                   │ guard throws │
-  │ → wrong ans  │                   │ → no call    │
-  │ → NO error   │                   │ → typed error│
-  └──────────────┘                   └──────────────┘
-```
-
-**Anchor:** `src/session.ts:46` wires it; `context-window-guard.ts:57-70` is the refuse-or-pass branch.
-
----
-
-**Q: The budget is 8192. Why would a 7800-token request get rejected?**
-
-Because the full window isn't all yours for input. The guard reserves `outputReserve` (default 768) for the answer the model still has to generate, so the real input ceiling is `8192 − 768 = 7424`. 7800 > 7424, so it's refused. The reserve is the load-bearing part people forget.
+Into the system prompt *text*. With a frontier model the schema rides a separate `tools` channel that doesn't count against the prompt the same way; with gemma2:9b it's stringified prose inside the 8192-token budget, paid on every turn.
 
 ```
-  8192 budget
-  ├── 768  output reserve (held for the answer)
-  └── 7424 available for input  ← the number that actually gates you
+  frontier: system + [tools]    ← schema in a side channel
+  gemma2:9b: system("...+SCHEMA AS TEXT...")  ← schema eats the budget
 ```
 
-**Anchor:** `context-window-guard.ts:80-88` — `availableInputTokens = max(0, maxTokens − outputReserve)`.
+Anchor: *"No native tools means tool definitions are prose, and prose costs budget."*
 
----
+**Q: "Does buffr remember the previous question within a session?"**
 
-**Q: How does the guard count tokens without a tokenizer, and what's the risk?**
-
-It approximates: `ceil(text.length / 3)` over the joined system prompt, messages, and tool schemas. That's cheap (no round-trip) but it's a heuristic — dense code or non-Latin text can pack fewer than 3 chars per token, so a request the guard thinks fits might actually be larger. The 768-token reserve is the slack that absorbs this estimation error.
+Not by stuffing it into the window. `answer()` treats each question independently (`src/session.ts:25-27`). Continuity comes from retrieval — each exchange is embedded as a memory chunk and resurfaces via the same search tool.
 
 ```
-  text ──length/3──► estimate (margin, not measurement)
-                       │
-              reserve absorbs the error
+  q1 ─► fresh window ─► answer ─► embed exchange as memory chunk
+  q2 ─► fresh window ─► search_knowledge_base may RETRIEVE the q1 memory
 ```
 
-**Anchor:** `context-window-guard.ts:91-103` — `estimateModelRequestTokens` + `estimateTextTokens`.
+Anchor: *"Continuity by retrieval, not by transcript — it saves the budget and dodges position bias."*
 
----
+**Q: "What happens if the assembled input exceeds 8192 tokens?"**
+
+The guard estimates input size and throws `ContextWindowExceededError` before calling the model — fail fast, no silent truncation by Ollama.
+
+```
+  estimate ─► over budget? ─► throw (model never runs)
+                   │
+                   └─ under ─► gemma2:9b generates
+```
+
+Anchor: *"It's a checked bound, not a buffer overrun."*
 
 ## See also
 
-- `02-lost-in-the-middle.md` — once it fits, *where* in the window you place things.
-- `03-prompt-chaining.md` — splitting work so no single call has to hold everything.
-- `01-llm-foundations/06-token-economics.md` — the cost of the same tokens this file budgets.
-- `03-retrieval-and-rag/11-rag.md` — the retrieved chunks that are the biggest variable input to the window.
-- `04-agents-and-tool-use/01-agents-vs-chains.md` — the loop that re-pays the window cost each turn.
+- `../01-llm-foundations/` — tokens, autoregressive generation, why input is a fixed-size function.
+- `./02-lost-in-the-middle.md` — the failure mode *inside* a full window; why profile-at-start matters.
+- `./03-prompt-chaining.md` — when one window can't hold one job, split across windows.
+- `../03-retrieval-and-rag/` — retrieval is how buffr keeps the window from overflowing.
+- `../04-agents-and-tool-use/` — the multi-turn view: `runAgentLoop`, `maxTurns:6`, `maxToolCalls:4`.

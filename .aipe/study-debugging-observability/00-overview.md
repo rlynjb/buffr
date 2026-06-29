@@ -1,99 +1,69 @@
 # Overview — Debugging & Observability in buffr-laptop
 
-The verdict first: this repo has **one** real observability mechanism, and it's
-good. `SupabaseTraceSink.emit()` (`src/supabase-trace-sink.ts:53`) persists every
-one of the six `CapabilityEvent` types the agent loop emits, into
-`agents.messages`. That makes the messages table a full, replayable trajectory of
-what the agent did — the args it called a tool with (the *cause*), the result and
-error and `durationMs` it got back, the tokens it spent, and any warning/error
-along the way. Most repos at this stage drop everything except the final answer.
-This one doesn't.
+The question this guide answers: **when buffr behaves wrong, what evidence exists to explain it quickly and stop it recurring?**
 
-Everything else is thin, and that's fine for a single-device, single-user laptop
-brain. There's no Prometheus, no OpenTelemetry, no Sentry, no log levels, no
-health check. Those aren't bugs — they're `not yet exercised`, and the audit says
-when each one starts to matter.
+The verdict first, then the map.
 
-## The observability map — one diagram
+## Verdict
 
-The whole evidence surface of the repo, by boundary. The thick box is the only
-place that produces durable, queryable evidence.
+buffr-laptop has exactly one serious observability investment — the trace / structured event stream (`CapabilityEvent` → `agents.messages`) — and it's genuinely good: it captures the *full* agent trajectory, all six event variants, including the cause (tool-call `args`), the result (`result` + `error` + `durationMs`), and token usage. If a turn goes wrong, you can replay it from a database table in emit order.
+
+Everything else is thin. Outside that table, the only logging is `process.stdout.write` — the CLIs print "indexed X", the answer, and the eval numbers, and that's the whole log surface. No metrics, no distributed tracing, no log levels, no error tracking, no health checks. For a single-device personal RAG agent that's a defensible scope, but you should know exactly where the blind spots are.
+
+## The evidence map — where you can observe behavior
+
+This is the system as observability bands: where a signal exists, and where there's nothing to look at.
 
 ```
-  buffr-laptop — where behavior becomes evidence
+  buffr-laptop — the observability surface
 
-  ┌─ UI layer (Ink TUI) ─────────────────────────────────────────┐
-  │  chat.tsx  →  catch(err) renders "error: <msg>" as a turn     │
-  │              (src/cli/chat.tsx:30)  — ephemeral, screen only  │
+  ┌─ CLI layer (src/cli/) ──────────────────────────────────────┐
+  │  index-cmd.ts   → process.stdout.write("indexed X")          │
+  │  eval-cmd.ts    → process.stdout.write(P@1 / R@3)            │  ← stdout only
+  │  chat.tsx       → Ink render; CATCHES per-turn errors (l.30) │
   └───────────────────────────────┬──────────────────────────────┘
-                                   │  session.ask(question)
-  ┌─ Session layer ───────────────▼──────────────────────────────┐
-  │  session.ts  →  agent.answer()  →  trace.flush()              │
-  │  memory.remember() in try/catch, swallowed (session.ts:66)   │
+                                   │  session.ask()
+  ┌─ Session layer (src/session.ts) ──────▼──────────────────────┐
+  │  agent.answer() → ★ trace.emit() per event ★ → trace.flush() │  ← THE signal
   └───────────────────────────────┬──────────────────────────────┘
-                                   │  6 CapabilityEvent types
-  ┌─ Trace sink (THE evidence store) ════════════════════════════┐
-  │ ║ SupabaseTraceSink.emit()  (src/supabase-trace-sink.ts:53) ║ │ ★ here
-  │ ║ step·tool_call_start·tool_call_end·model_usage·warn·error ║ │
+                  CapabilityEvent  │  (step / tool_call_start /
+                  ×6 variants      │   tool_call_end / model_usage /
+                                   │   warning / error)
+  ┌─ Sink (src/supabase-trace-sink.ts) ───▼──────────────────────┐
+  │  SupabaseTraceSink.emit() → persistMessage() per event       │
   └───────────────────────────────┬──────────────────────────────┘
-                                   │  insert ... created_at = event.timestamp
-  ┌─ Storage layer (Postgres) ────▼──────────────────────────────┐
-  │  agents.messages  — the trajectory, replayable in emit order │
-  │  agents.conversations  — one row per chat session            │
-  └──────────────────────────────────────────────────────────────┘
-
-  Off to the side, no shared store:
-  ┌─ One-shot CLIs ──────────────────────────────────────────────┐
-  │  index-cmd.ts  → stdout "indexed X"   (src/cli/index-cmd.ts:25)│
-  │  eval-cmd.ts   → stdout P@1 / R@3     (src/cli/eval-cmd.ts:31) │
+                                   │  INSERT (created_at = event.timestamp)
+  ┌─ Storage (agents.messages) ───▼──────────────────────────────┐
+  │  the replayable trajectory — one row per event, emit-ordered │
   └──────────────────────────────────────────────────────────────┘
 ```
+
+The whole observability story is that vertical spine. The CLI band has stdout; the storage band has the trace table; in between there is no metrics emitter, no span exporter, no structured logger.
 
 ## Ranked findings
 
-1. **Full-signal trajectory capture is the headline.** All six event types
-   persisted, `tokens_used` and `durationMs` filled, not just the answer. If you
-   want to know *why* an answer came out wrong, the tool args and results are
-   right there in `messages`, ordered. → `01-full-signal-trajectory-capture.md`.
+Ordered by consequence — what to look at first.
 
-2. **Deterministic replay order via client timestamps.** `created_at` is
-   `coalesce($8::timestamptz, now())` where `$8` is `event.timestamp`
-   (`src/supabase-trace-sink.ts:30`, `:54`). Replay order = emit order, not the
-   race between concurrent flush inserts. → `02-client-timestamp-ordering.md`.
+1. **Full-signal trajectory capture is the load-bearing win.** `SupabaseTraceSink.emit()` (`src/supabase-trace-sink.ts:53-85`) persists all six `CapabilityEvent` types. Crucially it captures the *cause* — `tool_call_start` writes `args` (`:62-66`) — and the *result* — `tool_call_end` writes `result` + `error` + `durationMs` (`:67-72`). Most agent loggers drop the args and keep only the answer; this one keeps the why. → `01-full-signal-trajectory-capture.md`
 
-3. **The fallback answer is invisible to the trace.** When the model returns
-   empty text, the loop's `step` event is gated behind `if (text)` and never
-   fires; `RagQueryAgent.answer()` then substitutes `FALLBACK_ANSWER`. The user
-   sees "I couldn't find anything…" but the trajectory has no row recording that
-   answer. The one place evidence is missing. → audit lens 6,
-   `01-full-signal-trajectory-capture.md` Move 2.5.
+2. **Replay order is deterministic by design — with one residual tie.** `created_at` comes from `event.timestamp`, not server `now()` (`src/supabase-trace-sink.ts:54`, `persistMessage` `:30`), so replay order matches emit order even though `flush()` races concurrent inserts. The residual: `timestamp()` is millisecond-resolution ISO with no sequence counter (aptkit `runtime/dist/src/events.js:2`), so two same-millisecond events tie with no tiebreaker. → `02-client-timestamp-ordering.md`
 
-4. **stdout is the only log.** index/eval CLIs and Ink all write plain lines —
-   no level, no structure, no conversation-id correlation. Fine at this scale,
-   first thing to outgrow. → `03-stdout-as-only-log.md`.
+3. **The FALLBACK_ANSWER path fires no `step` event — an answer the trace never records.** `RagQueryAgent.answer()` returns `finalText.trim() || FALLBACK_ANSWER` (aptkit `agent-rag-query/dist/src/rag-query-agent.js:51`). When synthesis comes back empty, the user sees `"I couldn't find anything…"` but the agent loop emitted no `step` for it — so `agents.messages` has no assistant row for that turn. The trace says the agent answered nothing; the user got an answer. This is the one place the full-signal table lies. → `audit.md` lens 6, and `01-`.
 
-5. **Eval numbers are the only numeric quality signal**, and they're an offline
-   batch over a labeled set — not a live SLI. → `04-eval-numbers-as-quality-signal.md`.
+4. **stdout is the only log surface outside the trace table.** No log levels, no structured fields, no correlation IDs in the CLI output (`src/cli/index-cmd.ts:25`, `eval-cmd.ts:31`). The chat UI catches per-turn errors and renders them inline (`src/cli/chat.tsx:30-31`) — good for the user, but the caught error is never persisted or logged anywhere durable. → `03-stdout-as-only-log.md`
 
-## Not yet exercised
+5. **Eval numbers are the only retrieval-quality signal.** `eval-cmd.ts` prints per-query P@1 / R@3 and a mean (`:31-33`). That's the repo's entire "is retrieval healthy" instrument — run by hand, printed to stdout, compared by eyeball. → `04-eval-numbers-as-quality-signal.md`
 
-Honest blanks. Each becomes relevant at a named trigger:
+## not yet exercised
 
-- **Metrics / Prometheus / SLOs** — no counters, gauges, or aggregation. Becomes
-  relevant when more than one user/device shares the store and you need
-  rates-over-time instead of per-run rows.
-- **OpenTelemetry / distributed tracing** — the trace never leaves one process
-  and one DB. Relevant once aptkit's loop runs behind a network boundary
-  (Edge Functions, a service) and a request crosses processes.
-- **Log levels / structured logs** — `process.stdout.write` only. Relevant when
-  output is collected by something that filters or queries it.
-- **Sentry / error tracking** — errors go to a `messages` row (sink) or the
-  screen (Ink) and stop there; nothing aggregates or alerts. Relevant when a
-  failure you didn't watch happen needs to page someone.
-- **Health checks / liveness** — none. Relevant when something supervises the
-  process instead of a human running `npm run chat`.
+Named honestly, with when each becomes relevant:
 
-## Where to read next
+- **Metrics / SLIs / SLOs (Prometheus, StatsD).** No counters, gauges, or histograms anywhere. Relevant the moment buffr runs unattended or multi-user and you need "p95 turn latency" without replaying the table by hand.
+- **Distributed tracing / OpenTelemetry.** The `CapabilityEvent` stream is a *local* trace, not a distributed one — no trace/span IDs propagate across the Ollama or Postgres hops. Relevant when buffr grows a second service or an Edge Function tier.
+- **Log levels / structured logging.** `process.stdout.write` is the whole logger; no `debug`/`info`/`warn`/`error` severity, no JSON log lines, no redaction. Relevant once logs are shipped somewhere and need filtering.
+- **Error tracking (Sentry, etc.).** The chat UI swallows-and-renders (`chat.tsx:30`); the memory write swallows silently (`session.ts:66-68`). No error reaches a tracker with a stack trace and a fingerprint. Relevant the first time a bug only reproduces on someone else's machine.
+- **Health checks / readiness probes.** No `/healthz`, no pool-liveness check, no Ollama-reachability probe. Relevant when something other than a human at a terminal needs to know buffr is up.
 
-`audit.md` walks all eight lenses with `file:line` grounding. The four pattern
-files go deep on the mechanisms above. Neighbors in `README.md`.
+## Cross-links
+
+`study-testing` (the eval seam), `study-performance-engineering` (`durationMs` as a budget), `study-distributed-systems` (the ordering tie), `study-agent-architecture` (the loop that emits the events).

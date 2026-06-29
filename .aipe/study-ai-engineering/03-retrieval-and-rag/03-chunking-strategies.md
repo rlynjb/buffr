@@ -1,243 +1,234 @@
-# Chunking strategies — the fixed 512/64-char window
+# Chunking Strategies
 
-*Industry standard (exercised, but un-tuned). The splitter buffr inherits from aptkit.*
+### *industry: document chunking / text splitting · type: the pre-embedding decision that bounds retrieval quality*
 
-## Zoom out, then zoom in
+## Zoom out
 
-Pull up the index path and find the very first transform a document hits. Before anything gets embedded, the raw text is *cut into pieces*. That cut decides what a "unit of retrieval" is — and buffr doesn't choose it. It inherits whatever aptkit's chunker does, which is a fixed-size character window.
+One layer up from embeddings. Before any text becomes a vector, something decides *what counts as one unit of text*. That decision is chunking, and it silently caps how good retrieval can ever be — you can't retrieve a passage you never made into a chunk.
+
+**buffr's retrieval stack, the splitter marked**
 
 ```
-  Zoom out — where chunking sits (first step of the index path)
-
-  ┌─ CLI ───────────────────────────────────────────────────────┐
-  │  npm run index -- file.md   (reads the whole file)           │
-  └───────────────────────────┬─────────────────────────────────┘
-                              │ doc.text (one big string)
-  ┌─ Retrieval pipeline (aptkit) ─────────────────────────────────┐
-  │  ★ chunkText(text) — fixed 512-char windows, 64 overlap ★     │ ← here
-  │       │ texts[]                                                │
-  │       ▼  embed each → upsert                                   │
-  └───────────────────────────┬───────────────────────────────────┘
-                              │ chunk vectors
-  ┌─ Storage ─────────────────▼───────────────────────────────────┐
-  │  agents.chunks (one row per chunk)                            │
-  └────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│  PgVectorStore          search over per-chunk vectors          │
+├──────────────────────────────────────────────────────────────┤
+│  embeddings             each chunk → one 768-dim vector        │
+├──────────────────────────────────────────────────────────────┤
+│  ★ CHUNKER ★            512-char windows, 64 overlap (fixed)   │  ◄── this file
+├──────────────────────────────────────────────────────────────┤
+│  documents              raw markdown text                      │
+└──────────────────────────────────────────────────────────────┘
 ```
 
-Zoom in. You've shipped RAG, so you've felt that retrieval quality hinges on chunk shape — too big and the relevant sentence is diluted by noise; too small and it loses context. This file is honest about a real limitation: buffr gets aptkit's **fixed-size, 512-char / 64-overlap, character-based** splitter, full stop. It is *not* token-aware, *not* sentence-aware, *not* structure-aware — and buffr can't tune it without changing aptkit (which it never edits). So it cuts mid-sentence and mid-markdown-heading. The concept is exercised; it's just the default, untuned. The Case-B move is to fix it *above* aptkit (pre-chunk) or *in* aptkit (contribute a structural splitter).
+On your last RAG app you probably reached for a library splitter and moved on. buffr does the opposite — it owns a deliberately dumb splitter, and the dumbness is a stated design choice, not laziness. This file is about *why a boring splitter can be the right call*, and exactly where it stops being right.
 
 ## Structure pass
 
-Read the skeleton: chunking is one function, but the *strategy* axis is where the limitation lives.
+The axis is **boundary policy**: where you cut one chunk from the next. The seam is the unit you cut on — characters, tokens, sentences, or structure.
 
-**Layers:** the file (one string) → the chunker (the cut) → the chunks (retrieval units).
-
-**Axis traced — "what boundary does the cut respect?"**
+**The chunking spectrum, buffr's pick marked**
 
 ```
-  one axis: what does a chunk boundary align to?
-
-  ┌─ what buffr HAS ────────┐   CHARACTER COUNT — cut at every 448 chars
-  │  fixed 512/64 char window│  (512−64 step), ignoring words/sentences
-  └────────────┬────────────┘
-               │ seam: this is the only knob, and buffr can't turn it
-  ┌─ what it COULD respect ─┐   SENTENCE — cut at "." boundaries
-  │  sentence / structural   │   STRUCTURAL — cut at markdown headings
-  └─────────────────────────┘   (semantic units, not arbitrary offsets)
+   dumber / cheaper                              smarter / costlier
+   ◄──────────────────────────────────────────────────────────►
+   fixed-char        fixed-token      sentence        structural
+   │                 │                │               (headings,
+   │ ★ buffr ★       │ needs a        │ needs an NLP   markdown
+   │ 512c + 64 ovl   │ tokenizer dep  │ sentence       sections)
+   │ deterministic   │ model-specific │ splitter       │ semantic,
+   │ vendor-neutral  │                │                │ heavy
+   └─ no deps        └────────────────┴───────────────┴─ best recall
+        ▲                                                  on prose
+   the seam: do you cut on bytes, or on meaning?
 ```
 
-**The seam that matters:** the boundary between "character offset" and "semantic unit." buffr's chunker cuts on the former — a hard offset every 448 characters — so a markdown heading, a code block, or a sentence gets sliced wherever the counter lands. The overlap (64 chars) softens it but doesn't fix it. And the seam is *closed to buffr*: the chunker lives in aptkit, which buffr consumes and never edits. Hold that: the limitation isn't a bug, it's an inherited default buffr can only route around, not tune in place.
+To the left of the seam: cuts are mechanical, deterministic, dependency-free, and *blind to meaning*. To the right: cuts respect sentences and sections, retrieve better on prose, and drag in tokenizers or NLP and non-determinism. Consequence: buffr's choice trades a slice of retrieval quality for *zero dependencies and perfectly reproducible chunks* — a trade it makes on purpose and admits to.
 
 ## How it works
 
-### Move 1 — the mental model
+### Move 1 — Mental model: a fixed-width sliding window with a sticky edge
 
-You know how `String.prototype.slice(start, end)` cuts a string at exact indices, blind to what's there — it'll split a word in half without a second thought? buffr's chunker is a sliding `slice` over the document: take 512 chars, step forward 448, take the next 512, and let consecutive windows overlap by 64 so a fact straddling a boundary survives in at least one window.
+Picture a 512-character-wide window sliding down the document in steps. Each stop is a chunk. The window doesn't slide a full 512 each time — it backs up 64 characters, so consecutive chunks share an overlapping tail. That overlap is the only "smart" thing here, and it exists for one reason: a fact sitting on a boundary survives in at least one chunk.
+
+**The sliding window with overlap**
 
 ```
-  the chunker kernel — a sliding fixed-size window
-
-  document:  ┌───────────────────────────────────────────────┐
-             │ ...the passport renewal form requires two...   │
-             └───────────────────────────────────────────────┘
-  window 0:  [════════ 512 chars ════════]
-  window 1:              [════════ 512 chars ════════]
-                         └64┘ overlap (carries straddling facts)
-  window 2:                          [════════ 512 ...
-             step = 512 − 64 = 448 chars between window starts
-
-  blind to: sentence ends, headings, code fences — cuts wherever it lands
+  document:  [................................................]
+             │←──── 512 ────→│
+  chunk 0    [################]
+                      step = 512 - 64 = 448
+                          │←──── 512 ────→│
+  chunk 1            [oo################]
+                     └ 64-char overlap (shared tail of chunk 0)
+                                  │←──── 512 ────→│
+  chunk 2                    [oo################]
+   a fact straddling a cut lands WHOLE inside at least one window
 ```
 
-The kernel: a fixed window size + a step (size − overlap) + the overlap that keeps boundary-straddling text. Lose the overlap and a fact split across two windows is lost from both. Lose the fixed size and you don't have *this* strategy — you'd have sentence or structural chunking, which buffr doesn't get.
+Frontend bridge: it's a windowed scroll with a fixed row height and a small `overflow` bleed between pages, so a line that lands on a page break still renders fully on the next page. No content gets clipped at a seam.
 
-### Move 2 — the step-by-step walkthrough
+### Move 2 — Walk the mechanism
 
-**Step 1 — the cut is a character slide, with two constants.** aptkit's `chunkText` is the entire strategy. Two exported constants set it; nothing in buffr overrides them:
+**Part A — Fixed-size character windows**
+
+The splitter cuts on character count, full stop. No tokenizer, no sentence detection. `CHUNK_SIZE = 512`, `CHUNK_OVERLAP = 64`.
+
+**The cut logic**
+
+```
+  text.length <= 512 ?  ──► return [text]   (one chunk, done)
+        │ no
+        ▼
+  step = max(1, 512 - 64) = 448
+  for start = 0, 448, 896, …:
+      push text.slice(start, start + 512)
+      if start + 512 >= length: break
+```
 
 ```ts
-// aptkit packages/retrieval/src/chunker.ts:13-14
-export const CHUNK_SIZE = 512;      // chars, NOT tokens
-export const CHUNK_OVERLAP = 64;    // chars carried between windows
-```
-
-512 *characters* — not tokens. That distinction matters: a token-based chunker (what most production RAG uses) would respect the embedder's actual unit and keep chunks at a consistent semantic length. Character count is a rougher proxy — 512 chars is roughly 100–130 English tokens, but it varies with the text. aptkit chose chars for determinism and zero tokenizer dependency (the comment at `:1-12` says exactly this). It's a reasonable *default*; it's not a tuned choice for buffr's markdown.
-
-**Step 2 — the slide loop.** The window walks the string in steps of `size − overlap`, slicing each window and stopping when it reaches the end:
-
-```ts
-// aptkit packages/retrieval/src/chunker.ts:16-31
-export function chunkText(text, size = CHUNK_SIZE, overlap = CHUNK_OVERLAP): string[] {
-  if (text.length === 0) return [];           // empty doc → no chunks
-  if (text.length <= size) return [text];     // short doc → one chunk, no cutting
-
-  const step = Math.max(1, size - overlap);   // 448; the slide distance
+// aptkit chunker.ts:16-31 — the whole splitter
+export function chunkText(text, size = 512, overlap = 64): string[] {
+  if (text.length === 0) return [];
+  if (text.length <= size) return [text];
+  const step = Math.max(1, size - overlap);     // 448
   const chunks: string[] = [];
   for (let start = 0; start < text.length; start += step) {
-    chunks.push(text.slice(start, start + size));   // raw slice — blind to content
-    if (start + size >= text.length) break;          // last window reached → stop
+    chunks.push(text.slice(start, start + size));
+    if (start + size >= text.length) break;
   }
   return chunks;
 }
 ```
 
-Walk it on a 1200-char doc: window 0 = `[0,512)`, window 1 = `[448,960)`, window 2 = `[896,1200)` (the `break` fires since `896+512 ≥ 1200`). Three chunks, each overlapping its neighbor by 64. The `text.slice(start, start + size)` is the load-bearing line — and it's a raw slice. A markdown heading at char 500 gets split: its last 12 chars are at the tail of window 0, its first chars at the head of window 1. Neither chunk contains the clean heading.
+There is no cleverness to misread. `slice(start, start + 512)` cuts mid-word, mid-sentence, mid-anything. That's the honest cost: a chunk can begin `"…and the answer is"` and end mid-thought. The bet is that 512 chars (~one paragraph) usually contains enough surrounding context that the embedding still lands near the right meaning — and the overlap covers the boundary case.
+
+**Part B — Overlap stops boundary-straddling facts from being lost**
+
+Without overlap, a fact split exactly across a cut would be half in chunk N and half in chunk N+1 — weakened in both, retrievable from neither. The 64-char overlap means the shared tail carries the whole fact into the next window.
+
+**With vs. without overlap**
 
 ```
-  Execution trace — chunkText on a 1200-char markdown doc
-
-  step = 448
-  start=0:    slice(0, 512)    → chunk #0   (cuts mid-sentence at 512)
-  start=448:  slice(448, 960)  → chunk #1   (overlaps #0 by 64)
-  start=896:  slice(896, 1200) → chunk #2   ; 896+512 ≥ 1200 → break
-  result: ["...", "...", "..."]  (3 chunks)
-  note: a "## Heading" near char 500 is split across #0 and #1
+  NO OVERLAP                        64-CHAR OVERLAP
+  ──────────                        ───────────────
+  …take my cof│fee black…           …take my cof│
+  chunk N ─────┘                    chunk N: …take my coffee black…  ✓ whole
+            chunk N+1                chunk N+1: …my coffee black, no…  ✓ also whole
+  "coffee black" split ──►           the fact survives in at least one chunk
+  weak in both, missed
 ```
-
-**Step 3 — chunks become retrieval units, each embedded whole.** Back in the pipeline, each chunk string is embedded and stored under `"<docId>#<i>"`. The chunk *is* the unit retrieval returns — so its quality bounds everything downstream:
 
 ```ts
-// aptkit packages/retrieval/src/pipeline.ts:37-44
-const texts = chunkText(doc.text);            // the fixed-window cut
-const vectors = await wiring.embedder.embed(texts);
-const chunks = texts.map((text, i) => ({ id: `${doc.id}#${i}`, vector: vectors[i]!, meta: {..., text} }));
+// aptkit chunker.ts:1-12 — the stated rationale (verbatim from the doc comment)
+// "The overlap stops a fact that straddles a boundary from being split across
+//  two chunks and lost."
 ```
 
-Here's the concrete consequence of a bad cut: if the chunk that answers a question got split mid-sentence, *neither* half embeds to a clean vector for that question. The query "what does passport renewal require?" might match a chunk that ends `...renewal form requires` — cut off right before the answer. The 64-char overlap is the mitigation, but it only spans 64 chars; a fact split by more than that is degraded in both chunks.
+Overlap is cheap insurance: it costs a little duplicate storage and a few redundant vectors, and it buys you immunity to the worst failure mode of fixed-size chunking. It's the one place the dumb splitter spends complexity, and it spends it where the failure is most likely.
+
+### Move 2.5 — Current vs. future
+
+**Honest: buffr's chunker is NOT sentence/structural/token-aware, and it was NEVER tuned against the eval set.**
 
 ```
-  Layers-and-hops — chunking's effect on retrieval
-
-  ┌─ index ──────┐ hop 1: chunkText (fixed window)  ┌─ embed ─────────┐
-  │ doc.text     │ ───────────────────────────────► │ each chunk → vec│
-  └──────────────┘  (may cut mid-sentence)           └────────┬────────┘
-                                                              │ hop 2: upsert
-  ┌─ query ──────┐ hop 3: embed question              ┌─ storage ▼──────┐
-  │ "renewal?"   │ ───────────────────────────────►   │ ANN over chunks │
-  └──────▲───────┘ hop 4: top-k chunks ◄───────────── │ (bad cut = bad  │
-         │          a mid-sentence chunk scores worse  │  match)         │
-         └──────────────────────────────────────────── └─────────────────┘
+  TODAY (deliberate, untuned)        SMARTER (a later drop-in)
+  ───────────────────────────        ─────────────────────────
+  fixed 512-char windows             structural: split on markdown
+  cuts mid-word, mid-sentence        headings/paragraphs
+  deterministic, zero deps           semantic: keep whole sentences,
+  512/64 = round defaults,           recursive split on natural breaks
+  never swept for best recall        better recall on prose, needs deps
+  ┌──────────────────┐               ┌──────────────────────────┐
+  │ chunkText()      │               │ same RetrievalDocument    │
+  │ contract: text → │  ──drop-in──► │ contract above it doesn't │
+  │ string[]         │               │ change                    │
+  └──────────────────┘               └──────────────────────────┘
 ```
 
-#### Move 2.5 — current state vs the tuned chunker you'd want
+Two honest admissions. First, this is *fixed-size by character* — not by token (no tokenizer dependency, by design) and not by sentence or markdown structure. Second, `512` and `64` are clean round defaults that were **never tuned against `eval/queries.json`** — nobody swept chunk size and measured P@1/R@3 to pick them. The contract (`text → string[]`) is narrow enough that a smarter splitter drops in without touching anything above it. The dumb version is the *honest default*, not the *measured optimum*.
 
-buffr runs the fixed window today because it can't reach into aptkit. Here's the honest comparison and the two routes out:
+### Move 3 — The principle
 
-```
-  Comparison — inherited default vs what you'd build
-
-  TODAY (aptkit default)            BETTER (Case-B routes)
-  ┌──────────────────────────┐      ┌──────────────────────────┐
-  │ fixed 512/64 CHAR window  │      │ structural: split on      │
-  │ char-based (not tokens)   │      │  markdown headings/blocks │
-  │ cuts mid-sentence/heading │      │ OR token-based windows    │
-  │ buffr CAN'T tune it       │      │ (respect embedder units)  │
-  └──────────────────────────┘      └──────────────────────────┘
-   Route A: contribute a structural chunker UPSTREAM to aptkit
-   Route B: PRE-CHUNK in buffr (split markdown by heading before
-            pipeline.index, so each "doc" is already a clean unit)
-```
-
-Route B is the buffr-only move: it never touches aptkit. You split the markdown by `##` headings *before* calling `indexDocumentRow`, indexing each section as its own document. aptkit's char window then only acts *within* a clean section, so the worst cuts (across headings) never happen.
-
-### Move 3 — the principle
-
-The chunk is the atom of retrieval — you can only ever retrieve a whole chunk, never a fragment — so chunk boundaries are a quality decision, not a formatting detail. A character-offset cut optimizes for determinism and simplicity; it pays for that with boundaries that ignore meaning. When the splitter is owned by a dependency you don't edit, the leverage you have is *what you feed it*: pre-segment along real boundaries so the dumb window only ever cuts inside already-coherent units. The general lesson: when you can't change a transform, change its input.
+**Chunking sets the ceiling on retrieval, so the right first move is the simplest splitter that's deterministic and dependency-free — then measure before you make it smarter.** buffr's fixed-512 splitter is a defensible *starting* point precisely because it's reproducible and owns no dependencies; you can reason about it exactly. The trap is shipping a fancy semantic splitter you can't reproduce and never measured. Dumb-but-known beats clever-but-unmeasured until the eval set tells you the chunking is the bottleneck.
 
 ## Primary diagram
 
-The chunking strategy, with its limit and the way out, one frame:
+The full split, from raw doc to stored chunks.
+
+**One document, N overlapping chunks, N vectors**
 
 ```
-  buffr chunking — inherited fixed window (and the route around it)
-
-  file.md (one string)
-     │ aptkit chunkText (buffr can't tune)
-     ▼
-  ┌─ fixed-size CHARACTER window ─────────────────────────────────┐
-  │  size=512  overlap=64  step=448                               │
-  │  slice(start, start+512); slide by 448; break at end          │
-  │  ⚠ cuts mid-sentence, mid-heading, mid-code-block             │
-  │  ✓ 64-char overlap rescues facts straddling a boundary (<64)  │
-  └───────────────────────────┬───────────────────────────────────┘
-                              │ chunk = the retrieval atom
-                              ▼
-  embed each → agents.chunks → ANN retrieval (quality bounded by the cut)
-
-  Case-B fix:  pre-split markdown by heading IN buffr  → each section a
-               clean "doc" → char window only cuts inside coherent units
+  documents.content  (raw markdown)
+            │
+            ▼  chunkText(text, 512, 64)
+  ┌──────────┬──────────┬──────────┬──────────┐
+  │ chunk 0  │ chunk 1  │ chunk 2  │ chunk 3  │   step = 448, overlap = 64
+  └──────────┴──────────┴──────────┴──────────┘
+       │          │          │          │
+       ▼ embed    ▼          ▼          ▼
+  [768]      [768]      [768]      [768]
+       │          │          │          │
+       ▼          ▼          ▼          ▼
+  agents.chunks  id = "<docId>#0", "<docId>#1", …
+                 meta = { docId, chunkIndex, text }
 ```
+
+After the box: each chunk becomes one stored vector with a stable `"<docId>#<i>"` id — so a retrieval hit can always cite which doc and which slice it came from. Chunk granularity *is* citation granularity.
 
 ## Elaborate
 
-Chunking strategies form a ladder of increasing structure-awareness. *Fixed-size* (buffr's) is the bottom rung: cut every N characters or tokens, optionally overlapping — dead simple, content-blind. *Sentence-based* splits on sentence boundaries so a chunk is always whole sentences. *Recursive/structural* splits along a document's own hierarchy (markdown headings → paragraphs → sentences), falling back down the levels only when a unit exceeds the size budget — this is what production RAG (LangChain's `RecursiveCharacterTextSplitter`, LlamaIndex's node parsers) typically uses for markdown.
-
-aptkit deliberately picked the bottom rung for good reasons stated in its own comment (`chunker.ts:1-12`): deterministic, vendor-neutral, trivially testable — the right *default* for a from-scratch in-memory pipeline. The honest read for buffr: it's a sensible default that buffr hasn't outgrown yet at its tiny corpus size, but it's the first thing to fix when retrieval quality matters, and the fix has to respect that buffr never edits aptkit. Token-based chunking (counting the embedder's actual tokens, not chars) is the other axis of improvement — it keeps chunks at a consistent semantic length regardless of how dense the text is.
+- **Why character, not token.** A token splitter needs a tokenizer that matches the embedding model, which is a dependency and a coupling. Character count is universal and free. The cost: 512 chars isn't a fixed token count (varies with content), so a chunk's token footprint wobbles. For buffr's small model and short docs, that wobble is harmless.
+- **Chunk size is a two-sided dial.** Too small and a chunk loses the context that makes it meaningful (a bare sentence embeds ambiguously). Too large and one chunk covers multiple topics, blurring its direction and re-creating lost-in-the-middle *inside* a chunk. 512 is a middle-of-the-road guess, not a tuned value.
+- **Determinism is a testing asset.** Because `chunkText` is pure and deterministic, buffr's pipeline tests can assert exact chunk boundaries without a live model. A non-deterministic semantic splitter would make those tests fuzzy.
+- **The contract is the escape hatch.** Everything above chunking consumes `string[]`. Swapping in a recursive/semantic splitter is a local change with no ripple — which is *why* it's safe to ship the dumb version first.
 
 ## Project exercises
 
-> No `aieng-curriculum.md` is present in this repo, so Build-item IDs are not cited. Exercises are derived directly from the codebase and the spec's concept set.
+### Sweep chunk size against the eval set
 
-### Pre-chunk markdown by heading (the buffr-only fix)
+- **Exercise ID:** [B2A.5] (cite [C2.2], Phase 2A) — Case A: chunking is implemented but admittedly untuned. This turns the round defaults into measured ones.
+- **What to build:** Re-index the corpus at several `(size, overlap)` settings — e.g. (256,32), (512,64), (1024,128) — and run `eval-cmd` at each to chart P@1/R@3 vs. chunk size. Pick the setting your eval actually prefers.
+- **Why it earns its place:** The file admits 512/64 were never swept. This is the cheapest possible quality win: the splitter contract is one function, the eval already exists, and the answer is currently *unknown*.
+- **Files to touch:** drive `chunkText`'s `size`/`overlap` (thread params through `src/cli/index-cmd.ts` indexing), then `src/cli/eval-cmd.ts` to score each.
+- **Done when:** A table shows P@1/R@3 across at least three chunk sizes and you can defend the chosen size with numbers.
+- **Estimated effort:** 1–4hr.
 
-- **Exercise ID:** CHK-1 (Case B — fix above aptkit, no aptkit edit).
-- **What to build:** before calling `indexDocumentRow`, split a markdown file on `##`/`###` headings into sections, and index each section as its own document (`id = "file.md#section-slug"`). aptkit's char window then only cuts *within* a coherent section — never across a heading.
-- **Why it earns its place:** it's the honest, in-bounds fix (buffr never edits aptkit) and directly removes the worst cut (across headings); it also demonstrates "change the input when you can't change the transform."
-- **Files to touch:** `src/cli/index-cmd.ts:22-26` (split before the loop) and `src/runtime.ts:5-18` (one document per section); chunker stays untouched at aptkit `chunker.ts`.
-- **Done when:** indexing a multi-heading markdown file produces chunks that never span two headings, verified by inspecting `agents.chunks.content`.
-- **Estimated effort:** half a day.
+### Add a structural (markdown-aware) splitter behind the same contract
 
-### Measure the chunking change with precision@k
-
-- **Exercise ID:** CHK-2 (Case B — prove the chunker change helps).
-- **What to build:** a before/after eval: index the same corpus with the raw char window vs the heading-pre-split, run the same query set through the pipeline, and compare precision@k. The chunking change must *earn* its place with a number.
-- **Why it earns its place:** "I changed chunking and retrieval improved by X" is the only defensible way to argue a retrieval change; intuition isn't evidence.
-- **Files to touch:** the eval path (`src/cli/eval-cmd.ts` per the RAG file's note), run against the two index variants from CHK-1.
-- **Done when:** you have a precision@k delta for both chunking strategies over the same query set.
-- **Estimated effort:** half a day. Cross-link `../05-evals-and-observability/`.
+- **Exercise ID:** [B2B.1] (cite [C2.2], Phase 2B) — Case B: buffr has NO structural chunking. This is the primary target for the "smarter splitter" gap.
+- **What to build:** A splitter that cuts on markdown headings/paragraphs (keeping whole sections when they fit, falling back to the 512-window when they don't), exposed behind the same `text → string[]` contract. A/B it against fixed-512 on the eval.
+- **Why it earns its place:** buffr's corpus is markdown (work.md/stack.md/coffee.md) — structure-aware cuts should beat byte-blind cuts on exactly this shape of doc. The contract makes it a clean drop-in, and the eval makes the win provable.
+- **Files to touch:** a new splitter module consumed by the pipeline's chunk step (aptkit-side seam; buffr wires it via `src/cli/index-cmd.ts`), verified with `src/cli/eval-cmd.ts`.
+- **Done when:** The structural splitter is selectable and the eval shows whether it beats fixed-512 on buffr's markdown corpus.
+- **Estimated effort:** 1 day.
 
 ## Interview defense
 
-**Q: What chunking strategy does buffr use, and what's wrong with it?**
-Answer: a fixed-size *character* window — 512 chars, 64 overlap, sliding by 448 — inherited from aptkit's `chunkText`. It's deterministic and tokenizer-free, but it's content-blind: it cuts mid-sentence and mid-markdown-heading, so the chunk that answers a question can get split with the answer straddling two chunks. The 64-char overlap only rescues facts that straddle by less than 64 chars. It's character-based, not token-based, so chunk semantic-length varies with text density.
+**Q: "Why is buffr's chunker so simple?"**
+
+Deliberate. Fixed 512-char windows with 64 overlap are deterministic and dependency-free — no tokenizer, no NLP. It's the honest default: reproducible and easy to reason about. The overlap covers the one real failure of fixed cuts, boundary-straddling facts.
 
 ```
-  fixed 512-char window:  [════512════][════512════]  step 448
-  cut lands here ─────────────────────┘ mid-sentence, mid-heading
-  overlap 64 = only mitigation; >64 straddle = degraded in both chunks
+  512-char window, step 448
+  overlap 64 ──► fact on a cut survives whole in one chunk
 ```
 
-**Q: buffr can't edit aptkit — so how would you improve chunking?**
-Answer: change the input, since I can't change the transform. Pre-split the markdown by heading *in buffr* before indexing, so each section is its own document and aptkit's char window only ever cuts inside an already-coherent section — the worst boundary (across headings) never occurs. The upstream alternative is contributing a structural/token-based splitter to aptkit, but the in-bounds move is pre-chunking. The anchor: **the load-bearing part people forget is that the chunk is the retrieval atom — you can't retrieve a fragment, so the cut boundary IS a quality decision.**
+Anchor: *"Dumb-but-known beats clever-but-unmeasured."*
+
+**Q: "What's wrong with it, honestly?"**
+
+It cuts mid-sentence and was never tuned against the eval set — 512/64 are round guesses, not measured optima. On markdown prose a structural splitter would likely retrieve better. The contract is one function, so that's a clean drop-in.
 
 ```
-  can't tune aptkit's chunker → pre-segment its INPUT instead
-  markdown ─split by heading─► clean sections ─► char window cuts safely
+  fixed-char ──► cuts blind to meaning
+  fix: structural splitter, same string[] contract
 ```
+
+Anchor: *"The splitter sets the ceiling — measure it before trusting it."*
 
 ## See also
 
-- `01-embeddings.md` — each chunk becomes one 768-vector; a bad cut = a muddy vector.
-- `10-incremental-indexing.md` — chunk ids `"<docId>#<i>"` and how re-chunking re-indexes.
-- `07-reranking.md` — another quality lever (rerank the chunks the window produced).
-- `../05-evals-and-observability/` — measuring whether a chunking change actually helps.
+- `./01-embeddings.md` — each chunk becomes one vector; chunk size shapes that vector's direction.
+- `../02-context-and-prompts/02-lost-in-the-middle.md` — chunk size also bounds window footprint; a too-big chunk has its own internal middle.
+- `./11-rag.md` — where chunks turn into citations; chunk granularity is citation granularity.
+- `../05-evals-and-observability/` — the eval set that should drive chunk-size tuning.

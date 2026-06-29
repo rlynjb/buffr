@@ -1,353 +1,254 @@
 # Chapter 5 — The Failure Story
 
-"What happens when things go wrong?" tests operational thinking — do you
-think about the unhappy path, or only the demo path? buffr is
-single-device, so most distributed failure modes genuinely don't apply,
-and the strong move is to say that cleanly rather than invent failures to
-sound thorough. But the failures that *do* exist in this codebase are
-handled with deliberate, named choices — best-effort memory,
-transactional rollback, fail-fast guards — and those choices are the
-material. This chapter walks the failure surfaces that are real and
-names exactly what the system does at each.
-
-The discipline: for each failure surface, state what the system does
-*today*, name whether that's a deliberate containment or an honest gap,
-and never dress a gap as a feature.
+"What happens when things go wrong?" tests operational thinking — whether you've considered the
+failure surfaces, or only the happy path. buffr has a small, well-bounded set of failure modes
+precisely because it's single-operator and read-only downstream, and that's a *defensible*
+posture if you walk the surfaces deliberately. The win in this chapter is showing you know
+exactly what the system does on each failure — not promising it handles everything, but naming
+what it handles, what it doesn't, and why the blast radius stays small.
 
 ## The failure-mode map
 
-Each box is a failure surface; the annotation is what the system
-actually does. Notice the split — some are contained by design, some are
-honest gaps with a named trigger to close them.
+Every failure surface as a box, with what the system actually does. This is the chapter's anchor.
 
 ```
-  failure surfaces — and what the system does
+  buffr — failure surfaces and the system's response
 
-  ┌─ CONTAINED BY DESIGN ───────────────────────────────────────────┐
-  │                                                                  │
-  │  memory-write fails    ──► try/catch swallows it; the answer     │
-  │  (session.ts:64-69)        the user already has is never lost    │
-  │                            (asymmetric durability, on purpose)   │
-  │                                                                  │
-  │  mid-batch upsert fail ──► BEGIN…ROLLBACK; no half-indexed doc   │
-  │  (pg-vector-store:59-62)   the whole batch rolls back            │
-  │                                                                  │
-  │  wrong-dim vector      ──► assertDim THROWS before any SQL runs; │
-  │  (pg-vector-store:32)      never silently truncates              │
-  │                                                                  │
-  │  agent.ask throws      ──► rendered as an error turn in the TUI; │
-  │  (chat.tsx:30-32)          the session survives, keeps running   │
-  │                                                                  │
-  │  missing DATABASE_URL  ──► throws at startup, not mid-run        │
-  │  (session.ts:37)           fail-fast on config                   │
-  └──────────────────────────────────────────────────────────────────┘
+  ┌─ Ollama down / model unreachable ──────────────────────────────────┐
+  │  agent.answer() throws → caught in chat.tsx onSubmit catch          │
+  │  → surfaced as "error: <message>" to the operator's own TTY         │
+  │  RESPONSE: turn fails visibly, session survives, no partial state   │
+  └─────────────────────────────────────────────────────────────────────┘
 
-  ┌─ HONEST GAPS (named trigger to close) ──────────────────────────┐
-  │  Ollama unreachable    ──► agent call throws → error turn.       │
-  │                            NO fallback chain. aptkit HAS a       │
-  │                            provider-fallback; buffr doesn't      │
-  │                            compose it.                           │
-  │                                                                  │
-  │  trace flush insert    ──► Promise.all rejects; that turn's      │
-  │  fails (trace-sink:91)     trajectory is PARTIAL, no retry       │
-  │                                                                  │
-  │  Gemma emits wrong     ──► missing query coerced to '' → empty   │
-  │  tool arg key              search → ungrounded answer (the       │
-  │                            dominant failure mode)                │
-  └──────────────────────────────────────────────────────────────────┘
+  ┌─ DB unreachable / read-only ───────────────────────────────────────┐
+  │  pool.query throws → propagates up through ask() → same catch        │
+  │  RESPONSE: turn fails visibly. NO retry, NO circuit breaker today.   │
+  └─────────────────────────────────────────────────────────────────────┘
+
+  ┌─ malformed tool call (THE big one) ────────────────────────────────┐
+  │  Gemma emits wrong JSON key → query field empty → search runs on    │
+  │  an empty-string embedding → returns garbage, SILENTLY               │
+  │  RESPONSE: NO error. Wrong-but-confident answer. The worst failure   │
+  │  because it's invisible. No arg-schema validation on the parse.      │
+  └─────────────────────────────────────────────────────────────────────┘
+
+  ┌─ memory write fails ───────────────────────────────────────────────┐
+  │  memory.remember() throws → try/catch in session.ts SWALLOWS it      │
+  │  RESPONSE: the answer is already returned to the user. By design —   │
+  │  a memory failure must never lose the answer. Best-effort.          │
+  └─────────────────────────────────────────────────────────────────────┘
+
+  ┌─ partial write on index (crash mid-index) ─────────────────────────┐
+  │  documents row written (txn 1), crash before chunks (txn 2)         │
+  │  RESPONSE: orphaned document, no chunks. Dropped FK = no complaint.  │
+  │  Reconcile by re-indexing. Non-atomic across two transactions.      │
+  └─────────────────────────────────────────────────────────────────────┘
+
+  ┌─ dimension mismatch (wrong embedding model) ───────────────────────┐
+  │  vector length ≠ 768 → assertDim THROWS, loudly, in 4 places         │
+  │  RESPONSE: fails fast and visibly. Never silently truncates. The     │
+  │  ONE failure the system is aggressively defended against.            │
+  └─────────────────────────────────────────────────────────────────────┘
 ```
 
-Walk the questions an interviewer asks against this map.
+Two of those boxes are the ones to lead with: the silent malformed tool call (the worst, and
+honest to name) and the dimension mismatch (the one you defend hardest). They show you've
+thought about both the failure you can't see and the one you refuse to let pass.
 
----
-
-### Question 1 — "What happens when the model is down?"
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│ THEY ASK                                                        │
-│   "What happens if Ollama is down, or the model call hangs?    │
-│    Does the whole thing fall over?"                             │
-│                                                                 │
-│ WHAT THEY'RE TESTING                                           │
-│   Do you know your own failure behavior, including the parts   │
-│   you DIDN'T harden? A candidate who claims graceful           │
-│   degradation they didn't build gets caught. They want the     │
-│   honest behavior and whether you know how to close the gap.   │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-The strong answer:
-
-> "If Ollama is unreachable, the agent's model call just throws, and that
-> propagates up to `session.ask`, which the TUI catches and renders as an
-> error turn — so the session itself survives and stays interactive, but
-> that turn fails with no recovery. I want to be straight about what's
-> NOT there: there's no timeout, no retry with backoff, and no fallback
-> chain. Interestingly, aptkit *has* a provider-fallback pattern — I just
-> don't compose it in buffr, because for one local user with Ollama on
-> the same machine, a down model means I have a bigger problem than a
-> retry would fix. The gap is real and I know exactly how I'd close it:
-> a timeout on the model call plus a retry, and for a remote deployment,
-> wire the provider fallback. It's the first reliability work I'd do
-> before any non-local use."
-
-The strength is the honesty: you name that the session *survives*
-(`src/cli/chat.tsx:30-32` renders the error turn) but the turn *fails
-without recovery*, you name what's missing (timeouts, retries,
-fallback), and you name that aptkit even has the fallback you didn't
-wire. That last detail proves you know the gap is a choice, not an
-ignorance.
-
-```
-  ┃ The session survives a failed turn; the turn doesn't
-  ┃ recover. Naming both halves precisely beats claiming a
-  ┃ resilience you didn't build.
-```
-
-#### Weak vs strong — the model-down answer
-
-```
-┌─────────────────────────────┬─────────────────────────────┐
-│ WEAK ANSWER                 │ STRONG ANSWER               │
-├─────────────────────────────┼─────────────────────────────┤
-│ "It handles that            │ "The agent call throws and  │
-│ gracefully — if the model   │ the TUI renders it as an    │
-│ is down it retries and      │ error turn, so the session  │
-│ falls back, so the user     │ survives but that turn       │
-│ still gets a response."     │ fails with no recovery.     │
-│                             │ There's no timeout, retry,  │
-│                             │ or fallback — aptkit HAS a  │
-│                             │ provider-fallback I just     │
-│                             │ don't compose, because for  │
-│                             │ one local user a down model │
-│                             │ is a bigger problem than a  │
-│                             │ retry fixes. It's the first │
-│                             │ reliability work I'd do."    │
-├─────────────────────────────┼─────────────────────────────┤
-│ Why it's weak:              │ Why it works:               │
-│ It claims resilience that   │ Names the real behavior     │
-│ isn't in the code. One      │ (session lives, turn dies), │
-│ follow-up — "show me the    │ names exactly what's        │
-│ retry" — and it collapses.  │ missing, and shows you know │
-│ Inventing graceful          │ the gap is a choice (the    │
-│ degradation is worse than   │ fallback exists, you didn't │
-│ admitting the gap.          │ wire it). Honest and        │
-│                             │ in-control.                 │
-└─────────────────────────────┴─────────────────────────────┘
-```
-
----
-
-### Question 2 — "What if a write fails halfway through?"
+## "What happens when the LLM is down?"
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │ THEY ASK                                                        │
-│   "When you index a document and write its chunks, what        │
-│    happens if it fails partway? Do you get a half-indexed       │
-│    document?"                                                    │
+│   "What happens when the model API is down or times out?"       │
 │                                                                 │
-│ WHAT THEY'RE TESTING                                           │
-│   Do you understand transactional boundaries? Partial-write    │
-│   handling is the classic operational-correctness probe. They  │
-│   want to hear "atomic batch, rollback" — or to catch you not  │
-│   having thought about it.                                      │
+│ WHAT THEY'RE TESTING                                            │
+│   Did you handle the dependency failure, or assume the model    │
+│   is always there? Do you degrade gracefully, fail loudly, or   │
+│   hang? And do you know the difference between what you BUILT   │
+│   and what you'd ADD?                                           │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-The strong answer:
+> "Ollama is a hard dependency — it's local, on the loopback, so 'down' usually means I didn't
+> start it. When the model is unreachable, `agent.answer()` throws, and that propagates up through
+> `session.ask()` to the catch block in `chat.tsx`'s `onSubmit`, which renders it as an error turn
+> in the chat — `error:` plus the message. So the turn fails visibly, the session survives, and
+> there's no partial state: I persisted the user message before calling the agent, but no
+> assistant answer gets written for a failed turn.
+>
+> What I have NOT built is retry or a circuit breaker — there's no backoff on a transient Ollama
+> hiccup. For a local single-operator tool that's acceptable; the operator sees the error and
+> retries by hand. If this were serving other people, I'd add a retry-with-backoff around the
+> model call and a circuit breaker so a sustained outage fails fast instead of making every turn
+> wait for a timeout. aptkit has the seam for it — the model provider is a port — so it's an
+> adapter-level change, not a rewrite."
 
-> "No half-indexed document — the upsert is atomic. In `PgVectorStore`,
-> all the chunks for a document are dimension-checked first, then the
-> whole batch runs inside an explicit `begin … commit`, with a `rollback`
-> on any error. So if chunk 7 of 10 fails to insert, the transaction
-> rolls back and none of them land — the document either indexes
-> completely or not at all. And the dimension check runs *before* the
-> transaction even opens, so a wrong-size vector fails fast without
-> touching the database at all. The one durability asymmetry worth
-> naming, since it's the opposite choice: conversation memory is
-> best-effort. A memory-write failure is swallowed in a try/catch,
-> because the answer the user already has must never be lost to a memory
-> bookkeeping failure. So indexing is all-or-nothing transactional;
-> memory is fire-and-forget. Different guarantees, on purpose, because
-> they protect different things."
-
-This is a strong answer because it shows you understand transactional
-atomicity (`src/pg-vector-store.ts:38-65`) *and* that you made a
-*deliberately different* durability choice for memory
-(`src/session.ts:64-69`) — and you can articulate *why* the asymmetry
-exists (the answer is the product; memory is a bonus). Naming the
-contrast is what proves it's deliberate.
-
-#### The follow-up tree
+The honesty move: name what you built (visible failure, no partial state), name what you didn't
+(retry, circuit breaker), and name *why the absence is acceptable here* and *what would change
+it*. That's operational maturity without overclaiming.
 
 ```
-  You give the atomic-batch answer.
-        │
-        ├─► IF THEY ASK "why is memory best-effort but indexing isn't?"
-        │     → Different things protected. Indexing is the corpus —
-        │       a half-indexed doc corrupts retrieval. Memory is a
-        │       bonus written AFTER the answer is delivered; losing it
-        │       costs nothing the user sees. Asymmetric on purpose.
-        │
-        ├─► IF THEY ASK "what about the trajectory writes — atomic too?"
-        │     → No, and this is an honest gap. The trace flush is a
-        │       Promise.all over queued inserts; one failed insert
-        │       leaves a partial trajectory with no retry. Since the
-        │       trajectory is the portfolio artifact, that's the
-        │       failure handling I'd most want to harden.
-        │
-        └─► IF THEY ASK "what if the dimension is wrong?"
-              → assertDim throws BEFORE the transaction opens — the
-                768-dim embedding one-way door, made a loud failure
-                instead of a silent truncation.
+"What happens when the model is down?"
+      │
+      ▼
+You give the throws → caught → visible-error answer.
+      │
+      ├─► IF THEY ASK "why no retry?"
+      │     "Single operator, local model — a retry loop on a model I
+      │      forgot to start just delays the error I want to see. On a
+      │      product I'd add backoff + a breaker; the provider port is
+      │      the place to put it."
+      │
+      ├─► IF THEY ASK "what about a partial answer mid-stream?"
+      │     "Can't happen here — answer() awaits the full response,
+      │      stream:false. There's no half-written answer to clean up.
+      │      That's also why there's no first-token feedback — a real
+      │      tradeoff I'd revisit if I streamed." (ch 4, ch 7)
+      │
+      └─► IF THEY ASK "what does the user see?"
+            "An error turn in the scrollback with the message. They're
+             the operator — they own their own errors, so a verbose
+             message is appropriate here, not a leak."
 ```
 
----
+## "What's the worst failure — the one you can't see?"
 
-### Question 3 — "What about bad input — can a user break it?"
+This is the question that separates candidates who walked the happy path from those who walked
+the failure surface. Volunteer the silent failure.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │ THEY ASK                                                        │
-│   "What stops malformed input — a weird question, an injection │
-│    attempt — from breaking the system or leaking data?"         │
+│   "Is there a failure mode that doesn't surface as an error?"   │
 │                                                                 │
-│ WHAT THEY'RE TESTING                                           │
-│   Do you understand your trust boundaries and your injection   │
-│   surface? For an AI app specifically — do you know where      │
-│   prompt injection can enter, and is the blast radius bounded? │
+│ WHAT THEY'RE TESTING                                            │
+│   Do you know your system's SILENT failures — the ones that     │
+│   return a confident wrong answer instead of throwing? Those    │
+│   are the dangerous ones, and naming yours unprompted is a      │
+│   strong signal.                                                 │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-The strong answer:
-
-> "Two things to separate: SQL injection and prompt injection. SQL is
-> resistant everywhere — every query that touches user- or model-derived
-> data uses parameterized placeholders, the value never becomes part of
-> the SQL string. Even the vector search binds the query vector as a
-> parameter and casts it; there's no string-built SQL in the repo. Prompt
-> injection is the live one: indexed documents come back as tool results
-> and re-enter the model's context, and now recalled conversation memory
-> does too — so a poisoned passage, or a poisoned earlier turn that got
-> remembered, could try to instruct the model. But the blast radius is
-> small *by design*, and that's the part I want to emphasize: the agent
-> is allowlisted to exactly one read-only tool — knowledge-base search —
-> with a hard budget of four tool calls and six turns. So even if the
-> model is fully talked into following injected instructions, the worst
-> it can do is *search*. There's no write tool, no exec, no network
-> egress to redirect. The model can be talked into a wrong *answer*; it
-> can't be talked into an *action*. The honest gap: there's no
-> content-level injection defense — no delimiting of retrieved text — and
-> I don't add it yet precisely because the tool scope makes injection
-> low-value. It becomes worth adding the day the agent gets a second,
-> non-read-only tool."
-
-This is a genuinely strong security answer for an AI role because it
-distinguishes the two injection types, names the real one (prompt, via
-retrieved content + recalled memory), and — the key move — defends the
-*blast radius* with the least-privilege tool scope (one read-only tool,
-bounded budget) rather than claiming a defense that isn't there. "Wrong
-answer, not an action" is the line that lands.
+> "Yes, and it's the one I'd flag first. The tool call is emulated — Gemma has no native
+> tool-calling, so aptkit parses a JSON object out of the model's prose. There's no
+> argument-schema validation on that parse. If the model emits the wrong key — say it doesn't
+> produce a `query` field — the query comes back empty, and the search runs on whatever an
+> empty string embeds to. It returns chunks, they're just garbage, and the model answers from
+> garbage. No error is thrown. The operator gets a confident, wrong answer with no signal that
+> retrieval failed.
+>
+> That's the worst failure in the system precisely because it's invisible. The fix is
+> argument-schema validation on the parsed call — reject or re-prompt when the required field is
+> missing — and that's an aptkit-side change, in the emulated tool-call path. Until that's in, the
+> mitigation is the eval: precision@k and recall@k catch *retrieval* regressions on the labeled
+> set, but they don't catch a per-query empty-query event in production. That gap is real."
 
 ```
-  ┃ A least-privilege tool scope is a prompt-injection defense.
-  ┃ The model can be talked into a bad answer but not into an
-  ┃ action — because the only tool it has is read-only search.
+┌─────────────────────────┬─────────────────────────┐
+│ WEAK ANSWER             │ STRONG ANSWER           │
+├─────────────────────────┼─────────────────────────┤
+│ "It handles errors      │ "The dangerous one is   │
+│ gracefully — if         │ silent: emulated tool   │
+│ something fails it       │ calls have no arg-      │
+│ shows an error          │ schema validation, so a │
+│ message."               │ wrong key → empty query │
+│                         │ → garbage retrieval →   │
+│                         │ confident wrong answer, │
+│                         │ no error thrown. Fix is │
+│                         │ schema validation on     │
+│                         │ the parse."             │
+├─────────────────────────┼─────────────────────────┤
+│ Why it's weak:          │ Why it works:           │
+│ "handles errors         │ Names the exact silent  │
+│ gracefully" is a claim  │ failure, the mechanism, │
+│ with no mechanism, and  │ why it's invisible, the │
+│ it ignores the failures │ fix, and the gap in the │
+│ that DON'T throw — the   │ current mitigation.     │
+│ ones that matter most.  │ This is what walking    │
+│                         │ the failure surface     │
+│                         │ sounds like.            │
+└─────────────────────────┴─────────────────────────┘
 ```
 
----
+> ▸ The failures that throw are the easy ones. The failure that
+>   returns a confident wrong answer is the one worth naming first.
 
-### Where you'll get pushed past your depth
+## When they push past your depth
 
 ```
-╔═══════════════════════════════════════════════════════════════╗
-║ WHEN YOU DON'T KNOW                                          ║
-║                                                              ║
-║   The push here: "If two writes raced — say two processes    ║
-║   indexing the same document at once — what happens? Walk    ║
-║   me through the concurrency control." buffr is              ║
-║   single-process single-writer, so you've never actually     ║
-║   exercised concurrent writes, and the deep answer is        ║
-║   Postgres MVCC internals you took on defaults.              ║
-║                                                              ║
-║   Say:                                                       ║
-║   "In practice this never races today — it's one process,    ║
-║    one writer. If two did race on the same chunk id, the     ║
-║    upsert is ON CONFLICT DO UPDATE, so last-writer-wins on   ║
-║    that row, and each batch is its own transaction so I'd    ║
-║    lean on Postgres's MVCC for isolation. But I'll be        ║
-║    honest — I took Postgres's default isolation level and    ║
-║    I haven't had to reason about a real write-write conflict ║
-║    in this system, because the architecture never produces   ║
-║    one. The day a second writer exists, that's exactly the   ║
-║    kind of thing I'd need to design for deliberately."       ║
-║                                                              ║
-║   What this signals: you know the relevant mechanism exists  ║
-║   (ON CONFLICT, MVCC, isolation levels) and you're honest    ║
-║   that the single-writer architecture means you haven't had  ║
-║   to exercise it. Knowing the shape and owning the           ║
-║   non-exercise beats inventing a conflict-resolution story.  ║
-║                                                              ║
-║   Do NOT say:                                                ║
-║   "I use optimistic locking with version numbers..." — you   ║
-║   don't; there's no version column. Claiming a concurrency   ║
-║   control you didn't build is the fastest way to get caught. ║
-╚═══════════════════════════════════════════════════════════════╝
+╔═══════════════════════════════════════════════════════════╗
+║ WHEN YOU DON'T KNOW                                       ║
+║                                                           ║
+║   They ask: "Your index write spans two transactions and  ║
+║   can crash in the middle. In a real distributed system   ║
+║   how would you make that atomic — two-phase commit, a    ║
+║   saga, an outbox? Walk me through the consistency        ║
+║   protocol."                                              ║
+║                                                           ║
+║   Distributed-commit protocols are exactly the gap        ║
+║   `me.md` names. You've reasoned about the two-transaction ║
+║   write; you have NOT implemented 2PC, sagas, or an        ║
+║   outbox in production.                                    ║
+║                                                           ║
+║   Say:                                                    ║
+║   "For buffr the fix is simpler than a distributed        ║
+║    protocol — both writes hit the same Postgres, so I'd    ║
+║    wrap them in ONE transaction and the problem's gone. I  ║
+║    split them because the documents write and the chunk     ║
+║    upsert come from two different layers, not because they ║
+║    had to be separate. As for true distributed-commit —    ║
+║    sagas, two-phase commit, the outbox pattern — I know    ║
+║    the shapes and the tradeoffs at a reading level, but I  ║
+║    haven't operated them in production, so I'd be          ║
+║    reasoning, not recalling. I'd rather say that than      ║
+║    pretend I've run a saga orchestrator."                 ║
+║                                                           ║
+║   What this signals: you solve the problem you actually    ║
+║   have with the tool you actually have (one transaction),  ║
+║   and you draw a clean line at the distributed protocols   ║
+║   you haven't run.                                         ║
+║                                                           ║
+║   Do NOT say:                                             ║
+║   "I'd use a saga with compensating transactions." — said  ║
+║   about a problem that's literally two writes to one DB,   ║
+║   it signals you reach for the fancy pattern instead of    ║
+║   the right one. The interviewer's next question buries    ║
+║   you.                                                     ║
+╚═══════════════════════════════════════════════════════════╝
 ```
 
----
+## What you'd change about failure handling
 
-### What you'd change about failure handling
+The reconsideration you'd volunteer is the retry-and-breaker gap around the model and database
+calls. Today every dependency failure surfaces as a raw error turn — fine for an operator
+debugging their own laptop, wrong for anything with a user who isn't you. The seam is already
+there: the model and store are both ports in aptkit, so adding retry-with-backoff and a circuit
+breaker is adapter-level work, not a rewrite. You'd sequence it *after* the argument-schema
+validation, though — the silent garbage-retrieval failure is more dangerous than a loud model
+timeout, so the invisible failure gets fixed first.
 
-The failure handling I'd most want to change is the trajectory flush.
-Everything user-facing is contained well — best-effort memory, atomic
-indexing, error turns that keep the session alive — but the trace sink's
-`Promise.all` over queued inserts means one failed insert leaves a turn's
-trajectory partial, with no retry. Since the entire portfolio thesis is
-"capture every trajectory now so fine-tuning is answerable later," a
-silently-partial trajectory is the failure that undercuts the project's
-own goal. I'd either write the trace events inside the same transaction
-as the answer, or add a retry on the queued inserts. It's acceptable for
-one local user, but it's the gap I'd close first, because of what the
-trajectory is *for*.
+## One-page summary
 
----
+**Core claim:** buffr's failure surfaces are small and bounded by design — single operator, one
+read-only tool, best-effort memory. The win is naming the *silent* failure (emulated tool call →
+empty query → garbage retrieval) unprompted, and being precise about what's handled (visible
+failure, no partial state, loud dimension assert) versus what's deferred (retry, circuit
+breaker).
 
-## One-page summary — Chapter 5
-
-**Core claim:** Single-device means most distributed failures don't
-apply — say that cleanly. The failures that exist are handled with
-deliberate, named choices; never dress a gap as a feature.
-
-**The questions covered:**
-
-- **"Model down?"** — Agent call throws → error turn; session survives,
-  turn doesn't recover. No timeouts/retries/fallback (aptkit has
-  fallback; buffr doesn't compose it). Honest gap, named.
-- **"Partial write?"** — Atomic batch: `BEGIN…ROLLBACK`, no half-indexed
-  doc; `assertDim` throws before the transaction. Memory is deliberately
-  the opposite — best-effort, swallowed.
-- **"Bad input / injection?"** — SQL: parameterized everywhere, resistant.
-  Prompt injection: real (retrieved docs + recalled memory), but blast
-  radius bounded by a one read-only tool, 4-call budget. Wrong answer,
-  not an action.
+**Questions covered:**
+- *"What happens when the model is down?"* → throws → caught in onSubmit → visible error turn,
+  session survives, no partial state. No retry/breaker yet; provider port is where they'd go.
+- *"Any failure that doesn't throw?"* → yes, the worst one: emulated tool call with no arg-schema
+  validation → empty query → silent garbage answer. Fix is schema validation on the parse.
+- *"Make the two-transaction write atomic?"* → wrap both in one Postgres transaction; draw the
+  line at distributed-commit protocols you haven't run.
 
 **Pull quotes:**
+- "The failures that throw are the easy ones. The failure that returns a confident wrong answer
+  is the one worth naming first."
+- "One read-only tool, capped turns, best-effort memory — small blast radius by design."
 
-```
-  ┃ The session survives a failed turn; the turn doesn't recover.
-
-  ┃ A least-privilege tool scope IS a prompt-injection defense —
-  ┃ talked into a bad answer, never into an action.
-```
-
-**The "I don't know":** Concurrent write-write conflicts — name the
-mechanisms (ON CONFLICT, MVCC, default isolation), own that the
-single-writer architecture never exercises them. Never claim optimistic
-locking you didn't build.
-
-**What you'd change:** Harden the trajectory flush — `Promise.all` over
-queued inserts gives partial capture on one failure, and the trajectory
-is the portfolio artifact.
+**What you'd change:** Add retry-with-backoff and a circuit breaker at the provider/store ports —
+but sequence it *after* argument-schema validation, since the silent garbage-retrieval failure is
+more dangerous than a loud model timeout.

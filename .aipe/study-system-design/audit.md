@@ -1,286 +1,255 @@
-# audit.md — the 8-lens architectural audit
+# System-Design Audit — buffr-laptop
 
-Pass 1. One `##` section per system-design lens, walked against the real codebase with
-`file:line` grounding. Where a lens finds nothing, it says `not yet exercised` — no
-invented services, no invented scale. Significant findings cross-link to a Pass-2
-pattern file rather than restating it.
+Pass 1 of the two-pass audit. Eight lenses, walked in order against the real code. Each lens
+names what the repo *actually does* with `file:line` grounding, or says `not yet exercised`
+plainly. Significant findings cross-link to a Pass-2 pattern file for the deep walk.
 
-The honest frame up front: **buffr-laptop is single-device, single-user, single-process,
-direct-to-one-Postgres.** That shape is a deliberate decision
-(`docs/superpowers/specs/2026-06-19-laptop-supabase-graduation-design.md:27` — "single
-device has one client; HTTP API is YAGNI"). Several lenses that light up in a
-distributed web service read `not yet exercised` here — and that's the correct reading,
-not a gap to apologize for.
+Evidence base: `src/*` (10 files), `sql/001_agents_schema.sql`, the two design specs under
+`docs/superpowers/specs/`, and `agent-layer-plan.md`. Observed behavior is grounded in code;
+production/scale claims are labelled as inference.
 
 ---
 
-## 1. system-map-and-boundaries
+## 1. System map and boundaries
 
-The full map lives in `00-overview.md`. The boundaries that carry real contracts:
-
-**The aptkit/buffr boundary — the load-bearing seam.** buffr consumes
-`@rlynjb/aptkit-core@^0.4.1` and never edits it (`package.json:14`, and the
-must-not-change constraint in `.aipe/project/context.md:65`). aptkit owns the contracts
-(`VectorStore`, `CapabilityTraceSink`, `EmbeddingProvider`, `ModelProvider`) and the
-logic (agent loop, retrieval pipeline, memory engine, evals). buffr owns the
-*implementations* of those contracts plus the storage and interface. The seam is a
-vertical one: control and data cross it in both directions — buffr injects a
-`PgVectorStore` *down* into aptkit's pipeline (`src/session.ts:42-44`), and aptkit's
-memory engine was extracted *up* out of buffr and is re-consumed
-(`.aipe/project/context.md:24`). → see `02-library-as-dependency-boundary.md`.
-
-**The store boundary.** `PgVectorStore` (`src/pg-vector-store.ts:19`) implements
-aptkit's `VectorStore` exactly so it drops into `createRetrievalPipeline` with zero
-agent changes. → see `01-vector-store-adapter.md`.
-
-**The trace boundary.** `SupabaseTraceSink` (`src/supabase-trace-sink.ts:49`) implements
-`CapabilityTraceSink`; aptkit's agent emits events, buffr persists them. → see
-`03-trajectory-capture.md`.
-
-**The process/DB boundary.** node-postgres `pg.Pool` (`src/db.ts:4`), direct SQL, no
-HTTP indirection. One trust boundary: the `.env` `DATABASE_URL`
-(`src/config.ts:11`), gitignored. **External dependencies:** Ollama on localhost
-(`src/config.ts:14`) and Postgres `reindb`. Both are local/self-hosted — no third-party
-cloud API in the hot path.
-
-**Trust boundaries:** there is essentially one — the operator's own machine. `app_id`
-defaults to `'laptop'` and is the *only* tenancy key, applied by convention, not
-enforced (no RLS). With one user that's correct; the audit flags it under lens 8 and
-lens 7 as the thing that must change before a second writer.
-
----
-
-## 2. request-response-and-data-flow
-
-The one important end-to-end flow is a chat turn. It is a waterfall with one internal
-loop (the agent's tool-call cycle), not a fan-out.
+Three trust/ownership bands, and the load-bearing boundary sits in the middle.
 
 ```
-  one chat turn — the data flow
-
-  Ink TUI                Session              aptkit agent          Postgres
-  (chat.tsx)            (session.ts)          + Ollama              (agents)
-     │ onSubmit(q)          │                     │                    │
-     │────────────────────►│ ask(q)              │                    │
-     │                     │ persistMessage(user)│───────────────────►│ INSERT messages
-     │                     │ agent.answer(q) ───►│ Gemma: tool_use?    │
-     │                     │                     │ search_knowledge_   │
-     │                     │                     │   base ────────────►│ cosine search
-     │                     │                     │ Gemma: synthesize   │
-     │                     │◄─── answer ─────────│                    │
-     │                     │ trace.flush() ──────────────────────────►│ INSERT messages×N
-     │                     │ memory.remember() ──────────────────────►│ upsert chunk(kind=memory)
-     │◄─── answer ─────────│                    │                    │
-     │ setTurns(...)       │                    │                    │
+  buffr code  ──►  aptkit-core (library)  ──►  buffr adapters  ──►  Postgres + Ollama
+  (owns)           (consumed, never edited)    (owns)               (external deps)
 ```
 
-The order is fixed and synchronous (`src/session.ts:60-71`): persist the user turn,
-run the agent to completion, *then* flush the trace, *then* best-effort remember. No
-parallelism across these steps — the trace flush deliberately happens after the answer
-is in hand, and memory is wrapped in try/catch so a memory failure can't lose the
-answer (`src/session.ts:65-69`). The agent loop itself (Gemma deciding to call the
-retrieval tool, then synthesizing) is aptkit's; buffr sees it only as `answer()`. →
-see `04-long-lived-chat-session.md` for the orchestration walk.
+**Major components and what they own:**
+- `src/cli/chat.tsx:9-60` — the Ink UI. Owns only screen state; delegates all work to the session.
+- `src/session.ts:34-76` — `createChatSession()`. The orchestrator. Owns the warm pool, the
+  one conversation id, and the wiring of every aptkit piece to every buffr adapter.
+- `src/pg-vector-store.ts:19-86` — `PgVectorStore implements VectorStore`. The adapter behind
+  the storage port. → see `01-vector-store-adapter.md`.
+- `src/supabase-trace-sink.ts:49-94` — `SupabaseTraceSink implements CapabilityTraceSink`. The
+  adapter behind the observability port. → see `03-trajectory-capture.md`.
+- `src/runtime.ts:5-18` — `indexDocumentRow`. The index path's document-row-then-chunks step.
+- `src/profile.ts:4-8`, `src/config.ts:9-16`, `src/db.ts:4-6`, `src/migrate.ts` — profile read,
+  pure config, pool factory, transactional migration runner.
 
-The two one-shot CLIs (`src/cli/index-cmd.ts`, `src/cli/eval-cmd.ts`) are simpler
-flows: index reads markdown → `indexDocumentRow` → pipeline.index → chunks; eval reads
-a labeled set → pipeline.query → precision@k/recall@k. Both open and close a pool per
-run, unlike the warm-pool chat session.
+**Trust boundaries:**
+- **The aptkit boundary** is the one that matters (`session.ts:2-6` imports; nothing in `src/`
+  reaches into aptkit internals). Stated as a hard constraint in `context.md` ("aptkit is
+  consumed, never edited here") and enforced structurally — buffr only implements aptkit's
+  *contracts* (`VectorStore`, `CapabilityTraceSink`, `ModelProvider` via Gemma). → `04-library-as-dependency-boundary.md`.
+- **The single-user trust boundary is by convention, not enforcement.** Every table carries
+  `app_id` (`sql/001:6,17,34` etc.) defaulting `'laptop'`, but there is **no RLS** — isolation
+  is cooperative. The graduation spec names this exactly: "isolation is by convention only
+  until app #2" (`...graduation-design.md:193-195`).
+- **Secrets boundary:** `DATABASE_URL` / Ollama host come from `.env` via `dotenv` (`session.ts:35`,
+  `config.ts:9-16`); `.env` is gitignored. No secret is in code.
 
----
-
-## 3. state-ownership-and-source-of-truth
-
-Trace one axis — *who owns this state and where does it live* — across the layers:
-
-| State | Lives in | Owner | Lifecycle |
-| --- | --- | --- | --- |
-| turn list, input, busy | Ink component (`src/cli/chat.tsx:11-13`) | the UI | ephemeral — dies with the process |
-| the conversation id | session closure (`src/session.ts:55`) | the session | one per `chat` run, held across turns |
-| the warm pool | session closure (`src/session.ts:39`) | the session | created once, `pool.end()` on close |
-| the corpus + vectors | `agents.documents` / `agents.chunks` | Postgres (canonical) | persists across runs |
-| the trajectory | `agents.messages` / `agents.conversations` | Postgres | append-only, per turn |
-| the profile | `agents.profiles` | Postgres | loaded once per session (`src/session.ts:47`) |
-| episodic memory | `agents.chunks` tagged `kind=memory` | Postgres, via aptkit memory engine | written per turn, recalled by similarity |
-
-**Postgres is the single source of truth** for everything durable. There is no client
-cache, no mirror, no second store to reconcile — so there is no source-of-truth
-*conflict* to resolve. The interesting ownership detail: conversation memory does not
-get its own table; it rides the `chunks` table
-(`.aipe/project/context.md:43-45`), which is why the document_id FK had to be dropped
-(memory chunks have no documents row). → see `06-retrieval-as-memory.md`.
-
-The one piece of state aptkit's engine owns in-process is the memory `counters` map
-(`packages/memory/src/conversation-memory.ts:71` in aptkit) — per-conversation id
-counters. That's ephemeral and rebuilt each session; the durable ids it generates land
-in Postgres.
+**External dependencies:** Postgres `reindb` (over `pg`), Ollama at `localhost:11434` (two
+models). Both are local/self-hosted — there is no third-party cloud API in the hot path.
 
 ---
 
-## 4. caching-and-invalidation
+## 2. Request / response and data flow
 
-**`not yet exercised` as an architectural layer.** There is no cache tier — no Redis,
-no in-process memo of search results, no tool-run cache. The design spec named an
-`agents.tool_runs` cache and deferred it explicitly as YAGNI for one device
-(`docs/superpowers/specs/2026-06-19-laptop-supabase-graduation-design.md:131`).
+There is no HTTP request — the "request" is `session.ask(question)`, an in-process call. Three
+end-to-end flows exist; the ask flow is the interesting one.
 
-The one thing that *is* cached, and worth naming precisely so it isn't mistaken for a
-cache layer: the **warm `pg.Pool`** (`src/db.ts:4`, held in `src/session.ts:39`). It
-caches *connections*, not results — the session reuses one pool across every turn
-instead of reconnecting. That's connection pooling, not a cache with an invalidation
-story. There is no staleness question because nothing memoizes query results.
+**The ask flow (the hot path), `session.ts:60-71`:**
 
-Because there's no result cache, there's no invalidation strategy to audit. The HNSW
-index is the closest thing to a derived structure, and pgvector keeps it current on
-`upsert` — invalidation is the database's job, not the app's. → engine-level index
-maintenance belongs to `study-database-systems`.
+```
+  chat.tsx onSubmit
+    └─► session.ask(q)
+         1. persistMessage(user)            ── one INSERT into agents.messages
+         2. agent.answer(q)                 ── aptkit loop:
+              model → wants search_knowledge_base
+              → tool: pipeline.query → embed(q) → PgVectorStore.search (cosine) → rank
+              → model → final answer
+              (every step emits a CapabilityEvent into SupabaseTraceSink, queued)
+         3. trace.flush()                   ── awaits all queued event INSERTs
+         4. memory.remember({q, answer})    ── embed exchange → upsert as a memory chunk
+                                               (best-effort; failure is swallowed)
+         return answer
+```
 
----
+This is a **sequential waterfall**, deliberately: persist-before-answer means the user turn
+survives a crash mid-generation; flush-before-remember means the trajectory is durable before
+the best-effort memory write. The one place work could parallelize — the per-event INSERTs —
+is itself made concurrent by the sink queuing promises and `flush()` awaiting them all at once
+(`supabase-trace-sink.ts:87-93`). → `03-trajectory-capture.md`, `05-long-lived-chat-session.md`.
 
-## 5. storage-choice-and-durability-boundaries
+**The index flow, `index-cmd.ts:22-26` → `runtime.ts:5-18`:** read file → write `documents`
+row → `pipeline.index` chunks+embeds+upserts. Document row first, chunks second — the source-of-
+truth row is the CLI's job, the chunk rows are the store's. → `02-retrieval-pipeline.md`.
 
-One datastore: **Postgres `reindb`, schema `agents`, pgvector extension**
-(`sql/001_agents_schema.sql:1-2`). It exists because the project graduated an in-memory
-RAG toy to durable persistence — the whole point of v1b
-(`docs/superpowers/specs/2026-06-19-laptop-supabase-graduation-design.md:14`). It owns
-five tables and one durability guarantee that matters: **a chat turn is durable once the
-inserts commit.**
-
-The durability boundaries, drawn precisely:
-
-- **Corpus + vectors** (`documents`, `chunks`): durable; `upsert` runs in an explicit
-  transaction with rollback (`src/pg-vector-store.ts:42-64`). The 768-dim guard throws
-  *before* any write so a wrong-dimension vector never lands
-  (`src/pg-vector-store.ts:32-36`, `.aipe/project/context.md:67`).
-- **Trajectory** (`messages`): durable but *best-effort-ordered* — `emit()` is sync
-  (aptkit's contract), writes are queued and awaited in `flush()`
-  (`src/supabase-trace-sink.ts:91-93`). The event timestamp is persisted into
-  `created_at` so replay order matches emit order, not the race between concurrent
-  flush inserts (`src/supabase-trace-sink.ts:46-48`). → see `03-trajectory-capture.md`.
-- **Memory** (`chunks` tagged): durable, but *best-effort to write* — a `remember`
-  failure is swallowed so the answer the user already has is never lost
-  (`src/session.ts:65-69`). The durability boundary here is asymmetric on purpose:
-  the answer is the product, the memory is a bonus.
-
-Why one Postgres and not a separate vector DB: vector and relational data are colocated
-in one instance, so a single transaction and a single connection cover both — the same
-colocation choice AdvntrCue made. Engine internals (HNSW build params, `<=>` operator,
-MVCC on the upsert) belong to `study-database-systems`; schema shape (the soft FK, the
-jsonb meta, chunk-id design) belongs to `study-data-modeling`.
+**The eval flow, `eval-cmd.ts:24-33`:** for each labeled query, `pipeline.query` → dedupe to
+docIds → `scorePrecisionAtK` / `scoreRecallAtK`. Pure measurement, no agent, no persistence.
 
 ---
 
-## 6. failure-handling-and-reliability
+## 3. State ownership and source of truth
 
-Single-device means most distributed failure modes don't apply — there's no partial
-failure across services because there's one service. What the repo *does* handle:
+One question, traced down the layers: **who owns this state, and is it the truth or a copy?**
 
-- **Memory-write failure is contained** (`src/session.ts:65-69`): try/catch swallows it
-  so the turn still returns the answer. Named tradeoff: memory is best-effort.
-- **Transaction rollback on upsert** (`src/pg-vector-store.ts:59-62`): a mid-batch
-  failure rolls the whole batch back — no half-indexed document.
-- **Dimension mismatch throws loudly** (`src/pg-vector-store.ts:32-36`): a wrong-size
-  vector fails fast rather than silently truncating — the embedding-dimension one-way
-  door, named not hidden (`.aipe/project/context.md:67`).
-- **Per-turn error surfacing in the UI** (`src/cli/chat.tsx:30-32`): a failed
-  `session.ask` renders as an error turn instead of crashing the TUI.
-- **Missing config fails fast** (`src/session.ts:37`, `src/migrate.ts:26`): no
-  `DATABASE_URL` throws at startup, not mid-run.
+```
+  state                     owner                  truth or copy?
+  ───────────────────────   ────────────────────   ──────────────────────────
+  screen turns / input      chat.tsx useState      ephemeral view state
+  the conversation id       session.ts (closure)   the session's identity
+  the agent instance        session.ts (closure)   built once, reused per turn
+  corpus documents          agents.documents       SOURCE OF TRUTH
+  chunks + embeddings       agents.chunks          DERIVED from documents (re-embeddable)
+  conversation memory       agents.chunks(kind=mem) DERIVED from messages
+  full trajectory           agents.messages        SOURCE OF TRUTH (replayable)
+  user profile              agents.profiles        SOURCE OF TRUTH
+```
 
-What is **`not yet exercised`:** retries with backoff, request timeouts, circuit
-breakers, graceful degradation when Ollama is down, offline behavior, health checks.
-If Ollama is unreachable the agent call simply throws and surfaces as an error turn —
-there's no fallback chain wired here (aptkit *has* a `provider-fallback` pattern; buffr
-doesn't compose it). The trace sink's queued-writes model has no retry: if a flush
-insert fails, `Promise.all` rejects and that turn's trajectory is incomplete. For one
-local user these are acceptable; coordination-under-partial-failure mechanics belong to
-`study-distributed-systems` and become real only when the phone brain lands.
+The sharp call: **Postgres is the single source of truth for everything durable.** There is no
+second store to reconcile (the laptop+phone two-store sync problem is deferred —
+`aptkit-packages-design.md:69-74`). `chunks` is *derived* — the soft-link `document_id` and the
+`embedding_model` column (`sql/001:16,23`) exist precisely so the corpus can be re-embedded
+without losing the source. The conversation id lives in a closure (`session.ts:55`) and is the
+only piece of session-scoped mutable state; everything else is either screen-ephemeral or durable.
 
----
-
-## 7. scale-bottlenecks-and-evolution
-
-What breaks first, in order:
-
-**At 10x corpus (≈10k+ chunks):** HNSW recall and index build time degrade with default
-`m` / `ef_construction` — flagged as the batch-reindex threshold in both plans
-(`agent-layer-plan.md:105`,
-`docs/superpowers/specs/2026-06-19-laptop-supabase-graduation-design.md:197`).
-Synchronous per-document indexing (`src/runtime.ts:17`) also starts to hurt; the plan
-says batch reindex past that point.
-
-**At a second writer (app #2 or the phone):** the `app_id`-by-convention isolation
-breaks. RLS is deferred (`sql` has no policies), and `app_id` is set by buffr, not
-derived from a token. The graduation spec calls this a hard prerequisite before a
-second app writes (`docs/superpowers/specs/2026-06-19-laptop-supabase-graduation-design.md:193`).
-
-**At a second device (the two-brain body):** one memory plane shared by two brains
-becomes a sync/merge problem — the canonical-local-with-cloud-mirror pattern again
-(`docs/superpowers/specs/2026-06-19-aptkit-packages-design.md:73`). This is the change
-that would force the most rearchitecture, and it's deliberately the *second* thing to
-solve, not the first.
-
-**What stays stable across all of these:** the `VectorStore` contract. Swapping the
-in-memory store for pgvector required zero agent changes; swapping pgvector for an
-Edge-Function-backed store later is the same move. The contract is the evolution
-insurance. → see `07-deferred-body.md` for what's gated and what won't have to change.
-
-**What does NOT scale by adding machines:** nothing here is horizontally scalable today
-because nothing is stateless-behind-a-load-balancer. The chat session is a single
-stateful process. That's correct for one user; it's the first thing that would change
-for many.
+The honest wrinkle, noted in `session.ts:25-28`: there is **no in-prompt turn history** —
+`RagQueryAgent.answer()` treats each question independently. Continuity comes from
+*retrieval-based* memory (relevant past exchanges resurface as chunks), not from a growing
+message array in the prompt. That's a state-ownership choice: conversational memory is owned by
+the vector store, not by the prompt window. → `04-library-as-dependency-boundary.md`.
 
 ---
 
-## 8. system-design-red-flags-audit
+## 4. Caching and invalidation
 
-Ranked by architectural risk. Each is grounded; none is a surprise — the plans named
-most of them as deliberate, deferred tradeoffs.
+`not yet exercised` — and named-deferred, not missing by accident.
 
-1. **`app_id` isolation is by convention, not enforced** (no RLS;
-   `sql/001_agents_schema.sql` has no policies, `app_id` set in app code at
-   `src/pg-vector-store.ts:27`). Correct for one user; a **hard one-way risk** the
-   moment a second tenant writes. The spec already gates it
-   (`...graduation-design.md:193`). Highest risk because it's a data-isolation
-   boundary that looks present (the column exists) but isn't enforced.
+The `agents.tool_runs` cache is explicitly deferred in both specs ("YAGNI for a single device",
+`...graduation-design.md:131`; deferred in `aptkit-packages-design.md:348`). There is no response
+cache, no embedding cache, no query-result cache. Every ask re-embeds the query and re-runs the
+cosine search.
 
-2. **No timeouts / retries / fallback on the model + DB calls** (lens 6). A hung Ollama
-   or a flaky connection stalls or fails the turn with no recovery. Low impact at one
-   local user; would be the first reliability gap to close before any remote use.
+The one thing that *resembles* a cache — conversation memory riding on `chunks` — is not a cache:
+it has no invalidation, no TTL, no staleness contract; it's an append-only episodic store. The
+specs flag conversation retention (TTL / keep-N) as an open question (`agent-layer-plan.md:118`),
+which is the invalidation decision deferred to when growth becomes a cost.
 
-3. **Trajectory completeness depends on `flush()` succeeding** (`src/supabase-trace-sink.ts:91`).
-   `Promise.all` over queued inserts means one failed insert leaves that turn's
-   trajectory partial, and there's no retry. Since the trajectory is the *portfolio
-   artifact* (the whole "capture now so fine-tuning is answerable later" thesis,
-   `agent-layer-plan.md:17`), partial capture is more costly here than it looks.
-
-4. **Synchronous per-document indexing** (`src/runtime.ts:17`) — fine for a hand-loaded
-   corpus, a bottleneck past ~10k chunks. Already flagged for batch reindex.
-
-5. **Memory recall over-fetches then filters in-process** (aptkit
-   `conversation-memory.ts:94`, driven by buffr sharing the store). The `VectorStore`
-   contract has no metadata filter, so recall fetches `max(k*4, 20)` and filters by
-   `kind` in JS. Cheap now; a real cost at large corpora where memory rows are sparse
-   among documents. This is a consequence of the shared-store choice in
-   `06-retrieval-as-memory.md`.
-
-Not a red flag, called out to prevent a false one: the **dropped FK** on
-`chunks.document_id` (`sql/001_agents_schema.sql:26-27`) looks like a missing integrity
-constraint but is a *deliberate* drop to preserve `VectorStore` drop-in parity
-(`...graduation-design.md:204`). It's a documented tradeoff, not an oversight. →
-`01-vector-store-adapter.md`.
+At 10x corpus this stays fine; the first cache that would earn its place is an embedding cache on
+re-index, since re-embedding the whole corpus on a model swap (`...graduation-design.md` reindex
+note) is the named expensive operation.
 
 ---
 
-## `not yet exercised` — the honest inventory
+## 5. Storage choice and durability boundaries
 
-Named so the map doesn't pretend to infrastructure that isn't there:
+One datastore, chosen deliberately: **Postgres with the `pgvector` extension**, so the vector
+index and the relational data live in **one instance** (`context.md`; matches the AdvntrCue shape
+in `me.md`'s portfolio — "vector + relational data colocated, one Postgres instance").
 
-- **caching** — no result cache or tool-run cache (lens 4); only connection pooling.
-- **retries / timeouts / circuit breakers** — none on model or DB calls (lens 6).
-- **horizontal scale / load balancing** — single stateful process, not behind an LB (lens 7).
-- **multi-region / replication** — one Postgres instance, one region (lens 5/7).
-- **HTTP gateway / API layer** — direct `pg`, no Edge Functions this phase (lens 1).
-- **enforced RLS / multi-tenant isolation** — `app_id` by convention only (lens 8).
-- **multi-device sync** — the two-brain memory merge is deferred (lens 7; `07-deferred-body.md`).
-- **fine-tuning** — the ceiling, gated on Phase-4 evidence (`agent-layer-plan.md:19`).
+**Why one store, what it owns:** colocating vectors and rows means a retrieval hit and its
+citation metadata come from the same query (`pg-vector-store.ts:70-85` returns score *and*
+content/docId in one round-trip) — no join across a separate vector DB, no consistency gap
+between "the chunk exists" and "the embedding exists."
+
+**Durability boundaries that are actually coded:**
+- `upsert` wraps all chunk inserts in `begin`/`commit` with `rollback` on error
+  (`pg-vector-store.ts:40-64`) — a partial multi-chunk index is impossible.
+- `migrate.ts:8-20` runs the whole schema script in one transaction — all-or-nothing migration.
+- The trace sink takes the opposite, deliberate stance: each event is its own INSERT, queued and
+  flushed, **not** transactional (`supabase-trace-sink.ts:53-93`) — losing one trajectory event
+  must not roll back the others. Durability granularity is per-event, by design.
+- `embedding vector(768) not null` (`sql/001:24`) + the assert in `pg-vector-store.ts:32-36` make
+  a dimension mismatch a loud throw, never a silent truncate — the 768-dim one-way door is
+  guarded at the storage edge.
+
+Engine internals (how HNSW indexes, how `<=>` executes, MVCC durability of the commit) → cross-link
+`study-database-systems`. Schema shape (the soft FK, the jsonb meta) → `study-data-modeling`.
+
+---
+
+## 6. Failure handling and reliability
+
+Single device, so most distributed-failure concerns don't apply — but the repo makes three
+real reliability calls.
+
+**1. Best-effort memory.** `session.ts:64-69` wraps `memory.remember` in try/catch and swallows:
+"a memory-write failure must not lose the answer the user has." The answer is already returned;
+memory is downstream and optional. This is graceful degradation at the right granularity.
+
+**2. Crash-survivable turns.** Persist the user message *before* running the agent
+(`session.ts:61-62`) and flush the trajectory *before* the best-effort memory write
+(`session.ts:63-66`). If generation crashes, the user turn is already a row. Ordering is the
+reliability mechanism.
+
+**3. UI-level error containment.** `chat.tsx:30-32` catches any `session.ask` rejection and
+renders it as a buffr turn rather than crashing the TUI. The session stays alive for the next
+question.
+
+**`not yet exercised`:** retries, timeouts, and backoff against Ollama or Postgres. There is no
+retry on a failed embed, no timeout on `agent.answer`, no circuit breaker. The `pg.Pool`
+(`db.ts:4-6`) gives connection reuse but no configured statement timeout. For a single local user
+this is acceptable; the moment Ollama is remote or Postgres is Supabase-cloud, timeouts become the
+first gap. Coordination mechanics (partial failure across services) → cross-link
+`study-distributed-systems` — but honestly, this repo has no cross-service coordination to fail.
+
+---
+
+## 7. Scale, bottlenecks, and evolution
+
+What breaks first, what stays stable, what forces a rearchitecture.
+
+**Stable to 10x–100x corpus:** the `VectorStore` port and the cosine query. HNSW handles growing
+chunk counts; the `app_id` index (`sql/001:30`) keeps the scan scoped. The graduation spec already
+names the threshold — "batch reindex past ~10k chunks" (`agent-layer-plan.md`) — so the bottleneck
+is *known*, not discovered.
+
+**Breaks first under concurrency:** nothing in this repo is built for concurrent users. The
+integration tests run `--test-concurrency=1` because they share one DB and `app_id='test'`
+(`...graduation-design.md:213-215`) — that's a tell. One conversation, one pool, one user is baked
+into `session.ts`. Two users would need RLS (the `app_id` columns are already there, the *policies*
+are not) — a one-migration change the schema was pre-shaped for (`...graduation-design.md:28-29`).
+
+**The change that forces a rearchitecture:** the **two-brain body** (laptop + phone). The moment a
+second device writes the same memory, the single-source-of-truth model in lens 3 becomes a
+sync/merge problem — explicitly the deferred "canonical-local-with-cloud-mirror" pattern
+(`aptkit-packages-design.md:69-74`). The direct-`pg` access path also flips: a phone can't open a
+raw pg connection, so the deferred Edge Function / HTTP layer (`...graduation-design.md:55-63`)
+arrives with it. Both are named one-way doors, not surprises.
+
+**Cheap evolutions the design pre-paid for:** swap the embedder (the `embedding_model` column +
+reindex op), swap the vector store (the port), add an app (the `app_id` columns), add the HTTP
+layer (same SQL behind it). The forward-compat columns in `sql/001` are the bet that these stay
+migration-free.
+
+---
+
+## 8. System-design red-flags audit
+
+Ranked by architectural risk, each grounded in evidence. The honest framing: most of these are
+*deliberately-accepted* tradeoffs for a single-user learning project, not accidents.
+
+1. **Convention-only tenant isolation (medium, accepted).** `app_id` everywhere but no RLS
+   (`sql/001`, no policy statements). Correct for one user; a hard prerequisite before app #2
+   writes (`...graduation-design.md:193-195`). The risk is forgetting it's convention-only when
+   the second writer arrives.
+
+2. **No timeouts on external calls (medium).** Neither Ollama nor pg calls have a timeout
+   (`session.ts`, `db.ts:4-6`). A hung Ollama hangs the turn with no upper bound. Lowest-effort,
+   highest-value hardening when the model server goes remote.
+
+3. **Best-effort memory hides failures silently (low, accepted).** `session.ts:67-68` swallows
+   the error with no log. The right call for not losing the answer, but a silent catch means a
+   systematically-failing memory write is invisible. A one-line warn would close it. Observability
+   detail → cross-link `study-debugging-observability`.
+
+4. **Soft-link `document_id` trades integrity for parity (low, accepted and documented).** The FK
+   is deliberately dropped (`sql/001:26-27`, `pg-vector-store.ts` writes a possibly-null docId) to
+   keep drop-in parity with aptkit's in-memory store. A chunk can outlive/precede its document row.
+   Documented as an as-built deviation (`...graduation-design.md:199-208`). Schema-integrity
+   detail → cross-link `study-data-modeling`.
+
+5. **`session.ts` is the single wiring choke point (low).** Every component is hand-wired in one
+   function (`session.ts:34-58`). Fine at this size; the place that grows complex first if the body
+   expands. Not a problem yet — flagged so it's watched.
+
+**`not yet exercised` (named so the audit is honest, not padded):** caching/invalidation, retries
+and timeouts, horizontal scale, multi-region, an API gateway, enforced RLS, queue/streaming
+infrastructure, fine-tuning. Each is deferred *on purpose* in the design specs, not absent by
+oversight.

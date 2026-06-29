@@ -1,80 +1,108 @@
-# Distributed Systems — Overview (`buffr-laptop`)
+# 00 — Overview: the coordination map of buffr-laptop
 
-## The verdict, first
+## Subtitle
 
-`buffr-laptop` is **not a distributed system**. It's one Node process that talks to two remote dependencies over the network: Postgres (via a `pg.Pool`) and Ollama (via HTTP). There are no peers, no replicas, no message queues, no consensus, no leader election, and — this is the load-bearing fact — **exactly one writer**. Everything writes as `app_id = 'laptop'`.
+The single-process / two-remote-dependency topology — *Industry standard*
+(it's a client talking to two backing services, the most common shape there
+is). The distributed-systems word for "this isn't really distributed" is a
+**single point of coordination**: one process decides everything; the remotes
+only answer.
 
-That single-writer, single-process shape is *why* most of this guide's lenses come back `not yet exercised`. Distributed systems is the study of what stays correct when coordination crosses a boundary and any participant can be slow, duplicated, stale, or unavailable. This repo has one boundary worth that scrutiny (the app↔Postgres seam), one place that buffers async writes (the trace sink), and one *designed-but-unbuilt* distributed problem (a laptop brain and a phone brain sharing one Supabase). The rest of the inventory — replication, quorums, queues, sagas, clocks-as-coordination, split-brain — is genuinely absent. Naming that honestly is the point.
+## The verdict, up front
 
-## The coordination map — the whole system in one frame
+buffr-laptop is **one Node process** with **two remote dependencies**:
 
-Here is every boundary the running process crosses. Two of the three are network hops; both are remote dependencies, not peers.
+- **Postgres** (`reindb`, schema `agents`), reached over a connection pool
+  (`pg.Pool` in `src/db.ts:4`). This is the *only* real client/server boundary
+  in the repo.
+- **Ollama**, reached over HTTP for generation (`gemma2:9b`) and embeddings
+  (`nomic-embed-text:v1.5`). aptkit owns that client; buffr only passes a host.
 
-```
-  buffr-laptop — the coordination map (one process, two remote deps)
-
-  ┌─ Process layer (one Node process) ───────────────────────────────┐
-  │                                                                   │
-  │   createChatSession()  src/session.ts:34                          │
-  │     ├─ RagQueryAgent.answer()      (aptkit — the agent loop)      │
-  │     ├─ SupabaseTraceSink           src/supabase-trace-sink.ts:49  │
-  │     └─ ConversationMemory          (aptkit, over buffr's store)   │
-  │                                                                   │
-  └───────┬───────────────────────────────────────┬──────────────────┘
-          │  hop A: SQL over pg.Pool               │  hop B: HTTP
-          │  (the ONE client/server seam)          │  (model + embeddings)
-          ▼                                        ▼
-  ┌─ Storage layer ──────────────┐        ┌─ Provider layer ──────────┐
-  │  reindb (Postgres+pgvector)  │        │  Ollama (localhost)        │
-  │  schema: agents              │        │   gemma2:9b   (generate)   │
-  │  documents·chunks·messages·  │        │   nomic-embed (768-dim)    │
-  │  conversations·profiles      │        └────────────────────────────┘
-  │  single writer: app_id=laptop│
-  └──────────────────────────────┘
-```
-
-Hop A is the seam this guide cares about most — it's the only place a client and a server with separate failure domains exchange state. Hop B (Ollama) is a network call too, but its failure handling and retry behavior belong to **`study-networking`** (transport, timeouts, pooling) and **`study-runtime-systems`** (the bounded agent loop); this guide names it on the map and moves on.
-
-## Ranked findings — what's actually here
-
-Verdict-first, most consequential at the top:
-
-1. **The app↔Postgres boundary is the only real client/server seam, and it fails fast with no acquire timeout.** `createPool` (`src/db.ts:4`) hands `pg` a bare `connectionString` — no `connectionTimeoutMillis`, no `statement_timeout`, no `idleTimeoutMillis`. On a single device against a local-ish Postgres this is fine; the first turn errors loudly if the DB is down rather than hanging a user-facing retry. The deep walk and the exact gap are in `01-app-to-postgres-boundary.md`.
-
-2. **The trace sink buffers async writes, but replay ordering is decided at *emit*, not by the flush race — so ordering is sound on one device.** `SupabaseTraceSink.emit()` (`src/supabase-trace-sink.ts:53`) queues one `persistMessage` promise per event and `flush()` awaits them with an **unordered** `Promise.all` (`:92`). The inserts race. But `created_at` is set from `event.timestamp` at emit time (`:55`, coalesced in `persistMessage` at `:30`), so replay-by-`created_at` reconstructs emit order regardless of which insert lands first. This is the most interesting correctness fact in the repo. The deep walk — and the one place it *would* break (cross-device clock skew) — is in `02-trace-sink-write-buffering.md`.
-
-3. **The real distributed problem exists only on paper.** The design spec (`docs/superpowers/specs/2026-06-19-laptop-supabase-graduation-design.md`) and the parent plan (`agent-layer-plan.md`) describe a future where a laptop brain and a phone brain both write `agents.*` through one Supabase, behind an HTTP gateway with per-app JWTs and RLS. *That* is a genuine distributed system — multiple writers, shared state, isolation-by-token, ordering under two clocks. It is **deferred, design-only, zero lines of code.** Walked — clearly labeled as design — in `03-deferred-two-brain-shared-memory.md`.
-
-4. **Idempotency is storage-level, not request-level.** The writes that *can* collide are made idempotent at the storage layer: `indexDocumentRow` uses `INSERT ... ON CONFLICT (id) DO UPDATE` (`src/runtime.ts:14`), and the design's `PgVectorStore.upsert` is `ON CONFLICT (id) DO UPDATE`. But nothing *retries* a request, so there is no request-level idempotency key, no dedup of duplicated work — because nothing duplicates work yet. Covered in `audit.md` lens 3.
-
-5. **Local transactions only.** `runMigration` wraps a script in `begin/commit/rollback` (`src/migrate.ts:11`). That's a single-node, single-connection transaction — no two-phase commit, no saga, no outbox, because there is no second resource manager to coordinate with. The trace-sink writes are not even wrapped in a transaction (each `persistMessage` is its own autocommit insert). Covered in `audit.md` lens 8.
-
-## The honest ledger — what's `not yet exercised`
-
-Six of the nine lenses find nothing real in the running repo. This table is the guide's spine; `audit.md` walks each in full.
+There are **no peers, no replicas, no message queue, no consensus, no leader,
+no second writer.** When the distributed-systems lens asks "what stays correct
+when a participant is slow, duplicated, stale, or unavailable?" — the honest
+answer for most of the inventory is *the question doesn't arise yet, because
+there's only one of everything.*
 
 ```
-  Lens                                         Verdict in this repo
-  ──────────────────────────────────────────   ─────────────────────────────────
-  1 distributed-system-map                     thin — 1 process, 2 remote deps
-  2 partial-failure/timeouts/retries           PARTIAL — fail-fast, no acquire timeout, no retries
-  3 idempotency/dedup/delivery semantics       PARTIAL — storage ON CONFLICT yes, request-level no
-  4 consistency models / staleness             not yet exercised — one writer, one reader
-  5 replication / partitioning / quorums        not yet exercised — no replicas, no shards
-  6 queues / streams / ordering / backpressure  thin — in-process promise buffer, no real queue
-  7 clocks / coordination / leadership          not yet exercised (one clock) — FUTURE risk named
-  8 sagas / outbox / cross-boundary workflows    not yet exercised — local tx only
-  9 red-flags audit                            ranked at the end of audit.md
+  buffr-laptop — the whole coordination map (one process, two remotes)
+
+  ┌─ Client (one Node process) ──────────────────────────────────────┐
+  │   src/cli/chat.tsx  (Ink TUI)                                     │
+  │        │ in-process call                                          │
+  │   src/session.ts  createChatSession → ask()                      │
+  │        │                                                          │
+  │   RagQueryAgent (aptkit)   PgVectorStore   SupabaseTraceSink      │
+  └────┬───────────────────────────┬──────────────────────┬──────────┘
+       │ HTTP                       │ pooled pg conn       │ pooled pg conn
+       ▼                            ▼                      ▼
+  ┌─ Provider ─────┐         ┌─ Storage ────────────────────────────┐
+  │  Ollama        │         │  Postgres  reindb / schema agents    │
+  │  gemma2:9b     │         │  documents · chunks · conversations  │
+  │  nomic-embed   │         │  messages · profiles                 │
+  └────────────────┘         └──────────────────────────────────────┘
+
+  one client decides everything; two remotes only answer.
+  no arrow goes sideways — no remote talks to another remote.
 ```
 
-Under-claiming is the correct posture here. A repo with one writer and one process does not have a consistency model to reason about; saying it does would be inventing infrastructure. The two places this guide *does* go deep (the Postgres seam, the trace-sink ordering) are real, and the one forward-looking file is fenced off as design throughout.
+That diagram is the whole system. Every distributed-systems concept either
+lands on the `client → Postgres` arrow, the `client → Ollama` arrow, or it's
+`not yet exercised`.
 
-## Reading order
+## Ranked findings
 
-`README.md` has the full list. Short version: this overview → `audit.md` (every lens) → the three pattern files (`01` Postgres seam, `02` trace-sink ordering, `03` the deferred two-brain design).
+The three things worth understanding, in order of consequence:
+
+1. **The app↔Postgres boundary is the only client/server seam — and it's
+   fail-fast with no acquire timeout.** The pool (`pg.Pool`) is created with a
+   bare connection string and nothing else (`src/db.ts:4`): no
+   `connectionTimeoutMillis`, no `statement_timeout`, no acquire timeout. If
+   Postgres is slow or the pool is exhausted, `ask()` waits on the default
+   behavior — it doesn't deadline-bound the wait. On one device with one user
+   this is fine; it's the first thing that needs a deadline the day load shows
+   up. → **`01-app-to-postgres-boundary.md`**.
+
+2. **The trace sink buffers async writes and flushes them unordered — but
+   replay order is decided at *emit* time, not by the flush race.** Each
+   `CapabilityEvent` triggers a fire-and-forget `persistMessage` promise pushed
+   into an array (`src/supabase-trace-sink.ts:87`); `flush()` awaits them with
+   `Promise.all` (`:92`), so the inserts complete in *whatever* order Postgres
+   finishes them. The thing that saves correctness: `created_at` is taken from
+   `event.timestamp` at emit time (`:54`, persisted at `src/session.ts` via
+   `persistMessage`), so when you `ORDER BY created_at` on replay, you get emit
+   order regardless of who won the insert race. **This is sound on one device.
+   It is exactly the assumption that breaks under cross-device clock skew** —
+   which is the future-RFC point. → **`02-trace-sink-write-buffering.md`**.
+
+3. **Idempotency exists at the storage level (`ON CONFLICT`), not at the
+   request level — and nothing retries, so request-level dedup isn't needed
+   yet.** `indexDocumentRow` uses `INSERT ... ON CONFLICT (id) DO UPDATE`
+   (`src/runtime.ts:14`); the design says the same for `PgVectorStore.upsert`.
+   That makes re-indexing the same document safe. But there's no idempotency
+   key on the *request* path (`ask()` never retries; a duplicate user turn
+   would just insert a second `messages` row). At-most-once delivery, by
+   omission of any retry. → covered in `audit.md` and `02`.
+
+## What's deferred (design, not code)
+
+The parent vision is a **centralized agent layer**: laptop + phone (and other
+apps) sharing one Supabase over an HTTP API, with RLS, an Edge Function gateway,
+and laptop↔phone memory sync (`agent-layer-plan.md`;
+`docs/superpowers/specs/2026-06-19-laptop-supabase-graduation-design.md`). That
+is **design-only, approved-to-capture, implementation-not-started.** The moment
+a second writer exists, six of the `not yet exercised` lenses light up at once:
+multi-writer consistency, the convention-only `app_id` isolation becoming a real
+tenant boundary, request-level idempotency across the network, and — most
+sharply — the clock-skew assumption in finding #2. One file walks that future as
+forward-looking design: **`03-deferred-two-brain-shared-memory.md`**, clearly
+labelled DESIGN-NOT-CODE.
 
 ## See also
 
-- `study-system-design/07-deferred-body.md` — the same deferred-phone decision from the architecture side.
-- `study-database-systems/05-transactions-isolation-and-anomalies.md` — the single-node transaction mechanics this guide cross-links instead of re-teaching.
-- `study-debugging-observability/` — the trace sink as an evidence artifact.
+- `audit.md` — every lens, walked honestly (mostly `not yet exercised`).
+- `01-app-to-postgres-boundary.md`, `02-trace-sink-write-buffering.md`,
+  `03-deferred-two-brain-shared-memory.md` — the three deep walks.
+- Sibling guides: `study-system-design` (shape/scale), `study-database-systems`
+  (Postgres-local consistency), `study-debugging-observability` (reading the
+  trajectory back).

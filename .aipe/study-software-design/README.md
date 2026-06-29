@@ -1,80 +1,80 @@
-# Study — Software Design (A Philosophy of Software Design, applied to buffr-laptop)
+# Study — Software Design (APOSD, applied to buffr-laptop)
 
-This guide audits **buffr-laptop** through the design primitives in John
-Ousterhout's *A Philosophy of Software Design* (APOSD) — deep modules,
-information hiding, complexity, layering, readability — and grounds every
-finding in real files at real line ranges. It does not teach the book in
-the abstract; it teaches what *your* code does with the book's ideas.
+This guide audits **buffr-laptop** through the design primitives in
+John Ousterhout's *A Philosophy of Software Design* (APOSD) — deep
+modules, information hiding, complexity, layering, readability — and
+grounds every finding in a real file. It teaches the primitive briefly,
+then spends its weight on what *your* code does with it: where it honors
+the principle, where it leaks, and the specific move to fix it.
 
-> **Source.** The primitives come from *A Philosophy of Software Design*,
-> John Ousterhout (2nd ed., 2021). The ideas are taught here in original
-> words and applied to your repo. Read the book for the full conceptual
-> treatment — this guide is the application, not the textbook.
-
----
+**Source:** John Ousterhout, *A Philosophy of Software Design* (2nd ed.).
+The primitives are his; the words here are original; the findings are
+about your code. Read the book for the full conceptual treatment — this
+guide assumes you want the *application*, not the lecture.
 
 ## The through-line
 
 ```
-  Complexity is the enemy. Deep modules are the weapon.
+  complexity is the enemy  ──►  deep modules are the weapon
 
-  ┌─ a deep module ─────────────────────────────────┐
-  │  small interface  ░░░░░░░░  (what callers see)   │
-  │  ───────────────────────────────────────────    │
-  │  big body         ████████████████████████████   │
-  │                   ████████████████████████████   │  (what it hides)
-  └──────────────────────────────────────────────────┘
-       ▲                              ▲
-       │                              │
-   cheap to use                  pays its way:
-   (1 line at the call site)     hides decisions you'd
-                                 otherwise repeat everywhere
+  a deep module:  big behaviour behind a small interface.
+                  functionality ÷ interface-size is high.
+
+  buffr's best:   PgVectorStore — two methods (upsert/search),
+                  and behind them: a transaction, a dimension
+                  guard, JS→pgvector encoding, a cosine→similarity
+                  flip, and a meta round-trip. That's depth.
 ```
 
-buffr's whole job is to take aptkit's in-memory `VectorStore` contract and
-implement it over Postgres + pgvector *without the rest of the system
-noticing the swap*. That is APOSD's central move — a deep module behind a
-narrow interface — and it's the spine of this audit.
-
----
+Everything in this guide measures against that one idea. A module earns
+its keep when it hides decisions the caller never has to learn.
 
 ## Reading order
 
-1. **`00-overview.md`** — the audit at a glance. The complexity profile,
-   the three highest-cost hotspots, and a one-line verdict per primitive.
-   Read this first; if you read nothing else, read this.
-2. **`audit.md`** — Pass 1. The 8-lens APOSD walk, each lens grounded in
-   `file:line` or honestly marked `not yet exercised`. The capstone lens
-   is the red-flag checklist sorted by severity for this repo.
-3. **Pass 2 — discovered patterns.** The design moves buffr makes
-   deliberately, each a full concept file:
-   - `01-adapter-behind-a-contract.md` — `PgVectorStore` implementing
-     aptkit's `VectorStore` so the swap is invisible.
-   - `02-pure-core-impure-shell.md` — `loadConfig` as a pure testable
-     seam vs the CLIs that own all the I/O.
-   - `03-dependency-as-a-boundary.md` — aptkit imported as a contract;
-     conversation memory extracted *up* and re-consumed.
-   - `04-sync-interface-async-work.md` — the trace sink's sync `emit()`
-     queuing async DB writes drained by `flush()`.
-   - `05-deep-session-facade.md` — `createChatSession` holding
-     pool/agent/memory/conversation behind a 2-method `ask`/`close`.
+```
+  1. audit.md          ← START HERE. The 8-lens APOSD audit of the
+                         whole repo. Ranked findings, file:line
+                         grounding, the red-flag checklist.
 
----
+  then the Pass 2 pattern files — the design MOVES this repo makes
+  deliberately, each a deep walk:
 
-## Cross-links
+  2. 01-adapter-behind-a-contract.md   PgVectorStore = the adapter
+                                        behind aptkit's VectorStore port
+  3. 02-pure-core-impure-shell.md      loadConfig (pure seam) vs the
+                                        CLIs (the I/O shell)
+  4. 03-dependency-as-a-boundary.md    depending on aptkit's contracts,
+                                        and the memory engine extracted UP
+  5. 04-sync-interface-async-work.md   SupabaseTraceSink = the observer
+                                        (sync emit / async flush)
+  6. 05-deep-session-facade.md         createChatSession = a deep facade
+                                        behind ask()/close()
+```
 
-- **Learn the primitives** (book-style, abstract): `.aipe/read-aposd/`
-  *(not yet generated in this repo — run `/aipe:read-aposd`)*.
-- **System architecture** (services, boundaries, scale): a different
-  altitude — `.aipe/study-system-design/`
-  *(not yet generated — run `/aipe:study-system-design`)*. When a finding
-  is about a service boundary or data-flow rather than a module/interface,
-  it belongs there, not here.
-- **Testing & the eval seam:** `.aipe/study-testing/`
-  *(not yet generated — run `/aipe:study-testing`)*. The `loadConfig`
-  pure-seam finding and the `test/` mirror are the design half of what
-  that guide audits for coverage.
+## Cross-links — what this guide does NOT cover
 
-The rule when two guides want the same finding is **altitude**:
-module / interface / complexity lives here; service / architecture lives
-in system-design.
+```
+  ┌─ altitude split — who owns which finding ──────────────────┐
+  │                                                            │
+  │  study-system-design/   ARCHITECTURE altitude.            │
+  │    03-provider-abstraction.md  — the same port/adapter     │
+  │    shape, but as a SERVICE boundary + scaling story.       │
+  │    This guide teaches it as a MODULE/interface move.       │
+  │    Don't re-teach the architecture here; link there.       │
+  │                                                            │
+  │  study-testing/         CORRECTNESS altitude.             │
+  │    loadConfig as a pure testable seam, PgVectorStore's     │
+  │    DB-gated tests, the eval set — the design here EXISTS   │
+  │    to make those tests possible; the test coverage and     │
+  │    isolation story lives there.                            │
+  │                                                            │
+  │  read-aposd (the book)  THE PRIMITIVES themselves, taught  │
+  │    abstractly. This guide APPLIES them; it doesn't define  │
+  │    them.                                                    │
+  └────────────────────────────────────────────────────────────┘
+```
+
+The rule when a finding could live in two places is **altitude**:
+module / interface / complexity / readability → here; service /
+architecture / scaling → `study-system-design`; test coverage and
+isolation → `study-testing`.

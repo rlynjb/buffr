@@ -1,147 +1,124 @@
-# Agent patterns in buffr-laptop
+# Agent Patterns in This Codebase — buffr-laptop
 
-The patterns this repo actually uses — the structure, not the full
-implementation. buffr is a **single-agent** system: one bounded ReAct
-loop over one read-only tool. Below is the table, then each pattern's
-shape, control envelope, and eval.
+The patterns buffr actually runs, not the study catalogue. One shape, named honestly, with
+the control envelope and the eval seam called out. Read `00-overview.md` first for the
+whole-system frame; this file is the close-out.
 
-## Agent patterns table
+## The shape: single-agent bounded ReAct loop
 
-```
-  ┌──────────────────────────┬─────────────────────┬─────────────────────────────┐
-  │ Feature                  │ Pattern / shape     │ Why this pattern            │
-  ├──────────────────────────┼─────────────────────┼─────────────────────────────┤
-  │ chat answer (the agent)  │ single-tool ReAct   │ action space is one read-   │
-  │                          │ (single-agent)      │ only retrieval; model       │
-  │                          │                     │ decides search-or-answer    │
-  ├──────────────────────────┼─────────────────────┼─────────────────────────────┤
-  │ retrieval                │ agentic RAG         │ retrieval IS the loop's one │
-  │                          │ (single-agent)      │ tool; can refine + re-query │
-  ├──────────────────────────┼─────────────────────┼─────────────────────────────┤
-  │ session.ask              │ chain (workflow)    │ persist→answer→remember is  │
-  │                          │                     │ a fixed engineer-written    │
-  │                          │                     │ order                       │
-  ├──────────────────────────┼─────────────────────┼─────────────────────────────┤
-  │ memory                   │ retrieval-based     │ recall by relevance via the │
-  │                          │ episodic memory     │ same search tool; NO in-    │
-  │                          │                     │ prompt history threading    │
-  ├──────────────────────────┼─────────────────────┼─────────────────────────────┤
-  │ tool calling             │ emulated tool-call  │ Gemma has no native tools;  │
-  │                          │                     │ schema in prompt, JSON out  │
-  ├──────────────────────────┼─────────────────────┼─────────────────────────────┤
-  │ system prompt            │ profile-as-standing-│ me.md-style profile injected│
-  │                          │ context             │ every turn for grounding    │
-  └──────────────────────────┴─────────────────────┴─────────────────────────────┘
-```
-
-## The one agent — single-tool ReAct (the load-bearing pattern)
-
-**Shape: single-agent.** One `RagQueryAgent.answer` per turn, delegating
-to `runAgentLoop` (`rag-query-agent.js:35` → `run-agent-loop.js:20`).
+buffr is one actor — a `RagQueryAgent` running a ReAct loop (`run-agent-loop`) over a local
+Gemma2:9b, with exactly one read-only tool. The session layer (`src/session.ts`) wraps that
+loop in a fixed three-step sequence per turn, so the *outer* shape is chain-like and the
+*inner* shape is a true agent loop. Verdict: hybrid — pipeline outside, loop inside.
 
 ```
-  the loop (capped 6 turns / 4 tool calls)
+  buffr's one loop — single actor, one read-only tool
 
-  question → ┌─ ReAct loop ──────────────────────────────┐
-             │ Thought → search_knowledge_base → Observe  │
-             │    ▲                                  │     │
-             │    └──────── loop, capped ────────────┘     │
-             │ forced synthesis on last turn → answer      │
-             └────────────────────────────────────────────┘
+  ┌─ Session (pipeline, src/session.ts) ──────────────────────────┐
+  │  ask(q):  persist user turn ─► agent.answer(q) ─► remember()   │
+  │           (fixed order — engineer wrote these steps)          │
+  └───────────────────────────┬───────────────────────────────────┘
+                              │  agent.answer(q)  — the loop starts
+  ┌─ ReAct loop (run-agent-loop.ts:76-202) ───────────────────────┐
+  │   turn 0..5 (maxTurns:6):                                      │
+  │     model.complete ──► model chooses:                         │
+  │        ├─ tool_use: search_knowledge_base  (≤ maxToolCalls:4) │
+  │        │     └─ harness runs it, feeds result back as obs     │
+  │        └─ text only ──► SUCCESS exit (finalText)              │
+  │     last turn OR budget spent ──► FORCED SYNTHESIS            │
+  │        (tools stripped, "no more tool calls") ─► BUDGET exit  │
+  └───────────────────────────────────────────────────────────────┘
 ```
 
-**Control envelope:** `maxTurns: 6`, `maxToolCalls: 4`, forced synthesis
-(tools stripped + "no more tool calls") on the budget exit
-(`run-agent-loop.js:25-34`); `ContextWindowGuardedProvider` halts at
-8192 tokens (`src/session.ts:46`); one read-only tool → no side effects
-(`ragQueryToolPolicy`, `rag-query-agent.js:8-11`).
+## Patterns table
 
-**Eval:** retrieval scored with precision@k over a labeled set
-(`eval/queries.json`, `src/cli/eval-cmd.ts`); the full trajectory
-captured into `agents.messages` (`src/supabase-trace-sink.ts`) but not
-yet scored for tool-call accuracy / recovery.
-
-## Agentic RAG — the loop's one tool
-
-**Shape: single-agent (retrieval specialization).** The single action is
-`search_knowledge_base` (`src/session.ts:42-44`), so the ReAct loop *is*
-agentic RAG. Up to 4 retrievals per question, model-decided; in practice
-usually one.
+The patterns buffr exercises, the shape each instantiates, and why it's the right call.
 
 ```
-  search(q) → chunks → model: enough? → search(q') | answer   (cap 4)
+  ┌──────────────────────────┬────────────────────────┬─────────────────────────────┐
+  │ Feature                  │ Pattern / shape        │ Why this pattern            │
+  ├──────────────────────────┼────────────────────────┼─────────────────────────────┤
+  │ chat answer (ask/answer) │ single-agent ReAct loop │ path depends on what the    │
+  │                          │ (run-agent-loop)       │ model finds; dynamic        │
+  ├──────────────────────────┼────────────────────────┼─────────────────────────────┤
+  │ knowledge retrieval      │ agentic RAG (ReAct      │ model decides whether/what  │
+  │                          │ whose tool is search)  │ to search, 0..4 times       │
+  ├──────────────────────────┼────────────────────────┼─────────────────────────────┤
+  │ session turn flow        │ sequential pipeline of  │ known steps: persist →      │
+  │ (session.ts)             │ functions (not agents) │ answer → remember           │
+  ├──────────────────────────┼────────────────────────┼─────────────────────────────┤
+  │ tool exposure            │ capability scoping      │ one read-only tool =        │
+  │                          │ (ragQueryToolPolicy)   │ smallest blast radius       │
+  ├──────────────────────────┼────────────────────────┼─────────────────────────────┤
+  │ past-exchange recall     │ retrieval-based         │ relevance-recall across     │
+  │ (@aptkit/memory)         │ episodic memory        │ sessions; same search tool  │
+  ├──────────────────────────┼────────────────────────┼─────────────────────────────┤
+  │ profile in prompt        │ context engineering     │ standing user context every │
+  │ (injectProfile)          │ (profile-as-context)   │ turn                        │
+  ├──────────────────────────┼────────────────────────┼─────────────────────────────┤
+  │ Gemma tool calls         │ emulated tool calling   │ Gemma2 has no native tools  │
+  │ (gemma-provider)         │ (the JSON path)        │ array; render as JSON       │
+  ├──────────────────────────┼────────────────────────┼─────────────────────────────┤
+  │ trajectory persistence   │ full-signal trace       │ replayable trajectory in    │
+  │ (supabase-trace-sink)    │ capture                │ agents.messages             │
+  └──────────────────────────┴────────────────────────┴─────────────────────────────┘
 ```
 
-**Control envelope:** `minTopK: 4` floor against under-fetching
-(`search-knowledge-base-tool.js:32`); the same loop caps.
-
-## The session chain — the workflow wrapping the agent
-
-**Shape: workflow / chain.** `session.ask` runs three fixed steps:
-persist user turn → `agent.answer` → flush trace + remember
-(`src/session.ts:60-70`). Engineer-written order; only the middle step
-is an agent.
+## The control envelope buffr ships with
 
 ```
-  persistMessage(user) → agent.answer(q) → trace.flush() + memory.remember(q,a)
+  Control points around the loop — what bounds it
+
+  ┌─ Input ───────────────────────────────────────────────────────┐
+  │  user question (no input guardrail — read-only downstream)     │
+  └───────────────────────────┬───────────────────────────────────┘
+  ┌─ Agent loop ──────────────▼───────────────────────────────────┐
+  │  • iteration cap     maxTurns:6      (rag-query-agent.ts:75)   │
+  │  • tool-call budget  maxToolCalls:4  (rag-query-agent.ts:76)   │
+  │  • forced synthesis  on budget/last  (run-agent-loop.ts:101-9) │
+  │  • capability scope  ONE read tool   (ragQueryToolPolicy:15-18)│
+  │  • context guard     maxTokens:8192  (session.ts:46)           │
+  │  • result truncation 16k chars       (run-agent-loop.ts:52-57) │
+  └───────────────────────────┬───────────────────────────────────┘
+  ┌─ Output ──────────────────▼───────────────────────────────────┐
+  │  finalText or FALLBACK_ANSWER — no side effects possible       │
+  │  (the only tool is a read; nothing the agent emits can act)    │
+  └───────────────────────────────────────────────────────────────┘
 ```
 
-## Memory — retrieval-based episodic, the honest distinction
+The load-bearing control is **forced synthesis** (`run-agent-loop.ts:101-109`): nothing
+guarantees the model reaches the success exit on its own, so the budget exit strips the
+tools and demands an answer. That is what makes this a shipped agent rather than a demo that
+can loop forever.
 
-**Shape: single-agent infrastructure.** After each turn,
-`memory.remember` embeds the exchange tagged `kind=memory` into the same
-`chunks` store (`src/session.ts:67`, `conversation-memory.js`). Future
-turns recall relevant past exchanges through the *same*
-`search_knowledge_base` tool.
+## The eval seam
 
-```
-  remember(q,a) → embed → chunks[kind=memory]
-  next Q → search_knowledge_base → recalls relevant past exchanges
-           ✓ relevance recall (cross-session)
-           ✗ NO in-prompt conversation threading (messages = [just this Q])
-```
+buffr **captures** the full trajectory — all six `CapabilityEvent` types into
+`agents.messages` (`src/supabase-trace-sink.ts:49-94`), timestamped for deterministic
+replay. It **evaluates** only precision@k over retrieval today (`src/cli/eval-cmd.ts`,
+`eval/queries.json`). Trajectory eval — did it call the right tool, in the right order, did
+it recover — is the gap: the signal is recorded, not yet scored.
 
-**The honest boundary:** relevance recall yes; conversational-context
-threading no — `RagQueryAgent.answer` treats each question independently
-(`run-agent-loop.js:22`; comment at `src/session.ts:25-27`).
+## What buffr is not (and why that's the right call)
 
-## Emulated tool calling
-
-**Shape: single-agent infrastructure.** Gemma has no native tools, so
-`GemmaModelProvider` renders the tool schema into the system prompt and
-parses a JSON tool call back out, retrying once with a nudge if malformed
-(`gemma-provider.js:82-125`). The loop is unaware it was emulated.
-
-## Profile as standing context
-
-**Shape: single-agent infrastructure.** A `me.md`-style profile from
-`agents.profiles` is injected at the start of the system prompt every
-turn (`injectProfile`, `rag-query-agent.js:28-32`; `src/profile.ts`).
-Standing context for grounding, not retrieved per query.
-
-## What buffr does NOT use (and why that's correct)
-
-- **Multi-agent orchestration** — one actor; the task isn't decomposable
-  into independent specialties (`03-.../01-when-not-to-go-multi-agent.md`).
-- **plan-and-execute / reflexion / tree-of-thoughts** — ReAct hasn't hit
-  a measured ceiling that justifies escalation.
-- **In-prompt conversational memory** — deliberate; retrieval-based
-  recall compensates, threading is an aptkit-side change.
-- **MCP** — one in-process tool; no cross-agent tool sharing needed.
-- **Trajectory eval / cross-turn caching / circuit breaking** — captured
-  or bounded by caps, but not yet scored / cached / short-circuited;
-  acceptable at single-user local scale.
-
-The honest read: buffr is at the ceiling of *correct single-agent
-design* and has not hit a quality wall that a more complex topology would
-clear. Its next moves are within-single-agent upgrades (a relevance
-grader, in-prompt history, trajectory scoring) — not multi-agent.
+- **Not multi-agent.** One loop, one tool. The single-agent baseline hasn't hit a quality
+  ceiling that decomposes into independent specialties — so the senior move is to stay
+  single-agent. The two-brain laptop+phone split (`agent-layer-plan.md`) is the deferred,
+  design-only topology buffr could grow into. See `03-multi-agent-orchestration/`.
+- **Not plan-execute / reflexion / tree-of-thoughts.** Plain ReAct is the measured baseline.
+  See `01-reasoning-patterns/`.
+- **No in-prompt conversational threading.** `RagQueryAgent.answer` treats each question
+  independently; relevance-recall via episodic memory stands in for it. See
+  `04-agent-infrastructure/02-agent-memory-tiers.md`.
+- **No MCP.** Tools are wired directly via `InMemoryToolRegistry`. See
+  `04-agent-infrastructure/03-tool-calling-and-mcp.md`.
+- **No fan-out / circuit-breaker state machine.** Single-device, single-user, local Ollama —
+  no provider rate limit to manage. See `05-production-serving/`.
 
 ## See also
 
-- `00-overview.md` — the full agent surface map
-- `01-reasoning-patterns/02-agent-loop-skeleton.md` — the kernel
-- `04-agent-infrastructure/02-agent-memory-tiers.md` — the memory
-  distinction in full
-- `06-orchestration-system-design-templates/` — buffr as interview
-  templates
+- `00-overview.md` — verdict + whole-system frame.
+- `01-reasoning-patterns/02-agent-loop-skeleton.md` — the kernel buffr runs.
+- `02-agentic-retrieval/01-agentic-rag.md` — the retrieval loop in depth.
+- `04-agent-infrastructure/05-guardrails-and-control.md` — the control envelope in depth.
+- `06-orchestration-system-design-templates/` — buffr reframed as three interview answers.

@@ -1,122 +1,103 @@
-# Agent architecture — the whole surface of buffr-laptop
+# Agent Architecture — buffr-laptop
 
-Before any single concept, here's the entire agent surface of this
-repo in one frame. buffr-laptop is a **single-agent** system: one
-autonomous ReAct loop, over one read-only tool, against a local
-Gemma2:9b. Everything below sits inside that one loop.
+One page to orient before you open anything else. This guide studies `buffr-laptop`
+through the agent-architecture lens: reasoning patterns, agentic retrieval, multi-agent
+orchestration, the cross-cutting infrastructure, and production serving for a loop.
+
+## The verdict first
+
+buffr is a **single-agent bounded ReAct loop** over a local Gemma2:9b. One actor, one
+read-only tool, a hard turn budget, and a forced final answer. It is not a chain (the
+model decides whether and what to search), and it is not multi-agent (there is exactly one
+loop). That single sentence is the spine of everything below.
 
 ```
-  buffr-laptop — the agent surface, top to bottom
+  Where buffr sits on the three-shapes map
 
-  ┌─ UI layer ──────────────────────────────────────────────┐
-  │  Ink TUI (src/cli/chat.tsx) — one in-process conversation │
-  │  onSubmit → session.ask(q)                                │
-  └───────────────────────────┬──────────────────────────────┘
-                              │  q: string
-  ┌─ Session layer ───────────▼──────────────────────────────┐
-  │  createChatSession (src/session.ts)                       │
-  │   persistMessage(user) → agent.answer(q) → trace.flush()  │
-  │                        → memory.remember(q, a)            │
-  └───────────────────────────┬──────────────────────────────┘
-                              │  question
-  ┌─ Agent layer (aptkit) ────▼──────────────────────────────┐
-  │  RagQueryAgent.answer  →  runAgentLoop                    │
-  │   ★ BOUNDED ReAct LOOP ★  maxTurns:6 / maxToolCalls:4     │ ← we are here
-  │   forced synthesis on the last turn (tools = undefined)   │
-  │   ONE tool allowed: search_knowledge_base                 │
-  └───────────────────────────┬──────────────────────────────┘
-                              │  tool intent (emulated JSON)
-  ┌─ Tool + retrieval layer ──▼──────────────────────────────┐
-  │  InMemoryToolRegistry → search_knowledge_base handler     │
-  │   → retrieval pipeline → PgVectorStore.search             │
-  └───────────────────────────┬──────────────────────────────┘
-                              │  SQL (vector cosine)
-  ┌─ Storage + provider layer ▼──────────────────────────────┐
-  │  Postgres pgvector (chunks: docs + kind=memory)           │
-  │  Ollama: gemma2:9b (gen) · nomic-embed-text (768-dim)     │
-  └──────────────────────────────────────────────────────────┘
+  ┌──────────────────┬───────────────────────────────────────┐
+  │ Workflow / chain │ engineer writes the steps; LLM fills   │
+  │                  │ slots, never chooses next       — NO   │
+  ├──────────────────┼───────────────────────────────────────┤
+  │ Single-agent     │ one ReAct loop with one tool; the      │
+  │   ★ buffr ★       │ model decides search-or-answer  — YES  │
+  ├──────────────────┼───────────────────────────────────────┤
+  │ Multi-agent      │ many agents in a topology       — NO   │
+  │                  │ (deferred / design-only)               │
+  └──────────────────┴───────────────────────────────────────┘
 ```
 
-## The dominant shape: single-agent
+## The whole system in one frame
 
-This codebase exercises exactly one of the three agent shapes:
+The full request path, from a keystroke in the terminal to a grounded answer and a
+remembered exchange.
 
-- **Workflow / chain** — no. The model chooses whether and what to
-  search; the steps are not written by the engineer.
-- **Single-agent** — **yes, this is it.** One `RagQueryAgent`
-  (`node_modules/@rlynjb/aptkit-core/.../agent-rag-query/dist/src/rag-query-agent.js`)
-  runs one bounded ReAct loop (`runAgentLoop`,
-  `.../runtime/dist/src/run-agent-loop.js`) with one read-only tool.
-- **Multi-agent** — no. There is one actor. No supervisor, no
-  workers, no handoff, no topology. The two-brain laptop+phone vision
-  in `agent-layer-plan.md` is design-only.
+```
+  buffr-laptop — one turn, end to end
 
-So SECTION A (reasoning patterns) and SECTION B (agentic retrieval)
-carry the weight here — they describe what this repo actually runs.
-SECTION C (multi-agent orchestration) is taught as study material and
-honestly marked "Not yet implemented" where it does not apply; the
-SECTION F templates name the refactor that would adopt each topology.
+  ┌─ UI layer (Ink / React-in-terminal) ──────────────────────────┐
+  │  src/cli/chat.tsx — TextInput → onSubmit(q)                    │
+  └───────────────────────────┬───────────────────────────────────┘
+                              │  session.ask(q)
+  ┌─ Session layer ───────────▼───────────────────────────────────┐
+  │  src/session.ts — warm pool, one conversation, agent built once│
+  │   1. persist user turn   2. agent.answer(q)   3. remember()    │
+  └───────────────────────────┬───────────────────────────────────┘
+                              │  RagQueryAgent.answer
+  ┌─ Agent layer (@aptkit, consumed not edited) ──────────────────┐
+  │  RagQueryAgent → runAgentLoop                                  │
+  │   maxTurns:6 · maxToolCalls:4 · forced synthesis on last turn  │
+  │        │ model picks: search_knowledge_base OR final answer    │
+  │        ▼                                                       │
+  │  GemmaModelProvider (tool calls EMULATED as JSON)             │
+  └──────────┬─────────────────────────────────┬──────────────────┘
+             │ search_knowledge_base            │ trace events
+  ┌─ Storage layer ──────────▼──────┐  ┌────────▼──────────────────┐
+  │  PgVectorStore (pgvector, 768d) │  │ SupabaseTraceSink          │
+  │   chunks: docs + memory rows    │  │  agents.messages           │
+  │   recalled by cosine similarity │  │  (full-signal trajectory)  │
+  └─────────────────────────────────┘  └───────────────────────────┘
+```
 
-## What this repo actually runs (the one-line tour)
+## The three findings that matter most
 
-1. The Ink TUI holds one conversation in-process and calls
-   `session.ask(q)` per turn (`src/cli/chat.tsx:15`).
-2. The session persists the user turn, runs the agent, flushes the
-   trajectory, and remembers the exchange (`src/session.ts:60-70`).
-3. The agent runs a **bounded ReAct loop**: up to 6 turns, up to 4
-   tool calls, and a **forced synthesis** on the final turn — the
-   loop strips tools and tells the model "you have NO more tool calls"
-   (`runAgentLoop`, `run-agent-loop.js:25-35`).
-4. The only tool is `search_knowledge_base` (read-only) — the
-   smallest possible blast radius (`ragQueryToolPolicy`,
-   `rag-query-agent.js:8-11`).
-5. Tool-calling is **emulated**: Gemma has no native tools, so aptkit
-   renders the tool schema into the system prompt and parses a JSON
-   tool call back out (`gemma-provider.js:82-125`).
-6. Every turn is captured as a full-signal trajectory into
-   `agents.messages` (`src/supabase-trace-sink.ts:49-94`), and the
-   exchange is embedded into the same vector store as episodic memory
-   recalled by relevance on future turns (`src/session.ts:53,67`).
+1. **Forced synthesis is the load-bearing mechanic.** On the last turn (or once the
+   tool-call budget is spent), `runAgentLoop` strips the tools and appends a "you have NO
+   more tool calls" instruction (`run-agent-loop.ts:101-109`,
+   `:72-74`). That guarantees the loop always exits with a real answer instead of cycling
+   tool calls forever. The budget exit, not the success exit, is what makes this a shipped
+   agent.
 
-## The honest memory distinction (read this twice)
+2. **Capability scope is exactly one read-only tool — the smallest possible blast
+   radius.** `ragQueryToolPolicy` allows only `search_knowledge_base`
+   (`rag-query-agent.ts:15-18`), and `filterToolsForPolicy` hands the model nothing else
+   (`tool-policy.ts:11-23`). The agent can read the knowledge base and nothing more — no
+   writes, no side effects, nothing to inject into.
 
-buffr-laptop has **retrieval-based episodic memory** but **not**
-conversational-context threading:
+3. **Memory is retrieval-recall, not conversational threading — and the code is honest
+   about the gap.** Each exchange is embedded into the same vector store and resurfaces by
+   relevance across sessions (`conversation-memory.ts:60-108`,
+   `session.ts:53,66`). But `RagQueryAgent.answer` treats every question independently —
+   there is no in-prompt turn history. Relevance-recall: yes. Conversational-context-
+   threading: no.
 
-- **Relevance recall — yes.** After each turn, the exchange is
-  embedded and stored tagged `kind=memory`; future turns surface
-  relevant past exchanges through the same `search_knowledge_base`
-  tool, across sessions (`createConversationMemory`,
-  `conversation-memory.js`).
-- **In-prompt turn history — no.** `RagQueryAgent.answer()` builds its
-  message array fresh each call (`messages: [{ role: 'user', content:
-  userPrompt }]`, `run-agent-loop.js:22`). It does NOT thread the
-  prior turns into the prompt. Each question is answered
-  independently. The session comment names this gap honestly
-  (`src/session.ts:25-27`).
+## Not yet exercised
 
-So buffr "remembers" by retrieving, not by carrying the conversation
-forward in the window. That distinction runs through the whole guide.
+Honest gaps — patterns this guide teaches as study material that buffr does not run:
+
+- **Multi-agent orchestration** (supervisor-worker, pipeline, fan-out, debate, swarm,
+  graph). One loop, no topology. Deferred / design-only (the two-brain laptop+phone split).
+- **Plan-and-execute, reflexion/self-critique, tree-of-thoughts.** buffr is plain ReAct;
+  single-agent has not hit a quality ceiling that would justify escalating.
+- **In-prompt conversational threading.** Relevance-recall stands in for it today.
+- **MCP.** Tools are wired directly via `InMemoryToolRegistry`; no protocol layer.
+- **Trajectory evaluation.** The trajectory is *captured* (full-signal in `agents.messages`)
+  but not yet *scored* — only precision@k over retrieval is evaluated.
 
 ## Reading order
 
-A → B → D first (they describe the running system), then C and E
-(study material for what's deferred), then F (the interview
-templates). Start with:
+`00-overview` (here) → `01-reasoning-patterns` → `02-agentic-retrieval` →
+`03-multi-agent-orchestration` → `04-agent-infrastructure` → `05-production-serving` →
+`06-orchestration-system-design-templates` → `agent-patterns-in-this-codebase.md`.
 
-1. `01-reasoning-patterns/02-agent-loop-skeleton.md` — the kernel
-   every other file refers back to.
-2. `01-reasoning-patterns/03-react.md` — what the running loop is.
-3. `02-agentic-retrieval/01-agentic-rag.md` — retrieval as the loop's
-   one tool.
-4. `04-agent-infrastructure/02-agent-memory-tiers.md` — the memory
-   model and its honest gap.
-5. `agent-patterns-in-this-codebase.md` — the patterns table.
-
-## See also
-
-- `agent-patterns-in-this-codebase.md` — the patterns this repo uses
-- `.aipe/study-system-design/00-overview.md` — the system map
-- `.aipe/study-prompt-engineering/` — the prompt-level mechanics
-- `.aipe/study-security/04-least-privilege-tool-scope.md` — the
-  single-tool blast radius from the security angle
+See `README.md` for the indexed file list and cross-links into the sibling guides
+(`study-ai-engineering`, `study-prompt-engineering`, `study-security`, `study-system-design`).

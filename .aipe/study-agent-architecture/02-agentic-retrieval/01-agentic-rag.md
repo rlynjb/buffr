@@ -1,220 +1,392 @@
-# Agentic RAG — retrieval as a loop the agent drives
+# 01 — Agentic RAG
 
-**Industry name(s):** agentic RAG · iterative retrieval · ReAct-over-
-retrieval. **Type label:** Industry standard.
+*Industry standard: **agentic retrieval-augmented generation** — implemented pattern.*
 
-**In this codebase: yes — this is what buffr's loop *is*.** buffr's
-single tool is `search_knowledge_base`, and the ReAct loop lets the
-model retrieve, observe, and retrieve again (capped at 4 calls). That
-makes buffr's agent *agentic RAG by construction* — though in practice
-most questions resolve in one search.
+---
 
-## Zoom out, then zoom in
+## Zoom out → zoom in
 
-Agentic RAG is the shift from retrieval as a one-shot pipeline step to
-retrieval as a control loop the agent drives. This file covers that
-shift; the retrieval *mechanics* (embeddings, chunking, cosine search)
-are system-design concerns covered elsewhere.
+This file is the spine of the whole section: it is the one pattern buffr actually runs.
 
 ```
-  Zoom out — where retrieval sits as the loop's one tool
+  Section B layers — file 01 is the implemented floor everything else escalates from
 
-  ┌─ Agent layer ───────────────────────────────────────────┐
-  │  ReAct loop — model decides: search again, or answer     │ ← we are here
-  │     │ the ONE action available                           │
-  │     ▼                                                    │
-  │  ★ search_knowledge_base ★  (the agent's retrieval loop)  │
-  └───────────────────────────┬──────────────────────────────┘
-                              │  query → ranked chunks
-  ┌─ Retrieval + storage ─────▼──────────────────────────────┐
-  │  pipeline.query → PgVectorStore.search (cosine, HNSW)     │
-  └──────────────────────────────────────────────────────────┘
+  ┌─ Agent loop (Section A) ───────────────────────────────────┐
+  │  runAgentLoop — model decides search-or-answer each turn   │
+  │  ┌─ ★ 01 AGENTIC RAG ★  — the model drives retrieval ────┐ │  ← YOU ARE HERE
+  │  │     calls search_knowledge_base 0..4×, then answers   │ │     [IMPLEMENTED]
+  │  ├─ 02 self-corrective — grade chunks, retry on a miss ──┤ │     [NOT YET]
+  │  ├─ 03 routing — pick the right SOURCE per query ────────┤ │     [NOT YET]
+  │  └────────────────────────────────────────────────────────┘ │
+  └─────────────────────────────────────────────────────────────┘
 ```
 
-Zoom in: static RAG retrieves once and generates — no second try.
-Agentic RAG puts retrieval inside the loop so the model can evaluate
-what came back and search again with a refined query. buffr is the
-agentic kind; whether it loops or not on a given question is the
-model's call.
+In AdvntrCue you ran retrieval *once*, outside the model, and handed it the chunks. buffr
+moves the retrieve step *inside* the model's control loop: the model issues the search
+call, reads the results, and decides whether that's enough to answer or whether it needs to
+search again. The retrieval is the same pgvector lookup you already know — what changed is
+*who decides when it runs*. The verdict up front: **buffr runs agentic RAG, which is just
+"a ReAct loop whose primary tool is retrieval."**
+
+---
 
 ## Structure pass
 
-**Layers.** Two: the agent loop (decides whether to retrieve again) and
-the retrieval pipeline (does one retrieval). Static RAG has only the
-second; agentic RAG adds the first.
+Trace ONE axis: **who decides when retrieval happens.** That is the axis that flips between
+static RAG and agentic RAG, and it flips at exactly one seam.
 
-**Axis — "how many retrievals per answer, and who decides?"** Static
-RAG: exactly one, the engineer. Agentic RAG: variable, the model.
-buffr is the variable case — 0 to 4 retrievals per question, model-
-decided.
+```
+  The axis: control over the retrieve step
 
-**Seam.** The seam is the tool-call boundary: the model emits a query
-as intent, the harness runs the pipeline. The agentic part is that the
-model can read the result and emit *another* query — a loop the seam
-allows.
+  STATIC RAG (AdvntrCue)            AGENTIC RAG (buffr)
+  ─────────────────────            ───────────────────
+  engineer's code decides          the MODEL decides
+  retrieve runs exactly once       retrieve runs 0..N times
+  before the model sees anything   whenever the model emits a tool call
+
+         retrieve                         ┌──────────────┐
+            │                             │ model turn   │
+            ▼                             │  search?     │──no──► answer
+        [chunks]                          │   │ yes              ▲
+            │                             │   ▼                  │
+         generate                         │ retrieve ──results──►┘ (loop)
+            │
+         answer                       SEAM: the tool-call boundary —
+                                      retrieval became a TOOL, not a step
+```
+
+The seam is the tool-call boundary. In static RAG the chunks arrive in the prompt by the
+time generation starts; the model never *asks*. In agentic RAG the model asks — it emits a
+`search_knowledge_base` tool call, the loop runs the retrieval, feeds results back as a
+tool result, and the model gets another turn to decide. Same vector store on both sides; the
+control inverted.
+
+---
 
 ## How it works
 
-#### Move 1 — the mental model
+### Move 1 — the mental model
 
-You know the difference between one `fetch` and a `fetch` inside a
-`while` that keeps requesting until it has enough data? Static RAG is
-the single fetch; agentic RAG is the loop. Same retrieval call, but
-the agent decides whether one was enough.
+Think of the `.then()` chain you wrote in AdvntrCue, then imagine the model holding the
+chain and choosing how many times to run the middle link.
 
 ```
-  Pattern — static RAG vs the agentic loop
+  PATTERN: retrieval as a tool the model calls in a loop
 
-  Static RAG (one shot):
-    query → retrieve top-k → stuff → generate
-    (no evaluation, no second try)
-
-  Agentic RAG (a loop — buffr):
-    ┌──────────────────────────────────────────┐
-    │  model: do I need to search? what for?    │
-    └───────────────────┬───────────────────────┘
-                        ▼
-    ┌──────────────────────────────────────────┐
-    │  search_knowledge_base(query) → chunks     │
-    └───────────────────┬───────────────────────┘
-                        ▼
-    ┌──────────────────────────────────────────┐
-    │  model: enough to answer?                  │
-    └────────┬──────────────────────┬────────────┘
-             ▼ no                   ▼ yes
-        search again            generate answer
-        (refine query)
-             │
-             └──── loop (capped at 4 calls)
+  ┌──────────────────────────────────────────────────────────────┐
+  │  loop turn (model.complete)                                   │
+  │     │                                                         │
+  │     ├─ emits text only ──────────────────► DONE (final answer)│
+  │     │                                                         │
+  │     └─ emits tool_use: search_knowledge_base                  │
+  │             │                                                 │
+  │             ▼                                                 │
+  │         run retrieval (pgvector HNSW cosine top-k)            │
+  │             │                                                 │
+  │             ▼                                                 │
+  │         tool_result: ranked chunks + citations ──► next turn  │
+  └──────────────────────────────────────────────────────────────┘
+       budget: up to 4 search calls across up to 6 turns,
+       then tools are stripped and a final answer is forced
 ```
 
-#### Move 2 — the walkthrough
+The model is the controller. The search tool is a pure function it can call. The loop is the
+clock that bounds how long the model gets to keep calling it. Hold those three pieces — they
+are the whole pattern.
 
-**The loop's one tool is retrieval.** buffr grants exactly one tool
-(`ragQueryToolPolicy`, `rag-query-agent.js:8-11`), and that tool is the
-retrieval pipeline wrapped as `search_knowledge_base`
-(`src/session.ts:42-44`):
+### Move 2 — step by step
+
+**Part 1 — The tool: retrieval wrapped as a callable.**
+
+In AdvntrCue, retrieval was a function *you* called. In buffr it is a function the *model*
+calls — which means it needs a name, a description, and a JSON input schema the model can
+target, not just a signature.
+
+```
+  Part 1 diagram: the search tool as a model-callable contract
+
+  model sees ──► { name: "search_knowledge_base",
+                   description: "Search the indexed knowledge base...",
+                   inputSchema: { query, top_k, filter } }
+                          │
+                          ▼ model emits args { query: "...", top_k: 5 }
+                   handler(args) ──► pipeline.query() ──► ranked chunks
+                          │
+                          ▼ enforce floor: topK = max(requested, minTopK)
+                   results: [{ id, score, citation, meta }, ...]
+```
+
+The bridge from what you know: a `fetch()` wrapper exposes a URL and parses the response;
+this exposes a *schema* and parses the model's chosen `args`. Real code, side by side:
 
 ```ts
-const pipeline = createRetrievalPipeline({ embedder, store });
-const tool = createSearchKnowledgeBaseTool(pipeline, { minTopK: 4 });
-const tools = new InMemoryToolRegistry([tool.definition], { [tool.definition.name]: tool.handler });
+// aptkit/packages/retrieval/src/search-knowledge-base-tool.ts:53-76
+const definition: ToolDefinition = {
+  name: SEARCH_KNOWLEDGE_BASE_TOOL_NAME,             // 'search_knowledge_base' (line 6)
+  description:
+    'Search the indexed knowledge base for passages relevant to a query and ' +
+    'return ranked chunks with citations.',          // ← this string IS the model's API doc
+  inputSchema: {
+    type: 'object',
+    properties: {
+      query:  { type: 'string',  ... },              // the model writes the query
+      top_k:  { type: 'integer', default: DEFAULT_TOP_K },  // and chooses how many
+      filter: { type: 'object',  additionalProperties: true },
+    },
+    required: ['query'],                              // query is the only thing it MUST give
+    additionalProperties: false,
+  },
+};
 ```
 
-So the only thing the model can *do* is retrieve. That's why buffr's
-ReAct loop and "agentic RAG" are the same object seen from two sides —
-the action space is retrieval.
-
-**The agent can refine and re-retrieve.** The loop allows up to 4 tool
-calls (`rag-query-agent.js:48`). If the model's first query returns
-weak chunks, it can emit a second, refined query — the observation
-(the chunks) is fed back as a `tool_result` message
-(`run-agent-loop.js:97-104`) so the next Thought sees what came back.
-That feedback is the difference from static RAG: the model reasons over
-the retrieval result and can act on it.
-
-**`minTopK: 4` is a floor against a weak model under-fetching.** The
-tool forces at least 4 results even if the model asks for fewer
-(`search-knowledge-base-tool.js:5,32`):
-
-```js
-const minTopK = Math.max(1, options.minTopK ?? 1);
-// ...
-const topK = Math.max(requestedTopK, minTopK);
+```ts
+// aptkit/packages/retrieval/src/search-knowledge-base-tool.ts:78-96
+const handler: ToolHandler = async (args): Promise<SearchKnowledgeBaseOutput> => {
+  const query = typeof args.query === 'string' ? args.query : '';
+  const requestedTopK = typeof args.top_k === 'number' && args.top_k > 0 ? args.top_k : defaultTopK;
+  const topK = Math.max(requestedTopK, minTopK);     // ← lines 80-81: the floor (see below)
+  ...
+  let hits = await pipeline.query(query, fetchK);    // the SAME pgvector lookup as AdvntrCue
+  ...
+  return { query, results: hits.map(toResult) };     // toResult builds [docId] snippet citations (108-118)
+};
 ```
 
-That's a small but real piece of hardening: Gemma might emit `top_k:
-1` and starve itself; the floor guarantees enough context to ground an
-answer.
+The retrieval mechanics inside `pipeline.query` — embed, HNSW cosine search, rank — are the
+ones you already know from `study-ai-engineering`; this file does not re-teach them. The new
+thing is the `minTopK` floor on line 81. buffr constructs the tool with `minTopK: 4`
+(`session.ts:43`), so `topK = max(requested, 4)`. Why: a weak local model (gemma2:9b) will
+sometimes pass `top_k: 1` and starve its own retrieval — one chunk can't answer a multi-part
+question. The floor is a guardrail against the model under-asking. Hold that thought; it
+reappears in file 02 as a *stand-in* for a relevance grader.
 
-**The honest reality: it usually doesn't loop.** Most buffr questions
-are single retrievals — the model searches once and answers. The
-agentic *capability* is there (the cap is 4, the feedback is wired),
-but the *behavior* is usually one-shot. That's fine: agentic RAG is
-worth it only when one-shot retrieval measurably fails, and for
-personal-knowledge questions it usually doesn't.
+**Part 2 — The loop: the model decides whether and what to search.**
 
-```
-  Layers-and-hops — one agentic retrieval cycle
-
-  ┌─ Model ─────┐ hop 1: search(query)  ┌─ Harness + pipeline ──────┐
-  │ Thought:    │ ───────────────────►  │ createSearchKnowledgeBase │
-  │ "search X"  │                       │ → pipeline.query          │
-  │             │ ◄───────────────────  │ → PgVectorStore.search    │
-  │ Obs: chunks │ hop 2: ranked chunks  │   (cosine, HNSW, 768-dim) │
-  │ "enough?"   │                       └───────────────────────────┘
-  └─────────────┘  loop if not, capped at 4
-```
-
-#### Move 3 — the principle
-
-All agentic RAG is agentic AI; not all agentic AI does retrieval.
-buffr's agent *is* agentic RAG because its single action is search. The
-tradeoff agentic RAG takes on — roughly 3-10x token cost and 2-5x
-latency over static RAG when it actually loops — means the
-above-threshold rule applies hard: let the loop run only when one-shot
-retrieval measurably fails. buffr keeps the loop available but cheap by
-capping it at 4 and resolving most questions in one pass.
-
-## Primary diagram
+This is the inversion. The loop calls the model, sees whether the model emitted a tool call,
+runs it if so, feeds the result back, and repeats — until the model answers in plain text or
+the budget runs out.
 
 ```
-  buffr's agentic RAG (the loop = the retrieval driver)
+  Part 2 diagram: the decision the model makes every turn
 
-  question
+  turn N: model.complete(messages, tools)
      │
-     ▼
-  ┌─ ReAct loop (capped 4 search calls) ─────────────────────┐
-  │  search_knowledge_base(q1) → chunks                       │
-  │     │ model: enough?                                      │
-  │     ├ no → search_knowledge_base(q2 refined) → chunks     │
-  │     └ yes ─────────────────────────────────┐             │
-  │  forced synthesis on last turn ─────────────┴─► grounded  │
-  │                                                 answer    │
-  └──────────────────────────────────────────────────────────┘
+     ├─ response is text only ──────────────► finalText, break   (model chose to ANSWER)
+     │
+     └─ response has tool_use blocks
+            │
+            ▼
+        for each: callTool() ──► push tool_result into messages   (model chose to SEARCH)
+            │
+            ▼
+        loop to turn N+1   (model now sees its own results)
 ```
+
+Bridge from known: this is your `fetch()` loading/error/success states, except the model is
+the one deciding to re-fetch. Real code:
+
+```ts
+// aptkit/packages/runtime/src/run-agent-loop.ts:131-135
+const toolUses = toolUsesFromContent(response.content);
+if (toolUses.length === 0) {     // model emitted no tool call —
+  finalText = text;              // it decided it can answer now.
+  break;                         // exit the loop. (the "answer" branch)
+}
+// ...otherwise fall through, run each tool, push results, loop again (lines 137-190)
+```
+
+Nothing here *forces* a search. The model is nudged toward one by the system prompt — that
+nudge lives in Part 3. The loop only provides the *opportunity* to search and the *plumbing*
+to feed results back.
+
+**Part 3 — The budget + the nudge: bounded freedom.**
+
+The model is free to search 0 to N times — but "free" without a ceiling is an infinite loop
+on a flaky local model. buffr bounds it: `maxTurns: 6`, `maxToolCalls: 4`. And it points the
+freedom in the right direction with a system prompt that says "search first."
+
+```
+  Part 3 diagram: bounded freedom — the budget and the forced exit
+
+  turn:   0     1     2     3     4     5
+          │     │     │     │     │     │
+  search: ✓     ✓     ✓     ✓     ✗     ✗     ← max 4 search calls (maxToolCalls:4)
+                                  │     │
+                                  └─────┴──► tools STRIPPED, synthesis FORCED
+                                             (forceFinal → no tools, "answer now")
+          └───────────── max 6 turns total (maxTurns:6) ──────────────┘
+```
+
+Bridge from known: a retry loop with a max-attempts counter and a "give up and return what
+you have" branch. Real code, the budget check and the forced synthesis:
+
+```ts
+// aptkit/packages/runtime/src/run-agent-loop.ts:101-109
+const budgetSpent = maxToolCalls !== undefined && toolCalls.length >= maxToolCalls;
+const forceFinal = turn === maxTurns - 1 || budgetSpent;   // out of turns OR out of searches
+const response = await model.complete({
+  system: forceFinal && synthesisInstruction               // append "you have NO more tool calls"
+    ? `${system}\n\n${synthesisInstruction}` : system,
+  messages,
+  tools: forceFinal ? undefined : toolSchemas,             // ← strip the tools: model CAN'T search now
+  maxTokens, signal,
+});
+```
+
+```ts
+// aptkit/packages/agents/rag-query/src/rag-query-agent.ts:75-79
+maxTurns: 6,
+maxToolCalls: 4,
+synthesisInstruction: buildSynthesisInstruction(          // run-agent-loop.ts:72-74
+  'Now answer the question directly and concisely, citing the sources you retrieved.',
+),
+```
+
+And the nudge — the system template that makes the model *want* to search before answering:
+
+```ts
+// aptkit/packages/agents/rag-query/src/rag-query-agent.ts:20-27
+const DEFAULT_SYSTEM_TEMPLATE = [
+  'You are a personal knowledge assistant.',
+  '',
+  `Always call the ${SEARCH_KNOWLEDGE_BASE_TOOL_NAME} tool first to retrieve relevant`,  // ← the "search first" nudge
+  'passages before answering. Ground every answer in the retrieved chunks and cite',
+  'their sources. If the knowledge base does not contain the answer, say so plainly',     // ← honesty over guessing
+  'rather than guessing.',
+].join('\n');
+```
+
+The wiring that assembles all three parts:
+
+```ts
+// buffr/src/session.ts:42-44, 57
+const pipeline = createRetrievalPipeline({ embedder, store });        // 42: the retrieve path
+const tool = createSearchKnowledgeBaseTool(pipeline, { minTopK: 4 }); // 43: wrap as a tool, floor at 4
+const tools = new InMemoryToolRegistry([tool.definition], {           // 44: register it
+  [tool.definition.name]: tool.handler,
+});
+// ...
+const agent = new RagQueryAgent({ model, tools, profile, trace });    // 57: hand the loop its one tool
+```
+
+### Move 3 — the principle
+
+**Agentic RAG is the model holding the retrieve step and choosing how many times to pull it,
+inside a budget you set.** Static RAG asks "what do I retrieve once?" Agentic RAG asks "does
+the model think it needs more, and can I afford to let it find out?" buffr answers: yes, up
+to 4 times, then it must commit.
+
+---
+
+## Primary diagram (recap)
+
+The whole pattern in one frame — static RAG on the left, buffr's agentic loop on the right.
+
+```
+  STATIC RAG vs AGENTIC RAG — the full picture
+
+  STATIC RAG (AdvntrCue)              AGENTIC RAG (buffr)
+  ════════════════════════           ═══════════════════════════════════════════
+                                      system prompt: "search first, ground, cite,
+   question                            say so plainly if not found"
+      │                                      │
+      ▼                                question ──► ┌─ runAgentLoop (≤6 turns) ──────┐
+   embed + retrieve (once)                          │  model.complete()             │
+      │                                             │    │                          │
+      ▼                                             │    ├─ text only ──► ANSWER ◄───┤
+   top-k chunks ──► prompt                          │    │                          │
+      │                                             │    └─ search_knowledge_base    │
+      ▼                                             │         (≤4 calls, minTopK 4)  │
+   generate                                         │         │                      │
+      │                                             │         ▼                      │
+      ▼                                             │     pgvector top-k ──results──►─┤ loop
+   answer                                           │  budget spent? strip tools,    │
+                                                    │  FORCE synthesis ──► ANSWER     │
+  engineer controls retrieval.                      └────────────────────────────────┘
+  1 retrieve, fixed.                  model controls retrieval. 0..4 retrieves, bounded.
+```
+
+Same store, same embeddings, same HNSW lookup on both sides. The only thing that moved is
+the controller of the retrieve step — and that one move is the entire concept.
+
+---
 
 ## Elaborate
 
-Agentic RAG is the name for what you get when you make retrieval a tool
-in a ReAct loop rather than a fixed pipeline stage — see `03-react.md`
-for the same loop from the reasoning side. The retrieval mechanics
-underneath (embedding with nomic-embed-text, cosine search over
-pgvector, HNSW) are walked in
-`.aipe/study-system-design/01-vector-store-adapter.md`. The next
-refinement — grading whether retrieved chunks are actually relevant
-before generating — is self-corrective RAG (`02-self-corrective-rag.md`),
-which buffr does not do.
+**The cost is real and buffr pays it on purpose.** Agentic RAG costs **3-10× the tokens**
+and **2-5× the latency** of static RAG: every turn re-sends the growing message history
+(question + all prior tool results) through the model, and each search is a full
+model-roundtrip plus a vector query. Static RAG is one retrieve and one generate. buffr
+accepts the multiplier because its job — a personal knowledge assistant answering
+multi-part, cross-source questions ("what did I decide about X, and how does it relate to
+Y?") — needs the model to gather evidence in more than one pass. For a single-fact lookup,
+static RAG would be the right call and agentic RAG would be waste. Know which question
+you're answering.
+
+**buffr is the *simplest* agentic RAG, and that is a deliberate position.** It does NOT:
+- **decompose sub-questions** — it does not break "compare A and B" into two planned
+  retrievals; the model just freely issues search calls and the budget catches it.
+- **re-retrieve on a grader signal** — there is no relevance grader between retrieval and
+  generation deciding "these chunks are weak, search again." (That is file 02.)
+- **route between sources** — there is exactly one source. (That is file 03.)
+
+What buffr *is*: the model may call the one search tool 0 to 4 times, nudged by the prompt to
+search first, then forced to answer. That is agentic RAG with nothing optional bolted on —
+the honest floor of the pattern.
+
+**Why "0..4" and not "always 1"?** The model *can* skip search entirely (the
+`toolUses.length === 0` branch answers immediately). The prompt nudges against that, but a
+nudge is not a guarantee on a 9B local model — which is exactly why file 02's grader pattern
+exists, and exactly why buffr's `minTopK: 4` floor and "say so plainly" prompt are the
+cheap insurance it ships instead.
+
+---
 
 ## Interview defense
 
-**Q: Is buffr's RAG static or agentic?**
-Agentic — retrieval is the agent's one tool inside a ReAct loop, so the
-model can search, read the chunks, and search again with a refined
-query, capped at 4 calls (`rag-query-agent.js:48`). In practice most
-questions resolve in one search, but the loop is there for the ones
-that don't. Static RAG would retrieve exactly once with no second try.
+**Q: "Is buffr doing RAG or is it an agent? Pick one."**
+
+> It's both, and the precise answer is the interesting one: buffr runs **agentic RAG, which
+> is a ReAct loop whose primary — and only — tool is retrieval.** The model decides whether
+> to search, writes the query, reads the chunks, and decides whether to search again, up to
+> 4 calls across 6 turns, then it's forced to synthesize. Classic RAG retrieves once before
+> the model ever runs; buffr's model holds the retrieve step. The framing I'd hand a
+> skeptic: *all agentic RAG is agentic AI; not all agentic AI does retrieval.* buffr is the
+> special case where the agent's tools are search tools — taken to its minimum, one search
+> tool.
 
 ```
-  static: query → retrieve → generate
-  agentic: loop[ search → observe → search? ] → generate
+  The defense in one diagram
+
+  agentic AI ⊃ agentic RAG ⊃ buffr
+  ┌─────────────────────────────────────────────┐
+  │ agentic AI: model loops over ANY tools       │
+  │  ┌──────────────────────────────────────┐    │
+  │  │ agentic RAG: the tools are SEARCH     │    │
+  │  │  ┌─────────────────────────────────┐  │    │
+  │  │  │ buffr: exactly ONE search tool, │  │    │
+  │  │  │ 0..4 calls, then forced answer  │  │    │
+  │  │  └─────────────────────────────────┘  │    │
+  │  └──────────────────────────────────────┘    │
+  └─────────────────────────────────────────────┘
 ```
 
-**Anchor:** "buffr's ReAct loop and its agentic RAG are the same object
-— the single action is retrieval."
+**Anchor it in code if pushed:** the tool is `search-knowledge-base-tool.ts:43-99` (schema
+53-76, handler 78-96, the `minTopK` floor 50-51 + 80-81). The loop that drives it is
+`run-agent-loop.ts:76-202` — the search-or-answer decision at 131-135, the forced synthesis
+at 101-109. The budget and the "search first" nudge are
+`rag-query-agent.ts:75-79` and `20-27`. The wiring is `session.ts:42-44`.
 
-**Q: What stops the retrieval loop from running away?**
-The same budget exit as any agent loop: `maxToolCalls: 4` plus the
-forced synthesis turn that strips the tool and demands an answer
-(`run-agent-loop.js:28-34`). Without it, a weak model could keep
-re-querying forever.
+---
 
 ## See also
 
-- `02-self-corrective-rag.md` — grading relevance before generating
-- `03-retrieval-routing.md` — routing across multiple sources
-- `03-react.md` — the same loop from the reasoning side
-- `04-agent-infrastructure/02-agent-memory-tiers.md` — memory recalled
-  through this *same* search tool
-- `.aipe/study-system-design/01-vector-store-adapter.md` — the
-  retrieval mechanics underneath
+- `02-self-corrective-rag.md` — the next rung: grade the chunks before trusting them, retry
+  on a miss. buffr's `minTopK` floor and "say so plainly" prompt are its lightweight
+  stand-ins.
+- `03-retrieval-routing.md` — the other rung: pick the right *source*. buffr has one.
+- `../01-reasoning-patterns/02-agent-loop-skeleton.md` — the ReAct kernel this pattern runs
+  on; this file is that kernel with retrieval as the payload.
+- `../01-reasoning-patterns/03-react.md` — the placement: buffr is plain ReAct, measured.
+- **`study-ai-engineering`** — the retrieval mechanics underneath the tool: embeddings,
+  chunking, HNSW, RRF, reranking, classic RAG vs GraphRAG. This file does not re-teach them.

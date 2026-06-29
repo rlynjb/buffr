@@ -1,307 +1,319 @@
-# 06 · Trajectory tables
+# Trajectory tables (full-signal agent log)
 
-**Subtitle:** event-log capture of an agent run — `conversations` + `messages`
-as a fully-populated, replayable trace — *Industry standard (agent observability)*.
+**Industry name(s):** event log / agent trajectory capture — here the
+trajectory tables (`conversations` + `messages`) plus episodic memory riding
+`chunks`. **Type:** Industry standard (append-only event/trajectory log),
+shipped full-signal.
 
 ---
 
 ## Zoom out, then zoom in
 
-Every agent run leaves a complete record: the user's question, each assistant
-step, every tool call with its arguments, every tool result with its duration and
-errors, the model and token cost per inference, and any warnings. That record
-lives in two tables — `conversations` (one row per session) and `messages` (one
-row per event) — and it's the only place in the schema with a real foreign key.
+You know an event log: an append-only table where each row is one thing that
+happened, in order, so you can replay or audit later. This file is about the two
+tables that record *everything the agent did* on each turn — not just the
+assistant's text, but every tool call's arguments, every result, every model's
+token count, every warning and error — and how a second form of memory
+(episodic recall) rides the `chunks` table instead.
 
 ```
   Zoom out — where the trajectory is written
 
-  ┌─ Agent layer ───────────────────────────────────────────┐
-  │  RagQueryAgent.answer() emits CapabilityEvents           │
-  └───────────────────────────┬─────────────────────────────┘
-                              │  6 event types → emit()
-  ┌─ Trace layer ─────────────▼─────────────────────────────┐
-  │  SupabaseTraceSink.emit → persistMessage(...)            │
-  └───────────────────────────┬─────────────────────────────┘
-                              │  insert per event
-  ┌─ Storage: agents ─────────▼─────────────────────────────┐
-  │  conversations  1 ──FK cascade──► N  messages  ★ here ★  │
-  │  tool_calls/tool_results/model/tokens_used POPULATED      │
-  └─────────────────────────────────────────────────────────┘
+  ┌─ agent run (aptkit RagQueryAgent) ───────────────────────┐
+  │  emits CapabilityEvents: step · tool_call_start ·         │
+  │  tool_call_end · model_usage · warning · error            │ ← source
+  └───────────────────────────────┬───────────────────────────┘
+                                  │  SupabaseTraceSink.emit (sync)
+  ┌─ persistence (app) ───────────▼───────────────────────────┐
+  │  every event → persistMessage(...)  ── queued, flushed     │ ← here
+  └───────────────────────────────┬───────────────────────────┘
+                                  │
+  ┌─ Postgres (agents schema) ────▼───────────────────────────┐
+  │  conversations (1 per session)                            │
+  │     └─FK→ messages (1 per event, full-signal columns)     │
+  │  chunks (meta.kind='memory')  ── episodic recall, separate │
+  └────────────────────────────────────────────────────────────┘
 ```
 
-Zoom in: the question is "can you reconstruct exactly what the agent did, in
-order, after the fact?" The shape that answers yes is an append-only event log
-with enough columns to replay the run — not just "user said X, agent said Y," but
-the full causal chain including the tool args (the cause) and the durations and
-token costs (the effect).
+Zoom in: the question is "what does the database remember about a turn, and in
+what order?" The answer is two things. The **trajectory** — the complete
+event-by-event record in `messages`, ordered by the event timestamp so replay
+matches emit order. And the **episodic memory** — a *different* memory that
+embeds past exchanges into `chunks` so they resurface by relevance through the
+same retrieval tool. Two memories, two storage shapes, one design.
+
+---
 
 ## The structure pass
 
-One axis: **lifecycle** — when is each row written, and is it ever changed? Trace
-it across the two tables.
-
 ```
-  axis = "when is this row written, and does it mutate?"
+  One axis: "how is a past turn recalled?"
 
-  ┌─ conversations ────────────────┐  written once, at session start
-  │  one row per createChatSession │  → never updated; the parent anchor
-  └────────────────┬────────────────┘
-                   │ seam: FK cascade — child lifecycle tied to parent
-  ┌─ messages ─────▼────────────────┐  written per event, append-only
-  │  one row per CapabilityEvent    │  → never updated; delete only via
-  └─────────────────────────────────┘    parent cascade
+  ┌─ trajectory (conversations → messages) ──────────────────┐
+  │  recall = read rows in created_at order                  │  by ORDER
+  │  full-signal: tool args, results, tokens, errors         │  (replay)
+  └─────────────────────────┬────────────────────────────────┘
+                            │  seam: the OTHER memory recalls differently
+  ┌─ episodic memory (chunks, meta.kind='memory') ───────────┐
+  │  recall = embed query, ANN search, top-k                 │  by RELEVANCE
+  │  rides the SAME vector column + HNSW index                │  (retrieval)
+  └──────────────────────────────────────────────────────────┘
 ```
 
-The seam is the FK with `on delete cascade`. It's the one place in the schema
-where a child's lifecycle is bound to a parent's: delete the conversation, the
-messages go with it. Both tables are append-only — rows are inserted, never
-updated — which is exactly the shape of an event log.
+The axis is **how a past turn is recalled**, and it flips cleanly across the two
+stores. The `messages` log is recalled by *order* — read the rows by
+`created_at` and you replay exactly what happened. The episodic memory in
+`chunks` is recalled by *relevance* — embed the new question, ANN-search, get
+the most similar past exchanges back regardless of when they happened. Same
+underlying conversation; two storage shapes because the two recall modes need
+different access paths. That flip is the load-bearing distinction.
+
+---
 
 ## How it works
 
 ### Move 1 — the mental model
 
-The shape is an **append-only event log with a parent envelope** — the same
-structure as a request log grouped by trace id, or git commits grouped by branch.
-The conversation is the envelope; each message is one immutable event stamped with
-when it happened. Replay = read the events in timestamp order.
+Think of two ways your app remembers a user's history. A `console.log` stream
+(or a Redux action log) — chronological, complete, you scroll it in order. And a
+search box over past content — you type a query and the most relevant past items
+surface, order-independent. The trajectory tables are the first; episodic memory
+is the second. Same raw history, two indexes into it, because "what happened
+next" and "what's relevant now" are different questions.
 
 ```
-  event log under one envelope (pattern)
+  Two memories over one conversation
 
-  conversation (envelope)
-  ├─ msg: user "what's X?"            t0
-  ├─ msg: step  (assistant thinking)  t1
-  ├─ msg: tool_call  search(args)     t2   ← the CAUSE (args captured)
-  ├─ msg: tool       result+duration  t3   ← the EFFECT
-  ├─ msg: model_usage  tokens         t4   ← the COST
-  └─ msg: step  (final answer)        t5
-
-  read in t-order → exact replay of the run
+  TRAJECTORY (messages)          EPISODIC (chunks, kind=memory)
+  ─────────────────────          ──────────────────────────────
+  ordered by created_at          ordered by embedding distance
+  read sequentially → replay     embed query → top-k by relevance
+  rows: every event              rows: past exchanges, embedded
+  recall question: "then what?"  recall question: "what's like now?"
 ```
 
 ### Move 2 — the walkthrough
 
-**The parent: one conversation per session.**
+**One conversation row, the only real FK in the schema.** Each session inserts
+one `conversations` row (`supabase-trace-sink.ts:4-7`, `startConversation`), and
+every message points at it via the schema's single enforced foreign key:
 
-```
-  File: sql/001_agents_schema.sql + src/supabase-trace-sink.ts
-  Lines: 32-38 (schema) / 4-8 (startConversation)
-
-    create table agents.conversations (
-      id uuid primary key default gen_random_uuid(),    ← surrogate key
-      app_id text not null default 'laptop',
-      agent_name text not null default 'rag-query-agent',
-      created_at timestamptz not null default now()
-    );
-    // startConversation: one insert, returns the id, held for the session
-```
-
-A conversation row is created once in `createChatSession` (`session.ts:55`) and
-its id is held in-process across every turn. It's the trace id every message
-hangs off.
-
-**The child: one message per event, with the causal columns populated.**
-The schema gives `messages` columns for the *full* signal — not just role and
-content, but the tool payloads, the model, and the token count.
-
-```
-  File: sql/001_agents_schema.sql
-  Lines: 40-50
-
-    create table agents.messages (
-      id uuid primary key default gen_random_uuid(),
-      conversation_id uuid references agents.conversations(id)
-        on delete cascade,                ← the one real FK + cascade
-      role text not null,
-      content text not null default '',
-      tool_calls jsonb,        ← the tool name + ARGS (the cause)
-      tool_results jsonb,      ← result + error + durationMs (the effect)
-      model text,              ← which model produced the inference
-      tokens_used int,         ← input+output tokens (the cost)
-      created_at timestamptz not null default now()
-    );
+```sql
+-- sql/001_agents_schema.sql:40-50
+create table if not exists agents.messages (
+  id uuid primary key default gen_random_uuid(),
+  conversation_id uuid references agents.conversations(id) on delete cascade,  // ← the ONE FK
+  role text not null,
+  content text not null default '',
+  tool_calls jsonb,        // populated — tool args (the cause)
+  tool_results jsonb,      // populated — result, error, durationMs
+  model text,              // populated — "provider/model"
+  tokens_used int,         // populated — input + output tokens
+  created_at timestamptz not null default now()   // overridden by event timestamp
+);
 ```
 
-The comment-worthy part: `tool_calls`, `tool_results`, `model`, and `tokens_used`
-are all **populated**, not left null. The trace sink fills each one from the
-matching event type.
+`on delete cascade` means deleting a conversation deletes its whole trajectory —
+the right cascade for a log that's meaningless without its parent. This is the
+one place the repo *wants* the database to enforce the relationship (contrast
+`03-soft-link-no-fk.md`, where it deliberately doesn't), and it's a clean fit.
 
-**The sink: every event variant maps to a row.**
-`SupabaseTraceSink.emit` is a switch over all six `CapabilityEvent` types, each
-writing the columns its event carries.
+**Full-signal capture — every event variant becomes a row.** The trace sink
+maps *all six* `CapabilityEvent` types to message rows, not just assistant text.
+The comment in the sink is explicit that tool args, durations, errors, and token
+usage were "previously dropped on the floor" and are now captured
+(`supabase-trace-sink.ts:42-48`). The dispatch:
 
-```
-  File: src/supabase-trace-sink.ts
-  Function: SupabaseTraceSink.emit
-  Lines: 53-85
-
-    case 'tool_call_start':                          ← the CAUSE
-      persistMessage(..., 'tool_call', event.toolName, {
-        toolCalls: { toolName, args: event.args },   ← args captured
-        createdAt: at });
-    case 'tool_call_end':                            ← the EFFECT
-      persistMessage(..., 'tool', event.toolName, {
-        toolResults: { result, error, durationMs },  ← outcome + timing
-        createdAt: at });
-    case 'model_usage':                              ← the COST
-      persistMessage(..., 'model_usage', '', {
+```ts
+// supabase-trace-sink.ts:53-84 (condensed)
+emit(event: CapabilityEvent): void {
+  const at = event.timestamp;                    // event's own timestamp
+  switch (event.type) {
+    case 'step':                                  // assistant/user text
+      if (event.content) this.push(persistMessage(pool, conv, event.role, event.content, { createdAt: at }));
+      return;
+    case 'tool_call_start':                       // the CAUSE — tool name + args
+      this.push(persistMessage(pool, conv, 'tool_call', event.toolName, {
+        toolCalls: { toolName: event.toolName, args: event.args }, createdAt: at }));
+      return;
+    case 'tool_call_end':                         // the EFFECT — result, error, duration
+      this.push(persistMessage(pool, conv, 'tool', event.toolName, {
+        toolResults: { result: event.result, error: event.error, durationMs: event.durationMs }, createdAt: at }));
+      return;
+    case 'model_usage':                           // fills the tokens_used column
+      this.push(persistMessage(pool, conv, 'model_usage', '', {
         model: `${event.provider}/${event.model}`,
-        tokensUsed: (inputTokens ?? 0) + (outputTokens ?? 0),
-        createdAt: at });
+        tokensUsed: (event.inputTokens ?? 0) + (event.outputTokens ?? 0), createdAt: at }));
+      return;
+    case 'warning': case 'error':                 // operational events, not just happy path
+      this.push(persistMessage(pool, conv, event.type, event.message, { createdAt: at }));
+      return;
+  }
+}
 ```
 
-Each `case` populates exactly the columns that event knows about. `tool_call_start`
-captures the args — the *cause* of a tool action, which the comment at
-`supabase-trace-sink.ts:39-48` notes was "previously dropped on the floor."
-`tool_call_end` captures the *effect* and timing. `model_usage` fills the
-otherwise-orphaned `tokens_used` column.
+Every branch produces a `messages` row, so the table holds the *complete* turn:
+the tool call (cause) and its result (effect) as separate rows, the model's
+token usage, and any warnings/errors — not a sanitized "assistant said X"
+summary. That's what "full-signal" means and it's why `tokens_used` and
+`tool_calls`/`tool_results` are populated, not orphaned columns.
 
-**The replay-order discipline: `created_at` from the event, not the insert.**
-This is the subtle, load-bearing part. The writes are queued and flushed
-concurrently (`flush()` awaits a `Promise.all`), so insert order is a race. If
-`created_at` defaulted to `now()` at insert time, the replay order would scramble.
-Instead, the event's own timestamp is threaded through.
+**`created_at` comes from the event, not server `now()` — for deterministic
+replay order.** This is the subtle, load-bearing part. `emit()` is synchronous
+(aptkit's contract), but the writes are *queued* and flushed concurrently after
+the run (`push` / `flush`, `:87-93`). Concurrent inserts race — if `created_at`
+defaulted to `now()`, two events emitted in order could land with reversed
+timestamps depending on which insert won the race. So the sink threads each
+event's *own* timestamp into `created_at`:
 
-```
-  File: src/supabase-trace-sink.ts + sql/001_agents_schema.sql
-  Lines: persistMessage 26-36 / event timestamp at:55-56 / schema :49
-
-    // persistMessage:
-    const createdAt = extra?.createdAt?.length ? extra.createdAt : null;
-    insert into agents.messages (..., created_at)
-      values (..., coalesce($8::timestamptz, now()))  ← event time, else now()
-    // emit: const at = event.timestamp;  ← the event's own clock
-```
-
-So replay order = `order by created_at`, which matches *emit* order, not the
-concurrent-flush insert race. That's the difference between a log you can replay
-and a log that's merely append-only.
-
-```
-  Layers-and-hops — sync emit, queued async write
-
-  ┌─ agent ───────┐ emit(event)      ┌─ trace sink ─────────┐
-  │ answer()      │ ───(sync)──────► │ push(persistMessage) │ queue
-  └───────────────┘                  └──────────┬───────────┘
-                                       hop: flush()│ Promise.all
-                                                   ▼ (concurrent inserts)
-                                       ┌─ messages ──────────┐
-                                       │ created_at = event  │ ← order preserved
-                                       │ time, NOT insert now│   despite the race
-                                       └─────────────────────┘
+```ts
+// supabase-trace-sink.ts:26-36 (persistMessage)
+const createdAt = extra?.createdAt && extra.createdAt.length > 0 ? extra.createdAt : null;
+await pool.query(
+  `insert into agents.messages (... created_at)
+   values ($1, ..., coalesce($8::timestamptz, now()))`,   // ← event ts, else now()
+  [..., createdAt],
+);
 ```
 
-**The boundary condition.** The append-only event-per-row shape means a single
-agent turn produces *many* message rows (user + step + tool_call + tool + model +
-step). Reconstructing "what was the assistant's final answer" means filtering by
-role, not reading the last row. And — tying back to `audit.md` Lens 3 — there's
-**no index on `conversation_id`**, so the `order by created_at where
-conversation_id = ?` replay query that this shape is built for would seq-scan
-until that index is added. The table is write-only today, so the gap is latent,
-but it's pre-loaded into exactly the read this design exists to serve.
-
-### Move 2 variant — the load-bearing skeleton
+`coalesce($8, now())` uses the event timestamp when present, falling back to
+server `now()` only if the event didn't carry one. The result: ordering by
+`created_at` replays the trajectory in *emit* order, immune to the flush race.
 
 ```
-  the kernel of a replayable trajectory
-    1. a parent envelope (conversation) with a stable id
-    2. an append-only child row per event
-    3. enough columns to reconstruct cause→effect→cost
-    4. an ordering key that reflects EMIT time, not insert time
+  Why event-timestamp, not now() — the flush race
+
+  emit order:   step₁  tool_call₂  tool_end₃   (synchronous, in order)
+                  │        │           │
+                  ▼        ▼           ▼  queued, flushed CONCURRENTLY
+  insert race:  could commit in ANY order
+                  │
+  if created_at = now():   3, 1, 2  ✗ replay order wrong
+  if created_at = event ts: 1, 2, 3 ✅ replay = emit order
 ```
 
-- Drop **(4)** (use insert-time `now()`) → concurrent flushes scramble order;
-  the log is append-only but no longer *replayable*. This is the part people
-  forget.
-- Drop **(3)** (only role+content) → you see what was said, not why the agent
-  did it or what it cost — the trace is a transcript, not a trajectory.
-- Drop **(1)** the FK cascade → orphaned messages when a conversation is deleted.
+**Episodic memory rides `chunks`, not `messages`.** The *second* memory is
+separate. After each turn, `memory.remember({ conversationId, question, answer })`
+(`session.ts:67`) embeds the exchange and writes it into the *same vector store*
+as a chunk tagged `meta.kind='memory'`, id `"memory:<conv>:<n>"`. It recalls by
+relevance through the existing `search_knowledge_base` tool — so a past exchange
+resurfaces when it's semantically similar to the new question, across sessions.
+It's best-effort: a memory-write failure is swallowed so it can't lose the answer
+the user already has (`session.ts:64-69`). This is why `chunks` is overloaded
+(`01`, `03`): episodic memory needs the ANN access path, and `messages` is
+ordered-replay, so they live in different tables on purpose.
+
+**The boundary condition — the trajectory write is best-effort and non-atomic
+with the user turn.** The user question is persisted up front
+(`session.ts:61`), then the agent runs, then `trace.flush()` writes the
+trajectory (`session.ts:63`). If `flush()` partially fails, you can get a turn
+with the user message but an incomplete trajectory. For a personal log that's an
+acceptable cost — the answer still reached the user — but it means the
+`messages` log is a *best-effort* record, not a transactional guarantee. Name it.
 
 ### Move 3 — the principle
 
-The difference between a transcript and a trajectory is causality. A transcript
-says "user asked, agent answered." A trajectory captures the tool args (why the
-agent did what it did), the durations and errors (what happened), and the token
-counts (what it cost) — enough to *replay and debug* the run, not just read it.
-The non-obvious requirement that makes it work is that the ordering key must come
-from when the event *happened*, not when the row was *written*, because real
-systems write concurrently. Get that wrong and you have all the data and none of
-the order.
+An event log's value is that it's *complete and ordered* — capture only the
+happy path and you can't debug the failure; capture out of order and you can't
+replay. This repo gets both right: full-signal (every event variant, cause and
+effect, tokens and errors) and event-timestamped ordering (replay matches emit,
+immune to the flush race). And it recognizes that "remember in order" and
+"remember by relevance" are different access patterns that earn different
+storage — ordered rows in `messages`, embedded chunks in `chunks`. The general
+lesson: match the *storage shape* to the *recall question*, and never let a
+concurrency detail (the flush race) silently corrupt the one property
+(ordering) the log exists to provide.
+
+---
 
 ## Primary diagram
 
-The full trajectory shape — envelope, events, columns, ordering.
-
 ```
-  Trajectory tables — replayable agent trace
+  Trajectory + episodic memory — two memories, two shapes
 
-  ┌─ conversations (envelope, written once) ────────────────┐
-  │  id uuid pk · app_id · agent_name · created_at           │
-  └──────────────────────────┬───────────────────────────────┘
-                  FK on delete cascade │ 1 → N
-  ┌─ messages (append-only event log) ▼─────────────────────┐
-  │  role  content  tool_calls  tool_results  model  tokens  │
-  │  ─────────────  (args=CAUSE) (result+dur)  ───── (COST)   │
-  │  created_at ← EVENT timestamp (coalesce $8, now())        │
-  │                                                          │
-  │  replay = SELECT * WHERE conversation_id=? ORDER BY      │
-  │           created_at   ← needs an index (latent gap)     │
-  └──────────────────────────────────────────────────────────┘
+  ┌─ agent run ───────────────────────────────────────────────┐
+  │  CapabilityEvents (6 types, with timestamps)               │
+  └──────────────┬───────────────────────────┬─────────────────┘
+                 │ SupabaseTraceSink.emit     │ memory.remember
+                 │ (queued → flush)           │ (best-effort)
+                 ▼                            ▼
+  ┌─ conversations ─┐  FK    ┌─ chunks (meta.kind='memory') ───┐
+  │ id uuid PK      │◄───────│ id "memory:<conv>:<n>"          │
+  └────────┬────────┘ cascade│ embedding vector(768) + HNSW    │
+           │                 │ recall: ANN by RELEVANCE        │
+           ▼                 └─────────────────────────────────┘
+  ┌─ messages ────────────────────────────────────────────────┐
+  │ conversation_id FK · role · content                       │
+  │ tool_calls · tool_results · model · tokens_used  (POPULATED)│
+  │ created_at = EVENT timestamp  ── replay = emit order       │
+  │ recall: read rows by created_at (ORDER)                    │
+  └────────────────────────────────────────────────────────────┘
 ```
+
+---
 
 ## Elaborate
 
-This is the agent-observability shape — the data side of what tracing systems
-(OpenTelemetry spans, LLM trace tools) capture: a parent trace with timestamped,
-typed events carrying enough structured payload to reconstruct the run. The
-deliberate choice here is to land it in *relational* rows with `jsonb` for the
-schemaless tool payloads, rather than a separate observability backend — which
-keeps the trajectory queryable with plain SQL and colocated with the rest of the
-agent's data. The honest gap is the missing `conversation_id` index: the schema
-is built to be replayed but not yet indexed for replay, because no read consumes
-it yet. The *debugging/observability* read of these same tables — what you'd
-actually do with the trace — lives in `study-debugging-observability`.
+Full-signal trajectory capture is what separates a toy agent from a debuggable
+one. When an agent gives a wrong answer, the question is always "what did it
+*do*?" — which tool did it call, with what args, what came back, did a step
+error. A log that only stores the final assistant text can't answer that; this
+one can, because it stores the cause (`tool_call_start` args) and the effect
+(`tool_call_end` result/error/duration) as distinct rows. The `tokens_used`
+capture turns the same log into a cost ledger.
+
+The deterministic-ordering trick — deriving `created_at` from the event rather
+than the insert — is the kind of detail that only shows up once you've been
+burned by a concurrent log writing rows out of order. It's a small line
+(`coalesce($8, now())`) carrying a real correctness property. The
+observability/replay treatment of this log lives in
+**study-debugging-observability**; the storage-engine view of MVCC behind the
+concurrent flush lives in **study-database-systems**. Here the lesson is the
+*schema shape*: one FK'd parent, full-signal child rows, event-ordered.
+
+---
 
 ## Interview defense
 
-**Q: What makes your message log replayable rather than just append-only?**
-
-The `created_at` column is set from the *event's* timestamp, not the insert time.
-The trace sink queues writes and flushes them concurrently, so insert order is a
-race — if `created_at` defaulted to `now()`, replay order would scramble. By
-threading the event's own clock through `coalesce($8, now())`, `order by
-created_at` reproduces emit order exactly.
-
-```
-  concurrent flush → insert order = race
-  created_at = event.timestamp → order by created_at = TRUE emit order
-```
-
-Anchor: "append-only gives you the events; an emit-time ordering key gives you
-the order — replay needs both."
-
-**Q: Why capture `tool_calls` and `tool_results` separately instead of one row?**
-
-Because they're cause and effect at different times. `tool_call_start` carries the
-args — *why* the agent reached for the tool — and `tool_call_end` carries the
-result, error, and duration — *what came back*. Splitting them into two
-timestamped events preserves the causal sequence and the latency between
-request and response, which is exactly what you need to debug a slow or failing
-tool call.
+**Q: Why does `created_at` come from the event timestamp instead of `now()`?**
+Because the writes are queued and flushed concurrently after the run
+(`supabase-trace-sink.ts:87-93`), so insert order races. If `created_at`
+defaulted to `now()`, two events emitted in order could persist with reversed
+timestamps and replay would be wrong. Threading the event's own timestamp into
+`created_at` via `coalesce($8, now())` (`:30`) makes "order by created_at" replay
+the trajectory in emit order, immune to the race. That's the load-bearing detail
+people forget — they store the log, then can't trust its order.
 
 ```
-  tool_call_start  args      t2   ← cause
-  tool_call_end    result    t3   ← effect (+ durationMs = t3 - t2)
+  Q: why event timestamp for created_at?
+  emit:   e₁ e₂ e₃ (in order)  →  flush: concurrent inserts (any order)
+  now():  order corrupted by race   ✗
+  event ts: order preserved          ✅  replay = emit order
 ```
 
-Anchor: "two events, not one row — the gap between them is the tool's latency."
+**Q: There are two kinds of memory here. Why two storage shapes?**
+Because they answer different recall questions. The trajectory (`messages`) is
+recalled by *order* — read rows by `created_at` to replay what happened — so it's
+ordered rows. Episodic memory (`chunks`, `meta.kind='memory'`) is recalled by
+*relevance* — embed the new question, ANN-search for similar past exchanges — so
+it rides the vector column and HNSW index. Same conversation, two access paths,
+two tables. Forcing both into one shape would make one of the two recalls slow or
+impossible.
+
+**Q: Is the trajectory a transactional guarantee?**
+No — it's best-effort. The user turn persists up front (`session.ts:61`), the
+trajectory flushes after the run (`:63`), and memory-write is wrapped in a
+swallow so a failure can't lose the answer (`:64-69`). A partial flush can leave
+an incomplete trajectory. For a personal log that's the right tradeoff — the
+answer still reached the user — but I'd name that the log is best-effort, not
+atomic with the turn.
+
+---
 
 ## See also
 
-- `05-app-id-tenant-column.md` — why `messages` reaches its tenant through the FK
-  instead of carrying `app_id`.
-- `03-soft-link-no-fk.md` — the contrast: this cluster *keeps* its FK with cascade.
-- `audit.md` Lens 3 — the latent `conversation_id` index gap.
-- `study-debugging-observability` — what you do with this trace once it's captured.
+- `01-vector-column-and-ann-index.md` — the vector column episodic memory rides
+- `02-deterministic-chunk-ids.md` — the `"memory:<conv>:<n>"` natural key
+- `03-soft-link-no-fk.md` — why memory chunks (no document) need the dropped FK
+- `audit.md` §1, §4 — model shape and the single real FK
+- **study-debugging-observability** — the replay/observability view of this log

@@ -1,220 +1,242 @@
-# Train / validation / test split — and leakage
+# Train / Validation / Test
 
-*Industry standard (split discipline + data leakage). buffr has no split — there's no model to train. Not yet implemented.*
+### *industry: data splitting · type: the discipline that keeps your metrics honest*
 
-## Zoom out, then zoom in
+## Zoom out
 
-The SPLIT stage of the pipeline (`01-supervised-pipeline.md`) owns the one number you're allowed to trust, and it's the stage that fails *silently* — a bad split doesn't throw, it just hands you an inflated score that collapses in production. buffr has no split because it trains nothing, but it has the exact unit a correct split would key on: `conversation_id` in `agents.messages`.
+This is the cheapest stage to implement and the easiest to get catastrophically wrong. Split the data carelessly and every number you report afterward is a lie you'll believe. buffr doesn't split anything for training — but it *does* hold out a labeled set for grading (`eval/queries.json`), which is the same discipline wearing a different hat.
+
+**The pipeline, with SPLIT marked ★ — the stage that decides whether your metrics are real**
 
 ```
-  Zoom out — where the split sits, and buffr's natural split unit
-
-  ┌─ Storage (Supabase) ─────────────────────────────────────────┐
-  │  agents.messages  ← many rows per conversation_id            │
-  │  conversation_id  ← THE unit a correct split keys on         │
-  └───────────────────────────────┬───────────────────────────────┘
-                                  │ the SPLIT stage WOULD attach here
-  ┌─ ML SPLIT — ★ NOT PRESENT ★ ─▼────────────────────────────────┐ ← we are here
-  │  TRAIN (fit) │ VAL (tune/select) │ TEST (final honest number) │
-  │  rule: split at the unit seen as NEW at inference            │
-  │  buffr: no split (no model) — but conversation_id is the key │
-  └───────────────────────────────────────────────────────────────┘
+┌────────┐   ┌──────────┐   ┌────────┐   ┌────────┐   ┌────────┐
+│  DATA  │──►│ FEATURES │──►│ SPLIT  │──►│ TRAIN  │──►│ DEPLOY │
+│        │   │          │   │ ★ train│   │        │   │        │
+│        │   │          │   │ val/   │   │        │   │        │
+│        │   │          │   │ test   │   │        │   │        │
+└────────┘   └──────────┘   └────────┘   └────────┘   └────────┘
+                            ◄── this file
+                  get this wrong and TRAIN's metrics are fiction
 ```
 
-Zoom in: you carve labeled data into three sets. **Train** fits the model. **Validation** tunes and selects it. **Test** is the sealed envelope you open once, for the final honest number. The discipline that makes those numbers mean anything is **no leakage** — and the single rule that prevents most leakage is: **split at the unit the model sees as NEW at inference.** For buffr that unit is the conversation, not the message row. The contrl pose pipeline had the same trap latent in it: frames from one workout split across train and test would have leaked, because consecutive frames are near-identical — same shape, different signal.
+In contrl you had to do this right or your landmark accuracy was a fantasy — if frames from the same video landed in both train and test, the model "memorized" the person and your test score lied. That exact trap — splitting at the wrong unit — is the heart of this file. buffr's `eval/queries.json` is the held-out analog: queries the system is graded on, kept separate from anything it tunes against.
 
 ## Structure pass
 
-**Layers:** the labeled pool (bottom) → the split → the three sets the model touches at different times (top).
+The axis is **what each split is allowed to influence**. Train influences the model's parameters. Val influences your choices (which model, which hyperparameters). Test influences nothing — it is read exactly once, at the end, to report. The seam is the wall the model must not see across.
 
-**Axis — "what is this set allowed to influence?"** Trace it across the three sets and they stop being interchangeable.
+**One axis: what each split touches**
 
 ```
-  trace "what may this set influence?"
-
-  ┌─ TRAIN ──────┐  influences: the model's parameters
-  │  fit         │  (model learns directly from these rows)
-  └──────┬───────┘
-  ┌─ VAL ────────┐  influences: your choices (hyperparams, model family,
-  │  tune/select │   threshold) — NOT parameters directly
-  └──────┬───────┘
-  ┌─ TEST ───────┐  influences: NOTHING — you only read it, once
-  │  final score │  (touch it twice and it stops being honest)
-  └──────────────┘
-
-  three sets, three permission levels — that ordering IS the discipline
+   TRAIN              VAL                TEST
+   ─────              ───                ────
+   fits parameters    tunes choices      reports once
+   model sees it all  model sees scores  model never sees it
+   ┌────────────┐     ┌────────────┐     ┌────────────┐
+   │ optimizer  │     │ you, picking│    │ sealed until │
+   │ updates    │     │ models/HP   │    │ the very end │
+   └────────────┘     └────────────┘     └────────────┘
+        │                   │                  │
+        └── touches params  └── touches choices └── touches nothing
+                  the seam: TEST is sealed; crossing it invalidates the score
 ```
 
-**The seam that leaks:** the boundary between train and val/test. Leakage is information crossing that seam the wrong way — and the most common form isn't exotic, it's *splitting at the wrong unit*. If two rows from the same conversation land one in train and one in val, the model effectively *memorized that conversation's context* during training and then "predicts" it on val. The axis-answer ("what influenced this set?") gets corrupted: val was supposed to be untouched by training, but a sibling row already taught the model the answer. That's why the seam has to fall *between conversations*, never *within* one.
+Left: train and val, which the model and you are allowed to learn from. Right: test, sealed. Consequence: buffr trains nothing so it has no train/val, but the *sealed held-out* concept is exactly what `eval/queries.json` enforces — and P@1/R@3 are the numbers you read off it.
 
 ## How it works
 
-### Move 1 — the mental model
+### Move 1 — Mental model
 
-You already know this from holding out a test fixture. You'd never write a test that asserts against data your function was *trained on* — it'd pass trivially and tell you nothing. The test set is the holdout you swear not to peek at while building. The trap unique to ML is *subtle* peeking: not training directly on the test row, but training on a near-duplicate of it (a sibling message from the same conversation) — which leaks the answer just as surely.
+A held-out set is a sealed exam. Train is the textbook, val is the practice quiz you can retake, test is the final you sit once. If you peek at the final while studying — let any test information leak into training — your grade stops measuring what you actually learned and starts measuring how well you cheated. The whole discipline is keeping the exam sealed.
 
-```
-  PATTERN — three sets, sealed in order, split BY unit not BY row
-
-  labeled pool (group rows by conversation_id FIRST)
-        │ assign whole conversations to sets (never split a conversation)
-        ▼
-  ┌─ TRAIN ───────┐   ┌─ VAL ────────┐   ┌─ TEST (sealed) ─┐
-  │ conv 1,2,3,4  │   │ conv 5,6      │   │ conv 7,8        │
-  │ FIT here      │   │ TUNE here     │   │ open ONCE       │
-  └───────────────┘   └──────────────┘   └─────────────────┘
-        ▲ no conversation appears in two sets ▲
-```
-
-The strategy: group by the inference unit, *then* split, so no unit straddles the seam.
-
-### Move 2 — the step-by-step walkthrough
-
-Four moves: the three sets' jobs, then the two ways to split, then the leakage failure, then the clean version.
-
-**The three sets and their jobs.** Each set is touched at a different moment and is allowed to influence a different thing. Train is read many times (the model fits to it). Val is read repeatedly *by you* (every time you compare models or tune a knob). Test is read exactly once, at the very end.
+**The three roles, and the one-way wall**
 
 ```
-  The three sets — when touched, what they decide
-
-  set    │ touched          │ decides                │ danger if misused
-  ───────┼──────────────────┼────────────────────────┼──────────────────
-  TRAIN  │ every fit step   │ model parameters       │ —
-  VAL    │ every comparison │ which model / settings │ overfit-to-val
-  TEST   │ once, at the end │ the reported number    │ peeking → number lies
+  STUDY ─────────────────────────► SIT EXAM
+  ┌────────┐    ┌────────┐         ┌────────┐
+  │ TRAIN  │───►│  VAL   │         │  TEST  │
+  │textbook│    │ retake │         │ once,  │
+  │        │    │ quiz   │         │ sealed │
+  └────────┘    └────────┘  ║WALL║ └────────┘
+   info flows left to right; NOTHING flows back across the wall
 ```
 
-Boundary condition: if you tune against the test set even once, it silently becomes a second validation set, and you no longer have an honest final number. The fix is discipline, not code — seal it.
+Frontend bridge: it's prod data discipline. You don't develop against the production database; you use a copy, and you ship to prod once you're confident. Touching prod during development is exactly the leak this stage forbids.
 
-**Random split vs temporal split.** How you assign units depends on whether time matters. If rows are exchangeable, random-assign whole units. If the model will predict the *future* from the *past* — and buffr's trajectories have a `created_at`, so time is real — you split *temporally*: train on older conversations, test on newer ones, so the test mimics "deployed and seeing tomorrow's data."
+### Move 2 — Walk the mechanism
 
-```
-  Random vs temporal split (buffr trajectories carry created_at)
+Code below is **illustrative pseudocode** — buffr trains nothing, so none of this exists in the repo.
 
-  RANDOM (units exchangeable)        TEMPORAL (time matters)
-  ──────────────────────────         ───────────────────────
-  shuffle conversations              sort by created_at
-  ┌───┬───┬───┐                       past ──────────────► future
-  │tr │val│tst│  (any order)          ┌─────────┬─────┬─────┐
-  └───┴───┴───┘                       │  TRAIN  │ VAL │ TEST│
-                                      └─────────┴─────┴─────┘
-                                       older               newer
-                                       (test = "tomorrow's runs")
-```
+**Part A — The three-way split**
 
-Temporal split catches drift (`15-drift-detection.md`) a random split hides: if the world changes over time, a random split smears future into train and over-reports.
-
-**The leakage failure — split by row.** This is the mistake, drawn explicitly. buffr's `agents.messages` has *many rows per conversation* (step, tool_call, tool, model_usage...). Split by row and rows from conversation 5 land in both train and val. The model sees conversation 5's early turns in training, then "predicts" its later turns on val — and aces it, because it already saw the session.
+You partition rows into three disjoint sets. Train fits, val tunes, test reports. They must not overlap.
 
 ```
-  LEAKAGE — splitting at the ROW level (the bug)
-
-  agents.messages rows for conversation_id = 5
-  ┌──────┬──────┬───────────┬──────┬─────────────┐
-  │ step │ step │ tool_call │ tool │ model_usage │
-  └──┬───┴──┬───┴─────┬─────┴──┬───┴──────┬──────┘
-     │      │         │        │          │
-   TRAIN  TRAIN     VAL      TRAIN       VAL      ← row-level split
-     └──────┴─────────┼────────┴──────────┘
-                      ▼
-   model memorized conv 5 in TRAIN, "predicts" conv 5 in VAL
-   → val score inflated → prod collapses on truly-new conversations
+  all rows ───────────────────────────────────►
+  ┌──────────────────┬──────────┬──────────┐
+  │      TRAIN (70%)  │ VAL (15%)│ TEST(15%)│
+  └──────────────────┴──────────┴──────────┘
+   disjoint: a row lives in exactly one set
 ```
 
-The val number looks great and means nothing — the classic leaky split.
-
-**The clean split — by conversation_id.** Group all rows by `conversation_id` first, assign *whole conversations* to sets, and no session ever straddles the seam. The model is evaluated on conversations it has *never* seen any part of — which is exactly what happens at inference.
-
-```
-  CLEAN — splitting at the conversation_id level (the fix)
-
-  group rows BY conversation_id, THEN assign whole groups:
-  ┌─ conv 1 (all rows) ─┐ ┌─ conv 5 (all rows) ─┐ ┌─ conv 8 (all rows) ─┐
-  │ TRAIN                │ │ VAL                  │ │ TEST                 │
-  └─────────────────────┘ └─────────────────────┘ └─────────────────────┘
-  pseudocode:
-    groups = group(messages, by = conversation_id)   // unit = conversation
-    train, val, test = split(groups, 0.7, 0.15, 0.15) // split GROUPS, not rows
-    assert no conversation_id in two sets             // the invariant
+```python
+# ILLUSTRATIVE PSEUDOCODE — not buffr code.
+train, temp = split(rows, 0.70)
+val, test   = split(temp, 0.50)            # 15% / 15%
+# fit on train, tune on val, touch test ONCE at the end
 ```
 
-The `assert` is the load-bearing line: a split is only honest if you can prove no unit crosses the seam.
+**Part B — The leakage rule: split at the unit the model meets NEW at inference**
 
-### Move 3 — the principle
+This is the whole file. Random row-splitting is *wrong* whenever rows are grouped or time-ordered, because related rows land on both sides of the wall and the model effectively sees the test answers.
 
-A split is a promise that your reported number reflects performance on data the model has genuinely never seen — and the only way to keep that promise is to split at the unit the model treats as new at inference. Get the unit wrong (split rows when the model predicts per conversation) and you leak context: the model "succeeds" by memorizing sessions, and the failure is invisible until production, where every conversation really is new. The deeper rule generalizes past buffr: whenever your data has *groups* (a user's many events, a patient's many visits, a conversation's many messages), split by the group, not the event — same trap, same fix, every time.
+```
+  WRONG: random split when rows are grouped
+  video V: [f1 f2 f3 f4]
+  random ─► f1,f3 in TRAIN   f2,f4 in TEST
+            └── model memorizes V's person, "passes" test  ◄── leak!
+
+  RIGHT: GROUP split — whole video to one side
+  video V: [f1 f2 f3 f4] ──► all four in TRAIN (or all in TEST)
+            └── test has people the model never saw  ◄── honest
+```
+
+```python
+# ILLUSTRATIVE PSEUDOCODE — not buffr code.
+# split by GROUP (e.g. video_id), not by row:
+train_groups, test_groups = split(unique(video_id), 0.8)
+train = rows[rows.video_id.isin(train_groups)]
+test  = rows[rows.video_id.isin(test_groups)]
+```
+
+contrl is the textbook case: split by `video_id`, never by frame. If you split by frame, your test accuracy is inflated nonsense.
+
+**Part C — Temporal split: when time is the unit**
+
+If you'll predict the future at inference, your test must be the future relative to train. A random split lets the model train on tomorrow to predict today — impossible at serve time.
+
+```
+  time ───────────────────────────────────►
+  ┌──────────────────────┬──────────────────┐
+  │   TRAIN (past)        │   TEST (future)  │
+  └──────────────────────┴──────────────────┘
+   the cut is a date; never shuffle across it
+```
+
+**Part D — Test is read ONCE**
+
+Every time you peek at test and adjust, you leak. Val is your repeatable feedback; test is the final, single, honest number. Tune on val, report on test, then stop.
+
+```
+  val:  check ─► adjust ─► check ─► adjust ... (as often as you like)
+  test: check ─── once ───► report ─── STOP
+        peeking + adjusting on test = silently overfitting to it
+```
+
+### Move 2.5 — Current vs future
+
+**Case B: buffr has no train/val split — it trains nothing.** But it *does* run the held-out discipline: `eval/queries.json` is a sealed labeled set the system is graded against, and P@1/R@3 are the reported metrics.
+
+```
+  TODAY (buffr)                      IF YOU BUILT TRAINING (new ml/)
+  ─────────────                      ───────────────────────────────
+  eval/queries.json                  split labels into:
+  = held-out labeled set             ┌───────┬─────┬──────┐
+  graded once ─► P@1, R@3            │ TRAIN │ VAL │ TEST │
+  ┌────────────────────┐            └───────┴─────┴──────┘
+  │ test-set role only │  ──gap──►   with GROUP/TEMPORAL split so
+  │ (no train/val)     │             the model meets new units at test
+  └────────────────────┘
+```
+
+What you'd build: split a labeled dataset (seeded from `eval/queries.json`) into train/val/test using a *group* split (e.g. by source doc) so the classifier is tested on queries about docs it didn't train on. `eval/queries.json` already plays the test role; the train/val arms are what's missing.
+
+### Move 3 — The principle
+
+**Split at the unit the model meets new at inference, or your metrics lie — and read the test set exactly once.** The model's reported skill is only as honest as the wall between train and test. Random splitting is the default trap; group and temporal splitting are the corrections. buffr's `eval/queries.json` is the held-out half of this discipline already in the repo — the train/val half is the new ground. The signal is naming, for a given dataset, what the leakage unit is *before* you split.
 
 ## Primary diagram
 
-The full split discipline, leaky vs clean, with buffr's unit marked.
+The three splits, the one-way wall, and where buffr's real held-out set sits.
+
+**The split discipline, with buffr's eval set placed**
 
 ```
-  Train/Val/Test — the discipline, the leak, the fix
+  ┌──────────────────┬──────────┬──────────┐
+  │      TRAIN        │   VAL    │   TEST   │
+  │  fit parameters   │ tune     │ report×1 │
+  └──────────────────┴──────────┴──────────┘
+   split UNIT = what the model meets new at inference
+   (group split by video/doc, OR temporal split by date)
 
-  labeled pool (agents.messages — MANY rows per conversation_id)
-        │
-        ├─ WRONG: split by ROW ──────────────────────────────────┐
-        │   conv 5 rows scattered across train+val               │
-        │   → model memorizes session → val score LIES           │
-        │                                                         │
-        └─ RIGHT: group by conversation_id, split the GROUPS      │
-            ┌─ TRAIN 70% ─┐ ┌─ VAL 15% ─┐ ┌─ TEST 15% ─┐         │
-            │ fit params  │ │ tune/select│ │ open ONCE  │         │
-            └─────────────┘ └────────────┘ └────────────┘         │
-            invariant: no conversation_id in two sets ────────────┘
-            (temporal variant: sort by created_at, past→future)
-
-  ★ buffr: no split exists; conversation_id is the unit it WOULD use ★
+  buffr today:  ✗ TRAIN   ✗ VAL   ✔ TEST-role = eval/queries.json
+                                       graded once ─► P@1, R@3
 ```
+
+After the box: buffr has the sealed-exam half (`eval/queries.json`) and lacks the train/val half. The leakage rule is the part that separates people who've trained a model from people who've only read about it.
 
 ## Elaborate
 
-The train/val/test triad is the foundation of honest ML evaluation, and "grouped" or "blocked" splitting is the standard fix for leakage when data has natural groups (scikit-learn ships `GroupKFold` for exactly this). Leakage is consistently ranked among the most common and most expensive ML mistakes precisely because it's *silent* — the model looks brilliant in development and fails in production, with nothing in the code to flag it. Temporal splitting connects forward to drift (`15-drift-detection.md`): a temporal split is the cheapest drift detector you have, because if performance drops from train-era to test-era data, the distribution moved. For buffr the connection is concrete and a little ironic — the repo already has the right unit baked into its schema (`conversation_id`, plus `created_at` for temporal ordering), so if it ever trained on trajectories, the hardest part of doing the split right is already done by the data model. The contrl pose pipeline carried the latent version of this: per-frame splitting would have leaked because adjacent frames are near-duplicates — the workout was the group, the frame was the event.
+- **Why leakage is the silent killer.** A leaked split doesn't crash — it gives you a *great* test score, which is worse. You ship a model that aced a rigged exam and faceplants in production. The only defense is reasoning about the unit *before* splitting: "what does the model see fresh at serve time?" That unit is your split boundary.
+- **Group split, temporal split, stratified split — pick by the data's structure.** Grouped rows (frames per video, messages per conversation) → group split. Time-ordered data → temporal split. Rare classes → stratified split to keep class balance. Random split is correct only when rows are genuinely independent, which is rarer than beginners assume.
+- **`eval/queries.json` is already the right shape.** It's `{query → relevant docs}`, held out, graded once per change. If you grew it into a training corpus, the leakage question becomes: don't put queries about `coffee.md` in both train and test if the model could memorize the doc. Group-by-doc is the natural split. The repo already models the test role correctly.
+- **Cross-validation is the val-set used k times (forward ref).** When data is scarce, you rotate which slice is val across k folds and average — squeezing more signal from few rows. That's the comparison engine in file 04. The wall to test stays sealed regardless.
 
 ## Project exercises
 
-> No curriculum file present; exercises derived from the codebase.
+### Build a leakage-safe split for the intent classifier
 
-### Write a conversation-level splitter over agents.messages
+Not yet implemented — buffr trains nothing, so no train/val/test split exists. This builds it with a deliberate group split so you internalize the leakage rule on buffr data.
 
-- **Exercise ID:** SPLIT-1 (Case B — train/val/test split not yet implemented). **The core exercise: it makes the SPLIT stage real on buffr's actual schema.**
-- **What to build:** a splitter that reads `agents.messages`, groups rows by `conversation_id`, and assigns *whole conversations* to train/val/test (70/15/15) — with a hard assertion that no `conversation_id` appears in two sets. Add a temporal mode that orders by `created_at` (past→future) instead of random.
-- **Why it earns its place:** it's the SPLIT stage for PIPE-1, and it forces the leakage discipline on the exact data shape (many rows per conversation) where row-level splitting would silently inflate every number. The "I split by the inference unit and proved no session leaked" story.
-- **Files to touch:** read the schema written by `src/supabase-trace-sink.ts` (`agents.messages.conversation_id`, `created_at`); put the splitter next to `src/cli/eval-cmd.ts` for the classifier harness to consume.
-- **Done when:** the splitter returns three disjoint sets keyed on `conversation_id`, the no-overlap assertion passes, and a temporal mode orders by `created_at`.
-- **Estimated effort:** 4–8hr.
+- **Exercise ID:** [B2C.5] (cite [B2C.5], Phase 2C) — Case B: no training split exists; this is the primary buildable target.
+- **What to build:** `ml/split.py` that splits a labeled query dataset into train/val/test, grouping by source doc so the model is never tested on queries about a doc it trained on. Print the group membership to prove no doc straddles the wall.
+- **Why it earns its place:** It forces the one decision that separates real ML from cargo-cult ML — choosing the split *unit* — on buffr's own corpus, with `eval/queries.json` as the test-role seed.
+- **Files to touch:** new `ml/split.py`, reads `eval/queries.json`.
+- **Done when:** The script prints disjoint train/val/test sets where no source doc appears in more than one split, and you can state the leakage unit out loud.
+- **Estimated effort:** 1–4hr.
 
-### Extend eval/queries.json into a frozen held-out test set
+### Demonstrate inflated metrics from a leaky split
 
-- **Exercise ID:** SPLIT-2 (Case B — held-out test set not yet implemented).
-- **What to build:** grow `eval/queries.json` past 3 rows, then carve it into a *frozen* test slice that `src/cli/eval-cmd.ts` reports on *only* — the test set you swear not to tune against — keeping a separate dev slice for iteration.
-- **Why it earns its place:** the IR eval is buffr's only labeled-pair file, and right now there's no separation between "the rows I iterate on" and "the rows I report." This installs the sealed-envelope discipline on real retrieval evaluation.
-- **Files to touch:** `eval/queries.json` (split into dev + frozen test); `src/cli/eval-cmd.ts` (report on the frozen slice, iterate on the dev slice).
-- **Done when:** `npm run eval` reports the final number on the frozen test slice and never touches it for tuning.
-- **Estimated effort:** 2–4hr.
+Not yet implemented — buffr trains nothing, so there's no metric to inflate yet. This builds the cautionary experiment: train once with a leaky random split and once with a group split, and watch the test score drop to honesty.
+
+- **Exercise ID:** [B2C.6] (cite [B2C.6], Phase 2C) — Case B: builds both the leaky and the honest split to contrast.
+- **What to build:** Train the same classifier twice — random split vs group split — and report both test accuracies. The gap is the leakage you'd have shipped.
+- **Why it earns its place:** Nothing teaches the leakage rule like watching a great score evaporate when you fix the split. It's the contrl lesson, reproduced on buffr.
+- **Files to touch:** `ml/split.py`, new `ml/leakage_demo.py`.
+- **Done when:** A printed comparison shows the random-split test accuracy is meaningfully higher (falsely) than the group-split accuracy, and you can explain why.
+- **Estimated effort:** 1 day.
 
 ## Interview defense
 
-**Q: How do you split data, and what's the one rule that prevents most leakage?**
-Answer: train fits the model, validation tunes and selects it, test is the sealed envelope I open once for the honest number. The one rule that prevents most leakage: split at the unit the model sees as NEW at inference. If my data has groups — a conversation's many messages, a user's many events — I split by the group, not the row. Split by row and sibling rows from the same group land in both train and val, the model memorizes the group, and my val score lies.
+**Q: "How do you split data, and what goes wrong if you do it naively?"**
+
+Train fits, val tunes, test reports once. The trap is random splitting when rows are grouped or time-ordered — related rows land on both sides and the model memorizes instead of generalizing, so the test score is inflated fiction. The fix is to split at the unit the model meets new at inference: group split or temporal split.
 
 ```
-  group by conversation_id ──► split the GROUPS ──► no session straddles the seam
-  (split by row ──► leak ──► inflated val ──► prod collapse)
+  random split on grouped data ─► leak ─► fake-high score
+  group/temporal split         ─► honest test
 ```
 
-**Q: In buffr specifically, what would you split on and why?**
-Answer: `conversation_id` in `agents.messages`. Each conversation has many rows — step, tool_call, tool, model_usage — so splitting by row would scatter one conversation across train and val, leaking within-conversation context. At inference, every conversation is genuinely new, so the test must mirror that: whole conversations, never shared across sets. And since rows carry `created_at`, I'd prefer a temporal split — train on older conversations, test on newer — so the eval also catches drift. **The part people forget: leakage is silent. Nothing throws; you just get a beautiful val number and a production faceplant.**
+Anchor: *"Split at the unit the model meets new at inference."*
+
+**Q: "buffr doesn't train — does any of this apply?"**
+
+The test-set discipline does. `eval/queries.json` is a held-out labeled set the system is graded against, and P@1/R@3 are the reported metrics. It plays the test role correctly — kept separate from anything tuned. The train/val arms don't exist because buffr fits no parameters.
 
 ```
-  conversation_id = the inference unit · created_at = temporal order
-  split WHOLE conversations · assert none in two sets
+  buffr: eval/queries.json = sealed exam ─► P@1, R@3
+         (test role present, train/val absent)
 ```
+
+Most candidates have only consumed pre-trained models and never had to reason about a split unit. Having done it in contrl — split by video, not by frame — is the signal that I know where the metrics come from.
+
+Anchor: *"The test set is sealed; eval/queries.json already is."*
 
 ## See also
 
-- `01-supervised-pipeline.md` — the SPLIT stage this file opens up.
-- `02-feature-engineering.md` — why scalers/encoders must be fit on train only (a leakage form).
-- `04-model-selection.md` — model selection happens on the VAL set, never the test set.
-- `15-drift-detection.md` — a temporal split is the cheapest drift detector.
-- `../05-evals-and-observability/01-eval-set-types.md` — golden/adversarial/regression sets and the frozen-test discipline (SPLIT-2).
+- `./01-supervised-pipeline.md` — where Split sits in the five-stage line.
+- `./02-feature-engineering.md` — fit transforms on train only (the feature-side leak).
+- `./04-model-selection.md` — cross-validation reuses the val role to compare models.
+- `../05-evals-and-observability/01-eval-set-types.md` — `eval/queries.json` as a held-out eval set.
+- `../03-retrieval-and-rag/` — what the P@1/R@3 metrics are actually grading.
+- `../09-ml-system-design-templates/` — splitting strategy inside a full system design.

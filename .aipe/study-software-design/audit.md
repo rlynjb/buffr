@@ -1,370 +1,404 @@
-# audit.md — Pass 1: the 8-lens APOSD walk
+# audit.md — the 8-lens APOSD audit of buffr-laptop
 
-Eight lenses, each one `##` section. Every claim cites a real path and line
-range, or honestly says `not yet exercised`. The capstone (§8) is the
-red-flag checklist sorted by severity for this repo.
+Pass 1. Walk the codebase against Ousterhout's design primitives, one
+lens per `##` section, each grounded in `file:line`. Where a lens finds
+nothing real, it says `not yet exercised` rather than manufacturing a
+finding. Where a finding earns a deep walk, it cross-links to the Pass 2
+pattern file instead of restating it.
 
-The conceptual treatment of each primitive lives in the book (and, once
-generated, in `.aipe/read-aposd/`). This file is the application.
+A note on size before we start: this is a small, young, single-device
+codebase — eight source files, none over 95 lines. Most APOSD red flags
+bite hardest in big multi-team codebases. So expect a lot of honest
+"too small to show meaningful X yet" — and expect the praise findings
+to outnumber the problem findings. That's not flattery; the deep-module
+discipline here is genuinely good for the size.
+
+```
+  the 8 lenses, ranked by what they found in THIS repo
+
+  FIRES / WORTH READING            QUIET / TOO SMALL YET
+  ───────────────────────          ─────────────────────
+  3. info-hiding (the dead         4. layers (1 clean
+     cfg.schema knob — the            pass-through, fine)
+     one real leak)                6. errors (handled well,
+  5. pull-complexity-down             little to bite)
+     (dimension owned, good)       7. readability (clean;
+  2. deep-vs-shallow (mostly          two micro-nits)
+     deep — praise)                8. red-flags (mostly
+  1. complexity overview              doesn't-fire)
+```
 
 ---
 
-## 1. Complexity in this codebase
+## 1. complexity-in-this-codebase
 
-The zoom-out for the whole audit. Where does a single change amplify, where
-does cognitive load spike, where do the unknowns hide?
+The zoom-out. APOSD names three symptoms of complexity: **change
+amplification** (one decision forces edits in many files), **cognitive
+load** (the module nobody wants to touch), and **unknown-unknowns** (you
+can't tell what you'd have to change). Let's locate each in real files.
 
-buffr is eight small source files. Total complexity is low — there's no
-god-object, no 400-line method, no tangle. The symptoms cluster in exactly
-two seams, and they're both *information leaks*, not size problems.
+**Change amplification — the one real instance: the hardcoded schema.**
+`config.ts:13` computes `schema: env.AGENT_DB_SCHEMA || 'agents'`. But no
+file ever reads `cfg.schema`. Instead, the literal `agents.` is hardwired
+into every SQL string: `pg-vector-store.ts:48` (`agents.chunks`),
+`pg-vector-store.ts:72`, `runtime.ts:12` (`agents.documents`),
+`profile.ts:5` (`agents.profiles`), `supabase-trace-sink.ts:6` and `:29`
+(`agents.conversations` / `agents.messages`). Rename the schema and you
+edit six call sites across five files — and the config knob that *looks*
+like it controls this is dead. That's textbook change amplification,
+made worse by a knob that lies. Full treatment in lens 3.
 
-```
-  Change-amplification map — "to change X, how many files do I touch?"
-
-  change the schema name "agents"   → 6 files   ✗ amplifies (the leak)
-  change the embedding dimension    → 0 callers ✓ derived from embedder
-  change the meta key "docId"       → 3 places  ✗ amplifies (the contract)
-  swap pgvector for another store   → 1 file    ✓ the adapter contains it
-  add a CapabilityEvent type        → 1 file    ✓ contained in trace sink
-```
-
-The two rows marked ✗ are the whole complexity story:
-
-- **The schema name** lives in `config.ts:13` as a computed-but-unread knob,
-  and as a hardcoded `agents.` literal in `pg-vector-store.ts:48,73`,
-  `runtime.ts:12`, `supabase-trace-sink.ts:6,28`, and `profile.ts:6`. Six
-  edit sites for one decision. → §3, §5.
-- **The `meta` magic keys** (`docId`, `chunkIndex`, `text`) are a contract
-  with no type, known in `pg-vector-store.ts:44-46` (write), `:83` (read),
-  and inside aptkit's pipeline + citation tool. → §3, and the deep walk in
-  `01-adapter-behind-a-contract.md`.
-
-**The module nobody wants to touch without care:** `pg-vector-store.ts`. Not
-because it's bad — it's the deepest, best module — but because the `meta`
-contract and the `$1::vector` cast are subtle, and the SQL is the one place
-a typo silently degrades retrieval instead of throwing.
-
-**Highest-complexity hotspots by path:**
-1. `src/config.ts:13` + the five `agents.` sites — the schema leak.
-2. `src/pg-vector-store.ts:44-46,83` — the undocumented meta contract.
-3. `src/session.ts:34-76` — the most *moving parts* in one function (deep,
-   but the place a reader holds the most state at once).
-
----
-
-## 2. Deep vs shallow modules
-
-Depth = functionality ÷ interface size. The best module hides a lot behind
-a little; the worst has an interface nearly as wide as its body.
-
-**Deepest module (best): `PgVectorStore`** — `src/pg-vector-store.ts:19-86`.
-
-Three public methods (`dimension`, `upsert`, `search`) over a body that hides:
-transaction management (`begin`/`commit`/`rollback`, `:42,58,60`), the
-dimension guard (`:32-36`), JS-`number[]` → pgvector text-literal encoding
-(`:14-17`), the cosine-**distance**-to-**similarity** flip (`:69`,
-`1 - (embedding <=> $1)`), and the `meta` round-trip (`:44-46,83`). A caller
-writes `store.search(vec, k)` and gets back hits — none of that machinery
-surfaces. That's the deepest module in the repo and the reason the whole
-pgvector graduation was invisible to aptkit. Deep walk:
+**Cognitive load — lowest in `pg-vector-store.ts`, and that's the
+point.** The module with the most going on (a transaction, dimension
+guards, vector encoding, a cosine flip, a meta round-trip) is also the
+one you can use without understanding any of it: you call `upsert` and
+`search`, two methods. Behind a small interface, the load stays inside
+the module. That's the opposite of the symptom — it's the cure. → see
 `01-adapter-behind-a-contract.md`.
 
-**Deep facade (runner-up): `createChatSession`** — `src/session.ts:34-76`.
-Two-method interface (`ask`, `close`, declared `:29-32`) over a body that
-constructs and *holds* a warm pool, embedder, store, pipeline, tool,
-registry, guarded model, profile, memory engine, conversation id, trace
-sink, and agent (`:39-57`). Eleven collaborators behind two methods. Deep
-walk: `05-deep-session-facade.md`.
+**Unknown-unknowns — the undocumented meta contract.** `search` at
+`pg-vector-store.ts:80-84` rebuilds `meta` with three magic keys:
+`docId`, `chunkIndex`, `text`. `upsert` at `pg-vector-store.ts:44-46`
+reads those same three keys back out. Nothing on the `Chunk`/`Hit` types
+(`pg-vector-store.ts:4-5`) tells you these keys are load-bearing — that
+the `search_knowledge_base` tool's citations break if `text` goes
+missing. A new contributor indexing a document has no way to know which
+meta keys matter. That's an unknown-unknown: the information needed to
+change the code safely isn't visible from the code. → lens 3 and lens 7.
 
-**Shallowest module (worst, but defensible): `createPool`** —
-`src/db.ts:4-6`.
+**The two hotspots, ranked:**
+1. `config.ts` ↔ the five SQL files — the dead-`schema` leak (lens 3).
+2. `pg-vector-store.ts:44-46,80-84` — the implicit meta contract.
 
-```ts
-export function createPool(databaseUrl: string): pg.Pool {
-  return new pg.Pool({ connectionString: databaseUrl });
-}
-```
-
-The interface — a function taking a string, returning a `Pool` — is as
-complex as the one-line body. By the book that's a shallow module: it adds a
-layer without hiding anything (`pg.Pool` is still the return type; the caller
-still knows it's pg). **But** it's the single seam where every entry point
-(`session.ts:39`, `migrate.ts:27`, `index-cmd.ts:17`, `eval-cmd.ts:13`) gets
-its pool. The fix the book would suggest — inline it — would scatter
-`new pg.Pool(...)` across four files and lose the one place to add a read
-replica or pool config later. **Verdict: leave it.** A shallow module that
-centralizes a future decision is a seam, not a smell. Naming it here is the
-honest call, not a fix-now.
-
-`profile.ts` (`:4-8`) and `db.ts` are both thin, but neither is classitis —
-there are no over-split one-method classes in this repo. The codebase is too
-small and too disciplined to exercise classitis meaningfully.
+Everything else in the repo is genuinely low-complexity for its size.
 
 ---
 
-## 3. Information hiding and leakage
+## 2. deep-vs-shallow-modules
 
-A leak is a decision known in two modules that forces them to change
-together. buffr has two — one severe, one inherent to the adapter.
+Depth = functionality ÷ interface width. Deep is good (lots of behaviour,
+tiny surface); shallow is the red flag (interface nearly as wide as the
+body — **classitis**, a class that adds a layer without hiding anything).
 
-**Leak 1 (severe): the schema name.** `src/config.ts:13` computes
-`schema: env.AGENT_DB_SCHEMA || 'agents'`. Then **nothing reads it**. Every
-query hardcodes the literal:
+**The deepest module — `PgVectorStore` (`pg-vector-store.ts:19-86`).**
+Interface: two methods plus a readonly `dimension`. Body hides: a
+connect/begin/commit/rollback/release transaction (`:40-64`), a dimension
+guard that throws on mismatch (`:32-36`), JS-`number[]`→pgvector-text
+encoding (`:14-17`), the cosine-distance→similarity-score flip
+(`:69`, `1 - (embedding <=> ...)`), and the meta round-trip (`:80-84`).
+A caller — `session.ts:41` — names none of that. **This is the best
+deep module in the repo.** → `01-adapter-behind-a-contract.md`.
 
-```
-  src/pg-vector-store.ts:48   insert into agents.chunks ...
-  src/pg-vector-store.ts:73   from agents.chunks
-  src/runtime.ts:12           insert into agents.documents ...
-  src/supabase-trace-sink.ts:6   insert into agents.conversations ...
-  src/supabase-trace-sink.ts:28  insert into agents.messages ...
-  src/profile.ts:6            select content from agents.profiles ...
-```
+**Runner-up — `createChatSession` (`session.ts:34-76`).** Wider job
+(it wires the embedder, store, pipeline, tool, model, profile, memory,
+conversation, trace, and agent) behind a 2-method interface:
+`ask(question)` and `close()` (`session.ts:29-32`). Eleven constructed
+things, two exposed verbs. Deep. → `05-deep-session-facade.md`.
 
-The schema decision is hidden *nowhere* — it's smeared across six sites, plus
-a seventh (`config.ts:13`) that pretends to own it and doesn't. This is the
-textbook *information leakage* red flag and the *same-knowledge-edited-twice*
-red flag at once. The fix is in §5 (pull the decision down) — but the leak
-itself is the finding: the schema name is not a hidden decision, it's a
-copy-pasted one.
+**The shallowest modules — and why it's fine here.** `db.ts` is one
+function wrapping one constructor (`createPool` → `new pg.Pool`,
+`db.ts:4-6`). `profile.ts` is one function wrapping one query
+(`profile.ts:4-8`). By the strict ratio these are shallow — the
+interface is about as big as the body. But this isn't classitis: there's
+no *class* adding ceremony, and each names one decision worth isolating
+(`db.ts` owns "how we get a pool"; `profile.ts` owns "most-recent
+profile, empty string if none" — note the `?? ''` default at `:7`, a
+real decision the caller doesn't repeat). A one-line module that hides
+one decision and gives it a name is a seam, not a smell. **No fix
+needed.** The honest read: the repo is too small to have grown a real
+classitis offender. Watch for it if `profile.ts` ever sprouts a
+`ProfileManager` class with getters that just forward.
 
-**Leak 2 (inherent): the `meta` magic-keys contract.**
-`src/pg-vector-store.ts:44-46` reads `c.meta.docId`, `c.meta.chunkIndex`,
-`c.meta.text`; `:83` rebuilds exactly those keys. The same three strings are
-known to aptkit's pipeline (which fills `meta` on index) and to the
-`search_knowledge_base` tool (which reads `meta.text` for citations,
-referenced in the comment at `:79`). Three modules, one untyped contract,
-no interface comment naming the keys. Change `docId` to `documentId` on one
-side and retrieval silently breaks. This is leakage too — but unlike Leak 1
-it's *partly inherent*: the adapter's whole job is to bridge buffr's table
-shape and aptkit's in-memory `meta` shape, so some knowledge must cross. The
-fix isn't to remove the crossing; it's to **name the contract** — a
-`ChunkMeta` type and one interface comment. Deep walk:
-`01-adapter-behind-a-contract.md`.
-
-**No temporal decomposition found.** The modules split by *responsibility*
-(store, profile, trace, session), not by *time-of-execution* (no
-`step1.ts` / `step2.ts`). That's the right axis. Honest praise.
+**Verdict:** the design instinct here is right — behaviour pushed down,
+interfaces kept narrow. The worst you can say is two modules are thin,
+and both earn their thinness.
 
 ---
 
-## 4. Layers and abstractions
+## 3. information-hiding-and-leakage
 
-Looking for pass-through methods (a method that just forwards to another at
-the same abstraction) and adjacent layers offering the same abstraction.
+The lens that actually fires. A leak is a fact known in two modules that
+forces them to change together. Find the seams where knowledge crosses
+that shouldn't.
 
-**No pass-through layers.** Trace the call chain and each layer changes the
-abstraction:
-
-```
-  one question — "what abstraction does each layer add?" — traced down
-
-  chat.tsx        UI: turns, busy state, /exit        (React/Ink)
-     │  session.ask(q)  ← string in, string out
-     ▼
-  session.ts      orchestration: persist→answer→        (lifecycle owner)
-     │            flush→remember
-     ▼
-  RagQueryAgent   (aptkit) reasoning loop               (the contract edge)
-     │  store.search / store.upsert
-     ▼
-  pg-vector-store SQL + pgvector + meta round-trip       (storage adapter)
-     │  pool.query(...)
-     ▼
-  pg.Pool         connection management                 (driver)
-```
-
-Every arrow *flips an abstraction*: UI turns → a string question → an agent
-run → a vector search → a SQL row. No layer just re-exposes the layer below.
-The one candidate for a pass-through — `createPool` (§2) — forwards to
-`new pg.Pool` without adding abstraction, but it's a *seam*, not a layer in a
-chain (nothing calls through it to reach something else).
-
-**`indexDocumentRow` is the cleanest example of a layer earning its place.**
-`src/runtime.ts:5-18`: it writes the source-of-truth `documents` row *and
-then* calls `pipeline.index()`. That's two abstractions fused into one
-operation the caller can't get wrong — you can't index chunks without
-recording the document they came from. `index-cmd.ts:24` calls it once and
-gets both. A layer that fuses two must-happen-together steps is the opposite
-of a pass-through.
-
----
-
-## 5. Pull complexity downward
-
-A knob pushed up to the caller that the module had enough information to
-decide itself is misplaced complexity. The module should eat the
-complexity so N callers don't each have to.
-
-**The counterexample done right: `dimension`.** `PgVectorStore`'s constructor
-takes an optional `dimension` (`src/pg-vector-store.ts:11,29`), defaulting to
-768. But the CLIs don't hardcode 768 — they pass `embedder.dimension`
-(`session.ts:41`, `index-cmd.ts:19`, `eval-cmd.ts:15`). The dimension is
-*derived from the embedder that produces the vectors*, so the store and the
-embedder can never disagree. The complexity (what dimension are we?) is
-pulled down to its source. This is the model to copy.
-
-**The knob to pull down (or delete): `schema`.** `config.ts:13` exposes
-`AGENT_DB_SCHEMA` as a caller-facing knob. The *avoidable config exposed to
-users* red flag fires hard here, because the knob doesn't even work — §3
-showed every query ignores it. Two honest fixes:
-
-- **Delete it.** The schema *is* `agents`, fixed by the migration
-  (`sql/001_agents_schema.sql`). Drop `cfg.schema`, accept that the literal
-  is the truth, and the interface stops lying.
-- **Pull it down.** Thread `cfg.schema` into the five SQL sites (or, better,
-  into `PgVectorStore`/`profile`/`trace-sink` constructors so the SQL builders
-  own it). Then the knob is real and the decision is hidden in one layer.
-
-Either is fine. The current state — a knob that's neither real nor gone — is
-the only one that isn't. → highest-leverage fix, `00-overview.md`.
-
----
-
-## 6. Errors and special cases
-
-Looking for try/except scattered across call sites, and special cases a
-different definition would erase.
-
-**Error handling is localized and deliberate — this lens is a strength.**
-
-- **Transaction rollback is defined in one place, twice.** `upsert`
-  (`pg-vector-store.ts:41-64`) and `runMigration` (`migrate.ts:9-20`) both
-  wrap work in `begin`/`try`/`catch → rollback`/`finally → release`. The
-  error path is *inside* the module that owns the transaction, not pushed to
-  callers. A caller of `upsert` never sees a half-written batch. That's
-  "define errors out of existence" applied correctly: partial writes are not
-  a state any caller can observe.
-- **The dimension mismatch throws, never truncates.** `assertDim`
-  (`:32-36`) is called before every write (`:39`) and every search (`:68`).
-  The context.md constraint — "a mismatch must throw, never silently
-  truncate" — is enforced as a guard at the boundary, so the special case
-  (wrong-size vector) becomes an exception, not a silent corruption.
-- **Best-effort memory is a deliberate special case, swallowed low.**
-  `session.ts:64-69`: the `memory.remember` call is wrapped in
-  `try { ... } catch { /* swallow */ }`, with the comment "a memory-write
-  failure must not lose the answer the user has." This is the *right* place
-  to swallow — at the exact site where the failure is non-fatal and the
-  contract (the user already has their answer) makes silence correct. It is
-  not try/except sprawl; it's one intentional swallow with a stated reason.
-
-**The one place errors cross a boundary as data:** `tool_call_end` events
-carry `error` into the trace as a *value*, not a thrown exception
-(`supabase-trace-sink.ts:69`). A failed tool call is recorded, not raised —
-correct, because the agent loop continues past a tool failure. Special case
-handled by definition (an error is just another event field).
-
----
-
-## 7. Readability — names, comments, consistency, obviousness
-
-Four facets in one lens, ranked within each.
-
-**Names — precise, almost no vague placeholders.** No `data`, `obj`, `tmp`,
-or `manager` in `src/`. Names carry intent: `assertDim`, `toVectorLiteral`,
-`toJsonb`, `indexDocumentRow`, `persistMessage`. The one weak spot is
-single-letter loop binds in the hot path — `c` for chunk (`:39,43`), `r` for
-row (`:80`), `v` for vector (`:15,32`). They're conventional and local, so
-they read fine; not a finding, just the only place precision dips.
-
-**Comments — carry the WHY, not the what. This is the repo's strongest
-readability trait.** Three comments earn their place by explaining a decision
-the code can't:
-
-- `pg-vector-store.ts:69` — `<=> is cosine DISTANCE; cosine similarity score
-  = 1 - distance.` Without it, `1 - (...)` looks like a magic constant.
-- `supabase-trace-sink.ts:23-24` — explains the explicit `JSON.stringify`:
-  "so array payloads aren't mistaken for a Postgres array literal by
-  node-postgres." That's a bug-prevention comment; only a comment can carry
-  it.
-- `session.ts:18-28` — the memory-model block, including the honest "Still
-  missing: sequential in-prompt turn history" — a comment documenting what
-  the code *doesn't* do yet. Rare and valuable.
-
-**The one missing interface comment:** `PgVectorStore` has no comment naming
-the `meta.docId`/`chunkIndex`/`text` contract (§3, Leak 2). The class's most
-fragile coupling is the one undocumented thing. Add a `ChunkMeta` type and a
-one-line doc; it's the highest-value comment not yet written.
-
-**Consistency — one convention per job.** Pools are always made via
-`createPool`. Env is always loaded via `loadEnv()` then `loadConfig`. SQL is
-always parameterized (`$1`, `$2`...). jsonb is always stringified via
-`toJsonb`. No two-ways-to-do-one-thing found.
-
-**Obviousness — one "huh?" spot.** `pg-vector-store.ts:55,77` cast with
-`$N::vector` *inside the SQL string* while passing `toVectorLiteral(vector)`
-(a `[0.1,0.2]` string) as the param. The cast-in-SQL + serialize-in-JS split
-is non-obvious — you have to read both to see why a `number[]` becomes a
-string becomes a `vector`. The comment at `:14` covers the serialize half;
-the cast half is only obvious if you know pgvector. Minor, but it's the spot
-a new reader pauses.
-
----
-
-## 8. Red-flags audit — the capstone checklist
-
-Ousterhout's red flags as a review checklist, marked against this repo,
-sorted by severity. This is the actionable index the rest of the audit feeds.
+**THE leak — the dead `cfg.schema` knob (worst offender in the repo).**
+`config.ts:13` produces a `schema` field. It's a promise: "the schema is
+configurable." Every SQL-writing module breaks that promise by hardcoding
+`agents.`:
 
 ```
-  red flag                         status   location / one-line fix
-  ───────────────────────────────  ───────  ──────────────────────────────
-  Information leakage               ✗ FIRES  schema name in 6 sites
-  (same knowledge, many edits)               (config.ts:13 + 5 SQL files)
-                                             → delete cfg.schema or thread it
-
-  Avoidable config / exposed knob   ✗ FIRES  config.ts:13 AGENT_DB_SCHEMA —
-                                             a knob no query reads
-                                             → §5; same fix as above
-
-  Hidden / undocumented contract    ✗ FIRES  pg-vector-store.ts:44-46,83
-  (implied interface)                        meta docId/chunkIndex/text,
-                                             untyped → add ChunkMeta type
-                                             + interface comment
-
-  Shallow module                    ⚠ NOTED  db.ts:4-6 createPool — true
-                                             but defensible (the pool seam);
-                                             leave it, don't inline
-
-  Non-obvious code                  ⚠ MINOR  pg-vector-store.ts:55,77
-                                             ::vector cast split across
-                                             SQL + JS → one comment closes it
-
-  Pass-through method/variable      ✓ CLEAR  none — every layer flips the
-                                             abstraction (§4)
-
-  Temporal decomposition            ✓ CLEAR  modules split by responsibility,
-                                             not by execution order (§3)
-
-  Try/except sprawl                 ✓ CLEAR  rollback localized; one
-                                             deliberate swallow (§6)
-
-  Comment restates code             ✓ CLEAR  comments carry WHY, not what
-                                             (§7) — a strength
-
-  Classitis (over-split classes)    — N/A    repo too small/disciplined to
-                                             exercise it (§2)
-
-  Vague names                       ✓ CLEAR  names are precise (§7)
+  config.ts:13         schema = env.AGENT_DB_SCHEMA || 'agents'   ← COMPUTED
+       │
+       │  (never flows anywhere)
+       ▼
+  pg-vector-store.ts:48   insert into agents.chunks ...           ┐
+  pg-vector-store.ts:72   from agents.chunks ...                  │
+  runtime.ts:12           insert into agents.documents ...        │ HARDCODED
+  profile.ts:5            from agents.profiles ...                │ 'agents.'
+  supabase-trace-sink.ts:6  ... agents.conversations ...          │ ×6
+  supabase-trace-sink.ts:29 ... agents.messages ...               ┘
 ```
 
-**Severity order for this repo:** fix the schema leak first (it's both a
-leak and a false promise, and the fix is a deletion), then name the `meta`
-contract (one type + one comment), then optionally annotate the `::vector`
-cast. Everything else is clear or a defensible call.
+The same knowledge — "the schema name" — lives in seven places (the
+config field plus six literals), and they don't agree on who's
+authoritative. The red flag is **the same knowledge edited in two
+places**, here amplified to six. Worse, the config field is a *lie*:
+setting `AGENT_DB_SCHEMA=foo` changes nothing, which is more dangerous
+than no knob at all because it invites a wrong mental model.
+
+**The move — pick one of two, don't straddle:**
+- *Delete the lie.* Drop `schema` from `Config` (`config.ts:3,13`) and
+  the `AGENT_DB_SCHEMA` env read. The literal `agents.` becomes the
+  honest single source of truth. Cheapest, and correct for a
+  single-tenant single-device app. **Recommended.**
+- *Honor the knob.* Thread `cfg.schema` into every query — pass it to
+  `PgVectorStore`, `loadProfile`, the trace sink, `indexDocumentRow`.
+  More code, only worth it if multi-schema is a real near-term need. It
+  isn't (context.md: "Schema is `agents` in database `reindb`").
+
+Pick delete. A knob nobody turns is complexity with no payoff.
+
+**The second leak — the implicit meta contract (`docId`/`chunkIndex`/
+`text`).** This crosses a different seam: between `PgVectorStore` and
+aptkit's pipeline/tool. `upsert` (`pg-vector-store.ts:44-46`) digs three
+keys out of `c.meta`; `search` (`pg-vector-store.ts:83`) puts three keys
+back into `meta`. The shape of that object is a contract with aptkit's
+`search_knowledge_base` tool, but it's invisible — not on a type, not in
+a comment naming all three keys as required. Two modules (this store and
+aptkit's tool) must agree on those key names or citations silently break.
+This is a real leak, but it's **partly inherited** — the key names are
+aptkit's in-memory-store shape, and matching them is the whole point of
+drop-in parity (context.md). Fix: a typed `ChunkMeta = { docId: string;
+chunkIndex: number; text: string }` and a one-line comment at `:79`
+naming the contract. → covered deeper in `01-adapter-behind-a-contract.md`.
+
+**Not a leak (worth noting):** the soft `document_id` link with no FK
+(`sql/001_agents_schema.sql`, `chunks` table) looks like a leak but is a
+deliberate, documented decision — the FK is dropped so memory chunks can
+exist with no `documents` row (`session.ts:52`). Information is *hidden*
+correctly here; the comment at the SQL and at `session.ts:51-52` carries
+exactly the knowledge a comment should.
 
 ---
 
-### Where the lenses didn't bite — honest notes
+## 4. layers-and-abstractions
 
-- **Classitis / over-engineering:** `not yet exercised`. Eight files, none
-  over-split. The repo is too small and too disciplined to show this red
-  flag meaningfully.
-- **Deep inheritance / abstraction towers:** `not yet exercised`. buffr uses
-  composition and a single `implements VectorStore` / `implements
-  CapabilityTraceSink`; no class hierarchies to audit.
-- **Cross-module duplication beyond the schema literal:** `not yet
-  exercised`. The CLIs share a near-identical bootstrap (load env → config →
-  pool → embedder → store → pipeline: `index-cmd.ts:10-20`,
-  `eval-cmd.ts:9-16`), which is mild duplication — but it's four lines of
-  wiring, below the bar for a finding. Watch it if a fifth CLI appears; that's
-  the moment to extract a `bootstrap()` seam.
+Find pass-through methods (a method that just forwards to another with no
+new abstraction) and pass-through variables (a value threaded through
+layers that don't use it). Adjacent layers offering the same abstraction
+earn no keep.
+
+**One pass-through, and it's benign — `runtime.ts:17`.**
+`indexDocumentRow` does real work first (it writes the `agents.documents`
+source-of-truth row, `:11-16`) and *then* forwards to
+`pipeline.index({ id, text })` (`:17`). That last line is a pass-through
+to aptkit's pipeline — but the function isn't *just* the pass-through; it
+adds the documents-row write that the pipeline doesn't know about. The
+two layers offer *different* abstractions (one owns the corpus row, one
+owns chunk indexing), so the layer earns its place. No fix.
+
+**Pass-through variable — `appId`, and it's load-bearing, not noise.**
+`appId` threads from `loadConfig` → `createChatSession` → `PgVectorStore`,
+`loadProfile`, `startConversation`. It looks like a variable forwarded
+through layers untouched. But each layer *uses* it: the store scopes
+queries `where app_id = $2` (`pg-vector-store.ts:73`), profile scopes its
+lookup (`profile.ts:5`), the conversation tags its row
+(`supabase-trace-sink.ts:6`). A pass-through variable is only a smell
+when intermediate layers carry it without using it. Here every layer
+that touches it reads it. No fix.
+
+**Verdict:** `not a problem in this repo`. The layering is shallow (CLI →
+session → store → pg) and each layer changes the abstraction — UI events
+become session calls, session calls become SQL, SQL becomes rows. Nothing
+forwards blindly. Too few layers to grow a redundant one yet; watch for
+it if a "service" layer ever appears between `session.ts` and the stores.
+
+---
+
+## 5. pull-complexity-downward
+
+The red flag: a knob or parameter pushed up to the caller that the module
+had enough information to decide itself. APOSD's rule — it's better for a
+module to absorb complexity than to export it.
+
+**The best example in the repo — dimension is pulled down, then taught
+upward correctly.** `PgVectorStore` takes an optional `dimension` and
+defaults it (`pg-vector-store.ts:29`, `?? 768`); it then *enforces* it
+itself in `assertDim` (`:32-36`) on every upsert and search, throwing on
+mismatch rather than making the caller check. The caller doesn't validate
+dimensions — the module owns that. And the one place dimension *must*
+agree (embedder vs store), `session.ts:41` wires
+`dimension: embedder.dimension` so the store learns it from the embedder
+instead of a hand-typed constant. The complexity (768-everywhere,
+mismatch-must-throw — context.md's hard constraint) lives down in the
+module where it belongs. **This is the lens working as intended.**
+
+**The counter-example — `cfg.schema`, the knob that should never have
+been exported.** Same lens, opposite verdict. The schema is a decision
+the modules could own (it's a constant, `agents`), but it was pushed up
+into config as a knob — and then ignored. The fix is the lens's own
+prescription: pull it down. Hardcode `agents.` (already done in practice)
+and delete the upward-facing knob. See lens 3.
+
+**A small one — `embeddingModel` and `appId` on `PgVectorStoreOptions`
+(`pg-vector-store.ts:7-12`).** Both are optional with sensible defaults
+(`'laptop'`, `'nomic-embed-text:v1.5'`, `:27-28`). Exposing them is fine
+— they're genuine per-deployment facts, and defaulting them means the
+common caller passes neither. This is the *right* way to expose a knob:
+optional, defaulted, the module owns the common case. Contrast with
+`schema`, which is exposed but never variable. No fix.
+
+---
+
+## 6. errors-and-special-cases
+
+Find exception handling scattered across call sites, and special cases a
+better definition would erase. APOSD's preference: define errors *out of
+existence*, mask them at a low level, or aggregate handling — not
+sprinkle try/catch everywhere.
+
+**Errors are handled at the right altitude — little to fix.**
+- *Defined out of existence:* `loadProfile` returns `''` for "no profile"
+  (`profile.ts:7`, `?? ''`) instead of throwing or returning null — the
+  caller never special-cases "missing profile." `SupabaseTraceSink.emit`
+  uses a `switch` with no `default` (`supabase-trace-sink.ts:56-84`): an
+  unknown event type is silently a no-op, not an error path. Both erase a
+  special case by definition.
+- *Masked low:* the transaction's rollback-on-error is inside `upsert`
+  (`pg-vector-store.ts:59-64`) — the caller sees a thrown error, never
+  the rollback machinery.
+- *Aggregated:* the chat UI has exactly one try/catch
+  (`cli/chat.tsx:27-34`), turning any `ask()` failure into a rendered
+  `error: <message>` turn. One catch, not one per failure mode.
+
+**One deliberate swallow, correctly placed.** `session.ts:64-69` wraps
+`memory.remember` in a try/catch with an empty body and a comment:
+"a memory-write failure must not lose the answer the user has." This is a
+*good* swallow — best-effort episodic memory should never fail a turn
+that already succeeded. The comment carries the *why*, which is exactly
+what a swallow needs to not look like a bug. No fix.
+
+**The one gap worth naming:** the dimension guard throws a bare
+`Error` (`pg-vector-store.ts:34`), as do the missing-`DATABASE_URL`
+checks (`session.ts:37`). For a single-device CLI that's fine — nobody's
+catching by type. If buffr ever grows programmatic callers that need to
+distinguish "dimension mismatch" from "DB down," a typed error class
+would let them. Not now. `mostly not yet exercised.`
+
+---
+
+## 7. readability — names · comments · consistency · obviousness
+
+Four facets, one lens. This repo is clean; the findings are micro-nits,
+ranked.
+
+**Names — strong, two near-misses.** Names are precise throughout:
+`assertDim`, `toVectorLiteral`, `persistMessage`, `indexDocumentRow` all
+say exactly what they do. No `data`/`obj`/`tmp`/`manager` anywhere — the
+classic vague-name red flag doesn't fire. Near-misses: `c` for a chunk in
+the `upsert` loop (`pg-vector-store.ts:43-56`) and `r` for a row in the
+`search` map (`:80`) — fine in a 3-line scope, but `chunk`/`row` would
+cost nothing. Minor.
+
+**Comments — the strength of this codebase.** The comments carry
+*why*, not *what*. Examples worth copying: the cosine-distance note
+(`pg-vector-store.ts:69`, "`<=>` is cosine DISTANCE; similarity = 1 -
+distance") explains a sign flip you'd otherwise misread; the jsonb
+stringify note (`supabase-trace-sink.ts:23-24`) explains a node-postgres
+gotcha that isn't visible in the code; the `SupabaseTraceSink` class
+comment (`:39-48`) explains the sync/async split and what was previously
+dropped. None restate the code. **This is the model — interface comments
+that say what the signature can't.**
+
+**The one missing interface comment:** the `meta` round-trip
+(`pg-vector-store.ts:79`) has a comment about *why* it rebuilds the shape,
+but nothing names `docId`/`chunkIndex`/`text` as the *required* keys — the
+contract a caller must satisfy. That's the comment most worth adding (see
+lens 3).
+
+**Consistency — one split convention.** Schema access is inconsistent in
+*intent*: `config.ts` says schema is configurable, every query says it's
+the literal `agents`. Two conventions for one job — the consistency red
+flag, same root cause as lens 3. Otherwise consistent: every SQL string
+uses `$n` params, every async DB call is awaited, every module imports
+`pg` the same way.
+
+**Obviousness — one "huh?" spot.** `chunkIndex` defaults to `0` when
+absent (`pg-vector-store.ts:45`) but `content` defaults to `''` (`:46`).
+A chunk with no `text` meta silently indexes empty content — and since
+`text` round-trips into citations (lens 3), a missing key means a silent
+empty citation, not a loud failure. The default hides a data problem.
+Worth a thrown error or at least a warning. Minor but real.
+
+**Verdict:** readability is a strength. The comments especially — they're
+better than most production code. Fix the one missing key-contract
+comment and you've closed the only real gap.
+
+---
+
+## 8. red-flags-audit — the capstone checklist
+
+Ousterhout's red flags as a review checklist, each marked against this
+repo: **FIRES** / doesn't / N/A, with location and the one-line fix when
+it fires. Sorted by severity for buffr.
+
+```
+  RED FLAG                        VERDICT   WHERE / FIX
+  ──────────────────────────────  ────────  ─────────────────────────────
+  Information leakage              FIRES     cfg.schema vs 6 hardcoded
+   (same knowledge, two places)   ★ worst   'agents.' literals
+                                             → delete the dead knob (lens 3)
+
+  Avoidable config / exposed       FIRES     cfg.schema knob never read
+   knob the module could own       (same)    → pull the decision down
+
+  Hard-to-describe (implicit       FIRES     meta keys docId/chunkIndex/
+   contract, no type/comment)      minor     text not typed or named
+                                             → add ChunkMeta type + comment
+
+  Nonobvious code                  FIRES     content '' / chunkIndex 0
+                                   minor     defaults hide missing-key bug
+                                             → throw or warn on missing text
+
+  Shallow module / classitis       doesn't   db.ts/profile.ts are thin but
+                                             hide one decision each, no
+                                             class ceremony — seams, not smells
+
+  Pass-through method/variable     doesn't   runtime.ts adds the docs-row
+                                             write; appId is used at every
+                                             layer it threads through
+
+  Temporal decomposition           doesn't   modules split by concern
+                                             (store/profile/trace), not by
+                                             execution order
+
+  Comment restates code            doesn't   comments carry WHY, not WHAT —
+                                             a repo strength (lens 7)
+
+  Try/catch everywhere             doesn't   one catch in the UI, one
+                                             deliberate swallow with a
+                                             reason — errors aggregated low
+
+  Vague names (data/obj/tmp/mgr)   doesn't   names are precise; only c/r in
+                                             3-line scopes
+
+  Repetition (same code N times)   N/A       too small; no duplicated logic
+                                             block beyond the schema literal
+
+  God class / over-large module    N/A       largest file is 94 lines
+```
+
+**The actionable index, ranked across the whole repo:**
+
+1. **Delete the dead `cfg.schema` knob.** One leak, six call sites, a
+   lying config field. `config.ts:3,13`. The single highest-leverage fix.
+2. **Type the meta contract.** `ChunkMeta` + a comment naming
+   `docId`/`chunkIndex`/`text` as required. `pg-vector-store.ts:4,79`.
+   Closes the unknown-unknown.
+3. **Throw (or warn) on missing `text` meta.** Turn a silent empty
+   citation into a loud failure. `pg-vector-store.ts:46`.
+
+Everything else is praise or "too small to bite yet." For an
+eight-file repo, that's a healthy audit — the design instincts (deep
+modules, why-comments, errors handled low) are right; the one structural
+problem is a knob that should never have shipped.

@@ -1,70 +1,95 @@
 # Transactions, isolation, and anomalies
 
-**Subtitle:** ACID transactions / READ COMMITTED / cross-transaction atomicity gap — *Industry standard*
+**Industry name:** ACID transactions · isolation levels · the cross-transaction
+write anomaly — *Industry standard*
 
 ---
 
-## Zoom out, then zoom in
+## Zoom out — where this concept lives
 
-A transaction is the unit of all-or-nothing. The repo draws transaction
-boundaries in three places — and crucially, it draws one boundary in a spot that
-leaves two related writes *outside the same boundary*. That's a real atomicity
-anomaly, kept on purpose, and it's the most instructive thing in this file.
+Transactions live at the boundary between application code and the engine — they're
+the unit the application draws around a set of writes to say "all of these, or none."
+This is seam 1 from the map (`01`), and it's where buffr's most consequential
+consistency gap lives: a logical operation that *should* be one atom is physically
+two.
 
 ```
-  Zoom out — transactions wrap the write paths
+  where transactions sit
 
-  ┌─ Service ───────────────────────────────────────────────┐
-  │  indexDocumentRow()  upsert()  persistMessage()  migrate │
-  └──────────────────────────┬───────────────────────────────┘
-  ┌─ ★ Transaction boundary ★▼───────────────────────────────┐ ← THIS FILE
-  │  begin … commit / rollback   ·   autocommit single stmt  │
-  └──────────────────────────┬───────────────────────────────┘
-  ┌─ Storage (MVCC + WAL) ───▼───────────────────────────────┐
-  │  versioned tuples · WAL append · READ COMMITTED          │
-  └──────────────────────────────────────────────────────────┘
+  ┌─ Application layer ─────────────────────────────────────┐
+  │  ★ the code decides the transaction BOUNDARY ★           │
+  │  pool.query (autocommit)  vs  connect()+begin (explicit) │
+  └───────────────────────────┬─────────────────────────────┘
+                              │
+  ┌─ Connection layer ────────▼─────────────────────────────┐
+  │  a transaction = one borrowed session, begin → commit    │
+  └───────────────────────────┬─────────────────────────────┘
+                              │
+  ┌─ MVCC / storage layer ────▼─────────────────────────────┐
+  │  atomicity (all-or-none) + isolation (READ COMMITTED)    │
+  └───────────────────────────────────────────────────────────┘
 ```
 
-Zoom in: a transaction promises atomicity (all writes land or none),
-consistency, isolation (concurrent transactions don't corrupt each other's
-view), and durability (a committed transaction survives a crash). This repo
-runs every transaction at Postgres's default isolation, **READ COMMITTED**, and
-never changes it. The question: where are the boundaries drawn, and where does a
-related pair of writes fall on *opposite sides* of one?
+---
+
+## Zoom in — narrow to the concept
+
+The question: *what does buffr wrap in a transaction, what does it leave loose, and
+what isolation level is it silently running at?* A transaction gives you two of the
+ACID letters directly — **A**tomicity (all writes commit or none) and **I**solation
+(concurrent transactions don't see each other's half-done work). buffr uses explicit
+transactions in exactly two places and *autocommit everywhere else* — and the one
+place it should have wrapped a pair, it didn't. Name the transaction boundary, walk
+the two-transaction write anomaly, then pin down the unstated isolation level.
 
 ---
 
 ## The structure pass
 
-**Layers.** Three transaction shapes in the repo, by boundary discipline:
+### Layers
 
 ```
-  ┌─ Explicit txn ───────────────────┐  begin/commit/rollback by hand
-  │   upsert(), runMigration()        │  pg-vector-store.ts:42, migrate.ts:11
-  └──────────────┬────────────────────┘
-  ┌─ Autocommit single stmt ▼─────────┐  one pool.query = one implicit txn
-  │   documents, messages, conv insert │  runtime.ts:11, trace-sink:27
-  └──────────────┬────────────────────┘
-  ┌─ Cross-txn sequence ▼─────────────┐  two txns, no shared boundary ⚠
-  │   indexDocumentRow: A then B       │  runtime.ts:11 + :17
-  └────────────────────────────────────┘
+  logical operation     →  "index this document" (one intent)
+    transaction(s)      →  how many atoms the code actually opens
+      isolation level   →  what a concurrent reader/writer sees mid-transaction
+        MVCC mechanics  →  how the engine enforces both (file 06)
 ```
 
-**Axis — trace `atomicity` (all-or-nothing scope) across the write paths.**
-*What's the unit that lands or rolls back together?*
+### Axis: trace *"is this set of writes atomic?"* across the call sites
 
-- `upsert()`: the unit is **all chunks in the batch** — `begin` … loop …
-  `commit`. One fails, all roll back.
-- A single autocommit insert: the unit is **that one statement**.
-- `indexDocumentRow`: the documents write is one unit, the chunk writes are a
-  *separate* unit. **There is no boundary around both.** Atomicity does not span
-  them.
+```
+  "are these writes all-or-none?"  — traced across buffr's writers
 
-**Seam — the `await` between txn A and txn B in `indexDocumentRow`.** Above it:
-the documents row is committed. Below it: the chunks commit in their own
-transaction. The guarantee that flips is *atomicity* — it does not cross this
-seam. A crash, an error, or a process kill in the gap leaves committed-A with
-no-B. This seam is the anomaly. Keep it on the table.
+  ┌─ upsert (chunks loop) ──────────────┐
+  │  begin → insert×N → commit           │  → YES. one atom. all chunks or none.
+  └──────────────────────────────────────┘
+  ┌─ indexDocumentRow (doc + chunks) ───┐
+  │  query(doc)  ; then  upsert(chunks)  │  → NO. two atoms. ★ THE ANOMALY ★
+  └──────────────────────────────────────┘
+  ┌─ persistMessage (one event) ────────┐
+  │  query(insert)                       │  → trivially atomic (single statement)
+  └──────────────────────────────────────┘
+  ┌─ runMigration (schema) ─────────────┐
+  │  begin → run whole .sql → commit     │  → YES. DDL atomic (Postgres allows it)
+  └──────────────────────────────────────┘
+
+  the answer flips at indexDocumentRow: every other writer is atomic for its
+  intent; this one splits a single logical write across two transactions.
+```
+
+### Seams
+
+```
+  seam 1  intent ↔ transaction   the load-bearing seam. "index a document" is ONE
+                                intent but TWO transactions. The atom boundary
+                                doesn't match the intent boundary. → the anomaly
+  seam 2  default ↔ chosen        every begin takes READ COMMITTED by default. No
+                                code ever names an isolation level. The level is
+                                inherited, not decided.
+```
+
+Hand off: two real transactions, autocommit elsewhere, the document+chunk intent
+split across two atoms, and an isolation level nobody chose.
 
 ---
 
@@ -72,233 +97,234 @@ no-B. This seam is the anomaly. Keep it on the table.
 
 ### Move 1 — the mental model
 
-You've written optimistic UI updates: change local state, fire the network
-request, roll back the local change if it fails. A transaction is that pattern
-enforced by the database — except it rolls back *automatically and completely*
-if anything inside fails, and nobody outside the transaction ever sees the
-half-done state. The kernel is four moves: `begin`, do work, then either
-`commit` (make it all visible and durable) or `rollback` (erase it all).
+You know how a `try`/`catch` around two `await`s doesn't make them atomic — if the
+second throws, the first already happened and you have to manually undo it? A database
+transaction is the fix for exactly that: wrap two writes in `begin`/`commit` and
+either both land or neither does, with the *engine* doing the rollback. The anomaly in
+buffr is the un-fixed version of that bug: two writes that *aren't* wrapped together.
 
 ```
-  The transaction kernel — what breaks if each part is missing
+  the cross-transaction write — the shape of the anomaly
 
-  begin     ─── without it: each statement autocommits, no grouping
-    │
-  work...   ─── the statements that must land together
-    │
-  commit    ─── without it: work is invisible & lost on disconnect
-    or
-  rollback  ─── without it: a mid-failure leaves partial writes
-              (on error path)
+  intent: "index this document"
+  ┌────────────────────── ONE logical operation ──────────────────────┐
+  │                                                                    │
+  │  ┌─ txn #1 (autocommit) ─┐    GAP    ┌─ txn #2 (begin/commit) ─┐   │
+  │  │ insert documents row  │ ════════► │ insert chunk × N        │   │
+  │  │ COMMIT  ✓ durable     │  crash    │ COMMIT                  │   │
+  │  └───────────────────────┘  here =   └─────────────────────────┘   │
+  │                          orphaned doc, zero chunks                 │
+  └────────────────────────────────────────────────────────────────────┘
+
+  the atom boundary (dashed boxes) does NOT match the intent boundary (outer box)
 ```
 
-### Move 2 — walk the three shapes, then the anomaly
+### Move 2 — walk it
 
-**Shape 1 — the explicit transaction in `upsert()`.** Textbook. `pg-vector-store.ts:40-65`:
+**The atomic case — upsert wraps its loop.** Start with what's done right, so the
+contrast lands. `PgVectorStore.upsert` borrows one connection and brackets the whole
+chunk loop.
 
 ```ts
-const client = await this.pool.connect();   // a dedicated connection — required
+// src/pg-vector-store.ts:40-64 (condensed)
+const client = await this.pool.connect();
 try {
-  await client.query('begin');               // open the boundary
+  await client.query('begin');                    // ← atom opens
   for (const c of chunks) {
-    await client.query(`insert ... on conflict (id) do update ...`, [...]);
+    await client.query(`insert into agents.chunks ... on conflict do update ...`);
   }
-  await client.query('commit');              // all chunks land together
+  await client.query('commit');                   // ← all chunks land together
 } catch (err) {
-  await client.query('rollback');            // any failure → none land
+  await client.query('rollback');                 // ← or none do
   throw err;
 } finally {
-  client.release();                          // give the connection back, always
+  client.release();                               // ← always return the connection
 }
 ```
 
-The load-bearing detail: you **must** `pool.connect()` to get one dedicated
-client. `pool.query()` may hand each call a *different* pooled connection, and
-`begin`/`commit` only group statements on the *same* connection. Run `begin` on
-one connection and `insert` on another and you've grouped nothing. **What breaks
-if you skip the dedicated client:** the transaction silently spans connections
-and atomicity evaporates. `migrate.ts:9` does the same `connect()`-then-`begin`
-correctly.
+This is textbook: one borrowed connection, `begin`/`commit`, `rollback` on the error
+path, `release` in `finally` so the connection always goes back to the pool. If chunk
+#7 of 10 fails, chunks #1–6 roll back too. The chunk set is one atom. Good.
 
-**Shape 2 — autocommit single statements.** A bare `pool.query` with no `begin`
-is its own implicit transaction — Postgres wraps every standalone statement in
-one. The `documents` insert (`runtime.ts:11`), each `messages` insert
-(`supabase-trace-sink.ts:27`), the `conversations` insert
-(`startConversation`): each lands atomically on its own, commits on its own.
-Fine for a single independent row.
-
-**Shape 3 — the cross-transaction anomaly in `indexDocumentRow`.** Here's the
-one to study. `runtime.ts:11-17`:
+**The anomaly — indexDocumentRow splits the intent.** Now the broken case. The
+logical operation "index this document" is two physical writes, and they're in two
+*different* transactions.
 
 ```ts
-await pool.query(                                    // ── txn A ──
-  `insert into agents.documents (...) values (...)
-   on conflict (id) do update set ...`,              // commits HERE, alone
+// src/runtime.ts:11-17
+await pool.query(                                  // ← txn #1: autocommit on the pool.
+  `insert into agents.documents (id, app_id, source_type, source_path, content)
+   values ($1, $2, 'markdown', $3, $4)
+   on conflict (id) do update ...`,                //   COMMITS immediately, by itself
   [doc.id, appId, doc.sourcePath ?? null, doc.text],
 );
-await pipeline.index({ id: doc.id, text: doc.text }); // ── txn B ──
-//   └─► PgVectorStore.upsert() → its own begin/commit (separate txn)
+await pipeline.index({ id: doc.id, text: doc.text }); // ← txn #2: upsert's begin/commit
+//    ▲ a SECOND, separate transaction. nothing wraps the pair.
 ```
 
-Two transactions. The documents row commits in txn A. Then `pipeline.index()`
-embeds the text and calls `upsert()`, which opens *its own* `begin`/`commit` —
-txn B. **No boundary wraps both.** Walk the failure:
+Walk the failure, step by step:
 
 ```
-  indexDocumentRow — the atomicity gap
+  failure trace — crash in the gap
 
-  txn A: INSERT documents ──commit──►  [documents row durable]
-                                              │
-                    ⚠ crash / error / kill here
-                                              │
-  txn B: begin → upsert chunks → commit ──►  [chunks durable]
-
-  outcome if it dies in the gap:
-    documents row exists, ZERO chunks → an un-retrievable document
+  step 1:  pool.query(insert documents)  →  documents row COMMITTED, durable
+  step 2:  pipeline.index(...) starts    →  embeds the text (network call to Ollama)
+           ░░░ process crashes here ░░░   →  txn #2 never opens
+  result:  documents has the row, chunks has nothing for it
+           the document is "indexed" per the documents table,
+           but search() can never retrieve it (no chunks → no embeddings)
 ```
 
-The reverse can't happen here (A precedes B), but the asymmetry is the point:
-you can land a documents row whose chunks never made it. The document is in the
-corpus, contributes nothing to retrieval, and nothing flags it.
+**Consequence, stated plainly:** a crash — or just an embedding-model error in
+`pipeline.index` — between the two writes leaves an *orphaned document*: a row in
+`documents` with no rows in `chunks`. The document looks indexed but is invisible to
+retrieval. And because the chunks→documents FK is **deliberately dropped**
+(`sql/001_agents_schema.sql:27`, a modeling choice owned by `study-data-modeling`),
+the engine won't reject or even notice the inconsistency — there's no referential
+constraint left to violate.
 
-**Why it's kept — and it should be.** Fixing it would mean threading one
-transaction through `pipeline.index()` — but `pipeline` is aptkit's
-`RetrievalPipeline`, and `upsert()` implements aptkit's `VectorStore` contract,
-which knows nothing about a `documents` row or an outer transaction. Forcing a
-shared transaction would break the drop-in parity that lets buffr swap aptkit's
-in-memory store for `PgVectorStore` (and is the same reason the FK is dropped —
-`001_agents_schema.sql:16`). The deliberate call: **accept a small, recoverable
-inconsistency (re-index fixes it, the `on conflict` upserts are idempotent) to
-keep a clean storage abstraction.** That's a real engineering tradeoff, owned,
-not an accident. The mitigation already in the code: both writes are
-`on conflict do update` (`runtime.ts:14`, `pg-vector-store.ts:50`), so re-running
-`indexDocumentRow` heals the gap with no duplicates.
-
-**Isolation: READ COMMITTED, everywhere, by default.** No statement in the repo
-sets an isolation level. READ COMMITTED means each statement sees rows committed
-*before that statement began* — so within one transaction, two `select`s can see
-different data if another transaction commits between them (a non-repeatable
-read). Nothing in this repo is exposed to that anomaly: the explicit
-transactions are write-only loops, and the reads (`search()`) are single
-statements. So READ COMMITTED is sufficient — but it's *unexamined*, an
-assumption nobody tested. → `not yet exercised`.
-
-### Move 2.5 — current state vs future state (the anomaly)
+**Why it's structured this way — and the fix.** This isn't carelessness; it's the
+cost of a clean seam. `pipeline.index` is aptkit's `RetrievalPipeline` (consumed,
+never edited — a must-not-change constraint), and it owns its own transaction inside
+`PgVectorStore.upsert`. buffr can't reach into it to share a connection without
+breaking the abstraction. The honest fix is to invert control: open one transaction
+in `indexDocumentRow`, write the documents row on *that* connection, and pass the same
+connection down so the chunk upsert joins the same atom.
 
 ```
-  Phase A — now                    Phase B — if cross-write atomicity needed
-  ─────────────────────────────    ──────────────────────────────────────
-  documents (txn A), chunks (txn B) one txn wraps both writes
-  gap heals on re-index (idempotent) no orphan window at all
-  clean VectorStore abstraction      pipeline must accept an outer txn/client
-  small recoverable inconsistency    breaks drop-in parity with aptkit store
+  current vs. fixed — the atom boundary
 
-  the call today: keep A. the abstraction is worth more than closing a
-  gap that re-indexing already heals.
+  CURRENT:  [doc txn] [chunk txn]        ← two atoms, gap between
+  FIXED:    [ doc + chunks  one txn ]    ← one atom, no gap
+                                            requires threading one connection
+                                            through pipeline.index — an aptkit
+                                            seam change, hence not done here
 ```
+
+Until aptkit's pipeline accepts an injected transaction, the pragmatic mitigation is
+*ordering* (index chunks first, then write the documents row last — so the visible
+"document exists" flag is the *last* thing to commit) or a periodic reconciliation
+sweep that deletes documents with no chunks. Neither is in the repo today.
+
+**The isolation level nobody chose — READ COMMITTED.** Every `begin` in the repo —
+`upsert` (`pg-vector-store.ts:42`), `runMigration` (`migrate.ts:11`) — takes
+Postgres's default isolation level, **READ COMMITTED**, because no code ever runs
+`SET TRANSACTION ISOLATION LEVEL`.
+
+```
+  the isolation ladder — buffr sits on the bottom rung, by default
+
+  rung                what it prevents              buffr uses?
+  ──────────────────  ────────────────────────────  ────────────
+  READ UNCOMMITTED    (Postgres treats as RC)       —
+  READ COMMITTED      dirty reads                    ✓ DEFAULT, unstated
+  REPEATABLE READ     + non-repeatable / phantom     not used
+  SERIALIZABLE        + write skew (full isolation)  not used
+```
+
+Under READ COMMITTED, each *statement* sees a fresh snapshot of committed data. Two
+statements in the same transaction can see different data if another transaction
+commits in between. **For buffr this is fine** — it's a single-device, single-writer
+CLI; there's no concurrent transaction to read a moving snapshot. But "fine because
+there's one writer" is a *property of the deployment*, not a *decision in the code*.
+The moment a second writer appears (a sync daemon, a second device), READ COMMITTED's
+non-repeatable reads and lost updates become reachable, and the code gives you no
+signal because it never named the level. That's the seam-2 risk: an inherited
+guarantee masquerading as a chosen one.
 
 ### Move 3 — the principle
 
-A transaction's guarantee is exactly as wide as its `begin`/`commit`, and not
-one statement wider. The moment two related writes sit in two transactions —
-even back-to-back, even with an `await` between them — atomicity does not span
-them, and a crash in the gap is a real possible state you have to design for.
-Here the design choice is honest: accept the gap, make both writes idempotent so
-re-running heals it, and keep the storage abstraction clean. Naming *which*
-inconsistency you've accepted, and *why*, is the senior move — not pretending
-the boundary is wider than it is.
+A transaction's job is to make the *atom boundary match the intent boundary*. When
+they match (upsert: one intent, one atom) you get correctness for free. When they
+drift (indexDocumentRow: one intent, two atoms) you get an anomaly the engine can't
+catch — especially once you've dropped the constraint that would have caught it. And
+isolation level is a *decision*, even when you don't make it: the default is a choice
+you've delegated to Postgres, safe only as long as your concurrency assumptions hold.
 
 ---
 
 ## Primary diagram
 
-Every transaction boundary in the repo, with the anomaly marked.
+The full transaction picture: who's atomic, who isn't, what isolation everyone runs.
 
 ```
-  buffr-laptop — transaction boundaries
+  buffr transactions — full recap
 
-  EXPLICIT (begin/commit on a dedicated client):
-    upsert()      [begin → insert*N → commit | rollback]  pg-vector-store.ts:42
-    migrate       [begin → whole schema    → commit | rollback]  migrate.ts:11
-
-  AUTOCOMMIT (one implicit txn per statement):
-    documents     [INSERT … on conflict]   runtime.ts:11
-    messages      [INSERT]                  supabase-trace-sink.ts:27
-    conversations [INSERT … returning]      startConversation
-
-  CROSS-TXN (no shared boundary — the anomaly):
-    indexDocumentRow:
-      txn A [INSERT documents] ──commit──► ⚠gap⚠ ──► txn B [begin upsert commit]
-                                  heals on re-index (both idempotent)
-
-  ISOLATION: READ COMMITTED for all of the above (Postgres default, untuned)
+  ┌─ Application writers ──────────────────────────────────────────────┐
+  │                                                                    │
+  │  upsert           [ begin → insert×N → commit ]   ATOMIC  ✓        │
+  │  persistMessage   [ single insert ]               ATOMIC  ✓        │
+  │  runMigration     [ begin → DDL → commit ]        ATOMIC  ✓        │
+  │                                                                    │
+  │  indexDocumentRow [ doc txn ] ░gap░ [ chunk txn ] NOT ATOMIC  ✗    │
+  │                    crash in gap → orphaned document                │
+  │                    (FK dropped → engine stays silent)              │
+  └───────────────────────────┬────────────────────────────────────────┘
+                              │  every begin inherits…
+  ┌─ Isolation ───────────────▼────────────────────────────────────────┐
+  │  READ COMMITTED  (default, never stated)                           │
+  │  safe ONLY because there is exactly one writer today               │
+  └────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
 ## Elaborate
 
-ACID isn't one property — it's four, and they're served by different machinery:
-atomicity and durability by the WAL (`07`), isolation and consistency by MVCC
-(`06`). READ COMMITTED is Postgres's default and the loosest level that still
-prevents dirty reads (you never see another transaction's uncommitted writes).
-The stricter levels — REPEATABLE READ (snapshot stable for the whole
-transaction) and SERIALIZABLE (as if transactions ran one at a time) — cost
-more and matter when a transaction reads the same data twice or makes decisions
-on what it read. This repo's transactions don't do either, so the default is
-right; the gap is that it was never *examined*. The cross-transaction pattern in
-`indexDocumentRow` is a distributed-write-in-miniature: two independent commits
-with a consistency window between them, healed by idempotent retry — the same
-shape you'd see writing to two services, which is why `study-data-modeling`
-treats the soft-link integrity choice and `study-system-design` treats the
-broader durability boundary.
+ACID's four letters split across this guide: **A**tomicity and **I**solation are this
+file; **C**onsistency (constraints — and here, the *dropped* constraint) leans on
+`study-data-modeling`; **D**urability is file `07`. The cross-transaction anomaly is a
+classic distributed-transactions-in-miniature: two writes that need to be atomic but
+live behind an abstraction boundary that owns its own transaction. The general
+solutions — pass a transaction handle through the boundary, use a saga with
+compensation, or accept eventual consistency plus a reconciliation sweep — are exactly
+the patterns you'd reach for if `documents` and `chunks` lived in two different
+*services* instead of two different *transactions*. Same problem, smaller scale.
+`study-distributed-systems` (if generated) owns the multi-service version; here it's a
+single-process write that simply forgot to share an atom.
 
 ---
 
 ## Interview defense
 
-**Q: Walk me through an atomicity bug in this codebase.**
-
-> `indexDocumentRow` at `runtime.ts:11` writes the `documents` row in one
-> autocommit transaction, then calls `pipeline.index()`, which routes to
-> `PgVectorStore.upsert()` — its own `begin`/`commit`. Two transactions, no
-> shared boundary. Crash in the gap and you've committed a documents row with
-> zero chunks: it's in the corpus but invisible to retrieval. It's deliberate —
-> wrapping both would force aptkit's `VectorStore` to know about a documents row
-> and break drop-in parity — and it's mitigated: both writes are
-> `on conflict do update`, so re-indexing heals it idempotently.
+**Q: "Where can buffr leave the database inconsistent, and why won't it error?"**
 
 ```
-  txn A: documents commit ──► ⚠gap⚠ ──► txn B: chunks commit
-  die in gap → orphan document → re-index heals (idempotent upserts)
+  the orphaned-document anomaly
+
+  insert documents ──COMMIT──► ░crash░ ──► insert chunks (never runs)
+       │                                          │
+       ▼                                          ▼
+  documents has row                         chunks has nothing
+       └──────────── no FK to catch it ─────────┘
 ```
 
-> Anchor: atomicity is exactly as wide as one begin/commit — these two writes
-> sit in two.
+Answer: "`indexDocumentRow` writes the documents row in one autocommit transaction,
+then indexes the chunks in a *second* transaction inside `PgVectorStore.upsert`.
+There's no atom around the pair, so a crash or an embedding error in the gap leaves a
+document row with zero chunks — indexed on paper, invisible to retrieval. It won't
+error because the chunks→documents FK is deliberately dropped, so there's no constraint
+left to violate. The fix is to thread one transaction through both writes, which means
+changing aptkit's pipeline seam to accept an injected connection." Anchor: *the atom
+boundary doesn't match the intent boundary, and the constraint that would catch it was
+removed on purpose.*
 
-**Q: Why does `upsert()` call `pool.connect()` instead of `pool.query()`?**
+**Q: "What isolation level does buffr run at?"**
 
-> Because a transaction only groups statements on the *same* connection.
-> `pool.query()` can hand each call a different pooled connection, so `begin` and
-> `insert` could land on different ones and group nothing. `pool.connect()`
-> (`pg-vector-store.ts:40`) checks out one dedicated client, runs
-> `begin`/inserts/`commit` on it, and releases it in `finally`. Skip that and
-> your transaction silently spans connections and atomicity is gone.
-
-```
-  pool.connect() → one client → begin…commit grouped correctly
-  pool.query()*N → maybe N connections → begin and insert unrelated
-```
-
-> Anchor: a transaction lives on one connection — `connect()` is what pins it.
+Answer: "READ COMMITTED — the Postgres default — and nowhere in the code is that
+chosen; every `begin` just inherits it. It's correct today only because there's
+exactly one writer. With a second writer, non-repeatable reads and lost updates become
+reachable, and the code gives no signal because the level was never named. Inherited,
+not decided." Anchor: *the isolation level is a delegated decision, safe only while the
+single-writer assumption holds.*
 
 ---
 
 ## See also
 
-- `06-locks-mvcc-and-concurrency-control.md` — MVCC, the `on conflict` mechanic,
-  and why the dedicated connection matters under contention.
-- `07-wal-durability-and-recovery.md` — what "committed" actually guarantees on
-  disk.
-- `study-data-modeling` — the soft-link / dropped-FK integrity tradeoff behind
-  the cross-transaction pattern.
+- `01-database-systems-map.md` — seam 1, the transaction boundary on the map.
+- `06-locks-mvcc-and-concurrency-control.md` — how MVCC enforces atomicity and
+  isolation, and why one writer makes the default safe.
+- `07-wal-durability-and-recovery.md` — what "commit" actually durably guarantees.
+- `study-data-modeling` — the *deliberately dropped* chunks→documents FK (the missing
+  constraint).

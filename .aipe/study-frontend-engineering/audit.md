@@ -1,181 +1,83 @@
-# Frontend Engineering — Audit (Pass 1)
+# Frontend audit — Pass 1, the 8 lenses
 
-The frontend surface of `buffr-laptop` is one file: `src/cli/chat.tsx` (64 lines),
-a React component rendered to the terminal by Ink. Its data layer is `src/session.ts`.
-No browser, no DOM, no router, no CSS. This is React — the reconciler, hooks, controlled
-inputs, async state — running against a TTY instead of a document.
+The frontend surface is one component, `<Chat>` (`src/cli/chat.tsx`), rendered by Ink to a terminal, sitting on a data façade (`createChatSession`, `src/session.ts`). This audit walks the eight frontend lenses against that surface. Where a lens finds nothing, it says `not yet exercised` — no invented patterns.
 
-This is your home turf wearing an unfamiliar coat. Everything you know about `useState`,
-controlled components, and the loading-state triad transfers exactly. What changes is the
-*host*: Ink swaps React's DOM renderer for one that paints box-drawing layout to stdout.
-The audit below walks the standard 8 frontend lenses against that surface and says
-`not yet exercised` honestly where a browser concept has no terminal analog.
-
-```
-  The whole frontend surface — one diagram
-
-  ┌─ UI layer (terminal) ───────────────────────────────────────┐
-  │  <Chat/>  src/cli/chat.tsx:9                                 │
-  │    useState: turns / input / busy        (chat.tsx:11-13)    │
-  │    <TextInput onSubmit={onSubmit}>       (chat.tsx:55)       │
-  │    <Spinner/> while busy                 (chat.tsx:48-50)    │
-  └───────────────────────────────┬──────────────────────────────┘
-                                  │  session.ask(q)   (chat.tsx:28)
-  ┌─ Data layer ──────────────────▼──────────────────────────────┐
-  │  ChatSession  src/session.ts:34   ask() / close()            │
-  │    persist → agent.answer() → trace.flush() → remember()     │
-  └───────────────────────────────┬──────────────────────────────┘
-                                  │  pg pool / Ollama / aptkit agent
-  ┌─ Storage + model layer ───────▼──────────────────────────────┐
-  │  Postgres + pgvector   ·   Ollama (gemma2 / nomic-embed)     │
-  └──────────────────────────────────────────────────────────────┘
-```
+Calibration note for you: this is a terminal React UI. Treat every browser instinct as a hypothesis to check, not a given. Most of your hooks knowledge holds verbatim; the platform and paint layers are where it bends.
 
 ---
 
 ## 1. rendering-and-reactivity
 
-**React, virtual-DOM reconciliation, rendering to a terminal — not a browser.** The
-rendering mode is the closest thing the terminal has to an SPA: a single long-lived
-process holding one component tree in memory, re-rendered on every state change. There
-is no SSR, no hydration, no SSG, no RSC — those are all server-to-browser handoff
-concepts and there is no browser here.
+**Rendering mode:** client-rendered, single-screen, **SPA-equivalent with no router**. There is no SSR, no SSG, no hydration, no React Server Components. The app boots, renders one component tree, and reconciles in place for the life of the process.
 
-The reconciler is the standard React virtual-DOM diff (`react` ^18.3.1, `package.json:21`),
-but the *renderer* is Ink (`ink` ^5.0.1, `package.json:18`) instead of `react-dom`. Ink
-reconciles your `<Box>`/`<Text>` tree against a Yoga flexbox layout engine and paints the
-result to stdout as box-drawing characters. When `setBusy(true)` fires (`chat.tsx:26`),
-React schedules a re-render exactly as it would in a browser; Ink computes the new terminal
-frame and writes the diff.
+**Reconciliation model:** virtual-DOM diffing — the standard React reconciler — but the **host renderer is Ink, not react-dom** (`render(<Chat session={session} />)`, `src/cli/chat.tsx:63`). React builds and diffs the element tree exactly as it does in a browser; Ink's renderer (built on `react-reconciler` + Yoga for flexbox layout) commits the diff to **terminal cells** instead of DOM nodes. Your `<Box flexDirection="column">` (`chat.tsx:38`) is flexbox computed by Yoga and printed as spaced text — not a real `<div>`.
 
-When work happens: mount (one `render(<Chat/>)` at `chat.tsx:63`), then update on every
-`setTurns`/`setInput`/`setBusy` call. No commit-phase effects, no `useEffect`, no
-concurrent features in play — this is sync React.
+**Scheduling:** synchronous, default React 18 (`react@^18.3.1`, `package.json:21`). No `startTransition`, no Suspense, no concurrent features in use. Every `setState` schedules a reconcile that repaints the terminal frame.
 
-→ The event loop that actually drives the `await session.ask(q)` suspension belongs to
-`study-runtime-systems`. → See **01-react-without-the-dom.md** for the deep walk on the
-reconciler-and-host-renderer split.
+**When work happens:** on mount (`render`, `chat.tsx:63`) and on every state update — three update sources: `setTurns`, `setInput`, `setBusy` (`chat.tsx:11–13`). The `turns.map()` (`chat.tsx:42`) re-runs on every render. The transcript is append-only and re-rendered whole each frame; under React's default behavior this list **re-renders on every keystroke** because `setInput` (`chat.tsx:55`) updates parent state and the `.map()` is in the same component — observed structurally, not measured. → full walk in `01-react-without-the-dom.md`. The event-loop mechanics of how the awaited turn yields belong to `study-runtime-systems`.
+
+---
 
 ## 2. state-architecture
 
-**Three pieces of local component state, all owned by `<Chat>`. No store, no lifted
-state, no derived state, no URL state.** The entire state graph:
+The entire client state graph is **three `useState` hooks in one component** (`src/cli/chat.tsx:11–13`):
 
-- `turns: Turn[]` (`chat.tsx:11`) — the conversation transcript, append-only.
-- `input: string` (`chat.tsx:12`) — the controlled text-input buffer.
-- `busy: boolean` (`chat.tsx:13`) — the in-flight flag for the current `ask()`.
+| state | type | role | who transitions it |
+|-------|------|------|--------------------|
+| `turns` | `Turn[]` | the transcript, append-only | `setTurns(t => [...t, …])` on submit and on answer/error (`chat.tsx:25,29,31`) |
+| `input` | `string` | controlled value of the text field | `onChange={setInput}` per keystroke (`chat.tsx:55`); cleared on submit (`chat.tsx:24`) |
+| `busy` | `boolean` | loading flag, one turn in flight | `setBusy(true)` before the call, `setBusy(false)` in `finally` (`chat.tsx:26,32`) |
 
-Every transition lives in one closure, `onSubmit` (`chat.tsx:15-35`). There is no Redux,
-no Zustand, no Context, no `useReducer`. The component is small enough that flat `useState`
-is the right call — lifting or globalizing this would be pure ceremony. **The one subtlety
-worth naming:** `turns` is the *client* copy of conversation state, but the *canonical*
-copy lives in Postgres (`messages`/`conversations`, written by `session.ask()` at
-`session.ts:62-67`). `turns` is never re-read from the DB — it is a write-through display
-buffer that happens to mirror what was persisted. The source-of-truth question has a real
-answer and it is "the database," not "`useState`."
+**Local only.** No global store (Redux/Zustand), no Context, no lifted state, no URL/route state, no form library. Source-of-truth for the *conversation itself* lives **below the UI** — the persisted `conversations`/`messages` rows and the in-process `ChatSession` (`src/session.ts:55,60`). The component's `turns` is a **display projection**, not the canonical record; the canonical record is the DB. That split (display state vs server state) is the one genuinely interesting thing in this lens. → `02-hooks-state-in-a-cli.md`. System-level state ownership (warm pool, one conversation across turns) is owned by `study-system-design`.
 
-→ Server-state-vs-client-state ownership at the system level belongs to
-`study-system-design`. → See **02-hooks-state-in-a-cli.md** for the `useState` triad walk
-and **04-session-as-the-data-layer.md** for the client/canonical split.
+---
 
 ## 3. component-architecture
 
-**One component. No composition patterns yet — and that is the correct amount.** `<Chat>`
-(`chat.tsx:9`) is the only component in the repo. It takes one prop (`session: ChatSession`,
-`chat.tsx:9`) and renders three regions: a header (`chat.tsx:39-41`), the mapped transcript
-(`chat.tsx:42-47`), and a state-switched footer that is either the spinner or the input
-(`chat.tsx:48-57`).
+**One component, no composition tree to speak of.** `<Chat>` (`chat.tsx:9`) is the only application component; the rest are Ink primitives (`<Box>`, `<Text>`) and two third-party leaves (`<TextInput>`, `<Spinner>`). No children/slots/render-props/compound/headless patterns — there's nothing to compose yet.
 
-There are no children/slots, no render props, no headless components, no compound APIs,
-no container/presentational split. The `<Box>`/`<Text>` primitives from Ink are
-composed declaratively — that *is* the JSX composition — but you author no abstractions
-over them. For a 64-line UI this is right; the moment a second screen or a reusable
-message-row appears, the `key`-mapped transcript (`chat.tsx:42`) is the first thing that
-would graduate into a `<Message>` component.
+**The boundary that *does* exist is vertical, not within the tree:** the container/presentational seam between `<Chat>` (presentational: renders, owns ephemeral UI state) and `createChatSession` (container: owns data acquisition). `<Chat>` receives `session` as a prop (`chat.tsx:9`) — dependency injection — and never imports pg, the agent, or the embedder. That's the one component-architecture decision worth defending. → `04-session-as-the-data-layer.md`. Module/interface depth behind `ChatSession` is owned by `study-software-design`.
 
-→ Module depth and interface design belong to `study-software-design`.
+---
 
 ## 4. data-fetching-and-cache
 
-**One async call, the loading-state triad, no query library and no cache.** The fetch
-seam is `session.ask(q)` (`chat.tsx:28`) — an awaited async call wrapped in
-`try/catch/finally` (`chat.tsx:27-34`) with `busy` as the loading flag. This is the same
-shape as a `fetch()` with loading/success/error states, except the "request" is a local
-function call that fans out to a pg pool, an Ollama model, and the aptkit agent loop.
+**One fetch path, no cache layer.** Server state crosses into the UI through a single awaited call: `const answer = await session.ask(q)` (`chat.tsx:28`). No react-query, no SWR, no route loaders, no optimistic updates, no cache invalidation, no retry/backoff in the UI.
 
-No react-query, no SWR, no route loaders, no optimistic updates, no cache invalidation,
-no retry. Each `ask()` is fire-once-await-once. The closest thing to a cache is the
-retrieval-based episodic memory inside `session.ts:53,65` — but that is server-side state
-in pgvector, not a client fetch cache, and it belongs to system-design.
+What *is* present is the **loading/success/error state machine** hand-rolled around that one call: `setBusy(true)` → `await` → success appends a `buffr` turn (`chat.tsx:29`) / `catch` appends an error turn (`chat.tsx:31`) / `finally` clears `busy` (`chat.tsx:32`). The re-entrancy guard `if (busy) return` (`chat.tsx:17`) is the manual stand-in for what a query library's `isFetching` would gate. → `03-async-ui-with-a-busy-flag.md`.
 
-→ See **03-async-ui-with-a-busy-flag.md** for the try/finally + spinner walk. → Wire
-semantics (the pg protocol, the Ollama HTTP calls) belong to `study-networking`; cache-as-
-architecture belongs to `study-system-design`.
+Optimistic update — *partial*: the user's own turn is appended **before** the await resolves (`chat.tsx:25`), so the question shows instantly. The answer is not optimistic; it waits. The wire semantics under `ask()` (Ollama HTTP, pg protocol) belong to `study-networking`; the no-client-cache-because-the-DB-is-the-cache argument belongs to `study-system-design`.
+
+---
 
 ## 5. routing-and-navigation
 
-`not yet exercised`. One screen, one process, no navigation. No route structure, no
-code-splitting, no deep-linking — there is nowhere to route to. The `/exit` and `/quit`
-string commands (`chat.tsx:18`) are the only "navigation" and they exit the app, not move
-between views.
+`not yet exercised`. One screen, one component, no routes, no navigation, no history, no deep-linking, no code-splitting at a route boundary. The only "navigation" is `/exit`/`/quit` tearing the app down (`chat.tsx:18–22`, `useApp().exit()`), which is process teardown, not routing.
+
+---
 
 ## 6. styling-and-design-system
 
-**Color props only — no design system.** Styling is Ink's prop-based layout and color:
-`flexDirection="column"` and `marginBottom` (`chat.tsx:38-43`) drive layout via Yoga;
-`color="cyan"`/`"green"`/`"yellow"`, `bold`, and `dimColor` (`chat.tsx:44,49,52,54`) drive
-appearance. There are no design tokens, no theme, no dark-mode switch, no responsive
-breakpoints, no animation system beyond the `<Spinner type="dots">` (`chat.tsx:49`), which
-is a prebuilt Ink component, not authored animation. CSS, CSS-in-JS, CSS Modules, and
-utility-first frameworks are all `not yet exercised` — the terminal has no stylesheet.
+`not yet exercised` as a *system*. Styling is **Ink prop-level color and weight only**: `color="cyan"`/`"green"`/`"yellow"` (`chat.tsx:44,49,54`), `bold` (`chat.tsx:44`), `dimColor` (`chat.tsx:40`), and flexbox layout via `<Box flexDirection marginBottom>` (`chat.tsx:38,39,43`). No CSS, no CSS-in-JS, no CSS Modules, no design tokens, no theming (dark mode / brand), no responsive breakpoints, no animation system beyond the third-party `<Spinner>`. There is nothing to "scale as components grow" because there is one component and a fixed palette.
+
+---
 
 ## 7. browser-platform-and-build
 
-**No Web APIs (no browser). The platform API is the TTY; the build is `tsc` to ESM.**
-The platform surface Ink touches on your behalf is raw-mode stdin — Ink puts the terminal
-into raw mode so `<TextInput>` (`chat.tsx:55`) can capture keystrokes character-by-character
-instead of line-buffered. That is the terminal analog of a DOM `keydown` listener. No
-Storage, Worker, ServiceWorker, IndexedDB, WebSocket, EventSource — none apply.
+**Platform APIs:** the platform is the **TTY, not the browser**. No Storage / Worker / ServiceWorker / IndexedDB / WebSocket / EventSource. The one platform primitive in play is **raw-mode stdin**: Ink + `ink-text-input` put the terminal into raw mode to capture keystrokes char-by-char and drive `<TextInput value/onChange/onSubmit>` (`chat.tsx:55`). That's the terminal analogue of a DOM input's keydown stream. → `05-controlled-text-input.md`.
 
-Build: `tsc -p tsconfig.json` (`package.json:7`) with `jsx: "react-jsx"` (`tsconfig.json:13`)
-— the automatic JSX runtime, so no `import React` is needed (note `chat.tsx:1` imports only
-`useState`). Output is ESM (`module: "NodeNext"`, `tsconfig.json:4`; `"type": "module"`,
-`package.json:4`), run directly by Node from `dist/` (`npm run chat` → `node dist/src/cli/chat.js`,
-`package.json:12`). There is no bundler — no Vite, Webpack, esbuild. No tree-shaking,
-code-splitting, polyfills, or sourcemap config; Node consumes the emitted `.js` directly.
+**Build:** `tsc -p tsconfig.json` only (`package.json:7`), emitting **ESM** (`"type": "module"`, `package.json:3`; `module: NodeNext`, `tsconfig.json:4`). JSX compiles via the **automatic runtime** (`jsx: react-jsx`, `tsconfig.json:13`) — no `import React` needed, which is why `chat.tsx:1` imports only `useState`. The deploy artifact is plain `.js` files under `dist/`, run by Node (`node dist/src/cli/chat.js`, `package.json:12`). No bundler (Vite/Webpack/esbuild), no tree-shaking, no code-splitting, no sourcemaps config, no polyfills. Bundle-size *measurement* would belong to `study-performance-engineering` — but there is no bundle, so it's `not yet exercised`.
 
-→ See **05-jsx-to-esm-build.md** for the `react-jsx` + ESM toolchain walk. → Bundle-size
-*measurement* would belong to `study-performance-engineering`, but there is no bundle.
+---
 
 ## 8. frontend-red-flags-audit
 
-Ranked by user-visible consequence. This is a small, clean surface — the flags are minor
-and mostly inference, labeled as such.
+Ranked by user-visible consequence. All grounded; the top one is the only one that would actually surface.
 
-1. **`turns` and the database can silently diverge** (`chat.tsx:25,29` vs `session.ts:62-67`).
-   The client appends to `turns` on submit and on answer, while `session.ask()` independently
-   persists. If `persistMessage` succeeds but `agent.answer()` throws, the DB has the user
-   turn but the screen shows an `error:` bubble (`chat.tsx:31`) — the two stores disagree and
-   nothing reconciles them. *Consequence:* a replayed conversation from the DB would not match
-   what the user saw. Real, but low-stakes single-device.
+**1. The transcript re-renders on every keystroke.** `setInput` (`chat.tsx:55`) updates state on `<Chat>`, and the `turns.map()` (`chat.tsx:42`) lives in the same component, so every keypress re-runs the whole transcript render. *Consequence:* on a long conversation, typing latency grows with transcript length — each keystroke reconciles N turns. Today N is small and the terminal repaint is cheap, so it's invisible; it becomes visible at hundreds of turns. *The move:* split the input into its own child component so `input` state lives below the transcript, or memoize the rendered turns. Inferred under React's default behavior, not measured — the measurement is `study-performance-engineering`'s.
 
-2. **`key={i}` uses the array index** (`chat.tsx:43`). Because `turns` is strictly append-only
-   and never reordered or spliced, index keys are *safe here* — but this is the exact pattern
-   that bites the moment anyone inserts, filters, or removes a turn. Flagged because you know
-   this one cold and a reviewer will look for it.
+**2. `turns` (display state) can drift from the DB (canonical state).** The transcript is rebuilt fresh each process start from `useState<Turn[]>([])` (`chat.tsx:11`) — it never reads back the persisted `messages`. *Consequence:* the on-screen history is session-local; a crash mid-turn loses the displayed transcript even though the user turn was persisted (`session.ts:62`). This is a deliberate split (display projection vs source of truth), not a bug — but it's the kind of state-can't-be-invalidated risk this lens names. Owned at the system level by `study-system-design`.
 
-3. **No cancellation on an in-flight `ask()`** (`chat.tsx:28`). `busy` blocks a *second*
-   submit (`chat.tsx:17`), but there is no way to abort the current one — no AbortController,
-   no escape-to-cancel. A slow Ollama generation locks the UI in `thinking…` with no exit but
-   killing the process. *Consequence:* perceived hang on a slow model. Cancellation semantics
-   belong to `study-runtime-systems`; the UI-side gap is the missing abort affordance.
+**3. No `await` cancellation.** `session.ask(q)` (`chat.tsx:28`) can't be cancelled once started — there's no `AbortController`, and the `/exit` path can't interrupt an in-flight turn (the `busy` guard at `chat.tsx:17` blocks new input but the awaited turn runs to completion). *Consequence:* `/exit` during a slow model call waits for the call. Acceptable for a single-user local CLI; would matter the moment a turn could hang. Cancellation mechanics belong to `study-runtime-systems`.
 
-4. **`render()` and `await createChatSession()` at module top level** (`chat.tsx:62-63`).
-   A `createChatSession()` rejection (e.g. `DATABASE_URL` unset, `session.ts:37`) throws before
-   `<Chat>` ever mounts — an unhandled top-level rejection with a raw stack trace, not a rendered
-   error state. *Consequence:* startup failures look like a crash, not a message. Minor; it is a
-   dev-run CLI.
-
-No re-render-per-keystroke pathology worth flagging: `<TextInput>` re-rendering on each
-`onChange` (`chat.tsx:55`) is correct controlled-input behavior, and the tree is tiny, so
-Ink repaints are cheap.
+**4. Error surface is a string in the transcript.** The `catch` stringifies `(err as Error).message` into a `buffr` turn (`chat.tsx:31`). *Consequence:* no error type discrimination, no retry affordance — a transient pg blip and a real bug look identical to the user. Fine for a personal tool; thin for anything shared.

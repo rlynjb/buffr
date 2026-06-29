@@ -1,27 +1,57 @@
-# Study — Distributed Systems (applied to `buffr-laptop`)
+# Study — Distributed Systems (applied to buffr-laptop)
 
-Reading order and what each file is for. This guide is **audit-style** (`me.md` two-pass shape): one honest lens audit, then a short list of pattern files for the few coordination seams the repo actually has.
+The honest verdict first: **buffr-laptop is not a distributed system.** It is
+one Node process with two remote dependencies — Postgres (over a connection
+pool) and Ollama (over HTTP). There are no peers, no replicas, no queues, no
+consensus, no leader election. Most of the distributed-systems lens inventory
+comes back `not yet exercised`, and that is the correct reading, not a gap to
+paper over.
 
-The headline up front, because it's the most important thing about this repo: **`buffr-laptop` is a single-device system.** One Node process, two remote dependencies (Postgres over a pool, Ollama over HTTP). No peers, no replicas, no queues, no consensus, no second writer. Most distributed-systems lenses come back **`not yet exercised`** — and that's the correct verdict, not a gap to paper over. The real distributed problem (a laptop brain and a phone brain sharing one Supabase) is **designed but deferred** — design, not code.
+So this guide is deliberately thin. It teaches the coordination that *is* here
+— the client/server boundary to Postgres, the async write-buffering in the
+trace sink, and the storage-level idempotency (`ON CONFLICT`) — and it names,
+honestly, what becomes relevant the day a second device shows up. That future
+(laptop + phone sharing one Supabase) is **design-only, deferred**; one file
+covers it as forward-looking design, clearly labelled DESIGN-NOT-CODE.
 
 ## Reading order
 
 ```
-  1. 00-overview.md   the coordination map + ranked findings + the honest "not yet exercised" ledger
-  2. audit.md         all 9 distributed-systems lenses walked against the repo, each marked honestly
-  3. 01-app-to-postgres-boundary.md      the ONE real client/server seam (pg.Pool, fail-fast)
-  4. 02-trace-sink-write-buffering.md    async write buffering where ordering is decided at emit, not by the flush race
-  5. 03-deferred-two-brain-shared-memory.md   DESIGN-NOT-CODE: the future laptop+phone-share-Supabase distributed problem
+  00-overview.md   ← start here. the coordination map + ranked findings
+  audit.md         ← Pass 1: every distributed-systems lens, walked honestly
+                       (mostly "not yet exercised")
+
+  Pass 2 — the three things actually worth a deep walk:
+  01-app-to-postgres-boundary.md       the only real client/server seam
+  02-trace-sink-write-buffering.md     async writes, ordered by event time
+  03-deferred-two-brain-shared-memory.md   DESIGN-NOT-CODE — the future
 ```
 
-Read `00` first for the map and the verdict. Read `audit.md` to see every lens checked. The three pattern files are the only places this repo has anything coordination-shaped worth a deep walk — and the third is explicitly a future design, labeled as such throughout.
+## What's here vs not
 
-## Cross-links (where the neighboring mechanism actually lives)
+| lens | verdict |
+| --- | --- |
+| client/server boundary (`pg.Pool`) | **present** → `01` |
+| partial failure / timeouts / retries | thin — fail-fast, no acquire timeout, nothing retries → audit |
+| idempotency / delivery semantics | storage-level yes (`ON CONFLICT`), request-level no → audit + `02` |
+| consistency / staleness | trivially consistent — single writer, single reader → audit |
+| replication / partitioning / quorums | `not yet exercised` |
+| queues / streams / ordering / backpressure | `not yet exercised` (the trace sink is the closest thing → `02`) |
+| clocks / coordination / leadership | logical clock absent; physical `event.timestamp` used for replay order → `02`, audit |
+| sagas / outbox / cross-boundary workflows | `not yet exercised` (local transactions only) → audit |
 
-This guide owns **correctness across a coordination boundary**. It deliberately does *not* re-teach mechanisms that belong to its neighbors:
+## Cross-links to the sibling guides
 
-- **`study-system-design/`** — the architectural shape and scale tradeoffs (the deferred-body decision, the vector-store adapter, the long-lived session). See `study-system-design/07-deferred-body.md` and `04-long-lived-chat-session.md`.
-- **`study-database-systems/`** — datastore-*local* consistency: transactions, isolation, MVCC, WAL, single-node durability. The `begin/commit/rollback` in `migrate.ts` and the `ON CONFLICT` upserts are taught there (`05-transactions-isolation-and-anomalies.md`, `08-replication-and-read-consistency.md`).
-- **`study-debugging-observability/`** — the trajectory capture as an *observability* artifact (what the trace sink lets you see). This guide covers the same sink as a *write-ordering* problem; observability covers it as evidence.
+This guide owns **correctness across a coordination boundary**. It does not
+re-teach what the neighbours own:
 
-A finding belongs to the generator that owns the mechanism. When in doubt this guide cross-links rather than duplicates.
+- **`study-system-design`** — the architectural shape and scale tradeoffs of
+  buffr-laptop (the local-first-with-cloud-mirror design, the boundaries).
+  When the question is "what's the shape," go there.
+- **`study-database-systems`** — datastore-*local* consistency: Postgres
+  transactions, isolation levels, the HNSW index, durability. When the
+  question is "what does Postgres guarantee on one box," go there.
+- **`study-debugging-observability`** — the trajectory capture in
+  `agents.messages` as an *observability* artifact (what the trace sink writes
+  and how you'd read it back). This guide covers the *write-ordering
+  correctness* of that sink; the observability guide covers reading it.

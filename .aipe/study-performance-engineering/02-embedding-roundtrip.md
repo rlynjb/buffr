@@ -1,242 +1,151 @@
-# Embedding Roundtrip
+# Embedding Roundtrip — batched-per-doc, serial-across-files
 
-**Industry names:** embedding generation · batched inference · embedding roundtrip.
-**Type:** Industry standard (the serial-across-files part is project-specific).
+**Industry name(s):** embedding generation; request batching vs request serialization; pipeline stall (GPU idle). **Type:** Industry standard.
 
----
+Embedding text into 768-dim vectors is an HTTP roundtrip to Ollama. buffr already does the *hard* batching right — and then leaves an easy parallelization on the floor at index time.
 
 ## Zoom out, then zoom in
 
-Before any text can be searched, it has to become a vector. That conversion is an HTTP
-roundtrip to Ollama, and Ollama runs it on the GPU. There are two questions hiding in
-"how fast is indexing": how efficiently does buffr *batch* the embed calls, and how well
-does it *overlap* embedding with the database writes around it. The answer is split:
-batching is good, overlap is absent.
+Every chunk that gets stored, and every query that gets searched, first passes through the embedding model. That model lives in Ollama, across an HTTP boundary. So "how slow is embedding" is really "how many HTTP roundtrips, and do they overlap."
 
 ```
-  Zoom out — where embedding sits in the index path
+  Zoom out — where the embedding roundtrip lives
 
-  ┌─ CLI layer (src/cli/index-cmd.ts) ──────────────────────────┐
-  │  for (const path of paths)  ← SERIAL across files            │
-  │     readFile → indexDocumentRow(...)                         │
-  └──────────────────────────────────┬──────────────────────────┘
-                                      │
-  ┌─ Pipeline (aptkit createRetrievalPipeline) ─▼───────────────┐
-  │  chunk doc → ★ embed ALL chunks in ONE call ★ → upsert       │ ← we are here
-  └──────────────────────────────────┬──────────────────────────┘
-                       embed │ HTTP :11434          │ upsert (pg)
-  ┌─ Provider: Ollama ──────▼──────┐  ┌─ Storage: Postgres ──▼──┐
-  │  nomic-embed-text:v1.5 (768d)  │  │  agents.chunks INSERTs   │
-  │  GPU-bound                     │  │                          │
-  └────────────────────────────────┘  └──────────────────────────┘
+  ┌─ Index CLI ──────────────────────────────────────────────────┐
+  │  src/cli/index-cmd.ts   for (path of paths) { await ... }     │ ◄ serial here
+  └───────────────────────────┬───────────────────────────────────┘
+                              │  indexDocumentRow → pipeline.index
+  ┌─ Retrieval pipeline (aptkit) ─────────────────────────────────┐
+  │  chunk the doc → ★ embed ALL chunks in ONE /api/embed call ★  │ ◄ batched here
+  └───────────────────────────┬───────────────────────────────────┘
+                              │  HTTP POST
+  ┌─ Provider — Ollama ───────▼───────────────────────────────────┐
+  │  nomic-embed-text:v1.5  →  768-dim vectors                    │
+  └───────────────────────────────────────────────────────────────┘
 ```
 
-Zoom in: the pattern is **batched-per-document** embedding (good — one HTTP call carries
-all of a document's chunks) running inside a **serial-across-files** loop (the cost — file
-N+1 doesn't start until file N's commit returns, so the GPU sits idle through every write).
-The question this file answers: where does the indexing path actually waste time, and is it
-worth fixing?
+Zoom in: there are two batching decisions stacked here, and buffr gets one right and one wrong. **Within a document:** all chunks go in one call — good batching. **Across documents:** files are processed one at a time, fully, before the next starts — serialization, with the GPU sitting idle while each file does its database writes.
 
----
+## The structure pass
 
-## Structure pass
-
-**Layers.** Two that matter for cost: the *outer* file loop in `index-cmd.ts:22-26`, and
-the *inner* per-document pipeline (chunk → embed → upsert) that the loop body calls.
-
-**Axis — lifecycle / overlap (is the GPU busy or idle right now?).** Trace "what is the GPU
-doing?" across the two layers:
+Axis: **lifecycle** — *when* does each embedding roundtrip happen, and what's the GPU doing between them?
 
 ```
-  One question — "is the GPU busy?" — across the loop
+  axis = "what is the GPU doing?"  — traced across the index loop
 
-  ┌─ inner (one document) ───────────────────────────────┐
-  │  embed all chunks  → GPU BUSY (one batched call)      │  good
-  │  upsert chunks     → GPU IDLE (DB doing the work)     │
-  └──────────────────────────────────────────────────────┘
-  ┌─ outer (across files) ───────────────────────────────┐
-  │  file N: embed(busy) → write(idle) → COMMIT           │
-  │  file N+1: ...waits for N's commit, THEN embeds...    │  ← the idle gap
-  └──────────────────────────────────────────────────────┘
-
-  the seam is the await between files: nothing overlaps the GPU with the DB write.
+  file A: embed(all chunks) ──► [GPU busy] ──► write rows ──► [GPU IDLE]
+                                                                  │
+  file B: embed(all chunks) ──► [GPU busy] ──► write rows ──► [GPU IDLE]
+                                  ▲
+                                  └─ seam: the GPU goes idle through
+                                     every file's DB writes because the
+                                     NEXT file's embed waits for this
+                                     file's writes to finish (for-await)
 ```
 
-**Seam — the `await` between files.** The load-bearing seam is the `await indexDocumentRow(...)`
-inside the `for...of` at `index-cmd.ts:24`. Because it's awaited serially, file N+1's
-embedding can't begin until file N has fully committed. The GPU — the scarce resource — is
-idle for the entire duration of each file's database write. That seam is where the only
-real indexing-path latency lives.
-
----
+**Layers:** per-file loop (serial) → per-doc pipeline (batched) → Ollama (the GPU). **Seam:** the `for...await` in `index-cmd.ts` — control flips from "could be concurrent" to "strictly sequential" right there. The batching seam inside the pipeline is fine; the serialization seam in the CLI is the cost.
 
 ## How it works
 
 ### Move 1 — the mental model
 
-You know how `Promise.all([a, b, c])` runs three async things concurrently, versus a
-`for` loop with `await` inside that runs them one after another? buffr's indexer is the
-*second* shape — deliberately serial. The mental model: **a pipeline where each stage is
-fast, but the stages are run strictly one-file-at-a-time, so the expensive resource (GPU)
-goes cold every time the cheap resource (DB) takes a turn.**
+You know how `Promise.all([fetchA(), fetchB()])` lets two requests overlap, but `await fetchA(); await fetchB();` forces the second to wait for the first to fully finish? That's the entire shape here. The per-document embed is one efficient request. The cross-file loop is the `await; await;` version — and the thing each file waits on isn't just its own embed, it's its own *database writes* too, during which the GPU has nothing to do.
 
 ```
-  Two timelines — serial (now) vs overlapped (possible)
+  serial (now)              vs    overlapped (possible)
 
-  NOW (serial):
-    GPU:  [embed f1]......idle......[embed f2]......idle......[embed f3]
-    DB:   ............[write f1].............[write f2].............[write f3]
-          └─ GPU idle here ─┘      └─ GPU idle here ─┘
-
-  OVERLAPPED (pipelined):
-    GPU:  [embed f1][embed f2][embed f3]
-    DB:           [write f1][write f2][write f3]
-          └─ GPU stays hot; writes hide behind the next embed ─┘
+  A:embed▓▓ A:write░░             A:embed▓▓ A:write░░
+                B:embed▓▓ B:write░░    B:embed▓▓ B:write░░
+                                       ▲ B embeds while A writes
+  GPU: ▓▓......▓▓......            GPU: ▓▓▓▓............
+       idle through writes             back-to-back, then idle
 ```
 
-The win on the table is the white space in the first timeline — the GPU idle gaps.
+### Move 2 — the step-by-step walkthrough
 
-### Move 2 — the walkthrough
-
-**The batching that's already right.** Inside one document, embedding is batched. The
-pipeline (`createRetrievalPipeline`, wired at `index-cmd.ts:20`) chunks the document and
-sends *all* chunks to Ollama in a single `/api/embed` call, not one call per chunk. That's
-the correct shape: one HTTP roundtrip, one GPU dispatch, N vectors back. If this were
-per-chunk you'd pay HTTP + GPU-dispatch overhead N times per document; it's paid once.
-
-**The serialization that isn't.** Here's the entire outer loop, `index-cmd.ts:22-26`:
+**The serialization, in the CLI.** This is the cost, and it's four lines (`src/cli/index-cmd.ts:22-26`):
 
 ```ts
 for (const path of paths) {
-  const text = await readFile(path, 'utf8');                          // ← read file N
-  await indexDocumentRow(pool, cfg.appId, pipeline,                   // ← embed + write N,
-    { id: basename(path), text, sourcePath: path });                 //   AWAITED fully
+  const text = await readFile(path, 'utf8');           // I/O wait
+  await indexDocumentRow(pool, cfg.appId, pipeline,    // embed + DB writes,
+    { id: basename(path), text, sourcePath: path });   //   fully awaited
   process.stdout.write(`indexed ${path}\n`);
-}                                                                      // ← only now: file N+1
+}
 ```
 
-`indexDocumentRow` does the embed *and* the database write for one file, and the `await`
-makes the loop block until both finish — including the `commit`. So the timeline is
-`embed(f1) → write(f1) → embed(f2) → write(f2) → ...`. While `write(f1)` is happening, the
-GPU is idle. While `embed(f2)` is happening, the DB is idle. Nothing overlaps.
+What breaks if you reorder: nothing functionally — the docs all get indexed. What's *lost*: the `await indexDocumentRow(...)` blocks the loop until that file's embed *and* its INSERTs are both done. The next file's embed can't start until this file's database round-trips finish. So the GPU — the expensive, serial resource — goes idle during every file's write phase. With 10 files you pay 10 sequential (embed + write) cycles instead of overlapping file B's embed with file A's write.
 
-**Why this is the one real win.** Of everything in the repo, this is the place buffr's
-*own code* (not the model, not Postgres) leaves measurable time on the floor. The fix is a
-bounded concurrency over files — embed file N+1 while file N's write is in flight:
+**The batching, in the pipeline (the part that's right).** Inside `pipeline.index` (aptkit, consumed via `indexDocumentRow` at `src/runtime.ts`), a document's chunks are embedded in a *single* `/api/embed` call carrying all chunk texts at once. This is the batching that actually matters: it amortizes the HTTP roundtrip and the model's startup overhead across every chunk in the doc.
 
 ```
-  pseudocode — overlap embed with write (the available win)
+  per-doc batching — the part buffr gets right
 
-  pending = empty queue
-  for each path in paths:
-    text = read(path)
-    embedJob = embedAndPrepare(text)        // GPU work, can run ahead
-    pending.enqueue(embedJob)
-    if pending.size >= CONCURRENCY:          // bounded — don't unleash all files at once
-      await pending.dequeue().write()        // drain oldest while next embeds
-  await all remaining writes
+  doc → [chunk1, chunk2, ... chunkN]
+              │ ONE call, not N
+              ▼
+   POST /api/embed { input: [c1, c2, ... cN] }
+              │
+              ▼
+   [v1, v2, ... vN]   ← N vectors, one roundtrip
 ```
 
-**Does it matter at laptop scale?** For indexing a handful of markdown files by hand —
-barely; you index rarely and wait once. The moment the corpus is dozens or hundreds of
-files (a real personal knowledge base), the cumulative idle gaps are the difference
-between an indexing run that feels instant and one you walk away from. It's the highest-
-leverage perf change in the repo precisely because it's the only one where the bottleneck
-is buffr's loop structure rather than an inherent model or DB cost.
+What would break without it: N separate HTTP calls per document, each paying connection + model-load overhead. That's the expensive mistake, and buffr avoids it. The serialization across files is the *cheap* mistake left in place.
 
-### Move 2.5 — current state vs future state
-
-```
-  Phase A — now (serial)                Phase B — overlapped (the fix)
-  ────────────────────────────          ──────────────────────────────
-  for...await, one file at a time       bounded-concurrency over files
-  GPU idle through each write           GPU stays hot; writes hide behind embeds
-  correct, simple, fine for a few       same correctness; faster on large corpora
-  files                                 cost: a concurrency limit to not OOM / not
-                                        overwhelm the single GPU
-```
-
-What *doesn't* change: the per-document batching (already right), the upsert logic, the
-HNSW index. The fix is purely the loop's concurrency shape.
+**Why this is correctly deprioritized.** Indexing is a manual, one-shot CLI you run when you add documents (`npm run index -- file.md`). It is not on any hot path, not on a chat turn, not user-facing latency. Fixing the serialization (a bounded `Promise.all` over files, or `p-limit` with a small concurrency) is a real speedup for large index runs and a 20-minute change — but it earns nothing on a 5-file corpus, and the dominant chat-turn cost (`gemma2:9b`) is untouched by it either way.
 
 ### Move 3 — the principle
 
-Two independent levers hide inside "make embedding faster": **batch** (fewer roundtrips per
-unit of work) and **overlap** (keep the scarce resource busy while the cheap one works).
-buffr nailed the first and skipped the second. The discipline is to ask both questions
-separately — a batched pipeline can still leave the GPU cold if its stages don't pipeline.
-
----
+Batch the expensive serial resource; overlap independent work. buffr batches the embed roundtrip *within* a document (the right instinct) but serializes *across* documents, parking the GPU during I/O. The general lesson: find the resource that's both expensive and serial — here, the embedding model — and make sure it's never idle while waiting on something that could have run concurrently. The fix is cheap; whether it's worth doing is a question of how often you re-index, which is unmeasured.
 
 ## Primary diagram
 
 ```
-  Embedding roundtrip — full index path with the idle gap marked
+  Embedding roundtrip — two batching decisions, one right, one not
 
-  ┌─ CLI: index-cmd.ts ───────────────────────────────────────────────┐
-  │  for path of paths:   ← SERIAL (the seam)                          │
-  │    read → indexDocumentRow(...) → AWAIT (blocks next file)         │
-  └──────────────────────────────┬────────────────────────────────────┘
-                                  │
-        ┌─────────────────────────┴───────────────────────────┐
-        │ inner: chunk → embed(BATCHED, 1 HTTP) → upsert       │
-        └───────┬──────────────────────────────────┬──────────┘
-        embed   │ HTTP :11434                upsert │ pg wire
-  ┌─ Ollama ───▼──────────┐              ┌─ Postgres ▼─────────┐
-  │ nomic-embed (GPU BUSY)│   ......      │ INSERTs (GPU IDLE) │
-  └───────────────────────┘   ↑ idle gap └─────────────────────┘
-                              │
-              the white space between embed and the next embed:
-              the only latency buffr's own code can reclaim
+  ┌─ Index CLI (src/cli/index-cmd.ts:22) ────────────────────────┐
+  │  for path of paths:  await indexDocumentRow(...)              │
+  │     ▲ SERIAL across files — GPU idle through each file's      │
+  │       DB writes  (the cheap miss, low priority)               │
+  └───────────────────────────┬───────────────────────────────────┘
+  ┌─ pipeline.index (aptkit) ─▼───────────────────────────────────┐
+  │  chunk doc → embed ALL chunks in ONE /api/embed call          │
+  │     ▲ BATCHED per doc — amortizes the roundtrip (the win)     │
+  └───────────────────────────┬───────────────────────────────────┘
+                              │  HTTP (one roundtrip per doc)
+  ┌─ Ollama ──────────────────▼───────────────────────────────────┐
+  │  nomic-embed-text:v1.5 → 768-dim vectors                      │
+  └───────────────────────────────────────────────────────────────┘
 ```
-
----
 
 ## Elaborate
 
-Batched inference is the first thing you learn shipping embeddings at any volume: GPU
-dispatch overhead is fixed per call, so amortizing it over many inputs is free throughput.
-buffr got that for free from the aptkit pipeline. The serial-across-files gap is the
-classic "the batch is fast but the pipeline isn't pipelined" mistake — common because the
-naive `for...await` reads correctly and *is* correct, just not overlapped.
+The per-doc batching is a property of aptkit's pipeline, not buffr — buffr consumes `createRetrievalPipeline` and gets the batching for free (`src/cli/index-cmd.ts:20`). The serialization is buffr's, in its own CLI loop. That split matters for where you'd make the fix: you can't touch the batching (aptkit is consumed, never edited — a hard repo constraint), but the cross-file loop is buffr's to change.
 
-This connects to `04-connection-pool-reuse` (the writes are cheap *because* the pool is
-warm) and `03-per-chunk-insert-loop` (the write itself is N round-trips, which is the *other*
-half of the idle gap's duration). Shorten the write and the idle gap shrinks too.
-
----
+For the HTTP transport underneath `/api/embed` — keep-alive, connection reuse to Ollama, why a roundtrip costs what it does — see **`study-networking`**. For why `nomic-embed-text:v1.5` at 768 dims and what the embedding model is doing, see **`study-ai-engineering`**. This file owns the *batching vs serialization* performance read.
 
 ## Interview defense
 
-**Q: Walk me through your indexing throughput. Where's the time going?**
+**Q: Walk me through your embedding throughput at index time.**
 
-Two stages per file: embed (one batched HTTP call to Ollama, GPU-bound) and upsert (a
-transaction of INSERTs). The embed batching is right — all of a document's chunks go in one
-call. The cost is that files are processed strictly serially: `index-cmd.ts:24` awaits each
-file's full embed-and-commit before starting the next. So the GPU sits idle through every
-database write.
+> Two layers. Within a document, all chunks embed in one `/api/embed` call — so I pay one HTTP roundtrip per doc, not one per chunk. That's the batching that matters; it amortizes the model-load and network overhead. Across documents though, my CLI loop is `for...await`, so file B's embed waits for file A's embed *and* file A's database writes to finish. The GPU sits idle while each file does its INSERTs. The fix is bounded concurrency over the files so B embeds while A writes.
 
 ```
-  GPU:  [embed f1]....idle....[embed f2]....idle....
-  DB:   .........[write f1].........[write f2]....
+  within doc:  N chunks → 1 call   ✓ batched
+  across docs: A then B then C     ✗ serial, GPU idle on writes
 ```
 
-The fix is bounded concurrency over files — embed N+1 while N's write is in flight, keeping
-the GPU hot. Bounded, not unbounded, because there's one GPU and one pool; I don't want to
-fan out infinitely. At my current scale (a few hand-indexed files) it doesn't bite, but it's
-the one place my own code leaves latency on the floor, so it's the first thing I'd fix if
-the corpus grew.
+**Q: Why haven't you fixed the serial part?**
 
-**Anchor:** `index-cmd.ts:22-26` (the serial loop), and the batching lives in the aptkit
-pipeline wired at line 20.
+> Because it's not on a hot path. Indexing is a manual one-shot CLI, not a chat turn — no user is waiting on it. On my corpus it's a handful of files and the cost is invisible. I'd fix it the moment re-indexing felt slow, and it's a small change — a `p-limit` over the file loop. But the dominant cost on the path users actually feel is `gemma2:9b` generation, which this doesn't touch, so it's correctly low priority.
 
----
+> Anchor: `src/cli/index-cmd.ts:22-26` (serial loop), per-doc batching inside `pipeline.index`.
 
 ## See also
 
-- `03-per-chunk-insert-loop.md` — the write half of the idle gap; shrinking it helps here.
-- `04-connection-pool-reuse.md` — why the per-file write is cheap to begin with.
-- `06-no-caching.md` — embeds are also recomputed (no cache) on the query side.
-- `audit.md` §5, §6 (batching present), §8 (red flag #1, the serial gap).
-- `study-networking` — the Ollama HTTP roundtrip and pg wire behind these timings.
-- `study-ai-engineering` — embedding models, chunking, the retrieval pipeline.
+- `00-overview.md` — finding #2
+- `audit.md` — lens 5 (I/O), lens 6 (batching), lens 8 (red flags #5)
+- `01-hnsw-approximate-search.md` — the search that consumes these vectors
+- `03-per-chunk-insert-loop.md` — the DB writes the GPU waits on
+- **`study-networking`** — the HTTP transport to Ollama
+- **`study-ai-engineering`** — the embedding model + pipeline

@@ -1,198 +1,102 @@
 # Performance Audit — buffr-laptop (Pass 1)
 
-The 8-lens walk. One `##` per lens. Each names what the code actually does, anchored to
-`file:line`, or says `not yet exercised` and explains when it would start to matter. The
-final lens ranks the risks. Significant findings cross-link to a Pass 2 pattern file
-instead of being re-explained here.
+The 8-lens walk. Each lens names what the codebase actually does with `file:line` grounding, or says `not yet exercised` honestly. Significant findings cross-link to a Pass-2 pattern file rather than restating it.
 
-The frame for every verdict: this is a **single-device, single-conversation** RAG agent.
-No traffic, no SLA, no concurrency. The dominant per-turn cost is `gemma2:9b` generation
-inside Ollama — owned by the model, not by this repo's code.
+The recurring verdict, stated once so each lens can lean on it: **the dominant per-turn cost is `gemma2:9b` generation, owned by Ollama.** Every cost below is measured against that baseline. Most are real and most don't matter yet, because they're rounding error next to the generation step.
 
 ---
 
 ## 1. performance-budget
 
-`not yet exercised` — there is no declared budget anywhere in the repo.
+`not yet exercised` — there is no user-visible or system-visible performance budget anywhere in the repo. No p95/p99 target, no per-turn latency SLO, no cost ceiling, no timeout that represents a budget (the only timeout-shaped config is `ContextWindowGuardedProvider({ maxTokens: 8192 })` at `src/session.ts:46`, which is a context-window guard, not a latency budget). Nothing in the codebase fails or warns when a turn gets slow.
 
-No p95/p99 target, no "a chat turn must complete within N seconds," no egress or token
-quota, no memory ceiling. The chat UI (`src/cli/chat.tsx`) shows a spinner and waits as
-long as the model takes; nothing enforces or even measures a deadline.
-
-The one number that functions *like* a budget is the context-window guard:
-`ContextWindowGuardedProvider(..., { maxTokens: 8192 })` at `src/session.ts:46`. That's a
-correctness/cost cap on prompt size, not a latency budget — but it's the only explicit
-"this many and no more" in the system.
-
-**When it starts to matter:** the moment buffr serves more than one user, or wants to
-promise interactive latency. Today the honest budget is "as fast as a local 9B model
-runs," which is inherent and unbudgeted.
+When it becomes relevant: the moment buffr serves more than one user, or the corpus grows enough that HNSW recall degrades. At single-device scale, "fast enough" is whatever `gemma2:9b` does on the local GPU, and the repo correctly doesn't pretend to control that.
 
 ---
 
 ## 2. measurement-baselines-and-profiling
 
-Partially exercised — one real baseline harness, zero profiling, and a baseline that's
-**written to the DB and never read back.**
+Partially exercised, and this is the most important lens in the guide because it's where the gap is.
 
-What exists:
+**What exists.** The trace sink captures real per-event timing and token data:
+- `src/supabase-trace-sink.ts:67-71` — `tool_call_end` events persist `durationMs` into `tool_results`.
+- `src/supabase-trace-sink.ts:73-78` — `model_usage` events persist `tokensUsed = inputTokens + outputTokens`.
+- The eval harness (`src/cli/eval-cmd.ts:22-33`) is a representative *correctness* workload — it runs every labeled query through the pipeline and scores precision@1 and recall@3.
 
-- **A retrieval-quality baseline:** `src/cli/eval-cmd.ts` runs a labeled query set
-  (`eval/queries.json`) and prints mean P@1 and R@3 (`eval-cmd.ts:22-33`). This is a
-  *quality* baseline, not a *performance* one — it measures whether HNSW returns the right
-  docs, not how fast. But it's the closest thing to a repeatable measurement in the repo,
-  and it's the right place to bolt a latency timer onto.
+**What's missing.** Nothing reads the timing back. `durationMs` and `tokens_used` land in `agents.messages` and are never aggregated, queried, or compared before/after. There is no profiler wired in — no `node --prof`, no `clinic`, no `0x`, no flamegraph. The eval harness measures precision, not latency; it never times `pipeline.query`.
 
-- **Latency + token data captured but orphaned:** `SupabaseTraceSink` persists
-  `event.durationMs` for every tool call (`src/supabase-trace-sink.ts:69`) and
-  `tokensUsed` for every model call (`trace-sink.ts:76`) into `agents.messages`. The data
-  lands in the database every turn — and **nothing ever queries it back.** No aggregation,
-  no p50/p95, no "embedding got slower this week." The baseline exists as rows nobody reads.
-
-What's missing: no profiler, no flame graph, no CPU/heap sampling, no before/after
-evidence on any change. → `05-per-turn-memory-and-trace-cost` covers the write side of
-that captured-but-unread data.
-
-**The cheapest win in the whole repo lives here:** `SELECT avg(tokens_used), ...` over
-`agents.messages` turns the already-written trace into a real baseline. The instrument is
-installed; the dial just isn't being read.
+So every "does this matter" verdict in this audit is an *estimate*, not a measurement. The instrumentation is built; the measurement loop is open. Closing it — one SQL aggregation over `agents.messages.tokens_used` and the trace `durationMs` — is the highest-leverage performance move in the repo. → see `00-overview.md` finding 6.
 
 ---
 
 ## 3. latency-throughput-and-tail-behavior
 
-`not yet exercised` for tail behavior; latency is observable but uncharacterized.
+`not yet exercised` for tail behavior, partially exercised for latency composition.
 
-There is no throughput concern: one conversation, one turn at a time, held in-process by
-the long-lived Ink session (`src/session.ts:34-76`). No queue, no fan-in, no contention.
-"p95/p99" is undefined when N=1 — you need a distribution, and there's one user issuing
-one serial request.
+**Latency composition (observed structure, inferred timing).** One `ask()` turn (`src/session.ts:60-71`) is a fixed sequence: persist user message → `agent.answer()` (embed query → HNSW search → `gemma2:9b` generate, possibly multi-step) → `trace.flush()` → `memory.remember()`. The generation step is the dominant term by an order of magnitude; the embed roundtrips and HNSW search are the next tier; the DB writes are noise. This is structural inference from the call order, not a measured distribution.
 
-The latency that *does* exist, per turn, in order: `persistMessage` (1 INSERT) → embed
-query (1 Ollama HTTP call) → HNSW search (1 SQL query) → `gemma2:9b` generation (the big
-one, seconds) → `trace.flush()` (several INSERTs) → `memory.remember` (1 embed + 1 upsert).
-Generation dominates by orders of magnitude; everything buffr controls is noise next to it.
+**Throughput.** Single-user, single-conversation, in-process (`src/session.ts:34` holds one conversation across turns). There is no concurrency, no queue, no fan-in, so there is no throughput figure to report and no contention to measure.
 
-**When tail behavior starts to matter:** under concurrency. With multiple turns in flight
-the pg pool (default size) and Ollama's single-GPU serialization become the queue points.
-Today neither is exercised.
+**Tail behavior.** `not yet exercised` — p95/p99 are undefined because there's no workload generating a latency distribution. No load test exists. The only multi-iteration path is the eval harness, which doesn't time anything.
 
 ---
 
 ## 4. cpu-memory-and-allocation
 
-`not yet exercised` as a tuned concern — no measured CPU or memory pressure, no GC tuning,
-no allocation profiling.
+Low-pressure and `not yet measured`, which together mean: nothing here is a concern, and nothing has been profiled to confirm it.
 
-The notable allocation choice is benign at this scale: `toVectorLiteral` (`pg-vector-store.ts:15-17`)
-builds a 768-element vector into a `[0.1,0.2,...]` text string on **every** upsert and
-every search. That's a string allocation per vector crossing the pg wire. At hundreds of
-chunks it's invisible; at bulk-load scale it's allocation churn worth noticing —
-→ `03-per-chunk-insert-loop`.
+**Allocation shapes worth naming.** `toVectorLiteral` (`src/pg-vector-store.ts:15-17`) builds a string of 768 floats joined by commas for every upsert and every search — a transient allocation per vector. At one query per turn it's invisible; in a tight indexing loop over a large corpus it's a small, real GC churn. The `search` result mapping (`src/pg-vector-store.ts:80-84`) rebuilds a meta object per hit, bounded by `k` (typically 3-4), so trivial.
 
-The heaviest memory consumer by far is the `gemma2:9b` model weights resident in Ollama's
-process — gigabytes — but that's Ollama's process, not buffr's, and is inherent to local
-generation.
+**Heavy memory lives outside this process.** The embedding model and `gemma2:9b` hold their weights in Ollama, not in the Node heap. buffr's own footprint is the pg pool buffers, the Ink render tree, and per-turn transient strings. No retention, no leak surface, no GC tuning needed at this scale. No heap snapshot has been taken — this is inference from the code shape, not a measurement.
 
 ---
 
 ## 5. io-network-and-database-bottlenecks
 
-The richest lens — this is where buffr's real performance character lives. Four distinct
-I/O patterns, each with its own pattern file:
+The richest lens — this is where buffr's real I/O patterns live, all of them deprioritized by the generation baseline but all of them genuinely present.
 
-- **HNSW approximate search** (`pg-vector-store.ts:67-85`): the `<=>` cosine operator +
-  `ORDER BY ... LIMIT k` is a sub-linear ANN scan — the main performance win in the system.
-  But the index is **untuned**: `sql/001_agents_schema.sql:28-29` creates it with no
-  `m` / `ef_construction`, and no `hnsw.ef_search` is ever set at query time.
-  → `01-hnsw-approximate-search`.
+- **Approximate nearest-neighbour search (the HNSW index)** — `src/pg-vector-store.ts:67-85`, schema at `sql/001_agents_schema.sql:28-29`. The `<=>` cosine-distance operator with `order by ... limit k` gives sub-linear retrieval. This is the main I/O *win*, not a bottleneck — but it's untuned. → see `01-hnsw-approximate-search.md`.
+- **Embedding roundtrip** — one HTTP call to Ollama's `/api/embed` per document (batched across that doc's chunks), but serialized across files in the index CLI. → see `02-embedding-roundtrip.md`.
+- **Per-chunk INSERT loop** — `src/pg-vector-store.ts:38-65` loops one parameterized INSERT per chunk inside a single transaction. N round-trips where a multi-row INSERT or COPY would be one. → see `03-per-chunk-insert-loop.md`.
+- **Connection pool reuse** — `src/db.ts:4-6` builds one `pg.Pool`; `src/session.ts:39` keeps it warm across the whole session. The right call — avoids per-query connect cost. → see `04-connection-pool-reuse.md`.
+- **Per-turn write amplification** — `src/session.ts:61-67` plus `src/supabase-trace-sink.ts:53-85`: one user INSERT, up to 6 trace INSERTs (one per `CapabilityEvent` type), plus `memory.remember`'s embed+INSERT. → see `05-per-turn-memory-and-trace-cost.md`.
 
-- **Embedding roundtrip** (`index-cmd.ts:22-26`, the aptkit pipeline): embedding is
-  **batched per document** — one `/api/embed` HTTP call carries all of a document's chunks.
-  Efficient *within* a file. The real serialization is **across files**: the `for...await`
-  loop processes file N+1 only after file N's commit returns, so the GPU sits idle through
-  every database write. → `02-embedding-roundtrip`.
-
-- **Per-chunk INSERT loop** (`pg-vector-store.ts:43-57`): `upsert` loops one parameterized
-  INSERT per chunk inside a single transaction — no multi-row VALUES, no `COPY`. One wire
-  round-trip per chunk. → `03-per-chunk-insert-loop`.
-
-- **Connection pool reuse** (`db.ts:4-6`, `session.ts:39`): one warm `pg.Pool` created at
-  session start and reused across every turn. The TCP+auth handshake is amortized to once
-  per session — the most load-bearing latency *avoidance* in the repo.
-  → `04-connection-pool-reuse`.
-
-Plus the per-turn write amplification: each chat turn does an extra embed+upsert for
-`memory.remember` (`session.ts:66`) and the trace sink writes up to 6 event types as
-separate INSERTs (`trace-sink.ts:53-85`). → `05-per-turn-memory-and-trace-cost`.
+Worth naming: the trace INSERTs are *queued* during the agent run (`emit()` is sync, pushes a promise) and *awaited together* in `flush()` (`src/supabase-trace-sink.ts:87-93`). So they overlap rather than blocking the run serially — a deliberate, decent choice. They still all hit the DB; `flush()`'s `Promise.all` means they race the connection pool.
 
 ---
 
 ## 6. caching-batching-and-backpressure
 
-Mixed: batching is present (per-doc embeds), caching is entirely absent, backpressure is
-`not yet exercised`.
+**Batching — exercised, partially.** Embedding is batched per document: one `/api/embed` call carries all of a document's chunks (handled inside aptkit's pipeline). The trace writes are batched in the sense of queued-then-flushed (`src/supabase-trace-sink.ts:91-93`). What is *not* batched: the chunk INSERTs (one per chunk, lens 5 / file `03`) and the cross-file embed calls (serial, file `02`).
 
-- **Batching — present.** Embeddings are batched per document into one HTTP call (the
-  aptkit pipeline behind `index-cmd.ts:24`). This is the one batching win the repo has.
+**Caching — `not yet exercised`.** No embedding cache, no query cache, no result memoization. An identical query — the same string asked twice, or the eval harness re-run unchanged — pays the full embed roundtrip and HNSW search every time (`src/pg-vector-store.ts:67`, `src/cli/eval-cmd.ts:25`). → see `06-no-caching.md`.
 
-- **Caching — absent.** No embed cache, no query cache, no result memoization. The same
-  question typed twice re-embeds twice (`session.ts:60-71` → fresh embed every `ask()`),
-  and the eval harness re-embeds every query on every run (`eval-cmd.ts:26`). Embeddings
-  are deterministic for a fixed model+input — a textbook cacheable cost left on the table.
-  → `06-no-caching`.
-
-- **Backpressure — not yet exercised.** No bounded queue, no throttle, no overload mode.
-  The trace sink collects pending writes in an unbounded array and `Promise.all`s them at
-  flush (`trace-sink.ts:50, 91-93`) — fine for one turn's handful of events, but it's an
-  unbounded buffer with no backpressure if event volume ever spiked.
+**Backpressure — `not yet exercised` and correctly so.** There is no queue, no fan-in, no concurrent producer, so there's nothing to apply backpressure to. `flush()`'s `Promise.all` (`src/supabase-trace-sink.ts:92`) fires all pending writes at once with no bound — fine at ~6 writes, would need a bound only if the trace ever fanned out to hundreds of events per turn.
 
 ---
 
 ## 7. rendering-client-and-mobile-performance
 
-`not yet exercised` in the web/mobile sense — no bundle, no DOM, no 60fps budget.
+`not yet exercised` in the web/mobile sense — there is no browser bundle, no DOM, no main-thread budget.
 
-The client is `src/cli/chat.tsx`, an Ink (React-in-terminal) app. Ink re-renders to the
-terminal, which is cheap and never the bottleneck — the user is waiting on `gemma2`, not
-on a render. There's no startup-time concern worth measuring (a Node CLI), no main-thread
-contention, no mobile constraint. The frame-rate-latency work in Rein's portfolio (contrl)
-lives in a different repo; this one has no rendering hot path.
+The one client surface is the Ink (React-in-terminal) TUI at `src/cli/chat.tsx`. It re-renders the terminal on each state change. At the scale of a single conversation transcript this is negligible; Ink's reconciler is the constraint and it's well under any perceptible budget here. No bundle size, no startup-time, no frame budget applies to a terminal app of this size. (For the real-time frame-budget shape, that lives in the `contrl` project, not buffr.)
 
 ---
 
 ## 8. performance-red-flags-audit
 
-Ranked by consequence, each with its evidence — a real anchor or an explicitly-named
-missing measurement.
+Ranked by consequence, with the evidence named for each — and for this repo, "evidence" is almost always *a missing measurement*, which is itself the finding.
 
-```
-  rank  red flag                         evidence                      verdict
-  ────  ───────────────────────────────  ────────────────────────────  ─────────────────────
-   1    GPU idles between files during   index-cmd.ts:22-26            REAL, fixable now.
-        indexing (serial for-await;      (serial loop, embed and       The one place this
-        no embed↔write overlap)          write don't overlap)          repo's own code leaves
-                                                                        latency on the table.
-   2    HNSW untuned (no m /             sql/001:28-29 (no WITH        LATENT. Defaults are
-        ef_construction; no ef_search)   clause); no SET hnsw.*         fine now; recall/latency
-                                         anywhere                       tradeoff is unmanaged
-                                                                        past ~10^5 chunks.
-   3    baseline written, never read     trace-sink.ts:69,76 write;    MISSING MEASUREMENT.
-                                         no SELECT reads it back        Data is in the DB; the
-                                                                        dial is just unread.
-   4    no caching — identical query     session.ts:60; eval-cmd.ts:26 LOW. Deterministic
-        re-embeds every time             (fresh embed each call)        embeds, trivially
-                                                                        cacheable, ~free fix.
-   5    per-chunk INSERT round-trips     pg-vector-store.ts:43-57      LOW now. Bites only at
-        (no multi-row / COPY)            (one query() per chunk)        bulk-load scale.
-   6    write amplification per turn     session.ts:66 + trace-sink    LOW. Extra embed+upsert
-        (extra embed+upsert; 6-event     53-85 (≥1 INSERT per event)   + several INSERTs,
-        trace)                                                         dwarfed by gemma2.
-   7    no performance budget / SLA      (absent everywhere)           ACCEPTED. Correct for a
-                                                                        single-device tool.
-```
+1. **The measurement loop is open (highest leverage).** `durationMs` and `tokens_used` are written (`src/supabase-trace-sink.ts:67-78`) and never read. Evidence: instrumentation present, aggregation absent. Every other verdict here is an estimate until this closes. Fix: one aggregation query over `agents.messages`.
 
-The honest top line: **only red flag #1 is worth acting on at current scale.** #2 and #3
-are worth *knowing* — they're the things that bite first when the corpus or the user count
-grows. The rest are correctly deprioritized below the inherent cost of running a 9B model
-on a laptop.
+2. **HNSW is untuned.** No `m` / `ef_construction` at build (`sql/001_agents_schema.sql:28-29`), no `ef_search` at query (`src/pg-vector-store.ts:70-78`). Evidence: defaults in use, no recall@k-vs-latency curve measured. Matters only past a few thousand chunks — `not yet measured` whether the corpus is there. → `01`.
+
+3. **Per-chunk INSERT loop.** N round-trips per document (`src/pg-vector-store.ts:43-57`). Evidence: code shape; no index-time profile. The first fix if indexing ever feels slow. → `03`.
+
+4. **No caching.** Identical query re-embeds (`src/pg-vector-store.ts:67`). Evidence: no cache layer exists; repeat-rate unmeasured. Helps eval runs more than chat. → `06`.
+
+5. **Serial cross-file indexing.** GPU idle through each file's DB writes (`src/cli/index-cmd.ts:22-26`). Evidence: `for...await` structure; no index-time wall-clock measured. → `02`.
+
+6. **Unbounded `flush()` fan-out.** `Promise.all` over all pending writes (`src/supabase-trace-sink.ts:92`). Evidence: ~6 writes today, no bound. A latent red flag, not a current one — only fires if per-turn event count grows large.
+
+The honest bottom line: none of these red flags are on fire, because the generation baseline makes them all small. The one that's actually *worth doing now* is #1 — not because it's slow, but because without it you can't prove any of the others are or aren't.

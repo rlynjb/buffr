@@ -1,217 +1,211 @@
-# LLM-as-judge bias — position, verbosity, self-preference
+# LLM-as-judge and its biases
 
-*Industry standard (LLM-as-judge evaluation). buffr's `RubricJudge` (aptkit) is wired into nothing yet — this is relevant the moment you wire it, with one buffr-specific trap: don't judge gemma2:9b with gemma2:9b.*
+### The faithfulness oracle buffr built but never wired — and the three ways a model judge lies
 
-## Zoom out, then zoom in
-
-The moment you use one LLM to grade another LLM's output, the grader brings its own biases. buffr is one wiring step away from this: aptkit ships a `RubricJudge`, buffr instantiates it nowhere (`02-eval-methods.md`). So this file is study-now, apply-when-wired — and the single most important buffr-specific point is a one-liner: **if you wire `RubricJudge` using gemma2:9b to grade gemma2:9b's own answers, you've built self-preference bias into your eval.**
+This is the rung `02` stopped at. When the oracle has to grade *meaning* — "is this answer faithful to the chunks it cited?" — no arithmetic suffices; you hand the comparison to a model. That oracle is the **LLM-as-judge** (the unwired `RubricJudge`). buffr's eng stack *contains* it — it lives, fully built, in aptkit. buffr just never constructs it. So the single most important generation-quality question — *is the answer grounded?* — is, today, unmeasured.
 
 ```
-  Zoom out — where the judge WOULD sit (unwired today)
-
-  ┌─ Faithfulness eval (NOT wired) ─────────────────────────────┐
-  │  ★ RubricJudge (aptkit) — an LLM grades the answer ★         │ ← we are here
-  │   judge(answer, chunks) → {dimensions, verdict, fix}        │
-  │   bias risk: position · verbosity · SELF-PREFERENCE         │
-  └───────────────────────────┬─────────────────────────────────┘
-                              │  would call a model to grade
-  ┌─ Generator (gemma2:9b) ───▼─────────────────────────────────┐
-  │  the model whose answers are being graded                   │
-  │   ⚠ if judge model == generator model → self-preference     │
-  └─────────────────────────────────────────────────────────────┘
+THE EVAL STACK — the judge rung, present but dark
+┌──────────────────────────────────────────────────────────────┐
+│  Method ladder       ... LLM-as-judge ◄── THIS FILE (the gap) │
+│                      RubricJudge: built in aptkit, UNWIRED    │
+├──────────────────────────────────────────────────────────────┤
+│  What it would grade  FAITHFULNESS — answer vs. retrieved     │
+│                       chunks (not retrieval identity)         │
+├──────────────────────────────────────────────────────────────┤
+│  buffr today          measures retrieval (02); NOT this       │
+└──────────────────────────────────────────────────────────────┘
 ```
 
-Zoom in: three biases dominate LLM judges. **Position bias** — when comparing two answers, the judge favors whichever came first (or second). **Verbosity bias** — the judge rates longer answers higher regardless of correctness. **Self-preference bias** — a model rates outputs from its own family higher. buffr's specific exposure is the third: a local-first setup naturally reaches for the one model it already runs (gemma2:9b) as the judge, which is exactly the wrong choice.
+Lead with the gap because it's the headline: buffr can prove the right chunks were fetched and cannot prove the answer used them. Everything below is how you'd close it — and how the judge can fool you while you do.
 
 ## Structure pass
 
-**Layers:** the eval harness → the judge model → the generated answer being graded.
-
-**Axis — "what skews the judge's score, independent of actual quality?"**
+The axis here is **what the judge sees vs. what biases that exposes.** An LLM judge is a model reading a prompt; everything that warps a model reading a prompt — order, length, authorship — warps the judge. There are three classic biases, and one of them (self-preference) is a live trap in buffr's local-only setup.
 
 ```
-  trace "what biases the score" across the judge
-
-  ┌─ position ──────────────┐   order of options       (pairwise judging)
-  │  favors A-then-B vs B-A  │   fix: swap order, average
-  └─────────────────────────┘
-  ┌─ verbosity ─────────────┐   answer length          (any judging)
-  │  longer rated higher     │   fix: rubric scores grounding, not length
-  └─────────────────────────┘
-  ┌─ self-preference ───────┐   judge == generator family (buffr's trap)
-  │  rates own output higher │   fix: DIFFERENT model family as judge
-  └─────────────────────────┘
-
-  same judge, three skews — each inflates a score for a non-quality reason
+ONE AXIS — what the judge reads ──► which bias it triggers
+  reads A then B ──────────► POSITION bias    (favors first/last)
+  reads a long answer ─────► VERBOSITY bias   (mistakes length for quality)
+  reads its OWN family's ──► SELF-PREFERENCE  (favors gemma-style output)
+       output                 ▲ LIVE TRAP: gemma2:9b judging gemma2:9b
 ```
 
-**The seam:** the judge→generator boundary is where self-preference lives. If the same model sits on both sides — gemma2:9b grading gemma2:9b — the boundary collapses and the eval grades itself. Keeping a *different* model family on the judge side is what makes that seam load-bearing instead of a mirror.
+The seam: the `RubricJudge` is designed to *reduce* these biases by forcing structure — a fixed rubric, bounded score ranges, an enumerated verdict set, JSON-only output. Structure narrows the judge's freedom to be swayed. But structure can't fix self-preference, because that bias lives in the model's *weights*, not its prompt. So wiring the judge is necessary; choosing a *different model family* to judge is the part the harness can't do for you.
 
 ## How it works
 
-### Move 1 — the mental model
+### Move 1 — mental model: a judge is a model with a scoring contract bolted on
 
-Think of code review by the author versus by a peer. Author self-review (self-preference) misses what the author already thinks is fine. A reviewer who skims and approves the longest PR (verbosity) rewards bulk, not quality. A reviewer who always rubber-stamps the first diff in the queue (position) isn't reading. An LLM judge has all three failure modes, and the fixes are the same as in code review: a different reviewer, a rubric that scores substance, and randomized order.
-
-```
-  the three biases — score inflated for the wrong reason
-
-  POSITION          VERBOSITY          SELF-PREFERENCE
-  ────────          ─────────          ───────────────
-  A first → A wins  longer → higher    same family → higher
-  fix: swap+avg     fix: rubric on     fix: different
-                       grounding          judge model
-                                       buffr's live trap ⚠
-```
-
-### Move 2 — the step-by-step walkthrough
-
-The judge isn't running in buffr, so this walks **the judge aptkit gives you and where each bias would bite.**
-
-**Step 1 — `RubricJudge` grades an answer against a rubric, producing a structured verdict.** It's a single-answer (pointwise) judge: it scores one answer against named dimensions and returns a verdict + fix. Pointwise judging sidesteps *position* bias (there's no A-vs-B order), but *verbosity* and *self-preference* still apply.
-
-```ts
-// aptkit packages/evals/src/rubric-judge.ts:72-104 (the class buffr never calls)
-export class RubricJudge {
-  judge(input, options = {}): Promise<StructuredGenerationResult<RubricJudgment>> {
-    return generateStructured({
-      model: this.model,                              // ← WHICH model judges = the bias knob
-      system: buildRubricJudgeSystemPrompt(this.rubric),
-      userPrompt: buildRubricJudgeUserPrompt(input),  // the answer + chunks to grade
-      validate: createRubricJudgmentValidator(this.rubric),
-    });
-  }
-}
-// returns { dimensions, checks?, verdict, fix, reasoning? }
-```
-
-`this.model` is the bias knob. Whatever you pass here is the grader, and its family determines self-preference exposure.
+A raw LLM asked "rate this answer" gives you mush — inconsistent scales, prose, no structure. The `RubricJudge` turns that into an oracle by wrapping the model in three constraints: a **rubric** (named dimensions with explicit score scales), a **structured-output demand** (JSON in an exact shape), and a **validator** (reject anything off-rubric). The model still does the judging; the wrapper makes its verdict machine-readable and range-checked.
 
 ```
-  Step 1 — pointwise judge, one bias knob
-
-  RubricJudge({ model: ?, rubric }).judge({answer, chunks})
-                       │
-                       ▼  → {verdict: pass/fail, dimensions, fix}
-  the "?" is the whole game: same family as generator → self-preference
+THE RUBRIC-JUDGE PATTERN
+   rubric ─────► system prompt    ┌─ dimensions (id, scale 0..n)
+   (RubricDefinition)             ├─ allowed verdicts
+                                  └─ checks (booleans)
+                                         │
+   subject + context ─► user prompt      ▼
+                              generateStructured(model, validate)
+                                         │
+                          JSON { dimensions:{id:{score,reason}},
+                                 checks, verdict, fix, reasoning }
+                                         │
+                              validator: score in [min,max]?
+                                         verdict allowed?  ──► RubricJudgment
 ```
 
-**Step 2 — self-preference: the buffr trap, made concrete.** buffr runs gemma2:9b locally. The path of least resistance is to instantiate `RubricJudge({ model: new GemmaModelProvider(...) })` — the model you already have warm. Now gemma2:9b grades gemma2:9b's own answers, and research shows models systematically rate their own family's outputs higher. Your faithfulness scores come out inflated, and you'd trust them.
+Bridging from schema validation you know: this is a Zod-style validator over a model's output. The novelty is that the thing being validated is a *judgment*, and the validator's job is to make the judge's freedom bounded — it literally rejects a score outside the rubric's declared range (`rubric-judge.ts:196`).
+
+### Move 2 — the unwired RubricJudge, in detail
+
+Everything below is real code in aptkit. None of it is called from buffr. That's the gap, made concrete.
+
+**It exists, fully, in aptkit.** `RubricJudge` is a class with a `judge()` method. Constructing it needs a `model` and a `rubric`. buffr never imports it — `grep RubricJudge src/` in buffr returns nothing.
 
 ```
-  Step 2 — the self-preference collapse
+aptkit evals/rubric-judge.ts:72  class RubricJudge
+              :89  judge(input) → generateStructured({ model, system, validate, ... })
 
-  WRONG (the easy path)              RIGHT
-  ─────────────────────              ─────
-  generator: gemma2:9b               generator: gemma2:9b
-  judge:     gemma2:9b   ⚠           judge:     DIFFERENT family
-  → grades its own output            → independent grader
-  → inflated faithfulness scores     → trustworthy scores
+buffr  src/  →  no import, no construction, no call   ← THE GAP
+        (compare: src/cli/eval-cmd.ts uses scorePrecisionAtK only)
 ```
 
-The fix is one line — pass a different model family to `RubricJudge` than the one generating the answers. For a local-first setup that means running a second small model of a different lineage as the judge (or accepting a cloud judge for eval runs only).
-
-**Step 3 — verbosity: defend against it in the rubric, not the model.** A judge left to its own instincts rewards longer answers. The defense is the *rubric*: score grounding and correctness explicitly ("is every claim supported by a retrieved chunk?"), so length stops being a proxy for quality. aptkit's judge takes the rubric as a constructor arg — the rubric design is where you spend the verbosity-bias defense.
+**The system prompt is built from the rubric.** `buildRubricJudgeSystemPrompt` (`rubric-judge.ts:107`) renders each dimension's score scale, the allowed verdicts, the boolean checks, and an exact output shape. The judge is *told* the scale, so two runs grade against the same ruler.
 
 ```
-  Step 3 — rubric kills verbosity bias
-
-  bad rubric: "rate answer quality 1-5"   → judge rewards length
-  good rubric: "every claim cite a chunk? (y/n) · unsupported claims? (count)"
-              → length irrelevant; grounding is scored directly
+rubric-judge.ts:107 buildRubricJudgeSystemPrompt(rubric)
+   "You are a rubric judge for: {title}."
+   dimensions:  {id} {label}: {desc}        ← per dimension...
+                  0 = {desc}   1 = {desc}    ←   ...its score scale
+   Allowed verdicts: - pass: ...  - fail: ...
+   "Output JSON only. Use exactly this shape:" {dimensions:{id:{score,reason}}, ...}
 ```
 
-**Step 4 — position bias: only if you go pairwise.** `RubricJudge` is pointwise, so buffr dodges position bias by default. It returns the moment you compare two answers (A/B testing two prompts, two models). Then the fix is mechanical: judge both orders (A-then-B and B-then-A) and average, so first-slot favoritism cancels.
+**The validator enforces the contract.** `createRubricJudgmentValidator` (`rubric-judge.ts:170`) rejects any output that isn't an object, any dimension score that's not a number, any score outside the rubric's `[min,max]`, and any verdict not in the allowed set. This is the structural defense against a judge that drifts off-scale.
 
 ```
-  Step 4 — position bias (only in pairwise mode)
-
-  judge(A, B) → A wins?   judge(B, A) → B wins?   ← disagreement = position bias
-  fix: run both orders, average the verdicts (favoritism cancels)
+rubric-judge.ts:193  score.score must be a number
+              :196  score.score in [range.min, range.max]   ← bounded judgment
+              :202  verdict ∈ allowed set                    ← no invented verdicts
 ```
 
-### Move 2.5 — current state vs future state
+**What a buffr faithfulness rubric would look like.** To measure grounding, the `subject` is the generated answer, the `context` is the retrieved chunks, and the dimensions grade *support*. None of this exists yet — it's the [B3.9] payload.
 
 ```
-  Phase A (today)                      Phase B (RubricJudge wired)
-  ─────────────                        ───────────────────────────
-  no judge running                     judge running per answer
-  no bias exposure                     position (if pairwise),
-                                         verbosity, self-preference live
-  faithfulness UNMEASURED              faithfulness measured —
-                                         only trustworthy if judge ≠ generator
+   faithfulness rubric (to build)
+     dimension "grounding"  scale 0..2
+        0 = claims contradict / aren't in the chunks
+        1 = partially supported
+        2 = every claim traceable to a cited chunk
+     check  "all citations point to a retrieved docId" : boolean
+     verdict  pass | fail
 ```
 
-The migration (also `02-eval-methods.md`'s EVAL-1): instantiate `RubricJudge` with a faithfulness rubric, feed it the answer + retrieved chunks from the trace. The bias work is the constraint on *how* you wire it — a different judge model family (kills self-preference), a grounding-focused rubric (kills verbosity), pointwise scoring or order-swapping (kills position). What doesn't change: the generator, the agent, the retrieval. The judge is additive; its bias discipline is design, not code volume.
+### Move 2.5 — current vs. future: the faithfulness column is empty
 
-### Move 3 — the principle
+State it bluntly. buffr measures retrieval; the faithfulness column is blank, and the tool to fill it is sitting unused one package over.
 
-An LLM judge is a measurement instrument, and an instrument that shares a bias with the thing it measures isn't measuring — it's agreeing with itself. The single rule that protects every LLM-as-judge eval: **the judge must be independent of the generator** — different model family, a rubric that scores substance not style, and randomized order when comparing. buffr's local-first instinct (reuse the one model you run) is the exact instinct that breaks this, which is why naming it matters before the judge is ever wired.
+```
+                    buffr today              after [B3.9]
+ retrieval P@k/R@k    ████ measured           ████ measured
+ faithfulness         ░░░░ UNMEASURED         ████ RubricJudge wired over
+   (answer grounded?)   ▲ RubricJudge exists      eval/queries.json
+                          in aptkit, never called
+```
+
+The consequence is concrete: right now an answer that retrieves `work.md` (P@1 = 1.00) and then states a job `work.md` never mentions passes every buffr eval. The hallucination is invisible. Wiring the judge is the only thing that makes it visible.
+
+### Move 3 — the principle, and the three biases
+
+**A model judge is an oracle with opinions — bound it with structure, and never let it grade its own family.** The `RubricJudge`'s rubric, ranges, and validator bound the *prompt-level* biases. The model-level bias they can't touch is self-preference, and you defeat that by choosing the judge model, not by improving the prompt.
+
+```
+   BIAS              MECHANISM                       FIX
+   position    judge favors first/last answer        randomize order; judge each
+                                                      answer alone (no A/B)
+   verbosity   long answer reads as "thorough"       rubric scores SUPPORT not
+                                                      length; cap subject length
+   self-       gemma2:9b rates gemma-style output     ← JUDGE WITH A DIFFERENT
+   preference    higher                                 FAMILY (not gemma)
+```
+
+The self-preference trap is *live* in buffr: it runs `gemma2:9b` locally for generation. The lazy faithfulness eval reuses the same `gemma2:9b` to judge — and it will systematically over-score its own outputs, because the answer "looks right" to the same weights that wrote it. The fix isn't a better prompt; it's a different judge model (a non-gemma local model, or a hosted judge), accepting the cost.
 
 ## Primary diagram
 
-```
-  LLM-as-judge bias — the three skews and their fixes, buffr-anchored
+The judge, its contract, its biases, and buffr's dark wiring.
 
-  ┌─ RubricJudge({ model, rubric }).judge(answer, chunks) ───────┐
-  │                                                              │
-  │  POSITION (pairwise only)   ─► fix: swap order + average     │
-  │   buffr: dodged (pointwise judge)                            │
-  │                                                              │
-  │  VERBOSITY (any judging)    ─► fix: rubric scores grounding  │
-  │   buffr: design the faithfulness rubric to ignore length     │
-  │                                                              │
-  │  SELF-PREFERENCE  ⚠ LIVE    ─► fix: judge ≠ generator family │
-  │   buffr trap: gemma2:9b judging gemma2:9b → inflated scores  │
-  │   → use a DIFFERENT model family as the judge                │
-  └───────────────────────────────────────────────────────────────┘
+```
+                  LLM-AS-JUDGE (the unwired RubricJudge)
+   answer ──┐
+   chunks ──┼─► RubricJudge.judge()  [aptkit rubric-judge.ts:89]   ✗ buffr never calls
+            │      │ system = rubric (dims, scales, verdicts)
+            │      │ generateStructured(model)
+            │      │ validate: scores in range, verdict allowed   ← bounds PROMPT bias
+            │      ▼
+            │   { dimensions:{grounding:{score,reason}}, verdict, fix }
+            │
+   BIASES NOT FIXED BY STRUCTURE:
+     position ─ randomize/solo    verbosity ─ score support    self-pref ─ DIFFERENT FAMILY
+                                                                 ▲ gemma≠gemma TRAP
+   buffr today:  retrieval measured ·  FAITHFULNESS unmeasured (RubricJudge dark)
 ```
 
 ## Elaborate
 
-LLM-as-judge took off because human eval is slow and expensive, and a capable model agrees with human raters often enough to scale. The biases were documented almost immediately — Zheng et al.'s MT-Bench work named position and verbosity bias and the order-swap mitigation; self-preference was shown across model families soon after. The practical upshot for a local-first system like buffr is sharper than for a cloud one: cloud setups can casually reach for a strong third-party judge, while a local-first project's instinct is to reuse its single warm model — which is the precise setup that triggers self-preference. So buffr's bias risk is structurally higher *because* of its architecture, even though no judge runs yet. This connects directly to the faithfulness gap (`02-eval-methods.md`): the eval buffr most needs is the one most exposed to judge bias, so the two must be designed together — wire the judge, but wire it with a different family, a grounding rubric, and order-swapping if pairwise.
+Why self-preference is the bias to fear most in *this* repo, specifically: position and verbosity bias assume you're comparing two answers or grading length — both are partly designable away in the rubric. Self-preference assumes the judge and the author share weights, and buffr's whole premise is *one local model on your laptop*. The path of least resistance — "I already have gemma2:9b loaded, I'll judge with it" — walks straight into the worst bias, because there's only one model in the box. The honest faithfulness eval for buffr must either pull a second model family into Ollama or call out to a hosted judge, and that cost is part of the exercise, not a footnote.
+
+Why a *structured* judge beats a free-text "rate 1–10" judge for grounding: faithfulness has a verifiable substructure — every claim either traces to a chunk or it doesn't. A free-text judge collapses that to one fuzzy number. The `RubricJudge`'s per-dimension `reason` field and boolean `checks` (e.g. "all citations point to a retrieved docId") force the judge to *show its work* per claim, which both improves the judgment and gives you a debuggable artifact — you can read *why* it said unfaithful, not just *that* it did. That `reason` field is also what you'd spot-check against human labels to calibrate the judge before trusting it.
 
 ## Project exercises
 
-> No curriculum file present; exercises derived from the codebase.
+### Wire RubricJudge into a faithfulness eval over the golden set
 
-### Wire RubricJudge with a non-Gemma judge model
+- **Exercise ID:** [B3.9] (cite [C3.9], Phase 3) — Case B: `RubricJudge` exists in aptkit but is **never constructed in buffr**; faithfulness is unmeasured. This exercise is primary.
+- **What to build:** A new eval that, for each query in `eval/queries.json`, runs the full `RagQueryAgent`, then constructs a `RubricJudge` with a grounding rubric (subject = answer, context = retrieved chunks) and records a faithfulness score + verdict + the one-line `fix`. Crucially, configure the judge with a **non-gemma** model family to dodge self-preference.
+- **Why it earns its place:** It closes the single biggest measurement gap in buffr — an answer can score P@1 = 1.00 and still hallucinate. This turns "grounded" from a prompt instruction into a number, using a tool already built one package away.
+- **Files to touch:** new eval beside `src/cli/eval-cmd.ts` importing `RubricJudge` from aptkit; drive the agent via `src/session.ts`; retrieved chunks from `src/pg-vector-store.ts`; a second Ollama model for the judge (config in `src/config.ts`).
+- **Done when:** `npm run eval` (or a sibling command) prints a faithfulness score per golden query, the judge runs on a different family than gemma2:9b, and you can name a query where the answer drifts off its citations.
+- **Estimated effort:** 2–3 days.
 
-- **Exercise ID:** JUDGE-1 (Case B — judge not yet exercised). **The exercise that makes this file real.**
-- **What to build:** a faithfulness eval that instantiates aptkit's `RubricJudge` with a model from a *different family* than gemma2:9b (a second local model of another lineage, or a cloud judge for eval-only runs), scoring answer-vs-chunks.
-- **Why it earns its place:** closes the faithfulness gap (`02-eval-methods.md`) AND demonstrates you designed around self-preference bias — the "I knew not to grade my model with itself" signal.
-- **Files to touch:** new `src/cli/eval-faithfulness-cmd.ts`, instantiate `RubricJudge` with the non-Gemma judge model, reuse the agent build from `src/session.ts`, read chunks from `agents.messages.tool_results`.
-- **Done when:** a hallucinated answer scores `fail` and a grounded one scores `pass`, with the judge model explicitly NOT gemma2:9b.
+### Calibrate the judge against hand labels and measure its biases
+
+- **Exercise ID:** [B3.10] (cite [C3.10], Phase 3) — Case B: builds on [B3.9]; no judge calibration exists.
+- **What to build:** Hand-label faithfulness for the golden queries, compare against the judge's verdicts, and run two bias probes: feed the judge a padded vs. terse version of the same answer (verbosity), and gemma-authored vs. non-gemma-authored answers of equal quality (self-preference). Report the disagreement.
+- **Why it earns its place:** An uncalibrated judge is just a confident guess. This proves the judge agrees with you *and* quantifies how much its biases move the score — the difference between a trusted oracle and a vibe.
+- **Files to touch:** the [B3.9] eval; a small `eval/faithfulness-labels.json`; the rubric definition.
+- **Done when:** You can state the judge's agreement rate with your labels and show a measured verbosity/self-preference delta on equal-quality answers.
 - **Estimated effort:** 1–2 days.
-
-### Measure self-preference empirically
-
-- **Exercise ID:** JUDGE-2 (Case B — bias quantified).
-- **What to build:** run the same set of answers through two judges — gemma2:9b and a different family — and compare the verdicts to see how much gemma2:9b inflates its own scores.
-- **Why it earns its place:** turns "self-preference bias exists" from a claim into a number you measured on your own system — the strongest possible defense of the design choice.
-- **Files to touch:** extend the faithfulness harness from JUDGE-1 to run both judges and diff their verdicts.
-- **Done when:** you have a measured gap between same-family and cross-family judging on identical answers.
-- **Estimated effort:** 1–4hr.
 
 ## Interview defense
 
-**Q: You want to use an LLM to score buffr's answer faithfulness. What biases do you design around?**
-Answer: three. Position bias (the judge favors order in pairwise comparisons — fix by swapping order and averaging; buffr's `RubricJudge` is pointwise so it dodges this). Verbosity bias (longer answers score higher — fix with a rubric that scores grounding, not length). And self-preference (a model rates its own family higher) — which is buffr's live trap, because the easy local-first move is to judge gemma2:9b with gemma2:9b.
+**Q: "Does buffr measure whether its answers are grounded?"**
+
+No — and that's the honest headline of this whole sub-section. buffr measures *retrieval* (precision@k/recall@k on docIds) but not *faithfulness*: whether the answer's claims trace back to the retrieved chunks. The tooling exists — aptkit ships a `RubricJudge` (a model judge with a rubric, bounded score ranges, and a validator) — but buffr never constructs it. So an answer can retrieve the right document and still hallucinate, and every current eval passes. [B3.9] wires the judge to close exactly this.
 
 ```
-  position (swap+avg) · verbosity (rubric on grounding) · self-preference (different family)
+   retrieval  ✓ measured (P@k/R@k)
+   grounded?  ✗ unmeasured ── RubricJudge built in aptkit, never called in buffr
 ```
 
-**Q: What's the one rule you'd never break with an LLM judge?**
-Answer: the judge must be independent of the generator — a different model family. **The part people forget, especially in local-first setups, is self-preference: reusing the one model you already run as the judge means it grades its own output and inflates the score.** For buffr that means NOT using gemma2:9b to judge gemma2:9b — wire `RubricJudge` with a different family even though gemma is the warm, convenient choice. An instrument that shares a bias with what it measures isn't measuring.
+*Anchor: the right chunks retrieved is not the same as the chunks actually used — and only a judge sees the difference.*
+
+**Q: "You're on a single local model. How would you run a judge without fooling yourself?"**
+
+By refusing to let gemma2:9b grade gemma2:9b. That's self-preference bias: a model over-scores output that looks like its own, and it lives in the weights, so no rubric tuning fixes it. The structural biases — position, verbosity — the `RubricJudge` already curbs by scoring support over length and judging answers solo rather than A/B. Self-preference I curb by pulling a *different* model family into the judge seat (a second Ollama model, or a hosted judge), and I pay that cost knowingly because the alternative is a faithfulness number I can't trust.
 
 ```
-  the anchor:  judge ≠ generator family  →  gemma2:9b must NOT judge gemma2:9b
+   prompt-level bias (position, verbosity) → rubric + validator handle it
+   weight-level bias (self-preference)     → MUST swap model family (gemma ≠ judge)
 ```
+
+*Anchor: a judge that shares weights with the author isn't a judge, it's a mirror.*
 
 ## See also
 
-- `02-eval-methods.md` — the faithfulness eval `RubricJudge` would power, and the unwired gap.
-- `01-eval-set-types.md` — the adversarial answers a judge would score.
-- `04-llm-observability.md` — the trace the judge reads the answer + chunks from.
-- `../04-agents-and-tool-use/02-tool-calling.md` — why a grounding rubric matters (silent garbage retrieval).
+- **`02-eval-methods.md`** — the rung below; why exact-match can't see faithfulness.
+- **`01-eval-set-types.md`** — the golden set the faithfulness judge runs over.
+- **`04-llm-observability.md`** — where the judged trajectories (and their chunks) are recorded for replay.
+- **`../01-llm-foundations/`** — `generateStructured` and the JSON-validation contract the judge rides on.
+- **`../03-retrieval-and-rag/11-rag.md`** — the grounding contract this eval would finally test.

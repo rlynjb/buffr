@@ -1,250 +1,260 @@
 # 03 — Trajectory Capture
 
-**Industry name(s):** Full-signal trajectory capture / observability sink / event-to-row
-persistence. The MLOps "capture-now-so-fine-tuning-is-answerable-later" discipline.
-**Type:** Industry standard (sink pattern), project-specific intent (the trajectory thesis).
+**Industry name(s):** event sourcing / trace sink · full-signal observability · the trajectory-capture discipline (Hermes Agent's idea). **Type:** Industry standard (applied to agents).
 
-## Zoom out, then zoom in
+## Zoom out — where this concept lives
 
-Here's the whole system, with one box lit. As aptkit's agent reasons through a turn, it
-*emits* a stream of capability events — assistant steps, tool calls, model usage,
-warnings, errors. buffr's `SupabaseTraceSink` catches every one and turns it into a row
-in `agents.messages`. The turn becomes a replayable record.
+Every agent run emits a stream of events — the model spoke, a tool was called with these args,
+the tool returned in 240ms, the model used 1,800 tokens, a warning fired. buffr persists *all six
+event types* as rows, turning each conversation into a complete, replayable trajectory. This is
+the **observability port** of the system: aptkit defines the `CapabilityTraceSink` contract;
+buffr's `SupabaseTraceSink` is the adapter that lands those events in Postgres.
 
 ```
-  Zoom out — where the trace sink sits
+  Zoom out — the trace sink in the system
 
-  ┌─ aptkit agent (emits events) ───────────────────────────────────────┐
-  │  RagQueryAgent.answer() → run-agent-loop → trace.emit(CapabilityEvent)│
-  └───────────────────────────────┬──────────────────────────────────────┘
-                                  │ emit(event)  (synchronous, 6 event types)
-  ┌─ buffr persistence layer ─────▼──────────────────────────────────────┐
-  │  ★ SupabaseTraceSink implements CapabilityTraceSink ★                 │ ← we are here
-  │    queue writes on emit · await them on flush                         │
-  └───────────────────────────────┬──────────────────────────────────────┘
-                                  │ INSERT INTO agents.messages
-  ┌─ Storage layer ───────────────▼──────────────────────────────────────┐
-  │  agents.messages (role, content, tool_calls, tool_results, model,     │
-  │                   tokens_used, created_at)                            │
-  └───────────────────────────────────────────────────────────────────────┘
+  ┌─ Agent layer (aptkit) ────────────────────────────────────────┐
+  │  RagQueryAgent.answer() — emits CapabilityEvents as it runs    │
+  │    step · tool_call_start · tool_call_end ·                    │
+  │    model_usage · warning · error                              │
+  └───────────────────────────────┬──────────────────────────────┘
+                                  │  the PORT: CapabilityTraceSink.emit(event)
+  ┌─ Adapter layer (buffr owns) ──▼──────────────────────────────┐
+  │  ★ SupabaseTraceSink implements CapabilityTraceSink ★         │
+  │  src/supabase-trace-sink.ts — emit() queues, flush() awaits   │
+  └───────────────────────────────┬──────────────────────────────┘
+  ┌─ Storage layer ───────────────▼──────────────────────────────┐
+  │  agents.messages — one row per event, ordered by event time   │
+  └───────────────────────────────────────────────────────────────┘
 ```
 
-Zoom in. The pattern is an **observability sink**: a passive listener that receives a
-stream of events from a system it doesn't control and persists each one. The twist here
-is *full-signal* — not just the assistant's words, but the cause (tool args), the
-outcome (tool result + error + duration), the cost (tokens), and the failures. The
-question it answers: *if you wanted to replay or fine-tune on this conversation six
-months from now, is everything you'd need already on disk?*
+Zoom in: the pattern is **a trace sink that captures full signal**. The question it answers:
+*if you wanted to fine-tune on this agent's behavior next year, would you have the data?* buffr's
+answer is yes, captured from day one — the parent plan calls this "capture every conversation as a
+trajectory now so fine-tuning is *answerable* later" (`agent-layer-plan.md:13,17`).
 
-## Structure pass
+## Structure pass — layers, axis, seam
 
-**Layers:** event source (aptkit loop) → contract (`CapabilityTraceSink.emit`) → sink
-(`SupabaseTraceSink`) → persistence helper (`persistMessage`) → storage (`messages`).
+**Layers:** agent (emits) → sink (queues) → flush (awaits) → `agents.messages` (rows).
 
-**Axis — sync or async?** Trace it. The agent's `emit(event)` is **synchronous** — it's
-aptkit's contract, the loop can't await a DB write mid-reasoning
-(`src/supabase-trace-sink.ts:53`). But the actual INSERT is **async**. The sink bridges
-the two: `emit` *queues* a promise without awaiting it (`src/supabase-trace-sink.ts:87-89`),
-and a later `flush()` awaits them all (`src/supabase-trace-sink.ts:91-93`). The
-sync/async answer flips at the sink — that flip is the whole design.
+**Axis — trace *control flow timing* (sync vs async) across the seam:**
 
-**Seam:** the `CapabilityTraceSink` contract (`src/supabase-trace-sink.ts:2`). Horizontal
-seam — the lower layer (the sink) promises the upper layer (the agent) one method,
-`emit`, that *never blocks and never throws into the loop*. Honor that and the agent
-reasons at full speed while persistence happens behind it.
+```
+  axis = "is this call sync or async?"
+
+  agent loop ──emit(event)──► sink        SYNC   (aptkit's contract demands it)
+       sink ──push(promise)──► pending[]  SYNC   (queue the write, don't await)
+       turn ──flush()──────────► await all ASYNC  (drain the queue after the run)
+
+  the axis FLIPS at the sink: emit must return instantly, but the DB write is async.
+  the sink bridges sync-in to async-out. that bridge IS the pattern.
+```
+
+**The seam:** `CapabilityTraceSink.emit(event)` is the joint. aptkit calls it *synchronously*
+mid-loop — it can't `await` a database on every event without serializing the whole agent. So the
+sink's job is to accept a sync call and *defer* the async I/O. The seam is where a sync contract
+meets async storage; the queue is how the sink honors both.
 
 ## How it works
 
 ### Move 1 — the mental model
 
-You've written this shape: an event handler that fires-and-forgets a network call —
-`onClick` pushes an analytics event without awaiting it, so the UI stays responsive.
-Same idea, with one addition: the fired promises are kept in a list so you can `await
-Promise.all` them at a checkpoint. The strategy: **decouple the fast emit from the slow
-write by queueing, then drain the queue once at the end of the turn.**
+You've fired analytics events from a React component: `track('clicked')` returns instantly, the
+network POST happens in the background, and you never `await` it in the click handler. The trace
+sink is that, with one addition — at the end of the turn you `flush()` to make sure every queued
+write actually landed before you move on. Fire-and-collect, then drain.
 
 ```
-  the sink kernel — queue on emit, drain on flush
+  The trace-sink pattern — sync emit, deferred flush
 
-   emit(e1) ─► push(insert(e1)) ─┐
-   emit(e2) ─► push(insert(e2)) ─┤  pending: [p1, p2, p3, ...]
-   emit(e3) ─► push(insert(e3)) ─┘            │
-                                              ▼
-   flush() ─────────────────────────► await Promise.all(pending)
+  agent loop:   emit ─► emit ─► emit ─► emit ─► emit ─► (run ends)
+                  │       │       │       │       │
+                  ▼       ▼       ▼       ▼       ▼
+  pending[]:    [ p0 ]  [p0,p1] [..p2]  [..p3]  [..p4]      ← promises queued, not awaited
+                                                  │
+                                            flush() ─► await Promise.all(pending)  ← drain here
+                                                  │
+                                            all rows durable in agents.messages
 ```
 
-### Move 2 — the load-bearing skeleton
+### Move 2 — the walkthrough
 
-This concept has a kernel — the emit/flush queue — so we walk it as a skeleton.
-
-**1. Isolate the kernel.** Three parts, nothing removable:
+**The sync/async bridge — `emit` queues, `flush` awaits.** This is the kernel
+(`supabase-trace-sink.ts:49-93`):
 
 ```ts
-// src/supabase-trace-sink.ts:50-93 (kernel, condensed)
-private readonly pending: Promise<void>[] = [];        // the queue
-emit(event: CapabilityEvent): void {                   // sync: route + queue
-  switch (event.type) { /* ...build a persistMessage promise... */ }
+// src/supabase-trace-sink.ts:49
+export class SupabaseTraceSink implements CapabilityTraceSink {
+  private readonly pending: Promise<void>[] = [];          // the queue
+
+  emit(event: CapabilityEvent): void {                     // SYNC — returns void, no await
+    // ... switch on event.type, each case calls this.push(persistMessage(...))
+  }
+  private push(p: Promise<void>): void { this.pending.push(p); }  // queue, don't await
+
+  async flush(): Promise<void> { await Promise.all(this.pending); }  // drain after the run
 }
-private push(p: Promise<void>): void { this.pending.push(p); }  // queue, don't await
-async flush(): Promise<void> { await Promise.all(this.pending); } // drain once
 ```
 
-**2. Name each part by what breaks without it.**
-- Drop the `pending` queue and await inside `emit` → `emit` becomes async, violating
-  aptkit's sync contract; the loop stalls on every event.
-- Drop `flush` → the promises are fired but never awaited; the process can exit (or the
-  turn can return) before the rows land — trajectory silently lost.
-- Drop the `created_at = event.timestamp` plumbing → rows get `now()` from whichever
-  concurrent INSERT wins the race, so replay order scrambles
-  (`src/supabase-trace-sink.ts:46-48`). This is the part people forget.
+`emit` returns `void` — it *must*, because aptkit's contract calls it synchronously inside the
+loop (line 39-40 of the source comment: "emit() is sync (aptkit's contract); writes are queued and
+awaited via flush()"). If `emit` blocked on a DB round-trip, every event would serialize the agent.
+Instead each write is a promise pushed onto `pending`; `flush()` (called once in `session.ts:63`
+after `agent.answer`) awaits them all at once. The per-event writes run *concurrently*, drained in
+one `Promise.all`.
 
-**3. Skeleton vs hardening.** The skeleton is queue + drain. The *full-signal* routing
-(handling all 6 event types) and the timestamp-for-ordering are hardening that make the
-captured trajectory complete and replayable rather than merely present.
-
-**The full-signal routing — the part that earns the "trajectory" name.** A naive sink
-persists only assistant text. This one routes all six `CapabilityEvent` types
-(`src/supabase-trace-sink.ts:56-84`), each to a row that captures a different facet:
-
-```
-  one turn → six kinds of row (the full signal)
-
-  event type          row role        what it preserves
-  ──────────────      ───────────     ──────────────────────────────────
-  step                <event.role>    the assistant's words (the answer)
-  tool_call_start     tool_call       the CAUSE: toolName + args
-  tool_call_end       tool            the OUTCOME: result + error + durationMs
-  model_usage         model_usage     the COST: provider/model + tokens_used
-  warning             warning         a soft failure
-  error               error           a hard failure
-```
+**Full-signal capture — every event type becomes a row.** The `switch` is the whole point: it
+handles all six `CapabilityEvent` variants, not just the obvious two (`supabase-trace-sink.ts:53-84`):
 
 ```ts
-// src/supabase-trace-sink.ts:62-66 — the cause, previously dropped on the floor
-case 'tool_call_start':
-  this.push(persistMessage(pool, conversationId, 'tool_call', event.toolName, {
-    toolCalls: { toolName: event.toolName, args: event.args }, createdAt: at,
-  }));
-  return;
+// src/supabase-trace-sink.ts:53
+emit(event: CapabilityEvent): void {
+  const at = event.timestamp;
+  switch (event.type) {
+    case 'step':                                    // assistant text
+      if (event.content) this.push(persistMessage(pool, conv, event.role, event.content, { createdAt: at }));
+      return;
+    case 'tool_call_start':                         // the CAUSE — args the model passed
+      this.push(persistMessage(pool, conv, 'tool_call', event.toolName,
+        { toolCalls: { toolName: event.toolName, args: event.args }, createdAt: at })); return;
+    case 'tool_call_end':                           // the EFFECT — result, error, duration
+      this.push(persistMessage(pool, conv, 'tool', event.toolName,
+        { toolResults: { result: event.result, error: event.error, durationMs: event.durationMs }, createdAt: at })); return;
+    case 'model_usage':                             // tokens — fills the orphaned tokens_used column
+      this.push(persistMessage(pool, conv, 'model_usage', '',
+        { model: `${event.provider}/${event.model}`, tokensUsed: (event.inputTokens ?? 0) + (event.outputTokens ?? 0), createdAt: at })); return;
+    case 'warning': case 'error':                   // the failures, not dropped
+      this.push(persistMessage(pool, conv, event.type, event.message, { createdAt: at })); return;
+  }
+}
 ```
 
-Capturing tool-call *args* (the cause) and `durationMs` + `error` (the outcome) and
-`tokens_used` (the cost) is what turns `agents.messages` from a chat log into a
-*replayable trajectory* — and fills the otherwise-orphaned `tokens_used` column
-(`src/supabase-trace-sink.ts:42-48`).
+The source comment (lines 43-48) names exactly what *used* to be dropped: "Tool-call args (the
+cause), durationMs + error, token usage, and warning/error events were previously dropped on the
+floor; capturing them turns `agents.messages` into a complete, replayable trajectory." That's the
+difference between a chat log (assistant said X) and a trajectory (model decided to call tool T with
+args A, it returned R in 240ms using 1800 tokens). The trajectory is the fine-tuning-grade signal.
 
-**The timestamp-for-ordering detail.** Because writes are queued and drained with
-`Promise.all`, the inserts race. If `created_at` defaulted to `now()`, replay order
-would be the race outcome, not the emit order. So `persistMessage` persists the *event's*
-timestamp into `created_at`, falling back to `now()` only when absent
-(`src/supabase-trace-sink.ts:24-26`, `:30`):
+**Deterministic replay order — the timestamp is load-bearing.** Every `persistMessage` passes
+`createdAt: at` from `event.timestamp`, and the SQL coalesces it (`supabase-trace-sink.ts:26-30`):
 
 ```ts
-// src/supabase-trace-sink.ts:26-30 — emit order survives the flush race
+// src/supabase-trace-sink.ts:27
 const createdAt = extra?.createdAt && extra.createdAt.length > 0 ? extra.createdAt : null;
 await pool.query(
   `insert into agents.messages (... created_at)
-   values ($1,...,$3, coalesce($8::timestamptz, now()))`, [...]);
+   values (..., coalesce($8::timestamptz, now()))`,   // event time, not insert time
+  [..., createdAt]);
 ```
 
-```
-  Layers-and-hops — emit during the loop, flush after
+Why this matters: the writes flush *concurrently* (`Promise.all`), so insert order is a race. If
+`created_at` defaulted to `now()` at insert time, replay order would be nondeterministic — events
+could be reordered by which INSERT won the race. Using the *event's* timestamp pins replay order to
+emit order (source comment lines 47-48). This is the subtle correctness detail in the file: the
+concurrency that makes flush fast would scramble order, so the event timestamp re-pins it.
 
-  ┌─ aptkit loop ─┐ hop 1: emit(step/tool/usage…)  ┌─ SupabaseTraceSink ─┐
-  │  per reasoning │ ─────────────────────────────► │  route → push(p)    │
-  │  step          │   (sync, non-blocking)         │  pending grows      │
-  └───────┬────────┘                                └──────────┬──────────┘
-          │ answer returned                                    │
-  ┌───────▼────────┐ hop 2: flush()                            │
-  │  session.ts:63 │ ─────────────────────────────────────────►│ Promise.all
-  └────────────────┘                                 hop 3: INSERT ×N ▼
-                                                     ┌─ agents.messages ─┐
-                                                     └────────────────────┘
+**Conversation lifecycle — one row, created once.** `startConversation` inserts the parent row at
+session start (`supabase-trace-sink.ts:4-8`, called once in `session.ts:55`); every event row
+references that `conversation_id` (the FK with `on delete cascade`, `sql/001:42`). One conversation
+per session (`05`), many event rows under it.
+
+### Move 2 variant — the load-bearing skeleton
+
+```
+  Trace-sink kernel:
+    1. emit() returns void          — honor aptkit's sync contract
+    2. queue promise, don't await   — don't serialize the agent on DB I/O
+    3. flush() awaits all           — guarantee durability after the run
+    4. event.timestamp → created_at — pin replay order against concurrent inserts
+    5. switch over ALL 6 types      — full signal, not just assistant text
 ```
 
-The session drives this: `agent.answer()` runs the loop (emits happen), *then*
-`trace.flush()` drains the queue (`src/session.ts:62-63`). Flush after answer, not during.
+- Drop **#1** (make emit async) → the agent loop must await; every event serializes the run.
+- Drop **#3** → the turn returns before writes land; a fast exit loses the trajectory.
+- Drop **#4** → concurrent flush reorders events; replay is nondeterministic.
+- Drop **#5's tool/usage/error cases** → you have a chat log, not a trajectory; fine-tuning is
+  no longer answerable. That's the *whole reason the pattern exists*.
+
+Optional hardening *not* here: batching the inserts into one multi-row statement, a write-ahead
+buffer, backpressure if `pending` grows unbounded. None needed at single-user volume.
 
 ### Move 3 — the principle
 
-A trajectory is only as useful as it is complete. The discipline isn't "log the answer" —
-it's "capture the cause, the outcome, the cost, and the failures, in the order they
-happened, so a future you can replay or train on it." Here that's a deliberate thesis:
-capture every conversation as a trajectory *now* so fine-tuning is *answerable* later,
-not assumed (`agent-layer-plan.md:17`). The sink pattern decouples that completeness from
-the agent's speed — the agent never waits for a write.
+**Capture the cause and the effect of every decision, timestamped, or you don't have a trajectory —
+you have a log.** The discipline is to record *why* the agent did something (tool args, token spend,
+warnings), not just *what* it said, because next year's question ("should we fine-tune, and on
+what?") can only be answered from data you captured before you knew you'd need it. The cost is a row
+per event; the payoff is that the decision stays evidence-based instead of a guess.
 
 ## Primary diagram
 
-The full sink, all six event types, the queue, the drain, every layer.
-
 ```
-  SupabaseTraceSink — full-signal capture
+  Trajectory Capture — full picture
 
-  ┌─ aptkit agent (run-agent-loop) ─────────────────────────────────────┐
-  │  emits: step · tool_call_start · tool_call_end · model_usage ·        │
-  │         warning · error            (sync, with event.timestamp)       │
-  └───────────────────────────────┬──────────────────────────────────────┘
-                                  │ emit(event)  — non-blocking
-  ┌─ SupabaseTraceSink ───────────▼──────────────────────────────────────┐
-  │  switch(type) → persistMessage(...) → push(promise)   [pending: P[]]  │
-  │  flush() → await Promise.all(pending)                                 │
-  └───────────────────────────────┬──────────────────────────────────────┘
-                 created_at = event.timestamp (replay order preserved)
-  ┌─ Postgres agents.messages ────▼──────────────────────────────────────┐
-  │  role · content · tool_calls · tool_results · model · tokens_used ·   │
-  │  created_at                 [ append-only, per conversation ]         │
-  └───────────────────────────────────────────────────────────────────────┘
+  ┌─ Agent (aptkit) ──────────────────────────────────────────────┐
+  │  RagQueryAgent.answer()  emits, in order:                      │
+  │   step → tool_call_start → tool_call_end → model_usage → step  │
+  └──────────────┬────────────────────────────────────────────────┘
+       emit() SYNC│  (void return, mid-loop)
+  ┌─ SupabaseTraceSink (buffr) ▼──────────────────────────────────┐
+  │  switch(type): build row payload (args / result+duration /    │
+  │                tokens / message) tagged with event.timestamp  │
+  │  push(persistMessage(...)) → pending[]   (queued, concurrent) │
+  └──────────────┬────────────────────────────────────────────────┘
+   flush() ASYNC  │  await Promise.all(pending)  (once, after the run — session.ts:63)
+  ┌─ Storage ─────▼───────────────────────────────────────────────┐
+  │  agents.messages — one row per event,                          │
+  │   created_at = event time → deterministic replay order         │
+  │   FK → conversations(id) on delete cascade                     │
+  └───────────────────────────────────────────────────────────────┘
 ```
 
 ## Elaborate
 
-The sink is the borrowed discipline from Hermes Agent — "trajectory-capture discipline
-but none of its platform machinery" (`agent-layer-plan.md:13`). The intent separates
-this from a debug log: trajectories are training data in waiting. The pattern itself
-(passive listener over an event stream, persisted out-of-band) is the same shape as a
-metrics exporter or an audit log. The sync-emit/async-flush bridge is the same shape as
-React's `useEffect` cleanup-and-flush, or any fire-and-forget-then-await-at-a-barrier
-queue you've written. Observability mechanics (what to log, sampling, retention) belong
-to `study-debugging-observability`; this file owns the architectural *boundary* — where
-capture sits and why it can't block the loop.
+This is borrowed, explicitly, from Hermes Agent's MLOps discipline — but "none of its platform
+machinery or its fine-tuned models" (`agent-layer-plan.md:13`). buffr steals the *pattern* (capture
+trajectories now) without the platform. The deeper idea is event sourcing: the `messages` table is
+an append-only event log, and the conversation is a projection you can rebuild by replaying it in
+`created_at` order. That's why the timestamp pinning matters — event sourcing is only sound if the
+log order is the truth.
 
-What to read next: `04-long-lived-chat-session.md` (who calls `flush`),
-`audit.md` lens 8 (why partial-flush is a ranked risk for the trajectory thesis).
+The trajectory is also the bridge to the deferred fine-tuning ceiling: Phase 4's "ship vs. iterate
+vs. fine-tune" decision "can supply data" from "Phase-3 trajectories" (`agent-layer-plan.md:97`).
+You can't fine-tune on data you didn't capture, and you can't capture it after the fact — hence
+day-one capture.
+
+Read next: `05-long-lived-chat-session.md` (where `flush` is called in the turn), `04-library-as-
+dependency-boundary.md` (why the sink is a port). Log/metric/trace mechanics →
+`study-debugging-observability`. The `messages` schema shape → `study-data-modeling`.
 
 ## Interview defense
 
-**Q: Why queue the writes instead of awaiting each insert in `emit`?**
-Because `emit` is synchronous — aptkit's `CapabilityTraceSink` contract. The agent loop
-can't await a DB round-trip between reasoning steps without stalling. So `emit` queues a
-promise and returns immediately; `flush()` drains the queue once after the answer is in
-hand.
+**Q: Why not just await each event write inside emit?**
+Because aptkit calls `emit` synchronously inside the agent loop — its contract returns `void`. If
+you awaited a DB round-trip per event, every event would serialize the agent's reasoning. So `emit`
+queues a promise and `flush()` drains them concurrently after the run (`supabase-trace-sink.ts:53,
+87-93`). Sync contract honored, I/O deferred, writes parallel.
 
 ```
-  emit (sync, must not block) ─► push(p) ─► pending[]
-  flush (async, at the barrier) ─► await Promise.all(pending)
+  emit (sync)  ─► push promise ─► pending[]          ← agent never blocks
+  flush (async)─► Promise.all(pending)               ← drained once, concurrently
 ```
-Anchor: sync contract at `src/supabase-trace-sink.ts:53`; queue at `:87-89`; drain at
-`:91-93`; flush call at `src/session.ts:63`.
 
-**Q: What's the load-bearing part people forget in a queued sink?**
-Ordering. Queued inserts race under `Promise.all`, so if `created_at` defaults to
-`now()`, replay order is the race outcome. Persisting the *event* timestamp into
-`created_at` preserves emit order. Forgetting it gives you a complete-but-scrambled
-trajectory.
-Anchor: `src/supabase-trace-sink.ts:46-48`; the `coalesce($8, now())` at
-`src/supabase-trace-sink.ts:30`.
+**Q: Your inserts run concurrently. How do you keep the trajectory in order?**
+Every row's `created_at` is the *event's* timestamp, not insert time — `coalesce($8::timestamptz,
+now())` with the event time passed in (`supabase-trace-sink.ts:27-30`). Concurrent inserts can land
+in any order, but ordering by `created_at` replays them in emit order. The timestamp is the part
+people forget — without it the concurrency that makes flush fast would scramble the trajectory.
 
-**Q: What makes this "full-signal" rather than a chat log?**
-It routes all six event types, capturing the cause (tool args), the outcome (result +
-error + durationMs), and the cost (tokens) — not just assistant text. That completeness
-is what makes the trajectory replayable and fine-tuning answerable later.
-Anchor: the switch at `src/supabase-trace-sink.ts:56-84`; the thesis at
-`agent-layer-plan.md:17`.
+**Q: What makes this a trajectory and not a chat log?**
+The full-signal capture: `tool_call_start` records the *args the model chose* (the cause),
+`tool_call_end` records result + `durationMs` + error (the effect), `model_usage` records tokens.
+A chat log has assistant text; a trajectory has every decision and its cost
+(`supabase-trace-sink.ts:62-78`). That's what makes fine-tuning answerable later.
 
 ## See also
 
-- `04-long-lived-chat-session.md` — the session that calls `flush` per turn
-- `02-library-as-dependency-boundary.md` — `CapabilityTraceSink` is aptkit's contract
-- `study-debugging-observability` — log/metric/trace mechanics, retention, sampling
-- `study-data-modeling` — the `messages` table shape, jsonb tool columns
+- `05-long-lived-chat-session.md` — where `flush()` sits in the turn ordering.
+- `04-library-as-dependency-boundary.md` — `CapabilityTraceSink` as an injected port.
+- `audit.md` lens 2 (the ask flow), lens 5 (per-event durability), red-flag #3 (silent memory catch).
+- `study-debugging-observability` → traces/logs. `study-data-modeling` → the `messages` table.

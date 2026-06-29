@@ -1,264 +1,224 @@
-# Retraining pipelines — deciding when and how to refresh a model
+# Retraining Pipelines
 
-*Retraining pipelines / model-refresh triggers (continuous-training, CT in MLOps). Industry standard. buffr retrains nothing — not yet implemented — but two real refresh loops (re-embedding on a model swap, fine-tuning on trajectory volume) are buildable from existing buffr data.*
+### *industry: retraining pipelines / continuous training (CT) · type: the automated loop that decides when to rebuild a model and whether the rebuild is allowed to ship*
 
-## Zoom out, then zoom in
+## Zoom out
 
-A model ships, drifts (file 15), and eventually has to be refreshed. The hard part isn't the retraining itself — it's the *trigger*: deciding *when* a refresh is worth its cost, and running the new model through a gate so you don't deploy something worse. buffr refreshes nothing today, but it has two genuine refresh loops waiting to be built: re-embedding its corpus when the embedding model changes, and fine-tuning Gemma once enough good trajectories pile up.
+The previous files gave you the parts: a labeled set to score against, run logging to make rebuilds reproducible, drift detection to notice the world moved. A retraining pipeline is what *wires them into a loop*. It's the answer to "a model decays — now what?" automated: something decides to retrain, the model is rebuilt, the new model is tested against the old one, and only a winner ships. buffr can't run this end-to-end yet because it has no model to rebuild — but it already owns the hardest, most-skipped piece: `eval/queries.json`, the gate that decides whether a challenger is actually better than the champion.
 
+**The MLOps lifecycle, drawn as the LOOP this file closes**
 ```
-  Zoom out — where a retraining loop would sit in buffr
-
-  ┌─ Signals layer ─────────────────────────────────────────────┐
-  │  PSI > 0.2 (file 15) · embedding_model version change ·     │
-  │  agents.messages trajectory volume                          │
-  └───────────────────────────────┬──────────────────────────────┘
-                                  │  a trigger fires
-  ┌─ Retraining loop ─────────────▼──────────────────────────────┐
-  │  ★ collect → split → RETRAIN → eval-gate → canary → promote ★│ ← we are here
-  │  NOT IMPLEMENTED — buffr trains/refreshes nothing            │
-  └───────────────────────────────┬──────────────────────────────┘
-                                  │  promote
-  ┌─ Serving layer ───────────────▼──────────────────────────────┐
-  │  Ollama / pg-vector-store now serve the refreshed artifact   │
-  └───────────────────────────────────────────────────────────────┘
+┌────────┐ ┌──────────┐ ┌───────┐ ┌───────┐ ┌────────┐ ┌─────────┐
+│  Data  │►│ Features │►│ Split │►│ Train │►│ Deploy │►│ Monitor │
+└───▲────┘ └──────────┘ └───────┘ └───────┘ └────────┘ └────┬────┘
+    │                                                        │
+    └──────────────── ★ RETRAINING PIPELINE ★ ◄──────────────┘
+         trigger fires ──► rebuild ──► validate-vs-incumbent ──► ship/rollback
+                              this file: the arrow that closes the loop
 ```
-
-Zoom in: a **retraining pipeline** is the loop that turns a refresh *trigger* into a *safely deployed* new model. Three things make it: a trigger strategy (when), the retrain-and-validate loop (how), and a gate (don't ship a regression). buffr has the data two such triggers would fire on — an `embedding_model` version column and an accumulating trajectory log — and no loop wired to either.
+Retraining is the lifecycle eating its own tail: the monitor's signal flows back to data and kicks off a fresh run, gated so a worse model can't reach production.
 
 ## Structure pass
 
-**Layers:** the trigger (when to refresh) → the retrain loop (build the candidate) → the gate (is it better?) → the rollout (canary → promote).
+One axis organizes the whole pipeline: **what fired the rebuild, and did the rebuild earn the right to ship?** The first half is the *trigger* (three kinds). The second half is the *gate* (champion vs challenger). Everything else is plumbing between them.
 
-**Axis — "what decides this fires, and what could it cost if it's wrong?"** Trace the trigger question across the three strategies.
-
+**The one axis: trigger (why rebuild) → gate (may it ship)**
 ```
-  trace "what fires the retrain, and what's the failure?" across strategies
+   TRIGGERS (any one fires) ──────────►  REBUILD  ──────────► GATE
+   ┌──────────────────────┐                                  ┌──────────────────┐
+   │ scheduled (cron)      │            train fresh          │ challenger vs     │
+   │ drift-triggered (PSI) │            challenger model     │ champion on the   │
+   │ perf-triggered (eval) │                                 │ labeled set       │
+   └──────────────────────┘                                  └────────┬─────────┘
+                                                          better? ─────┤
+                                              ┌───────────────────┬────┘
+                                              ▼ ship (promote)    ▼ rollback (keep champion)
 
-  ┌─ SCHEDULED ──────────┐  a clock      fires every N days
-  │  cron, no signal      │  fails by: wasteful (stale data) OR too late
-  ├─ DRIFT-TRIGGERED ────┤  PSI > 0.2    fires on input shift (file 15)
-  │  ties to file 15      │  fails by: blind to concept drift
-  └─ PERFORMANCE-TRIG. ──┘  metric drop   fires on live-quality drop
-     needs prod labels      fails by: needs ground-truth buffr lacks
+   ┌────────────────────────────── THE SEAM ──────────────────────────────┐
+   │ A trigger is NOT permission to ship. The GATE is the safety: a fresh   │
+   │ model that scores WORSE than the incumbent must be rejected, not       │
+   │ deployed just because it's newer.                                      │
+   └────────────────────────────────────────────────────────────────────────┘
 ```
-
-**The seam:** the **eval gate** between "candidate trained" and "candidate deployed." Control flips there — before the gate the pipeline is *building*, after it the pipeline is *serving*. A retrained model that skips the gate can be strictly worse than what it replaces, and you'd never know until production. The gate is the one part you can't drop: it's what makes a retraining *pipeline* rather than a retraining *gamble*.
+The seam: newer is not better. The gate exists precisely because a retrain can produce a regression, and "we just retrained" must never override "the old model scored higher."
 
 ## How it works
 
-### Move 1 — the mental model
+### Move 1 — Mental model
 
-You already know dependency-driven rebuilds: a CI pipeline rebuilds when a file changes, runs the test suite, and only deploys if tests pass. A retraining pipeline is that loop for models — a *trigger* (something changed), a *build* (retrain), a *gate* (eval must pass), a *deploy* (canary then promote). The only new idea is that the "trigger" can be a statistical signal (drift) rather than a file edit.
+The mental model: **champion/challenger.** The model in production is the *champion*. A retrain produces a *challenger*. The challenger only becomes champion if it beats the incumbent on the same labeled evaluation — otherwise it's discarded and the champion stays. This is the whole safety story in two words.
 
+**The pattern: challenger must beat champion on the same gate to be promoted**
 ```
-  the kernel — the trigger→retrain→gate→deploy loop
-
-         ┌─────────────────────────────────────────────┐
-         ▼                                             │
-  ┌─ trigger ──┐   ┌─ collect+split ─┐   ┌─ retrain ─┐  │
-  │ clock/drift│ → │ new data, fresh │ → │ candidate │  │
-  │ /perf drop │   │ train/val/test  │   │  model    │  │
-  └────────────┘   └─────────────────┘   └─────┬─────┘  │
-                                               ▼        │
-                          ┌─ EVAL GATE ─┐  pass? ──no──►│ discard, keep current
-                          │ candidate > │
-                          │  current?   │  yes
-                          └──────┬──────┘
-                                 ▼
-                    ┌─ canary/shadow ─┐ → ┌─ promote ─┐
-                    │ small % traffic │   │ full swap │
-                    └─────────────────┘   └───────────┘
+        CHAMPION (in prod)                CHALLENGER (just retrained)
+              │                                   │
+              └──────────► SAME eval set ◄────────┘
+                                │
+                    challenger_score > champion_score ?
+                       ┌──────────────┬──────────────┐
+                       │ YES → promote │ NO → reject   │
+                       │ (new champion)│ (rollback)    │
+                       └──────────────┴──────────────┘
 ```
+The incumbent is the bar; the challenger must clear it on identical, fair ground before it ships.
 
-The loop closes: promote, then keep watching, and the next trigger restarts it.
+### Move 2 — Walk the mechanism
 
-### Move 2 — the step-by-step walkthrough
+**Part 1 — A trigger fires.** Three independent triggers, any of which starts a run. Scheduled is dumb-but-reliable; drift- and performance-triggered are reactive.
 
-**The three trigger strategies — when to refresh.** Each answers "when" differently, and each fails differently.
-
+**The three triggers, by what they watch**
 ```
-  trigger strategies side by side
-
-  SCHEDULED          retrain every N days, no matter what
-    + dead simple, predictable cost
-    − wasteful if nothing changed; stale if change is faster than N
-
-  DRIFT-TRIGGERED    retrain when PSI > 0.2 (file 15)
-    + only pays when inputs actually moved
-    − blind to concept drift (PSI watches inputs only)
-
-  PERFORMANCE-TRIG.  retrain when a live metric drops below threshold
-    + fires on the thing you actually care about (quality)
-    − needs production GROUND-TRUTH labels to measure live quality
-```
-
-Drift-triggered is the natural pairing for buffr because it leans on PSI (file 15) and needs no labels; performance-triggered is mostly off the table since buffr collects no production ground-truth.
-
-**The full retrain-and-validate loop.** Once a trigger fires, the model doesn't just get swapped — it runs a gauntlet.
-
-```
-  Step-by-step: trigger fired → safe deploy
-
-  1. collect new data        gather the fresh corpus / trajectories
-  2. revalidate split        re-draw train/val/test (no leakage from prod)
-  3. retrain                 produce the candidate artifact
-  4. EVAL GATE               candidate must BEAT current on a held-out set ← the gate
-  5. canary / shadow         route a small % (or mirror traffic) to candidate
-  6. promote                 candidate becomes current; loop continues
-```
-
-Pseudocode for the trigger-to-promote decision:
-
-```
-  // input:  signal (PSI / clock / metric), current_model
-  // output: deployed model (new or unchanged)
-  function maybe_retrain(signal, current_model):
-    if not trigger_fires(signal):        // when? — strategy-specific
-      return current_model               // cheapest path: do nothing
-    data = collect_new_data()
-    train, val, test = revalidate_split(data)   // fresh split, no leakage
-    candidate = retrain(train, val)
-    if eval(candidate, test) <= eval(current_model, test):  // ← THE GATE
-      return current_model               // candidate worse → discard, keep current
-    promote_via_canary(candidate)        // small % first, then full
-    return candidate
-```
-
-The gate (`if eval(candidate) <= eval(current)`) is the load-bearing line: drop it and a retrain that produced a *worse* model ships automatically, which is the classic "we retrained on bad fresh data and degraded production" incident.
-
-**buffr loop A — re-embed on an embedding-model swap.** `agents.chunks` carries an `embedding_model` column (`src/pg-vector-store.ts:28`, default `'nomic-embed-text:v1.5'`). Embeddings from different models live in *incompatible vector spaces* — a query embedded with model B cannot be cosine-compared against chunks embedded with model A. So swapping the embedding model isn't a config change; it's a *re-embed-everything* trigger.
-
-```
-  buffr loop A — embedding model swap → re-embed pipeline
-
-  embedding_model column changes: nomic-v1.5 → new-model
-        │  TRIGGER: every chunk's vector is now in the WRONG space
-        ▼
-  re-embed all agents.chunks with the new model
-        │  build a SHADOW set (new vectors) alongside the old
-        ▼
-  ATOMIC swap: queries point at new vectors only after ALL chunks re-embedded
-        │  (mixed-space search = silently wrong results = the failure to avoid)
-        ▼
-  drop old vectors
-```
-
-The boundary condition is atomicity: if queries hit a half-re-embedded table, some chunks are in the old space and some in the new, and cosine search returns garbage with no error. The swap must be all-or-nothing.
-
-**buffr loop B — fine-tune trigger on trajectory volume.** buffr's actual (unbuilt) ML ceiling is fine-tuning Gemma on its own conversation trajectories (file 07). `agents.messages` accumulates the full-signal trajectory of every run — that's the SFT corpus growing in place. The retraining trigger is volume-and-quality: fine-tune once enough *good* trajectories have piled up.
-
-```
-  buffr loop B — trajectory volume → fine-tune trigger
-
-  agents.messages grows: every conversation appends its trajectory
-        │  TRIGGER: count high-quality trajectories
-        ▼
-  if  count(clean, successful runs) ≥ N   AND   quality bar met
-        │  (ties to file 15: don't SFT on a drifted/degraded corpus)
-        ▼
-  build SFT set from agents.messages → fine-tune gemma (file 07)
+   SCHEDULED      ─ cron: "every Sunday" ───────────► fires on TIME
+   DRIFT          ─ PSI > 0.25 (file 15) ───────────► fires on INPUT shift
+   PERFORMANCE    ─ metric drop on labeled canary ──► fires on OUTPUT quality drop
         │
-        ▼
-  EVAL GATE on eval/queries.json → promote only if it beats base gemma
+   any one ──► enqueue a retrain run
 ```
 
-The trigger is the missing piece between "we have the corpus" and "we fine-tune" — `agents.messages` is the corpus, but nothing decides *when* it's big and clean enough.
+**Part 2 — Rebuild reproducibly.** The retrain is a logged run (file 14): pinned data version, hyperparams, seed, commit. The challenger artifact is stamped with its run id so its lineage is traceable.
 
-### Move 2.5 — current state vs future state
-
+**The challenger is a logged run, not a one-off**
 ```
-  Phase A (today)                        Phase B (a retraining loop exists)
-  ─────────────                          ──────────────────────────────────
-  embedding_model column tracked         swap triggers atomic re-embed (loop A)
-  agents.messages accumulates            volume/quality triggers SFT (loop B)
-  NO trigger, NO gate, NO rollout        trigger → retrain → eval-gate → promote
-  swapping models would break silently   swap is safe (shadow + atomic cutover)
+   trigger ──► train() with PINNED inputs ──► challenger artifact + run_id
+                         │
+            reproducible by construction (file 14 discipline)
 ```
 
-Both loops are buildable from data that already exists — an `embedding_model` column and a growing trajectory table. What's missing is the *control*: the trigger, the gate, the atomic cutover.
+**Part 3 — Validate against the incumbent on the labeled set.** Both models score on the *same* held-out labeled data. In buffr's shape, that's exactly what `eval/queries.json` is: `{query, relevant[]}` rows yielding P@1/R@3. Illustrative pseudocode, not buffr code:
 
-### Move 3 — the principle
+**Gate: same labeled set, champion vs challenger (illustrative)**
+```python
+# ILLUSTRATIVE ONLY — not buffr code. The validate-vs-incumbent gate.
+labeled = load("eval/queries.json")              # {query, relevant[]} rows
+champ_score = evaluate(champion,   labeled)      # P@1 / R@3 today
+chal_score  = evaluate(challenger, labeled)      # same metric, same data
 
-A retraining pipeline is mostly a *decision* problem, not a training problem: when is a refresh worth its cost, and how do you avoid shipping a regression. The trigger strategy answers "when" (clock vs drift vs live-metric), and the eval gate answers "is the candidate actually better" — drop the gate and you've automated the deployment of worse models. buffr has the signals two triggers would fire on and no loop wired to either, so its model never refreshes and its swap path is silently unsafe.
+if chal_score > champ_score + MARGIN:            # MARGIN guards against noise
+    promote(challenger)                          # new champion → deploy
+else:
+    rollback(challenger)                         # keep champion, log the reject
+```
+
+**Part 4 — Promote or roll back, and log the decision either way.** A win promotes the challenger to champion and deploys it. A loss keeps the incumbent and records *why* the challenger lost — a rejected retrain is signal, not noise.
+
+**The terminal fork: ship or keep, always logged**
+```
+   challenger WINS ──► promote ──► deploy ──► challenger is new champion
+   challenger LOSES ─► rollback ─► champion stays ──► log the reject + scores
+                                          │
+                       either way: the decision is RECORDED (run id + verdict)
+```
+
+### Move 2.5 — Current vs future
+
+buffr has the gate but not the model. The eval harness is real today; the loop around it is the ceiling.
+
+**What buffr has vs the full loop**
+```
+   HAVE TODAY (real):
+     eval/queries.json + P@1/R@3 ──► the validate-vs-incumbent GATE exists
+     drift monitor (file 15) ──► the drift TRIGGER is buildable
+     run logging (file 14) ──► reproducible REBUILD is buildable
+
+   MISSING (the ceiling):
+     a TRAINED MODEL to rebuild ──► without it, there's no champion/challenger
+     ★ the full retraining loop is gated on training a model at all
+```
+
+### Move 3 — The principle
+
+The principle: **automate the rebuild, but never automate away the gate.** A retraining pipeline's value is that it reacts to decay without a human babysitting it — *and* that it refuses to ship a regression. The trigger makes you fast; the champion/challenger gate makes you safe. Remove the gate and you've built a machine that confidently deploys worse models on schedule.
 
 ## Primary diagram
 
+**The full picture: three triggers into a rebuild, a labeled gate, and a ship-or-rollback fork**
 ```
-  buffr's two retraining loops — full picture
-
-  ┌─ TRIGGER signals ───────────────────────────────────────────┐
-  │  PSI > 0.2 (file 15) · embedding_model change · msg volume   │
-  └──────────────┬───────────────────────────┬───────────────────┘
-                 │ loop A: model swap          │ loop B: trajectory volume
-                 ▼                             ▼
-  ┌─ re-embed pipeline ─────────┐  ┌─ fine-tune pipeline (file 07) ─────┐
-  │ re-embed all agents.chunks  │  │ build SFT set from agents.messages │
-  │ shadow set → ATOMIC swap    │  │ fine-tune gemma                    │
-  └──────────────┬──────────────┘  └──────────────┬─────────────────────┘
-                 ▼                                 ▼
-  ┌─ EVAL GATE ─────────────────────────────────────────────────┐
-  │  candidate must beat current on eval/queries.json           │
-  │  fail → discard, keep current   pass → canary → promote     │
-  └───────────────────────────────┬──────────────────────────────┘
-                                  ▼
-  ┌─ Serving layer ───────────────────────────────────────────────┐
-  │  pg-vector-store (new vectors) / Ollama (fine-tuned gemma)    │
-  └───────────────────────────────────────────────────────────────┘
+   ┌───────────── TRIGGERS ─────────────┐
+   │ scheduled (cron)                    │
+   │ drift (PSI > 0.25, file 15)         │──┐
+   │ performance (eval drop on canary)   │  │
+   └─────────────────────────────────────┘  ▼
+                                    REBUILD (logged run, file 14)
+                                    pinned data/hp/seed/commit ──► challenger + run_id
+                                             │
+                              ┌──────────────▼──────────────┐
+                              │  GATE: champion vs challenger │
+                              │  SAME labeled set             │
+                              │  ★ eval/queries.json → P@1/R@3│ ◄── buffr HAS this
+                              └──────────────┬──────────────┘
+                            challenger > champion + MARGIN ?
+                              ┌──────────────┴──────────────┐
+                              ▼ YES                          ▼ NO
+                         PROMOTE → deploy               ROLLBACK → keep champion
+                         (new champion)                 (log the reject + scores)
 ```
+Read it top to bottom: any trigger starts a reproducible rebuild, the challenger faces the champion on buffr's existing labeled gate, and only a clear winner ships — the gate is the one piece buffr already owns.
 
 ## Elaborate
 
-Retraining pipelines are the "CT" in MLOps' CI/CD/CT — continuous training — and the discipline is the same as deployment safety: never ship an artifact that hasn't passed a gate. The three trigger strategies trade cost against freshness. Scheduled is the simplest and the default people start with; it's wasteful when nothing changed and dangerous when change outpaces the schedule. Drift-triggered (retrain when PSI crosses 0.2, straight from file 15) only pays when inputs actually moved, but inherits PSI's blind spot — it won't fire on concept drift. Performance-triggered is the gold standard because it fires on the metric you actually care about, but it needs production ground-truth labels to measure live quality, which most systems — buffr included — don't collect.
-
-buffr's two real loops are worth being precise about. Loop A (re-embed) is forced by a property of embeddings: different models produce vectors in *incompatible spaces*, so the `embedding_model` column (`src/pg-vector-store.ts:28`) isn't just metadata — it's a correctness invariant. Change it without re-embedding and cosine search silently compares incompatible vectors. The pipeline is a re-embed-everything job with an atomic cutover so queries never see a half-migrated table. Loop B (fine-tune) is buffr's ceiling: `agents.messages` is a fine-tuning corpus growing in place (file 14 logs it, file 07 would consume it), and the only missing piece is a *trigger* — a rule for "the corpus is now big and clean enough to SFT on." That trigger ties back to file 15: you don't want to fine-tune on a drifted or degraded corpus, so quality-gating the trajectories is part of the trigger.
-
-buffr's prior ML pipeline (MediaPipe pose-landmarking) never retrained anything — it ran a fixed pre-built model — so the entire retraining-loop discipline is new ground here. The honest summary: buffr has both corpora (chunks and trajectories) and both version signals (`embedding_model`, message volume), and zero machinery to act on them.
+- **`eval/queries.json` is the load-bearing asset.** A retraining pipeline is only as trustworthy as its gate, and the gate is a *labeled* evaluation. buffr already has one: `[{query, relevant[]}]` yielding P@1/R@3. That's the hard part most teams skip — they automate the retrain and ship on "loss went down in training," which says nothing about real quality. You have the right artifact; you're missing the model in front of it.
+- **MARGIN matters — don't promote on noise.** Eval scores wobble. Promoting whenever `chal > champ` by any amount means you'll churn champions on statistical noise. Require a meaningful margin (or a significance test) so you only promote real improvements.
+- **The performance trigger needs *fresh labels*.** Drift (file 15) needs no labels — it watches inputs. But the performance trigger watches *quality*, which means a labeled canary: a small, continuously-labeled slice of production. Without fresh labels you cannot detect quality decay, only input decay.
+- **Shadow / canary deploys de-risk promotion.** Even a gate-passing challenger can surprise you in prod. Running it in shadow (scoring live traffic without serving it) or canary (a small % of traffic) catches gate-blind-spots before full rollout. This is the serving-side cousin of the offline gate.
+- **A scheduled trigger is a floor, not a strategy.** Cron retraining guarantees freshness but wastes compute when nothing changed and lags when things change fast. The mature setup is scheduled *plus* reactive (drift/performance) — the cron is the safety net under the reactive triggers.
 
 ## Project exercises
 
-> No curriculum file present; exercises derived from the codebase.
+### Exercise — A retraining loop gated on eval/queries.json
 
-### Design the re-embed pipeline triggered by an embedding-model change
+- **Exercise ID:** [B3.16] Phase 5
+- **What to build:** *Not yet implemented — buffr trains nothing,* so this is the Phase 5 ceiling and is explicitly gated on first having a trained model (the [B2C.13]/[B2C.14] exercises). Once a small `ml/` model exists, build `ml/retrain.py`: a loop that retrains a challenger (reproducible run), scores both champion and challenger on `eval/queries.json`, and promotes only if the challenger beats the champion by a margin — otherwise rolls back and logs the reject.
+- **Why it earns its place:** It's the capstone that wires together the labeled set, run logging, and the champion/challenger gate into the loop real MLOps teams run. The signal is that you built the *gate*, not just the retrain — proving you understand newer ≠ better.
+- **Files to touch:** new `ml/retrain.py`, reads `eval/queries.json`, reuses `ml/train.py` + the run logger from [B2C.14], writes a promotion/rollback verdict to `agents.training_runs`.
+- **Done when:** feeding a deliberately-worse challenger triggers a logged rollback (champion stays); a genuinely-better one promotes and deploys.
+- **Estimated effort:** Large — two to three days, and only after a trained model exists. The loop is moderate; the gate's correctness (margin, fairness of comparison) is the real work.
 
-- **Exercise ID:** RETRAIN-1 (Case B — re-embed pipeline not yet exercised). **The lead retraining exercise.**
-- **What to build:** a pipeline that detects an `embedding_model` version change, re-embeds every row in `agents.chunks` with the new model into a shadow set, and swaps atomically so queries never hit a mixed-space table.
-- **Why it earns its place:** swapping embedding models without re-embedding silently breaks cosine search (incompatible vector spaces, no error) — this is a real correctness trap buffr is one config change away from. The story is "I built a zero-downtime re-embed with atomic cutover."
-- **Files to touch:** new `scripts/reembed.ts`; read/write `agents.chunks` via `src/pg-vector-store.ts` (the `embedding_model` column at L28, the `upsert` path); stage new vectors, then atomically repoint search.
-- **Done when:** changing the embedding model re-embeds all chunks and queries only see the new space after the full re-embed completes (never a mix).
-- **Estimated effort:** 1–2 days.
+### Exercise — Drift- and performance-triggered retraining
 
-### Design the fine-tune trigger keyed on trajectory volume and quality
-
-- **Exercise ID:** RETRAIN-2 (Case B — fine-tune trigger not yet exercised).
-- **What to build:** a trigger rule over `agents.messages` — fire a fine-tune when the count of *clean, successful* trajectories crosses N and a quality bar is met — turning buffr's accumulating trace into an SFT trigger (ties to file 07 and file 15).
-- **Why it earns its place:** `agents.messages` is buffr's fine-tuning corpus growing in place; the missing piece is *when is it big and clean enough to SFT*. This is the retraining trigger for buffr's actual unbuilt ceiling.
-- **Files to touch:** new `scripts/ft-trigger.ts` reading `agents.messages` (filter for successful runs: no `error` rows, completed trajectory); reuse the PSI/quality checks from file 15; emit a "fine-tune now" flag with the candidate SFT set.
-- **Done when:** the trigger fires only when ≥ N high-quality trajectories exist and the corpus passes the quality bar, naming the SFT set it would train on.
-- **Estimated effort:** 1 day.
+- **Exercise ID:** [B3.16b] Phase 5
+- **What to build:** *Not yet implemented — buffr trains nothing.* Extend [B3.16] with the two reactive triggers: subscribe `ml/retrain.py` to the `agents.drift_events` rows from [B2C.15b] (drift trigger) and to a periodic P@1/R@3 check on a labeled canary (performance trigger), so a PSI breach or a metric drop — not just cron — can start a retrain.
+- **Why it earns its place:** Scheduled-only retraining is the beginner version. Reactive triggers — rebuild *because* drift or quality moved — is the staff-level loop, and it consumes the drift monitor you already built in file 15.
+- **Files to touch:** `ml/retrain.py`, reads `agents.drift_events` (from [B2C.15b]) and runs the `eval/queries.json` canary check; optional `ml/triggers.py`.
+- **Done when:** injecting drift writes a `drift_events` row that kicks off a retrain run, and a simulated eval drop on the canary does the same — both logged with the trigger reason.
+- **Estimated effort:** Medium to large — two days on top of [B3.16].
 
 ## Interview defense
 
-**Q: What triggers a retrain, and which fits buffr?**
-Answer: three strategies. Scheduled — retrain every N days, simple but wasteful or stale. Drift-triggered — retrain when PSI crosses 0.2 (file 15), only pays when inputs move but blind to concept drift. Performance-triggered — retrain when a live quality metric drops, the gold standard but it needs production ground-truth labels. For buffr, drift-triggered fits because it leans on PSI and needs no labels; performance-triggered is mostly off the table since buffr collects no production ground-truth.
+**Q: "When do you retrain a model?"**
+```
+   ┌──────────────────────────────────────────────┐
+   │ scheduled (cron)        — freshness floor      │
+   │ drift-triggered (PSI)   — inputs moved         │
+   │ performance-triggered   — quality dropped      │
+   └──────────────────────────────────────────────┘
+        any fires ──► retrain; cron is the net under the reactive two
+```
+Anchor: "Three triggers — schedule, drift, performance — with the reactive two doing the real work and cron as the safety net."
 
+**Q: "A retrain finished. Does it ship?"**
 ```
-  scheduled (clock) · drift (PSI>0.2) · performance (metric drop, needs labels)
-  buffr → drift-triggered (no labels required)
+   challenger ──vs── champion   on the SAME labeled set
+                  │
+        better by a MARGIN? ── yes → promote ── no → rollback (keep champion)
 ```
+Anchor: "Only if it beats the incumbent on the same labeled gate by a real margin — newer is never reason enough; that's what `eval/queries.json` is for."
 
-**Q: buffr swaps its embedding model — what has to happen, and what's the trap?**
-Answer: every chunk must be re-embedded. Embeddings from different models live in incompatible vector spaces, so a query embedded with the new model can't be cosine-compared against chunks still embedded with the old one — `agents.chunks.embedding_model` tracks which model produced each vector for exactly this reason. The pipeline re-embeds all chunks into a shadow set and cuts over atomically. **The part people forget: the cutover must be all-or-nothing — if queries hit a half-re-embedded table, search compares mixed spaces and returns silently wrong results with no error to catch it.**
-
+**Q: "What's the hardest part to get right, and do you have it?"**
 ```
-  model swap → re-embed ALL chunks (shadow) → ATOMIC cutover
-  half-migrated table = mixed-space search = silent garbage
+   most candidates: automate the retrain ◄── the easy half
+   the gate: a LABELED validate-vs-incumbent check ◄── the hard half
+        buffr HAS it: eval/queries.json → P@1/R@3
 ```
+Anchor: "Most candidates have only consumed pre-trained models and would automate a retrain with no real gate. The hard part is the labeled champion/challenger check — and buffr already has that asset in `eval/queries.json`; what's missing is the model in front of it. That's the [B3.16] ceiling."
 
 ## See also
 
-- `15-drift-detection.md` — the PSI signal that drives drift-triggered retraining.
-- `07-transfer-learning.md` — the fine-tune that loop B (RETRAIN-2) triggers; buffr's ML ceiling.
-- `14-training-run-logging.md` — `agents.messages`, the trajectory corpus loop B trains on.
-- `13-quantization.md` — you'd quantize a fine-tuned model before serving it; the step after retraining.
-- `../05-evals-and-observability/04-llm-observability.md` — the trace that supplies both the trigger signal and the SFT corpus.
+- ./15-drift-detection.md — the drift trigger that feeds this pipeline.
+- ./14-training-run-logging.md — the reproducible rebuild every challenger must be.
+- ./13-quantization.md — a promoted challenger gets quantized before it serves.
+- ./08-confusion-matrices.md — the metric family the gate reads challenger vs champion off of.
+- ./03-train-val-test.md — the held-out discipline the labeled gate depends on.
+- ../03-retrieval-and-rag/10-incremental-indexing.md — the retrieval-side cousin: refreshing the index instead of the model.
+- ../05-evals-and-observability/01-eval-set-types.md — `eval/queries.json` as the labeled gate type.
+- ../06-production-serving/05-retry-circuit-breaker.md — rollback as the serving-side safety the gate mirrors.
+- ../09-ml-system-design-templates — the retraining loop as the continuous-training box in a system-design answer.

@@ -1,256 +1,238 @@
-# HTTP Semantics, Caching, and CORS
+# 05 · HTTP Semantics, Caching, and CORS
 
-**Industry name(s):** HTTP request/response semantics / browser security
-policy (CORS) / HTTP caching. **Type:** Industry standard.
+> POST JSON to the local model server — Industry standard
+> · the HTTP transport (`defaultHttpTransport`) lives in aptkit; buffr supplies the host
 
 ## Zoom out, then zoom in
 
-buffr speaks HTTP in exactly one direction: *outbound* to Ollama. And it
-barely speaks it — buffr's entire HTTP surface is the host *string*
-`http://localhost:11434`. The actual methods, headers, bodies, and status
-handling live inside aptkit's providers. So this file is half "what HTTP
-buffr triggers" and half "the large HTTP topics this repo never touches" —
-CORS, caching, cookies — all `not yet exercised`, and for a clean reason.
+buffr's only HTTP is two POSTs to Ollama: `/api/chat` for generation,
+`/api/embed` for embeddings. And here's the key fact — **buffr doesn't write the
+HTTP.** The `fetch()` calls live in aptkit's transport. buffr's entire HTTP
+surface is the host string. CORS, cookies, caching, browser policy: all `not yet
+exercised`, because there is no browser and no inbound server.
 
 ```
-  Zoom out — buffr's HTTP surface is one string
+  Zoom out — HTTP lives one layer down, in aptkit
 
-  ┌─ Config (buffr) ─────────────────────────────────────────┐
-  │  ollamaHost = "http://localhost:11434"   (config.ts:14)  │ ← ★ the
-  │  ── that's the ENTIRE HTTP surface buffr owns ──         │   whole
-  └─────────────────────────────┬─────────────────────────────┘   surface
-                                │  host string
-  ┌─ Transport (aptkit) ────────▼────────────────────────────┐
-  │  OllamaEmbeddingProvider / GemmaModelProvider            │
-  │   build the request: method, path, headers, JSON body    │
-  │   call fetch(), parse status + response                  │
-  └─────────────────────────────┬─────────────────────────────┘
-                                ▼ HTTP POST, TCP 11434
-  ┌─ Ollama daemon ──────────────────────────────────────────┐
-  │  /api/embeddings · /api/generate                         │
-  └──────────────────────────────────────────────────────────┘
+  ┌─ Process layer (buffr) ─────────────────────────────────────┐
+  │  cfg.ollamaHost = "http://localhost:11434"  ── src/config.ts:14
+  │       │ passed to providers                                  │
+  │       ▼                                                       │
+  │  GemmaModelProvider / OllamaEmbeddingProvider  (aptkit)      │
+  │       │                                                       │
+  │       ▼  ★ defaultHttpTransport — the only fetch() ★         │
+  └───────┬──────────────────────────────────────────────────────┘
+          │ HTTP/1.1  POST application/json
+          ▼
+   [ Ollama :11434 ]   /api/chat   /api/embed
 ```
 
-Zoom in. The concept is **HTTP semantics**: methods (GET/POST), status
-codes, headers, and the request/response shape. The seam that defines this
-file: buffr provides the *address*; aptkit owns the *protocol*. buffr never
-constructs an HTTP request itself.
+Zoom in: HTTP semantics is the contract — method, headers, status, body. buffr
+relies on a tiny slice of it (POST + JSON + a 2xx/non-2xx split) and ignores the
+rest (no caching headers, no cookies, no conditional requests).
 
 ## Structure pass
 
-**Layers.** Config (the host string) → aptkit provider (builds + sends the
-HTTP request) → Ollama (responds).
+**Layers.** buffr config → aptkit provider → aptkit transport (`fetch`) → Ollama.
+The HTTP semantics live in the transport layer, which buffr injects a host into
+but doesn't author.
 
-**Axis — control / "who decides the HTTP request's shape?"** This axis is
-the whole story of this file:
+**Axis — trace `who owns the HTTP contract?`**
 
 ```
-  axis: "who builds the HTTP request?"
+  axis = "who decides method / headers / status handling?"
 
-  ┌─ buffr config.ts ──────────┐  → only the HOST. nothing else.
-  └────────────────────────────┘
-  ┌─ aptkit provider ──────────┐  → method, path, headers, body,
-  │                            │     status handling — ALL of it
-  └────────────────────────────┘
-  ┌─ Ollama ───────────────────┐  → the response semantics
-  └────────────────────────────┘
-
-  control over HTTP flips entirely to aptkit at the very first seam
+  ┌─ buffr ────────────────┐  seam  ┌─ aptkit transport ────────┐
+  │ supplies host string   │ ══════►│ POST, content-type: json, │
+  │ ONLY                   │ (flips)│ res.ok check, res.json()  │
+  └────────────────────────┘        └────────────────────────────┘
+   buffr owns 0% of HTTP            aptkit owns 100% of HTTP
 ```
 
-**Seam.** The seam is the `host: cfg.ollamaHost` argument at
-`session.ts:40` and `:46`. On buffr's side: a string. On aptkit's side: a
-full HTTP client. Control over every HTTP semantic flips across that one
-argument — which is why buffr's HTTP code is, almost literally, one line.
+**Seam.** The load-bearing seam is the provider boundary: buffr hands a host
+string across it and gets back a typed result. Everything HTTP — the method, the
+JSON serialization, the status check, the error message — is on aptkit's side.
+That's a clean port/adapter split: buffr depends on the provider interface, not on
+HTTP.
 
 ## How it works
 
 ### Move 1 — the mental model
 
-Think of how you use a typed API client in a frontend: you call
-`api.getUser(id)` and never see the `GET /users/:id`, the headers, or the
-status check — the client owns all of it; you own the *base URL* you
-configured it with. buffr relates to aptkit's Ollama providers exactly
-that way. buffr configures the base host; aptkit is the client.
+You know how a `fetch(url, { method: 'POST', body })` either resolves with a
+response you check `res.ok` on, or rejects on a network failure? That's the whole
+shape. aptkit's transport is exactly that fetch, once for chat and once for embed.
+buffr never sees it — it calls `agent.answer()` and a string comes back.
 
 ```
-  The control split — address vs protocol
+  Pattern — request/response over HTTP/1.1
 
-   buffr ─────────► "http://localhost:11434"
-                          │ (just the origin)
-                          ▼
-   aptkit provider ──► POST /api/generate
-                       Content-Type: application/json
-                       body: { model, prompt, ... }
-                       ──► fetch() ──► read status + JSON
+   buffr: agent.answer(q)
+       │
+       ▼
+   aptkit transport:
+     POST /api/chat
+     headers: { content-type: application/json }
+     body:    { model, messages }
+       │
+       ▼ (TCP to :11434)
+   Ollama
+       │
+       ▼
+     200 + { message } ──► res.ok ? res.json() : throw
+       │
+       ▼
+   string answer back to buffr
 ```
 
-### Move 2 — walk the HTTP surface
+### Move 2 — the walkthrough
 
-**buffr's contribution: the origin, twice.** `src/session.ts:40` and
-`:46`:
+**buffr's contribution is one line.** The host string (`src/config.ts:14`):
 
-```
-  session.ts:40,46 — the only HTTP buffr "writes"
-
-  new OllamaEmbeddingProvider({ model: 'nomic-embed-text:v1.5',
-                                host: cfg.ollamaHost });   // :40
-  new GemmaModelProvider({ host: cfg.ollamaHost });        // :46
-  //                              └──────┬──────┘
-  //          a host string. no path, no method, no headers,
-  //          no fetch — buffr stops at the origin.
+```ts
+ollamaHost: env.OLLAMA_HOST || 'http://localhost:11434',
 ```
 
-The same `cfg.ollamaHost` flows into `index-cmd.ts:18` and `eval-cmd.ts:14`
-for the embed-only paths. Everywhere, buffr's HTTP involvement ends at the
-host string.
+passed into both providers (`src/session.ts:40,46`). That's it. buffr does not
+construct a `Request`, set a header, or read a status code.
 
-**The actual request lives in aptkit.** When `agent.answer()` runs
-(`session.ts:62`), aptkit's `GemmaModelProvider` issues an HTTP POST to
-Ollama's generate endpoint; when the retrieval pipeline embeds a query,
-`OllamaEmbeddingProvider` POSTs to the embeddings endpoint. Method, path,
-`Content-Type`, the JSON body, and reading the status code are all
-aptkit's. Since `me.md` marks aptkit as *consumed, never edited here*, the
-honest statement is: **buffr triggers these HTTP requests but does not
-define their semantics.** Treat the exact headers/paths as aptkit's
-contract, not buffr's code.
+**The actual HTTP is aptkit's `defaultHttpTransport`.** Inside
+`@aptkit/provider-gemma`, the chat transport is:
 
-```
-  Request flow — buffr triggers, aptkit shapes, Ollama answers
-
-  ┌─ buffr ──────┐ host    ┌─ aptkit provider ─┐  HTTP POST  ┌─ Ollama ┐
-  │ session.ask  │ ──────► │ build req + body  │ ──────────► │ generate│
-  │ → agent      │         │ fetch()           │            │ /embed  │
-  │   .answer()  │ ◄────── │ parse status+json │ ◄────────── │ 200+JSON│
-  └──────────────┘ string  └───────────────────┘  response  └─────────┘
-       ▲
-       │ if aptkit throws (non-2xx, parse fail), it bubbles to
-       │ chat.tsx:30's try/catch → rendered as "error: ..."
+```js
+function defaultHttpTransport(host) {
+  const base = host.replace(/\/$/, '');                  // strip trailing slash
+  return async ({ signal, ...payload }) => {
+    const res = await fetch(`${base}/api/chat`, {        // ── POST to /api/chat
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },   // ── JSON body
+      body: JSON.stringify(payload),
+      ...(signal ? { signal } : {}),                     // ── optional AbortSignal
+    });
+    if (!res.ok) {                                       // ── status split: 2xx vs not
+      throw new Error(`ollama HTTP ${res.status}: ${await res.text()}`);
+    }
+    return res.json();
+  };
+}
 ```
 
-**Status codes and errors: surfaced, not handled.** buffr does no HTTP
-status inspection of its own. If Ollama returns a non-2xx, or the body
-fails to parse, aptkit throws, and that error propagates up through
-`agent.answer()` to the per-turn `try/catch` at `src/cli/chat.tsx:30`,
-which renders `error: <message>`. So buffr's HTTP error handling is
-exactly one catch clause: show the message, keep the session alive, let
-the user retry by typing again. There is no status-code-specific logic (no
-"retry on 503", no "re-auth on 401") — file `07` covers that absence.
+Read the HTTP semantics buffr actually depends on:
 
-**CORS: not applicable, by construction.** CORS is a *browser*
-same-origin policy enforced on *inbound* cross-origin requests. buffr is a
-Node process making *outbound* requests, and it accepts no inbound HTTP at
-all (file `01`: nothing listens). There is no browser and no server, so
-CORS has nothing to apply to. `not yet exercised` — and it never will be
-in this shape.
+- **Method: POST.** Both endpoints are POST — they carry a request body (the
+  prompt / the texts) and are not idempotent reads. No GET anywhere.
+- **One header: `content-type: application/json`.** No auth header (it's
+  loopback, no token), no `accept`, no cache-control, no cookies.
+- **Status handling is a binary split.** `res.ok` (any 2xx) → parse JSON.
+  Anything else → throw `ollama HTTP <status>: <body>`. There's no per-status
+  logic (no 429 backoff, no 404 special-case) — every non-2xx is one error class.
+  That's the *only* HTTP semantic buffr's failure path knows.
+- **No retry on the status split.** A 503 from an overloaded Ollama throws
+  immediately. → `07-timeouts-retries-pooling-and-backpressure.md`.
+
+The embed transport (`@aptkit/retrieval`) is the same shape against `/api/embed`,
+returning `json.embeddings`.
 
 ```
-  why CORS is absent — the policy has nothing to govern
+  Layers-and-hops — one chat completion over HTTP
 
-  CORS governs:  browser ──► cross-origin SERVER (inbound, browser-enforced)
-  buffr is:      node ──► Ollama / Postgres (outbound, no browser)
-
-  no browser + no inbound server = CORS is structurally irrelevant
+  ┌─ buffr ───────────────┐
+  │ agent.answer(q)       │
+  └──────────┬────────────┘
+             │ hop 1: provider builds { model, messages }
+             ▼
+  ┌─ aptkit transport ────┐
+  │ fetch POST /api/chat  │
+  └──────────┬────────────┘
+             │ hop 2: HTTP/1.1 POST + JSON body   ──► ┌─ Ollama ─┐
+             │ hop 3: 200 + { message } JSON      ◄── │ gemma2:9b│
+             ▼                                         └──────────┘
+  res.ok ? res.json() : throw  ──► string back to buffr
 ```
 
-**Cookies, sessions, auth headers: none in buffr.** No `Set-Cookie`, no
-bearer tokens, no session middleware. The local Ollama daemon needs no
-auth. The "session" in buffr is a *conversation* held in process memory
-(`session.ts`), not an HTTP cookie session — same word, unrelated concept.
-`not yet exercised`: HTTP-level auth.
+**CORS, cookies, caching — all absent, and correctly so.**
 
-**HTTP caching: none.** No `Cache-Control`, no `ETag`, no conditional
-requests, no response cache. Every turn re-embeds and re-generates from
-scratch against Ollama. There's a caching-shaped thing in the system —
-retrieval and conversation memory both pull from Postgres — but that's
-*application*-level reuse of stored vectors, not HTTP caching, and it lives
-behind boundary 1 (pg), not boundary 2 (HTTP). `not yet exercised`:
-HTTP-layer caching.
+- **CORS is `not yet exercised`.** CORS is a *browser* enforcement — the browser
+  refuses to let JS read a cross-origin response without the right
+  `Access-Control-Allow-Origin` header. buffr is a Node process; `fetch` in Node
+  doesn't enforce CORS. No browser, no CORS. It would only appear if buffr grew a
+  browser frontend hitting a cross-origin API.
+- **Cookies are `not yet exercised`.** No session cookie, no `Set-Cookie`
+  handling. The Ollama calls are stateless POSTs; identity isn't carried in a
+  cookie (there's no auth at all).
+- **HTTP caching is `not yet exercised`.** No `Cache-Control`, no `ETag`, no
+  conditional `If-None-Match`. Every embed and every chat is a fresh POST.
+  Caching would matter if buffr re-embedded identical text often — it doesn't
+  dedupe at the HTTP layer.
 
 ### Move 3 — the principle
 
-**Own the address, delegate the protocol, and your HTTP code shrinks to a
-config line.** By keeping only the host string and letting aptkit own
-method/headers/body/status, buffr's HTTP surface is impossible to get
-subtly wrong — there's almost nothing there to get wrong. The cost is that
-buffr can't add HTTP-level behavior (a timeout, a retry on 503, a cache)
-without reaching into aptkit, which it won't. That tradeoff is why file
-`07`'s absences are absences: the place to add them isn't in buffr.
+buffr depends on the *thinnest possible slice* of HTTP — POST, JSON, ok/not-ok —
+and pushes the actual protocol into a transport it can swap. That's the right
+altitude for a client: depend on the provider contract, not on `fetch`. The cost
+is that buffr's failure handling is coarse (one error class for every non-2xx),
+which is the tradeoff `07` examines.
 
 ## Primary diagram
 
-The whole HTTP picture, including what's absent.
-
 ```
-  HTTP semantics — present (outbound) and absent (the rest)
+  buffr HTTP — recap
 
-  ┌─ buffr ──────────────────────────────────────────────────┐
-  │  HTTP surface = "http://localhost:11434"  (config.ts:14) │
-  └───────┬───────────────────────────────────────────────────┘
-          │ host string only
-  ┌───────▼─── aptkit (owns the protocol) ───────────────────┐
-  │  POST /api/generate · /api/embeddings                    │
-  │  Content-Type: application/json · JSON body · status     │
-  │  non-2xx / parse-fail → throw → chat.tsx:30 try/catch    │
-  └───────┬───────────────────────────────────────────────────┘
-          ▼ TCP 11434
-       Ollama
+  buffr surface:  cfg.ollamaHost = "http://localhost:11434"  (src/config.ts:14)
+                  passed to both providers — buffr writes NO fetch
 
-  not yet exercised:  CORS · cookies · auth headers ·
-                      HTTP caching · inbound HTTP server
+  aptkit transport (defaultHttpTransport):
+    POST /api/chat   { model, messages }  → { message }     (gemma2:9b)
+    POST /api/embed  { model, input }      → { embeddings }  (nomic-embed)
+    header:  content-type: application/json   (no auth, no cache, no cookie)
+    status:  res.ok → json | else → throw `ollama HTTP <status>`
+
+  CORS:    not yet exercised (no browser)
+  cookies: not yet exercised (stateless, no auth)
+  caching: not yet exercised (every call a fresh POST)
 ```
 
 ## Elaborate
 
-The cleanest way to hold this file: buffr is an HTTP *client of one
-endpoint family*, and even that it delegates. Compare AdvntrCue from
-`me.md` — a Next.js app that *serves* HTTP, sets streaming responses,
-handles its own routes, and lives inside the browser security model (CORS,
-cookies all in play). buffr is the photographic negative: outbound-only,
-no server, no browser, HTTP delegated to a library. Recognizing which of
-the two shapes you're in tells you instantly which HTTP topics are even
-relevant — and for buffr, most of them aren't.
+The provider/transport split aptkit uses is the standard way to keep an LLM
+client testable: inject a fake transport in tests, use the real `fetch` in prod
+(the `OllamaEmbeddingProvider` docstring literally says "pass `embed` to feed
+recorded vectors in tests"). HTTP semantics like caching and conditional requests
+matter most for *read-heavy* APIs over the public internet; buffr's traffic is
+write-shaped POSTs to a local server, so the slice it uses is genuinely all it
+needs. The day buffr fronts a remote model API with rate limits, the `res.ok`
+binary split is the first thing that needs to grow a 429 branch.
 
 ## Interview defense
 
-**Q: "How does this app handle HTTP? CORS? Caching?"**
-
-> buffr's only HTTP is outbound to Ollama, and its whole surface is the
-> host string `http://localhost:11434` in `config.ts:14`. aptkit's
-> providers own the actual method, path, headers, body, and status — buffr
-> just supplies the origin. CORS is structurally absent: it's a browser
-> inbound-policy and buffr is a Node process with no browser and no server.
-> No HTTP caching either — every turn re-embeds and re-generates; the only
-> reuse is application-level vectors in Postgres, which isn't HTTP caching.
+**Q: What HTTP does buffr actually speak?**
 
 ```
-  buffr → host string only · aptkit → full HTTP client
-  CORS: no browser + no inbound server = N/A
-  caching: app-level (pg vectors), not HTTP
+  POST /api/chat  + POST /api/embed   — JSON bodies, ok/not-ok handling
+  buffr writes none of it — it supplies a host string
 ```
 
-Anchor: *"`session.ts:40,46` pass `host: cfg.ollamaHost` and nothing else
-— aptkit owns the request."*
+Answer: "Two POSTs to Ollama — chat and embed — both JSON. But buffr doesn't
+author the HTTP; the `fetch` lives in aptkit's `defaultHttpTransport`. buffr's
+whole HTTP surface is the host string `http://localhost:11434` at
+`src/config.ts:14`. It never sees a header or status code directly."
 
-**Q: "What happens when Ollama returns an error?"**
+**Q: How does buffr handle a CORS error from the model server?**
 
-> aptkit throws on non-2xx or a parse failure; the error bubbles through
-> `agent.answer()` to the per-turn try/catch at `chat.tsx:30`, which
-> renders `error: <message>` and keeps the session alive. There's no
-> status-specific handling — no retry on 503, no re-auth on 401. The user
-> just retries by typing again.
+Answer: "It can't get one — CORS is a browser enforcement and buffr is a Node
+process. No browser in the loop means CORS never fires. It'd only appear if buffr
+grew a browser frontend." That's the load-bearing distinction people miss: CORS is
+browser policy, not a server-side or Node-`fetch` concern.
 
-Anchor: *"`chat.tsx:30` — one catch clause is buffr's entire HTTP error
-policy."*
+**Q: How are non-2xx responses handled?**
+
+Answer: "Coarsely — one class. `res.ok` false throws `ollama HTTP <status>:
+<body>`. No per-status logic, no 429 backoff. Every failure is the same error, and
+it surfaces in the Ink catch (`src/cli/chat.tsx:30`) with no retry."
 
 ## See also
 
-- `01-network-map.md` — boundary 2 (the Ollama HTTP hop) and the absent
-  inbound boundary.
-- `02-dns-routing-and-addressing.md` — the `localhost` origin the HTTP
-  request targets.
-- `06-websockets-sse-streaming-and-realtime.md` — why the Ollama response
-  arrives as one string, not a stream.
-- `07-timeouts-retries-pooling-and-backpressure.md` — the missing
-  status-code retries and request timeouts.
-- `study-security` — auth posture on these endpoints.
+- `06-websockets-sse-streaming-and-realtime.md` — why the chat response isn't streamed
+- `07-timeouts-retries-pooling-and-backpressure.md` — the missing 429/timeout/retry handling
+- `04-tls-and-trust-establishment.md` — why this HTTP is plaintext (loopback)
+- `study-security` — trusting the model server's responses; no auth header

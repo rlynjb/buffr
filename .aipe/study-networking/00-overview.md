@@ -1,127 +1,124 @@
-# Networking — Overview
+# Study — Networking · Overview (buffr-laptop)
 
-> Study guide for `buffr-laptop`. What actually happens on the wire when
-> you run `npm run chat`, where it can fail, and which protocol semantics
-> the code relies on. Curriculum-style: concept → mechanism → real
-> `file:line` in your repo. Where the repo doesn't exercise something, it
-> says `not yet exercised` instead of inventing it.
+The whole networking story of this repo fits in one sentence: **two long-lived
+outbound clients, no inbound server.** buffr-laptop opens a connection pool
+(`pg.Pool`) to Postgres over TCP and makes HTTP requests to a local model server
+(Ollama) — and that is the entire wire surface. Nothing listens. Nothing
+accepts connections. There is no browser, so there is no CORS, no cookies, no
+WebSocket, no SSE. That absence is not a gap to apologize for — it's the shape
+of a single-device CLI brain, and naming it precisely is half the lesson.
 
-## The whole network surface in one picture
+## The system in one diagram
 
-`buffr-laptop` is a single-process Node CLI. It is a **client to two
-servers** and a **server to nobody**. That one sentence is the spine of
-this entire guide — keep it in your head.
+This is every byte that crosses a socket in buffr. Two outbound paths from one
+Node process; both endpoints are on (or reachable from) the same machine.
 
 ```
-  buffr-laptop on the wire — the whole thing
+  buffr-laptop — the complete on-the-wire map
 
-  ┌─ Process: node (npm run chat) ─────────────────────────────┐
-  │                                                            │
-  │   src/cli/chat.tsx (Ink TUI)                               │
-  │        │ in-process calls, NO network                      │
-  │   src/session.ts  ── one warm pool, many turns ──┐         │
-  │        │                                         │         │
-  │   ┌────▼──────────┐                  ┌────────────▼──────┐  │
-  │   │ pg.Pool       │                  │ Ollama providers  │  │
-  │   │ (src/db.ts)   │                  │ (aptkit transport)│  │
-  │   └────┬──────────┘                  └────────┬──────────┘  │
-  └────────┼──────────────────────────────────────┼────────────┘
-           │ TCP 5432 (pg wire)                    │ TCP 11434 (HTTP)
-           │ TLS by DATABASE_URL sslmode           │ plaintext, loopback
-           ▼                                       ▼
-  ┌─ Provider: Postgres ──────┐         ┌─ Provider: Ollama ────────┐
-  │ reindb / schema agents    │         │ gemma2:9b (generate)      │
-  │ pgvector HNSW             │         │ nomic-embed-text (embed)  │
-  └───────────────────────────┘         └───────────────────────────┘
-
-  two outbound connections; ZERO inbound. nothing listens.
+  ┌─ Process layer (one Node ESM process) ───────────────────────┐
+  │  npm run chat → Ink TUI → createChatSession()                 │
+  │     │                                                         │
+  │     ├──► PgVectorStore / trace sink / profile  (src/*.ts)     │
+  │     │         uses the connection pool (pg.Pool)              │
+  │     │                                                         │
+  │     └──► RagQueryAgent (aptkit)                               │
+  │               uses GemmaModelProvider + OllamaEmbeddingProvider│
+  └───────┬───────────────────────────────────┬──────────────────┘
+          │ pg-wire over TCP                   │ HTTP/1.1 over TCP
+          │ (libpq protocol, port 5432)        │ (POST JSON, port 11434)
+          ▼                                    ▼
+  ┌─ Storage layer ──────────┐        ┌─ Provider layer ──────────┐
+  │  Postgres (reindb)       │        │  Ollama model server      │
+  │  pgvector / agents schema│        │  gemma2:9b  (/api/chat)   │
+  │  TLS gated by sslmode    │        │  nomic-embed (/api/embed) │
+  └──────────────────────────┘        └───────────────────────────┘
 ```
 
-Everything north of the two TCP lines is one OS process with no network
-inside it. The Ink terminal UI talks to `session.ts` by function call.
-The only bytes that leave the process go down those two pipes: the
-Postgres wire protocol on 5432, and HTTP to Ollama on 11434.
+Everything in this guide hangs off that picture. The connection pool (`pg.Pool`)
+owns the left path; aptkit's HTTP transport (`defaultHttpTransport`) owns the
+right path; buffr's only contribution to the right path is the host string.
+
+## The ranked findings — what to look at first
+
+Verdict-first. Here is what actually matters on the wire, in order of
+consequence:
+
+1. **One warm connection pool (`pg.Pool`) across many turns is the
+   load-bearing networking decision.** `createChatSession()` opens the pool once
+   (`src/session.ts:39`) and every turn borrows a connection from it. This is the
+   single most important wire-level choice in the repo — it's what makes a
+   long-lived CLI cheap instead of paying a TCP + TLS + Postgres-auth handshake
+   on every keystroke. → `03-tcp-udp-connections-and-sockets.md`,
+   `07-timeouts-retries-pooling-and-backpressure.md`.
+
+2. **buffr's HTTP surface is one string.** The actual `fetch()` calls live in
+   aptkit (`defaultHttpTransport` → `POST /api/chat`, `POST /api/embed`). buffr
+   contributes exactly the host `http://localhost:11434` (`src/config.ts:14`).
+   The most surprising thing here: the HTTP client is wired-but-thin — buffr
+   never sees a header, a status code, or a response body directly.
+   → `05-http-semantics-caching-and-cors.md`.
+
+3. **TLS is configured by connection string, not by code.** There is no
+   `ssl: {...}` object anywhere. Whether the pg-wire connection encrypts is
+   decided entirely by the `sslmode=` parameter inside `DATABASE_URL`. The repo
+   has no opinion in code — the credential carries the policy.
+   → `04-tls-and-trust-establishment.md`.
+
+4. **Cancellation is wired in the transport but unused at buffr's layer.**
+   aptkit's transports accept an `AbortSignal` and call `signal?.throwIfAborted()`
+   — but buffr passes no signal. So a hung `/api/chat` request blocks the turn
+   forever. → `07-timeouts-retries-pooling-and-backpressure.md`.
+
+5. **Loopback is the transport for the model server.** `localhost:11434` resolves
+   to the loopback interface (`127.0.0.1`/`::1`) — the request never touches a
+   network card. → `02-dns-routing-and-addressing.md`.
+
+## Not yet exercised (honest absences)
+
+These are real networking concepts the repo simply does not contain. Each file
+says when it would start to matter.
+
+- **No inbound server.** buffr accepts zero connections. No Express, no HTTP
+  listener, no port bound for incoming traffic. → it's a CLI process, not a
+  service.
+- **No CORS, no cookies, no browser policy.** There is no browser in the loop.
+  CORS is a browser enforcement; with no browser, it never fires.
+  → `05-http-semantics-caching-and-cors.md`.
+- **No WebSocket, no SSE, no streaming.** `agent.answer()` returns one whole
+  string (`src/session.ts:62`); the model response is awaited in full, not
+  streamed token-by-token. → `06-websockets-sse-streaming-and-realtime.md`.
+- **No retries, no timeouts, no backoff, no jitter.** A failed `fetch` or a
+  dropped pg connection throws straight up to the Ink catch
+  (`src/cli/chat.tsx:30`). → `07-timeouts-retries-pooling-and-backpressure.md`.
+- **No pool tuning.** `new pg.Pool({ connectionString })` takes node-postgres
+  defaults — `max: 10`, no `idleTimeoutMillis` override, no
+  `connectionTimeoutMillis`. → `07-timeouts-retries-pooling-and-backpressure.md`.
+- **No proxy, no CDN, no edge, no load balancer.** Single device, two direct
+  outbound paths. → `02-dns-routing-and-addressing.md`.
 
 ## Reading order
 
-Read top to bottom; each file is self-contained but they build.
-
 ```
-  01-network-map                     the full path, every boundary
-  02-dns-routing-and-addressing      how localhost / a DB host resolves
-  03-tcp-udp-connections-and-sockets pg wire over TCP + the pool
-  04-tls-and-trust-establishment     TLS by connection string, not in code
-  05-http-semantics-caching-and-cors HTTP to Ollama; honest absences
-  06-websockets-sse-streaming        realtime transports — all absent
-  07-timeouts-retries-pooling        pooling present; the rest absent
-  08-networking-red-flags-audit      ranked risks, evidence per verdict
+  00-overview                  ← you are here
+  01-network-map               the full path, both directions
+  02-dns-routing-and-addressing names, loopback, no edge
+  03-tcp-udp-connections-and-sockets   pg-wire over TCP, the pool
+  04-tls-and-trust-establishment       sslmode-by-connection-string
+  05-http-semantics-caching-and-cors   POST JSON to Ollama; CORS absent
+  06-websockets-sse-streaming-and-realtime   all absent, and why
+  07-timeouts-retries-pooling-and-backpressure   the pool + every gap
+  08-networking-red-flags-audit        ranked risks with evidence
 ```
-
-## The ranked findings
-
-Verdict first. These are the things worth knowing about this repo's
-network behavior, most consequential first. Each is walked in full in the
-file named.
-
-1. **One warm pool across many turns is the load-bearing network
-   decision.** `createChatSession()` builds one `pg.Pool` once
-   (`src/session.ts:39`) and every `ask()` borrows-and-returns a
-   connection from it. A long-lived Ink session reuses warm TCP+auth'd
-   connections instead of paying connect+TLS+auth per turn. → `03`, `07`.
-
-2. **TLS is configured by connection string, never in code.** `src/db.ts`
-   passes `connectionString: databaseUrl` straight to `pg.Pool` with no
-   `ssl` object. Whether the 5432 connection is encrypted is decided
-   entirely by `sslmode=` in `DATABASE_URL`. The code is TLS-agnostic. → `04`.
-
-3. **HTTP to Ollama is plaintext over loopback, and buffr never sees the
-   request.** buffr's whole HTTP surface is the host *string*
-   `http://localhost:11434` (`src/config.ts:14`). The actual `fetch`,
-   headers, and body live inside aptkit's providers. buffr supplies an
-   address; aptkit owns the protocol. → `02`, `05`.
-
-4. **No timeouts, no retries, no AbortSignal anywhere.** A hung Postgres
-   query or a stalled Ollama generation blocks the turn forever; the Ink
-   spinner spins indefinitely. The only safety net is the per-turn
-   `try/catch` in `chat.tsx:30` that renders the error string. → `07`, `08`.
-
-5. **buffr listens on nothing.** No HTTP server, no socket server, no
-   inbound port. That erases an entire class of concerns — CORS, request
-   auth, rate limiting, DDoS — by construction, not by configuration. → `01`, `05`.
-
-## not yet exercised — the honest absences
-
-This repo is a local-first single-device CLI. Large parts of the
-networking syllabus simply aren't present. Naming them is the lesson:
-
-- **Inbound server / listening socket** — nothing calls `listen()`. → `01`.
-- **DNS resolution of a real hostname** — default host is `localhost`,
-  resolved from the hosts file, not DNS. A remote `DATABASE_URL` would be
-  the first real resolver hit. → `02`.
-- **Proxies, CDN, edge, load balancers** — direct connections only. → `02`.
-- **UDP** — both protocols (pg wire, HTTP) are TCP. → `03`.
-- **CORS / cookies / browser policy** — no browser, no inbound HTTP. → `05`.
-- **WebSocket / SSE / HTTP streaming** — `agent.answer()` returns a
-  single resolved string; nothing streams token-by-token. → `06`.
-- **Timeouts / retries / backoff / jitter / circuit breakers** — none in
-  buffr's code. → `07`.
-- **Pool tuning** — `pg.Pool` is constructed with `max`/idle/connection
-  timeouts all at library defaults. → `07`.
-- **Backpressure / request collapsing / overload control** — single user,
-  one turn at a time, gated by the `busy` flag in `chat.tsx:13`. → `07`.
 
 ## Cross-links to neighboring guides
 
-This guide owns *what happens on the wire*. It does not re-teach:
+The partition seam (per the spec): this guide owns **WHAT happens on the wire.**
 
-- **`study-database-systems`** — owns the storage engine behind 5432:
-  HNSW index, pgvector cosine ops, transaction/isolation semantics, the
-  `<=>` operator. This guide stops at "bytes reach Postgres"; that guide
-  takes over inside Postgres.
-- **`study-security`** — owns *whether* each boundary is safe: secret
-  handling for `DATABASE_URL`, the `sslmode` trust decision as a security
-  posture, the absence of RLS, plaintext loopback as a threat model. This
-  guide says *what* the wire does; that guide says whether it's *safe*.
-- **`study-system-design`** — owns *where* the network boundaries belong
-  in the architecture (the provider-abstraction seam, local-first choice).
-```
+- `study-database-systems` — owns the pgvector storage engine, the HNSW index,
+  the transaction in `PgVectorStore.upsert` (`src/pg-vector-store.ts:38`). This
+  guide stops at the socket; that guide picks up inside the database.
+- `study-security` — owns **WHETHER** each boundary is safe: secrets in
+  `DATABASE_URL`, the no-RLS / no-auth posture, trust of the model server. This
+  guide names where TLS is decided; that guide judges whether the decision is
+  safe.

@@ -1,252 +1,187 @@
 # Token Economics
 
-*Token accounting / cost observability — the cost ledger — Industry standard.*
+*Industry name: token accounting / cost ledger. Type: **Industry standard** (the accounting); **Project-specific** (buffr's local-free twist).*
 
 ## Zoom out, then zoom in
 
-Every LLM call has a price, and the price is measured in tokens (`02-tokenization.md`). buffr runs locally, so the dollar price is `$0` — but it still *counts the tokens* and persists them to a database column. That persisted count is buffr's cost ledger, partial but real. Here's where the meter is read and where the number lands.
+Every call spends tokens. *Token economics* is the ledger: who counts them, where they're recorded, what they cost. Here's where buffr's ledger lives, with the recording site marked ★.
 
 ```
-  Zoom out — where tokens get metered and stored in buffr
-
-  ┌─ Agent layer (aptkit) ──────────────────────────────┐
-  │  runAgentLoop emits a model_usage event per call     │
-  └──────────────────────────┬───────────────────────────┘
-                             │  CapabilityEvent{ inputTokens, outputTokens }
-  ┌─ Trace sink (buffr) ─────▼───────────────────────────┐
-  │  ★ SupabaseTraceSink.emit ★                          │ ← the ledger is written HERE
-  │    model_usage → tokens_used = in + out              │
-  └──────────────────────────┬───────────────────────────┘
-                             │  INSERT
-  ┌─ Storage layer (Postgres) ▼──────────────────────────┐
-  │  agents.messages.tokens_used  (the cost column)      │
-  └──────────────────────────────────────────────────────┘
-
-  the tokens themselves come from: Ollama prompt_eval_count + eval_count
-  (gemma toResponse, estimated:false — see 02-tokenization.md)
+buffr stack — the token ledger
+┌───────────────────────────────────────────────────────────┐
+│ GemmaModelProvider   usage{inputTokens, outputTokens}       │ the meter
+├───────────────────────────────────────────────────────────┤
+│ aptkit agent loop   emits model_usage CapabilityEvent       │ the event
+├───────────────────────────────────────────────────────────┤
+│ ★ SupabaseTraceSink   model_usage case → persistMessage     │ THE LEDGER WRITE
+├───────────────────────────────────────────────────────────┤
+│ agents.messages   model, tokens_used = in + out             │ the ledger table
+└───────────────────────────────────────────────────────────┘
+   (missing: any $ → cost math. Ollama is local & free.)
 ```
 
-Zoom in: a cost ledger answers "what did this turn cost, and where did it go?" In a paid setup that's dollars. Locally, the dollar axis collapses to zero — but the *token* axis and the *latency* axis are still live. buffr captures tokens (real, from Ollama), pins the model name, and stamps the time. What it can't capture locally is a dollar figure. So this is **partial cost observability**: tokens yes, dollars N/A, and latency is the budget that actually bites.
+Good news, and it surprises people: **buffr actually keeps the ledger.** Per-call token counts are captured and written to a real Postgres column. The honest caveat: there's no *dollar* math, because `gemma2:9b` runs locally on Ollama — the marginal cost of a token is electricity, not an API invoice. This file is about the real accounting buffr does, and the one column it leaves on the table.
 
-## Structure pass
+## Structure pass — trace *a token* from meter to ledger
 
-The ledger spans three layers. Trace the axis **what unit is the cost measured in?** as it crosses them.
+Pick one axis: **the lifecycle of a single token count.** Follow one number from creation to storage.
 
 ```
-  Axis: "what's the cost unit?" — across the metering pipeline
-
-  ┌─ Ollama / gemma2:9b ─────────────────────┐
-  │  produces token COUNTS (eval_count etc.) │  unit = TOKENS (raw, exact)
-  └─────────────────────┬─────────────────────┘
-                        │  seam: gemma toResponse maps counts → usage
-  ┌─ aptkit event ──────▼─────────────────────┐
-  │  model_usage { inputTokens, outputTokens }│  unit = TOKENS (typed event)
-  └─────────────────────┬─────────────────────┘
-                        │  seam: trace sink SUMS them
-  ┌─ Postgres ──────────▼─────────────────────┐
-  │  messages.tokens_used = in + out          │  unit = TOTAL TOKENS (one number)
-  └───────────────────────────────────────────┘
-       dollars would attach HERE (rate × tokens) — but locally = $0
+one token count, meter → ledger
+  Ollama          │ prompt_eval_count=842, eval_count=210 │ measured
+  GemmaProvider   │ usage{inputTokens:842, outputTokens:210, estimated:false} │ wrapped
+  agent loop      │ model_usage event {provider, model, in, out} │ emitted
+  ★ SupabaseTraceSink │ tokens_used = 842+210 = 1052 │ summed & written
+  agents.messages │ row: model='gemma/gemma2:9b', tokens_used=1052 │ STORED (the seam)
 ```
 
-The seam that does the real work is the trace sink: it *sums* `input + output` into a single `tokens_used`. That's a deliberate flattening — it loses the in/out split for the cost column (though the raw event still carries both). The dollar axis would attach at the storage layer, multiplying a per-token rate by the count — but there's no rate locally, so that multiplication is absent. Naming the absent multiplication is the honest core of this file.
+The seam is the trace sink: that's where a transient in-memory event becomes a durable row. Before it, the count is a fleeting field; after it, it's queryable history. Note the lossy step — input and output are **summed** into one `tokens_used`, so the ledger remembers the total but not the split. That's a real (if minor) information loss to call out.
 
 ## How it works
 
-#### Move 1 — the mental model
+### Move 1 — the mental model: a usage row per call, like a DB audit log
 
-You know how an analytics layer fires an event on every meaningful action and a backend writes it to a `events` table you can later query? Token economics is that, where the "event" is "the model ran" and the payload is "how many tokens it ate." The strategy: **on every model call, emit a usage event; persist it keyed to the conversation so you can sum cost per turn, per conversation, per day.**
-
-```
-  Pattern — meter-on-every-call, persist to a ledger
-
-  model call ──► emit model_usage { provider, model, in, out }
-                          │
-                          ▼
-                 trace sink: tokens_used = in + out
-                          │
-                          ▼
-            INSERT agents.messages (role='model_usage', tokens_used, model, created_at)
-                          │
-                          ▼
-            later: SELECT sum(tokens_used) ... GROUP BY conversation  ← the report
-```
-
-Every call leaves a row. The rows are the ledger. Sum them however you slice.
-
-#### Move 2 — the step-by-step walkthrough
-
-**Where the real token counts come from.** Not estimated — Ollama returns exact counts, and aptkit's Gemma provider maps them into the usage object, flagged `estimated:false`.
+You know audit columns: `created_at`, `updated_by`. Token economics is an audit log for model spend — one row per model call recording who (model), how much (tokens), when (timestamp). The difference from a normal audit log is the cost driver: in a hosted model, `tokens × price` is your bill; locally, it's a usage signal, not an invoice.
 
 ```
-  toResponse — gemma-provider.ts:116-126 (annotated)
-
-  usage: {
-    inputTokens: response.prompt_eval_count,   // ← real prompt tokens (the question + context)
-    outputTokens: response.eval_count,          // ← real generated tokens (the answer)
-    estimated: false,                           // ← trustworthy: from the tokenizer, not len/3
-  }
+the ledger row, conceptually
+  ┌───────────────┬──────────────────┬─────────────┬─────────────┐
+  │ role          │ model            │ tokens_used │ created_at  │
+  ├───────────────┼──────────────────┼─────────────┼─────────────┤
+  │ 'model_usage' │ 'gemma/gemma2:9b'│ 1052        │ <event ts>  │
+  └───────────────┴──────────────────┴─────────────┴─────────────┘
+  one row, every model call
 ```
 
-These are the numbers the ledger bills on. Contrast the guard's `len/3` *estimate* from `02-tokenization.md` — that one gates, this one accounts. The `estimated:false` flag is the signal that this is ground truth.
+### Move 2 — the moving parts
 
-**Where the event becomes a ledger row.** buffr's `SupabaseTraceSink` handles the `model_usage` event and writes it as a message with the token sum.
+#### The meter: Ollama's exact counts, flagged real
 
-```
-  SupabaseTraceSink.emit — supabase-trace-sink.ts:73-79 (annotated)
+The source numbers come from the provider's `usage` block — the same `prompt_eval_count`/`eval_count` from file 02, marked `estimated:false` so the ledger knows these are truth, not the chars/3 guess (`gemma-provider.ts:116–126`). The ledger is only as honest as this flag.
 
-  case 'model_usage':
-    this.push(persistMessage(pool, conversationId, 'model_usage', '', {
-      model: `${event.provider}/${event.model}`,                       // ← 'gemma/gemma2:9b'
-      tokensUsed: (event.inputTokens ?? 0) + (event.outputTokens ?? 0),// ← in + out, summed
-      createdAt: at,                                                    // ← event timestamp
-    }));
-    return;
-```
+#### The ledger write: the `model_usage` case
 
-Three fields carry the cost story: `model` (which function spent the tokens), `tokensUsed` (how many), `createdAt` (when, for ordering and per-period rollups). The `?? 0` guards a missing count so a partial event still writes a row instead of throwing.
+`SupabaseTraceSink.emit` handles a `model_usage` event by writing a `messages` row (`src/supabase-trace-sink.ts:73–79`):
 
-**Where it lands in the schema.** `persistMessage` inserts into `agents.messages`, and `tokens_used` is the column that was previously orphaned.
-
-```
-  persistMessage INSERT — supabase-trace-sink.ts:27-36 (annotated)
-
-  insert into agents.messages
-    (conversation_id, role, content, tool_calls, tool_results, model, tokens_used, created_at)
-  values ($1, $2, $3, $4, $5, $6, $7, coalesce($8::timestamptz, now()))
-                                          ↑            ↑
-                                     model name   tokens_used = the cost column
+```ts
+case 'model_usage':
+  this.push(persistMessage(pool, conversationId, 'model_usage', '', {
+    model: `${event.provider}/${event.model}`,                       // ← 'gemma/gemma2:9b'
+    tokensUsed: (event.inputTokens ?? 0) + (event.outputTokens ?? 0),// ← SUM, split is lost
+    createdAt: at,
+  }));
+  return;
 ```
 
-The sink's own comment (`supabase-trace-sink.ts:39-48`) calls this out: capturing `model_usage` "fills the otherwise-orphaned `tokens_used` column." Before this handler, the column existed but nothing wrote it — the meter existed but wasn't read.
+Annotation that matters: the `?? 0` guards make this robust to a provider that reports only one side, but the `+` collapses input and output into a single number. If you ever want cost (where input and output tokens often have *different* prices on hosted models), you'd need to stop summing here and store both.
 
 ```
-  Layers-and-hops — one model call, three hops to the ledger
-
-  ┌─ gemma2:9b ──┐  prompt_eval_count + eval_count   ┌─ aptkit loop ────┐
-  │  Ollama      │ ───────────────────────────────── │ emit model_usage │
-  └──────────────┘  (estimated:false)                └────────┬─────────┘
-                                                              │ inputTokens, outputTokens
-                                                              ▼
-                                          ┌─ SupabaseTraceSink.emit [trace:73] ─┐
-                                          │  tokens_used = in + out             │
-                                          └────────┬─────────────────────────────┘
-                                                   │ INSERT
-                                                   ▼
-                          ┌─ Postgres: agents.messages.tokens_used [trace:27] ─┐
-                          │  role='model_usage', model='gemma/gemma2:9b'       │
-                          └────────────────────────────────────────────────────┘
+the write, with its one lossy step
+  event {inputTokens:842, outputTokens:210}
+        │  (842 ?? 0) + (210 ?? 0)
+        ▼
+  tokens_used = 1052   ← split GONE; only the total survives
+  model = 'gemma/gemma2:9b'
+        ▼
+  insert into agents.messages (... model, tokens_used ...)
 ```
 
-**What's missing — and why that's the honest part.** Three things the local setup can't or doesn't capture:
+#### The ledger table: a real column, previously orphaned
+
+`agents.messages.tokens_used` is an `int` column (`sql/001_agents_schema.sql:48`). The trace sink's own comment notes this column was *"previously dropped on the floor"* and that capturing usage *"fills the otherwise-orphaned tokens_used column."* So this is genuinely wired now — the ledger has data, not just a schema.
 
 ```
-  Comparison — full cost observability vs buffr's partial ledger
-
-  axis          paid cloud setup            buffr (local)
-  ───────────── ─────────────────────────── ──────────────────────────
-  tokens        captured                     captured ✔  [trace:76]
-  in/out split  kept per-row                 SUMMED into one number  ~
-  dollars       rate × tokens                $0 — no rate exists  ✗
-  latency       a budget                     THE budget (laptop) — durationMs
-                                             on tool calls, not yet on the model call
+the ledger table (agents.messages, relevant columns)
+  role         text   ← 'model_usage' tags the cost rows
+  model        text   ← provider/model
+  tokens_used  int    ← in + out (real, not estimated)
+  created_at   timestamptz ← event time, for ordering replay
 ```
 
-Locally the dollar column is genuinely N/A — there's no per-token price to multiply. The real budget that bites is *latency*: a 9B model on a laptop is slow, and that's what you'd actually optimize. buffr captures `durationMs` for tool calls (`supabase-trace-sink.ts:69`) but not yet for the model call itself — a clean Case-B gap.
+### Move 2.5 — current vs future state (the missing $ column)
 
-#### Move 3 — the principle
+**Current:** token counts captured per call, summed, stored, queryable. You can `SELECT sum(tokens_used) FROM agents.messages WHERE role='model_usage'` and get a real total. What you *cannot* do: convert that to dollars, or break it down by input vs output, or see a cost-per-conversation dashboard.
 
-Token economics is cost observability, and observability is worth building even when the current cost is zero — because the *plumbing* is what survives a change of circumstances. buffr counts tokens it doesn't pay for, so that the day it points at a paid endpoint, the ledger already exists and only a rate multiplication is missing. Capture the meter now; attach the price later. And know which axis actually bites you today: locally it's latency, not dollars.
+**Future:** because Ollama is free, the honest "cost" is throughput/latency, not dollars. The buildable next step is either (a) a `cost-cmd` that aggregates `tokens_used` per conversation, or (b) if buffr ever adds a hosted provider, a `$ = inputTokens × inPrice + outputTokens × outPrice` calc — which would require *un-summing* the trace sink first.
+
+```
+current → future
+  CURRENT │ tokens_used (sum) per call │ queryable │ NO dollars (local/free)
+  FUTURE  │ aggregate per conversation │ dashboard │ + $ only if hosted provider added
+           ⚠ dollars need input/output split → stop summing in the trace sink
+```
+
+### Move 3 — the principle that generalizes
+
+> **Capture the meter reading whether or not it costs money today — the ledger is cheap, and the day you add a paid provider you'll want the history. But know what you're throwing away: summing input+output saves a column and forfeits cost math.**
+
+Buffr made the right call recording tokens even though they're free — the instrumentation is in place for the day a hosted model gets wired (file 08's whole point is that swap is one constructor). The one wart: the eager sum means "how much did *input context* cost me?" is unanswerable from the current data. That's a deliberate-looking simplification that's actually a future tax.
 
 ## Primary diagram
 
-```
-  Token economics in buffr — the partial cost ledger, full path
+The ledger, end to end, with the lossy sum and the missing dollar step both marked.
 
-  ┌─ Provider: gemma toResponse [gemma:116] ───────────────────────┐
-  │  usage { inputTokens=prompt_eval_count,                        │
-  │          outputTokens=eval_count, estimated:false }            │  ← real, not len/3
-  └───────────────────────────────┬─────────────────────────────────┘
-                                  │ aptkit emits model_usage event
-                                  ▼
-  ┌─ Sink: SupabaseTraceSink.emit [trace:73] ──────────────────────┐
-  │  tokens_used = in + out   |   model = 'gemma/gemma2:9b'        │
-  └───────────────────────────────┬─────────────────────────────────┘
-                                  │ persistMessage INSERT [trace:27]
-                                  ▼
-  ┌─ Storage: agents.messages ─────────────────────────────────────┐
-  │  tokens_used  ·  model  ·  created_at   → SELECT sum(...) report│
-  └─────────────────────────────────────────────────────────────────┘
-   captured: tokens ✔   |   absent: dollars ✗ ($0 local)   |   real budget: latency
+```
+token economics in buffr
+  Ollama: prompt_eval_count + eval_count
+        │  GemmaProvider wraps → usage{in, out, estimated:false}   ← the meter (truth)
+        ▼
+  agent loop emits model_usage {provider, model, inputTokens, outputTokens}
+        │
+  SupabaseTraceSink.emit (model_usage case)
+        │  tokens_used = in + out   ⚠ split discarded
+        ▼
+  insert agents.messages (role='model_usage', model, tokens_used, created_at)
+        │
+  query: SELECT sum(tokens_used) ...   ✓ total tokens
+        │
+        ✗ no $ math (Ollama free) · ✗ no in/out breakdown (summed away)
 ```
 
 ## Elaborate
 
-Token economics exists because, on paid APIs, tokens *are* the bill — input tokens and output tokens are usually priced differently (output often costs several times more), so the in/out split is the unit of cost control. That's why "shorter prompts, tighter answers, cache the context" are the standard cost levers. buffr inherits the *measurement* machinery from that world without the bill, which is the right call: the cost of capturing usage is one event handler and one column, and it converts "we have no idea what anything costs" into "we have a per-turn token ledger."
-
-The connections run both ways. Backward to `02-tokenization.md`: the `estimated:false` real counts are exactly the tokenizer's output, distinct from the guard's `len/3` estimate. Forward to `05-evals-and-observability/04-llm-observability.md`: `tokens_used` is one signal in the broader trajectory trace, alongside tool calls, durations, and warnings. And the honest gap — no model-call latency, summed in/out, no dollar rate — is what makes this "partial" rather than "complete" cost observability. The standard upgrade path is: add model-call `durationMs`, keep the in/out split, and (if cloud) attach a rate table.
+- **Origin.** Hosted LLM APIs bill per token, usually with input cheaper than output, so "token economics" became a real ops discipline — caching, prompt trimming, output caps all chase the bill. Local models invert the cost: tokens are free, but throughput and VRAM are the constraint.
+- **Adjacent concepts.** *Tokenization* (02) produces the counts this file stores. *Caching / cost* (sub-section 06) is where dollar-aware economics would live. *Provider abstraction* (08) — swapping in a hosted provider is what would make dollars real.
+- **Honest gap.** No cost dashboard, no dollar conversion, no input/output split in storage. Token *counts* are real and captured; token *cost* is `$0` and unmodeled. Don't claim a "cost ledger" — claim a *token* ledger.
+- **What to read next.** File 07 — heuristic-before-LLM, the cheapest possible economy: don't spend the tokens at all.
 
 ## Project exercises
 
-No curriculum file present; exercises derived from the codebase. This concept is **exercised (partially)** — Case A for token capture; Case B for the missing latency and rate.
+### Build a per-conversation token report
 
-### EX-06-1 — Capture model-call latency into the ledger
+- **Exercise ID:** [B1.11] (Phase 1 — LLM foundations) — token capture is **implemented**; this is the next step.
+- **What to build:** A `npm run tokens` CLI that queries `agents.messages` and prints tokens-per-conversation and a session total, using the real `tokens_used` buffr already writes.
+- **Why it earns its place:** Turns the orphaned-then-filled column into something a human reads, and proves the ledger end to end with a real query.
+- **Files to touch:** new `src/cli/tokens-cmd.ts`; read-only against `src/supabase-trace-sink.ts` and `sql/001_agents_schema.sql`.
+- **Done when:** the command prints a table of `conversation_id → total tokens` sourced from `role='model_usage'` rows.
+- **Estimated effort:** 1–4hr
 
-- **Exercise ID:** EX-06-1
-- **What to build:** Time the model call and persist its `durationMs` alongside `tokens_used` on the `model_usage` row, so the *real* local budget (latency) is observable, not just tokens. Tool calls already record `durationMs`; the model call doesn't.
-- **Why it earns its place:** Latency is the budget that actually bites on a laptop. This turns "partial" cost observability into the part that matters locally.
-- **Files to touch:** `src/supabase-trace-sink.ts:73-79` (extend the `model_usage` case to carry a duration); confirm the aptkit `model_usage` event exposes timing, else time it in buffr's session around `agent.answer` at `src/session.ts:62`.
-- **Done when:** each `model_usage` row carries a duration and you can `SELECT avg(durationMs)` per conversation.
-- **Estimated effort:** 1-4hr
+### Un-sum the ledger to enable cost math
 
-### EX-06-2 — A per-conversation token report
-
-- **Exercise ID:** EX-06-2
-- **What to build:** A small CLI/script that queries `agents.messages` and reports total `tokens_used`, input/output split if available, and call count per conversation — turning the ledger rows into an actual report.
-- **Why it earns its place:** A ledger no one queries isn't observability. This proves the captured data is usable and surfaces the summed-in/out limitation.
-- **Files to touch:** new `scripts/token-report.ts`; reads the schema written by `src/supabase-trace-sink.ts:27-36`. Uses `src/db.ts` for the pool.
-- **Done when:** running it prints token totals per conversation from real rows.
-- **Estimated effort:** 1-4hr
-
-### EX-06-3 — Preserve the input/output split
-
-- **Exercise ID:** EX-06-3
-- **What to build:** Stop flattening `in + out` into one `tokens_used` for the cost picture — persist input and output token counts separately (extra columns or a JSON field on the row), so a future dollar rate (output usually costs more) can be applied correctly.
-- **Why it earns its place:** Output tokens are priced higher on real APIs; collapsing the split throws away the information any real cost model needs. Future-proofs the ledger.
-- **Files to touch:** `src/supabase-trace-sink.ts:73-79` (carry both counts), and the `agents.messages` schema/migration.
-- **Done when:** rows record input and output token counts distinctly; `tokens_used` can still be derived as their sum.
-- **Estimated effort:** 1-2 days
+- **Exercise ID:** [B1.12] (Phase 1 — LLM foundations)
+- **What to build:** Add `input_tokens` and `output_tokens` columns (or a jsonb usage blob) to the `model_usage` write so the split survives; stop collapsing them in the trace sink. Then a `cost-cmd` that applies a configurable per-token price (default `$0` for Ollama) to show what the same traffic *would* cost on a hosted provider.
+- **Why it earns its place:** Removes the future tax this file flags, and makes the "what if we went hosted" question answerable from existing traffic.
+- **Files to touch:** `sql/001_agents_schema.sql` (columns); `src/supabase-trace-sink.ts:73–79` (stop summing); new `src/cli/cost-cmd.ts`.
+- **Done when:** a `model_usage` row stores input and output separately, and the cost command prints a non-zero hypothetical dollar figure when a price is configured.
+- **Estimated effort:** 1–4hr
 
 ## Interview defense
 
-**Q: "buffr is local and free. Why does it count tokens at all?"**
+**Q: "Does buffr track cost, and how?"**
 
-Because the plumbing is what survives a change of circumstances. Capturing usage is one event handler and one column; it converts "we have no idea what anything costs" into a per-turn ledger that's ready the day buffr points at a paid endpoint — only a rate multiplication is then missing.
-
-```
-  capture now, price later
-
-  tokens (now) ──► tokens_used column ──[+ rate, if cloud]──► dollars
-                   $0 locally, but the meter is read
-```
-
-*Anchor:* `tokens_used = in + out` written on every `model_usage` event at `supabase-trace-sink.ts:73-78`.
-
-**Q: "So buffr has full cost observability?"**
-
-Partial. It captures real tokens (Ollama's `prompt_eval_count`/`eval_count`, `estimated:false`) and the model name, but the dollar axis is N/A locally and the in/out split is summed into one number. And the budget that actually bites — latency — isn't captured on the model call yet, only on tool calls.
+Model answer: It tracks token *counts*, not dollars. Every model call emits a `model_usage` event with Ollama's real input/output counts (`estimated:false`); the trace sink writes a `messages` row with `model` and `tokens_used = input + output`. So I can query total tokens per conversation. There's no dollar math because `gemma2:9b` runs locally on Ollama — tokens are free. The one honest wart: the trace sink *sums* input and output, so cost math (which prices them differently on hosted models) would first need un-summing. Capturing tokens even though they're free was the right move — the instrumentation is ready the day a paid provider gets swapped in.
 
 ```
-  partial ledger
-
-  tokens ✔   model ✔   dollars ✗(local)   model-latency ✗(yet)
+the honest ledger
+  captured │ tokens_used = in + out (real)  │ ✓ queryable
+  missing  │ $ conversion                    │ Ollama free
+  wart     │ in/out summed away              │ cost math needs the split first
 ```
 
-*Anchor:* real counts at `gemma-provider.ts:116` (`estimated:false`); the summing flatten at `supabase-trace-sink.ts:76`.
+Anchor: *Real token ledger, zero-dollar cost — counts captured, the split summed away.*
 
 ## See also
 
-- `02-tokenization.md` — where the real `prompt_eval_count`/`eval_count` come from vs the estimate.
-- `05-streaming.md` — why streaming barely affects the ledger (final usage comes at stream end).
-- `../05-evals-and-observability/02-eval-methods.md` — `tokens_used` as one signal in the trajectory trace.
-- `08-provider-abstraction.md` — the provider whose `toResponse` produces the usage object.
+- `02-tokenization.md` — where the counts in this ledger come from.
+- `07-heuristic-before-llm.md` — the cheapest economy: skip the call entirely.
+- `08-provider-abstraction.md` — swapping to a hosted provider is what makes dollars real.

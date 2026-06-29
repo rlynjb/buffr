@@ -1,124 +1,86 @@
-# Problem Selection — buffr, in one picture
+# 00 — Overview: Problem Selection for the Centralized Agent Layer
 
-This bundle is the **human layer before solution design**: not *how* you built the
-laptop brain, but *why this problem deserved your time at all* — and how you'd defend
-that choice in a room full of skeptics before you've drawn a single box of architecture.
+This is the human layer *before* the design doc. Not "how did I build buffr" — that's
+`study-system-design` and the design specs. This is the harder question a staff reviewer
+asks first and an interviewer asks before they care about your HNSW params: **why does this
+problem deserve the investment at all, and why are you the person to spend it?**
 
-You already have study guides for the *how* (`study-system-design`,
-`study-ai-engineering`). This one rehearses the *why*. The order matters: in a senior
-interview, a promo packet, or a staff design review, the person across the table decides
-whether the problem was worth solving **before** they grade the solution. Lead with the
-solution and you've skipped the question they're actually asking.
+You answer the *how* fluently already. This bundle drills the *why* — and it drills it in
+the order a skeptic actually pushes: justify the problem, *then* defend the build.
 
-```
-  where this bundle sits in the rehearse family
-
-  ┌─ rehearse-problem-selection ─────────────────────────┐
-  │  WHY this problem deserves investment   ← YOU ARE HERE│
-  └───────────────────────────┬──────────────────────────┘
-                              │ once the problem is justified…
-  ┌─ rehearse-design-doc ─────▼──────────────────────────┐
-  │  HOW a significant technical decision is communicated │
-  └───────────────────────────┬──────────────────────────┘
-  ┌─ rehearse-hackathon-demo ─▼──────────────────────────┐
-  │  HOW the resulting value is shown                     │
-  └───────────────────────────┬──────────────────────────┘
-  ┌─ rehearse-interview-defense ─▼───────────────────────┐
-  │  HOW the work is defended under scrutiny              │
-  └──────────────────────────────────────────────────────┘
-```
-
-## The problem, in one line
-
-> A 7-year frontend engineer pivoting to AI engineering needs **one portfolio artifact
-> that proves the combination is real** — and the proof has to be a system she built the
-> hard parts of herself, not a tool she configured.
-
-The product is a self-hosted personal agent that centralizes the **agent layer** (not the
-data) across her apps and "knows her over time" — Hermes-shaped. But the *problem being
-solved* is not "I need a personal assistant." It's **"I need to demonstrate AI-engineering
-judgment, and a turnkey tool hides exactly the parts that signal skill."** Hold that
-distinction. It's the spine of every file in this bundle.
-
-## The core justification thesis
+## The whole brief, one frame
 
 ```
-  the one-sentence problem case (memorize this shape)
+  Problem-selection brief — the order a reviewer interrogates it
 
-  ┌─ WHY THIS ──────────────────────────────────────────────────┐
-  │  the portfolio value is in the engineering a turnkey tool    │
-  │  hides — provider contract, RAG from scratch, evals with     │
-  │  numbers — so building beats buying for THIS goal            │
-  └───────────────────────────┬─────────────────────────────────┘
-                              │
-  ┌─ WHY HER ─────────────────▼─────────────────────────────────┐
-  │  7yr frontend (Vue/React, FedEx/Amazon/CoreWeave) + already  │
-  │  shipped the adjacent pieces (AdvntrCue RAG, dryrun/contrl   │
-  │  on-device AI, aipe) — this composes them into one case      │
-  └───────────────────────────┬─────────────────────────────────┘
-                              │
-  ┌─ WHY NOW ─────────────────▼─────────────────────────────────┐
-  │  mid-pivot: the portfolio is the case for the combination,   │
-  │  and the cost of NOT having it compounds every month the     │
-  │  pivot stays unproven                                        │
-  └─────────────────────────────────────────────────────────────┘
+  ┌─ 01 PROBLEM BRIEF ────────────────────────────────────────────────┐
+  │  why this · why now · why her · cost of NOT solving                │
+  │  who experiences the pain · what the repo already proves           │
+  └───────────────────────────────┬───────────────────────────────────┘
+                                  │  "okay, the problem is real. now —"
+                                  ▼
+  ┌─ 02 SCOPE, CUTS & NON-GOALS ──────────────────────────────────────┐
+  │  the smallest slice that validates the premise                    │
+  │  what you deliberately did NOT build (phone, RLS, HTTP, fine-tune) │
+  └───────────────────────────────┬───────────────────────────────────┘
+                                  │  "why build it — Hermes exists?"
+                                  ▼
+  ┌─ 03 OPTIONS & OPPORTUNITY COST ───────────────────────────────────┐
+  │  build vs buy (Hermes) vs do-nothing · centralize layer not data  │
+  │  one agent not a platform · the cost of each road not taken       │
+  └───────────────────────────────┬───────────────────────────────────┘
+                                  │  "how will you know it worked?"
+                                  ▼
+  ┌─ 04 SUCCESS METRICS & FEEDBACK LOOP ──────────────────────────────┐
+  │  precision@k · faithfulness · JSON validity · the Phase-4 decision │
+  │  one user is a PROOF problem, not a market problem                 │
+  └───────────────────────────────┬───────────────────────────────────┘
+                                  │  "here's where I'd push back —"
+                                  ▼
+  ┌─ 05 SKEPTICAL REVIEWER QUESTIONS ─────────────────────────────────┐
+  │  the review-room objections + the answers that hold               │
+  │  "one user" · "off-the-shelf" · "no market" · "just RAG"          │
+  └───────────────────────────────────────────────────────────────────┘
 ```
 
-## The trap, and how this bundle disarms it
+## The thesis in one paragraph
 
-The obvious skeptic's shot: *"You built a personal agent for one user. That's a toy, not
-a product. Where's the market?"*
+A self-hosted personal agent — one that centralizes the *reasoning layer* across your apps
+and "knows you over time" — is a **proof problem, not a market problem.** The pain is real
+and documented: your data and your context are scattered across `buffr`,
+`blooming_insights`, `contrl`, and every app keeps its own schema, so nothing can answer a
+question that spans them. The off-the-shelf option (Hermes Agent) *solves that for you* — and
+that is precisely why building it yourself is the right call here. The deliverable is not a
+product with users; it's the **portfolio case** that you can do the engineering a turnkey
+tool hides: a provider contract for a weak local model, a RAG pipeline you actually built,
+trajectory capture from day one, and a ship/iterate/fine-tune decision made *from* measured
+evals. One user isn't a weakness to apologize for — it's the structural strength that lets you
+prove the engineering end-to-end with zero market noise in the signal.
 
-The answer this bundle teaches you to give — and it's a **structural strength, not a
-dodge**: **one user is a proof problem, not a market problem.** The deliverable is
-*"one good agent with measured eval numbers — not a platform"* (`agent-layer-plan.md:6`).
-You're not claiming product-market fit. You're claiming you can build the engineering that
-sits under a real AI product and *prove* it works with numbers. A single user is the
-right scope for that claim — more users would be scope you'd have to defend without
-evidence, which is the opposite of what a measured portfolio piece is for.
+## Grounding discipline
 
-## The five questions every file maps back to
+Every claim in this bundle is anchored to a documented decision — the `agent-layer-plan.md`
+vision, the two design specs under `docs/superpowers/specs/`, and the shipped code the study
+guides audit. Where something is inference rather than a recorded decision, it's labeled.
+**Nothing here invents users, metrics, market evidence, or organizational constraints** —
+because the honest version of this story is stronger than any invented one. The single most
+important move in this whole bundle is refusing to fake a market and instead reframing "one
+user" as exactly the right scope for a proof.
 
-```
-  the problem-justification checklist — every file answers a subset
+## How to rehearse this
 
-  ┌──────────────────┬────────────────────────────────────────────┐
-  │ question         │ where it's answered                        │
-  ├──────────────────┼────────────────────────────────────────────┤
-  │ why this?        │ 01-problem-brief · 03-options              │
-  │ why now?         │ 01-problem-brief                           │
-  │ why her?         │ 01-problem-brief                           │
-  │ cost of NOT       │ 01-problem-brief · 03-options (do nothing) │
-  │   solving?        │                                            │
-  │ why not buy?     │ 03-options (build vs buy, Hermes)          │
-  └──────────────────┴────────────────────────────────────────────┘
-```
-
-## Reading order
-
-1. **`01-problem-brief.md`** — the load-bearing file. Who has the pain, the real evidence,
-   why now, why her, what it costs to do nothing. This is the file you rehearse most.
-2. **`02-scope-cuts-and-non-goals.md`** — the smallest useful slice (one laptop brain,
-   measured) and everything deliberately cut. Scope discipline *is* the senior signal.
-3. **`03-options-and-opportunity-cost.md`** — build vs buy decided against Hermes
-   directly, plus `do nothing` as a real option. The "why not off-the-shelf" file.
-4. **`04-success-metrics-and-feedback-loop.md`** — how you'll know it worked.
-   precision@5 ≥ 0.8 as the gate, the Phase-4 one-pager as the portfolio artifact.
-5. **`05-skeptical-reviewer-questions.md`** — the review-room cross-examination, with the
-   answers that hold and the ones that don't.
-
-## What this bundle does NOT invent
-
-Every claim here traces to a documented decision in `agent-layer-plan.md`, the two design
-specs under `docs/superpowers/specs/`, or `me.md`. There are **no invented metrics, no
-invented users, no invented market size, no invented competitors.** Where a number doesn't
-exist yet (the actual eval result), this bundle says so and points at the gate that will
-produce it. A problem brief that invents evidence is worse than no brief — it collapses on
-the first follow-up question.
+Read it in order — the files mirror the order a reviewer attacks. For each file, the coach
+voice gives you the **strong first-person answer in your voice** (the thing to actually say),
+then the diagram you'd sketch while saying it, then the one-line anchor to land it. Don't
+memorize prose; hold the diagram and the anchor. The picture is what survives the pressure.
 
 ## See also
 
-- `agent-layer-plan.md` (buffr root) — the parent vision and the build-vs-buy thesis.
-- `docs/superpowers/specs/2026-06-19-aptkit-packages-design.md` — the packages and the deferred body.
-- `.aipe/study-system-design/07-deferred-body.md` — the one-way-door reasoning, taught.
-- `.aipe/study-ai-engineering/00-overview.md` — the engineering the build exposes.
+- `01-problem-brief.md` — why this / why now / why her / cost of not solving
+- `02-scope-cuts-and-non-goals.md` — the smallest useful slice and what you cut
+- `03-options-and-opportunity-cost.md` — build vs buy vs do-nothing, grounded in the real calls
+- `04-success-metrics-and-feedback-loop.md` — the eval ruler and the Phase-4 decision gate
+- `05-skeptical-reviewer-questions.md` — the objections and the answers that hold
+- `agent-layer-plan.md` — the parent vision (the documented decisions)
+- `docs/superpowers/specs/2026-06-19-laptop-supabase-graduation-design.md` — the locked decisions table
+- `.aipe/study-system-design/00-overview.md` — the *how* layer this brief sits on top of

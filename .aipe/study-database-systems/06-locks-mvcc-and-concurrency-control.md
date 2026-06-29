@@ -1,72 +1,94 @@
 # Locks, MVCC, and concurrency control
 
-**Subtitle:** multi-version concurrency control / ON CONFLICT upsert / connection-pool contention — *Industry standard*
+**Industry name:** multi-version concurrency control (MVCC) · row versions ·
+optimistic vs pessimistic locking — *Industry standard*
 
 ---
 
-## Zoom out, then zoom in
+## Zoom out — where this concept lives
 
-When two operations touch the same row at once, something has to keep them from
-corrupting each other's view. Postgres's answer is MVCC — every write makes a
-new row version instead of overwriting — so readers never block writers. This
-repo barely exercises concurrency (one CLI, one conversation in-process), but
-the two places it *could* see contention are the `on conflict` upserts and the
-unsized connection pool.
+MVCC is the mechanism *underneath* transactions (`05`) — it's how Postgres actually
+delivers isolation and atomicity without making readers wait for writers. It lives in
+the storage layer, in the tuple headers, invisible to your SQL. buffr never writes a
+lock or a version check, so this file is mostly "the machinery you're relying on
+without naming it" — plus the one place that machinery costs you: index churn under
+upsert.
 
 ```
-  Zoom out — concurrency control sits in the storage engine
+  where MVCC sits
 
-  ┌─ Service ───────────────────────────────────────────────┐
-  │  upsert() ON CONFLICT  ·  parallel ask() turns?          │
-  └──────────────────────────┬───────────────────────────────┘
-  ┌─ Pool (db.ts:4) ─────────▼───────────────────────────────┐
-  │  bare pg.Pool, max 10, no sizing  ← contention point      │
-  └──────────────────────────┬───────────────────────────────┘
-  ┌─ ★ MVCC + locks ★ ───────▼───────────────────────────────┐ ← THIS FILE
-  │  versioned tuples (xmin/xmax) · row locks · ON CONFLICT  │
-  └──────────────────────────────────────────────────────────┘
+  ┌─ Transaction layer (file 05) ───────────────────────────┐
+  │  begin / commit / isolation level                        │
+  └───────────────────────────┬─────────────────────────────┘
+                              │  enforced by…
+  ┌─ MVCC / concurrency layer ▼─────────────────────────────┐
+  │  ★ row versions (xmin/xmax) + visibility rules ★         │
+  │  ★ readers don't block writers, writers don't block readers★│
+  └───────────────────────────┬─────────────────────────────┘
+                              │
+  ┌─ Storage layer ───────────▼─────────────────────────────┐
+  │  dead tuples (file 02) + autovacuum reclaims them        │
+  └───────────────────────────────────────────────────────────┘
 ```
 
-Zoom in: MVCC means a row isn't a slot you overwrite — it's a *chain of
-versions*, each stamped with the transaction that created (`xmin`) and deleted
-(`xmax`) it, from the tuple header you met in `02`. A reader sees the version
-visible to its snapshot; a writer adds a new version. The question: how does that
-let buffr's reads and writes coexist, and where does the pool become the real
-bottleneck before MVCC ever does?
+---
+
+## Zoom in — narrow to the concept
+
+The question: *how does Postgres let buffr's reads and writes happen "at the same
+time" correctly — and what does buffr pay for it?* The answer is MVCC: every row is
+versioned, every transaction sees a consistent snapshot, and nobody waits on a lock
+for ordinary reads. buffr's single-writer reality means it never hits a *conflict* —
+but it still pays MVCC's *storage* cost (dead tuples) and its *index* cost (HNSW
+re-insertion on every update). Name the version mechanism, walk how a snapshot is
+chosen, then show where the cost lands.
 
 ---
 
 ## The structure pass
 
-**Layers.** Concurrency control decomposes into:
+### Layers
 
 ```
-  ┌─ Pool admission ─────────────────┐  who gets a connection at all
-  │   max 10 (default), no timeout    │  db.ts:4
-  └──────────────┬────────────────────┘
-  ┌─ MVCC visibility ▼────────────────┐  what each txn sees (snapshot)
-  │   xmin/xmax, no read locks         │
-  └──────────────┬────────────────────┘
-  ┌─ Row locks (on write) ▼───────────┐  ON CONFLICT, concurrent updates
-  └────────────────────────────────────┘
+  isolation guarantee     →  "see a consistent snapshot" (file 05)
+    snapshot              →  the set of row versions a transaction can see
+      row version         →  one tuple, tagged xmin (created by) / xmax (deleted by)
+        vacuum            →  reclaims versions no snapshot can see anymore
 ```
 
-**Axis — trace `contention` (where work waits) down the layers.** *Where does an
-operation block?*
+### Axis: trace *"does this operation block?"* across reads and writes
 
-- Pool admission: blocks when all `max` connections are checked out — the
-  *first* place buffr would stall under load.
-- MVCC visibility: readers **never block** writers and vice versa — that's the
-  whole point of multi-version.
-- Row locks: a writer blocks only another writer of the *same row*.
+```
+  "does this operation wait on a lock?"  — traced across buffr
 
-**Seam — the pool's `max` connections (`db.ts:4`).** Above it: the application
-calls `pool.connect()` / `pool.query()` freely. Below it: at most `max` (10 by
-default) run concurrently; the 11th waits. The guarantee that flips is
-*availability* — and because `upsert()` holds a connection for a whole
-multi-insert transaction (`pg-vector-store.ts:40-65`), a long index run can
-starve a concurrent `search()`. This seam, not MVCC, is buffr's real concurrency
-constraint.
+  ┌─ search (read) ─────────────────────┐
+  │  reads a snapshot of committed rows  │  → NEVER blocks. no lock taken.
+  └──────────────────────────────────────┘
+  ┌─ upsert insert (new chunk) ─────────┐
+  │  writes a new tuple                  │  → NEVER blocks a reader.
+  └──────────────────────────────────────┘
+  ┌─ upsert on-conflict UPDATE ─────────┐
+  │  same id, two writers at once?       │  → WOULD block on the row lock —
+  │                                      │     but buffr has one writer, so never.
+  └──────────────────────────────────────┘
+
+  the answer would flip only at a write-write conflict on the SAME row — a case
+  buffr's single writer never reaches. that's the luck the design rides on.
+```
+
+### Seams
+
+```
+  seam 1  reader ↔ writer       MVCC's whole point: this boundary has NO lock. A
+                              reader sees the last committed version; a concurrent
+                              writer makes a new version beside it. No contention.
+  seam 2  live ↔ dead version   every UPDATE/DELETE leaves a dead version. Vacuum is
+                              the seam that reclaims it. buffr's upsert-heavy
+                              workload makes this seam busy. → file 02
+```
+
+Hand off: rows are versioned, readers and writers don't block each other, conflicts
+need two writers (which buffr lacks), and the cost is dead tuples plus HNSW churn.
 
 ---
 
@@ -74,217 +96,207 @@ constraint.
 
 ### Move 1 — the mental model
 
-You know how React state updates don't mutate in place — you produce a *new*
-state object and the old render keeps showing the old one until the re-render
-commits. MVCC is that for rows: an update doesn't overwrite the row, it writes a
-new version and marks the old one dead-as-of this transaction. Readers already
-holding a snapshot keep seeing the old version; new readers see the new one. No
-reader ever waits for a writer.
+You know how React state is immutable — you don't mutate the object, you produce a
+*new* object and the old one is garbage-collected once nothing references it? MVCC is
+that, for table rows. An UPDATE doesn't overwrite the row; it writes a new *version*
+and marks the old one dead. Readers holding an older snapshot keep seeing the old
+version (like a closure holding the old state), and the dead version is
+garbage-collected later by *vacuum*. Immutable data structures, on disk, with a GC.
 
 ```
-  MVCC — one logical row, a chain of versions
+  MVCC — a row as versioned tuples
 
-  logical row "memory:c1:0"
-    ┌─ v1 ─────────┐   ┌─ v2 ─────────┐
-    │ xmin=100     │──►│ xmin=140     │   newer version
-    │ xmax=140     │   │ xmax=∞ (live)│
-    └──────────────┘   └──────────────┘
-       a txn with snapshot < 140 sees v1
-       a txn with snapshot ≥ 140 sees v2
-       → reader and writer never block each other
+  time ──►
+            ┌─ tuple v1 ──────────────┐
+  insert →  │ xmin=100  xmax=∞ (live) │  ← created by txn 100, never deleted
+            └─────────────────────────┘
+                       │ UPDATE in txn 150
+            ┌─ tuple v1 ──────────────┐   ┌─ tuple v2 ──────────────┐
+  update →  │ xmin=100  xmax=150 (DEAD)│   │ xmin=150  xmax=∞ (live) │
+            └─────────────────────────┘   └─────────────────────────┘
+              a snapshot from txn 120        a snapshot from txn 160
+              still sees v1 ✓                sees v2 ✓
+                          ▲ no lock between them — that's MVCC
 ```
 
-### Move 2 — walk concurrency in this repo
+### Move 2 — walk the machinery
 
-**MVCC means the reads are lock-free.** `search()` (`pg-vector-store.ts:67`) is a
-plain `select`. Under MVCC it takes no row locks — it reads the versions visible
-to its snapshot. So a `search()` running while `memory.remember()` upserts a new
-memory chunk doesn't block; it just sees the pre-upsert snapshot. **What this
-buys buffr:** the per-turn read never waits on the per-turn write. Nothing in the
-repo needs `select ... for update` (lock-on-read), and it doesn't use it.
+**Row versions — xmin and xmax.** Every tuple carries two hidden transaction-id
+fields in its 23-byte header (the header from file `02`): `xmin` = the transaction
+that created this version, `xmax` = the transaction that deleted/superseded it (or
+"infinity" if still live). That's the entire versioning mechanism — two integers per
+row.
 
-**`ON CONFLICT` is the write-write concurrency primitive.** Both
-`upsert()` (`pg-vector-store.ts:50`) and the documents insert (`runtime.ts:14`)
-use `insert ... on conflict (id) do update`. Walk what it does under concurrency:
-
-```
-  ON CONFLICT (id) DO UPDATE — atomic insert-or-update
-
-  txn tries: INSERT row id="<docId>#0"
-       │
-       ├─ id absent  → insert it, take the new row
-       │
-       └─ id present → row lock the existing tuple,
-                       apply DO UPDATE SET ...,
-                       new MVCC version
-```
-
-The key property: `on conflict` makes insert-or-update a **single atomic
-statement** — no read-then-write race where two transactions both check "does it
-exist?", both see no, both insert, one fails on the primary key. Postgres
-resolves the conflict at the row level. **What breaks without it:** you'd hand-
-roll `select` then `insert`/`update`, opening exactly that lost-update race. For
-buffr this also makes re-indexing idempotent (the heal from `05`) and lets the
-same chunk id be re-embedded without duplicating.
-
-**The primary key is what `on conflict` keys on.** `chunks.id` is the PK
-(`001_agents_schema.sql:15`), `documents.id` is the PK (`:5`). The chunk id is
-aptkit's deterministic `"<docId>#<index>"`, so re-indexing the same document
-produces the same ids → `on conflict` updates in place rather than duplicating.
-The determinism and the `on conflict` work together.
-
-**The real contention is the pool, not the rows.** `db.ts:4`:
-
-```ts
-export function createPool(databaseUrl: string): pg.Pool {
-  return new pg.Pool({ connectionString: databaseUrl });   // no max, no timeouts
-}
-```
-
-No `max`, no `idleTimeoutMillis`, no `connectionTimeoutMillis`. node-postgres
-defaults `max` to 10. For the current shape — one CLI, one in-process
-conversation (`session.ts` holds a single `conversationId` across turns) — you
-rarely have two concurrent queries, so 10 is plenty. But trace the contention:
-`upsert()` checks out a dedicated client (`pool.connect()`) and holds it for the
-*entire* multi-chunk transaction. During a corpus index run, that's one
-connection pinned for the whole batch.
+**Snapshots — what a transaction can see.** When a statement runs (under READ
+COMMITTED, file `05`), Postgres takes a *snapshot*: the set of transaction-ids that
+had committed at that moment. A tuple is visible if its `xmin` is in the snapshot
+(committed before me) and its `xmax` is not (not yet deleted as far as I'm concerned).
+**Consequence:** `search` reading the `chunks` table never waits — it just filters
+tuples by visibility against its snapshot. A concurrent `upsert` writing new versions
+is invisible to the in-flight read until it commits and the next statement takes a
+fresh snapshot.
 
 ```
-  Layers-and-hops — where a query waits under load
+  visibility check — does this snapshot see this tuple?
 
-  ┌─ Service ──────┐  many concurrent     ┌─ Pool ─────────────┐
-  │ search() +     │  pool.connect()/     │ max 10 (default)   │
-  │ index upsert() │  query() ──────────► │ 11th call: WAITS   │
-  └────────────────┘                       │ (no timeout → ∞)   │
-        ▲                                   └─────────┬──────────┘
-        │  index upsert holds 1 client               ▼
-        │  for the whole txn                  ┌─ Postgres ─────┐
-        └──── starved if pool exhausted ───── │ MVCC: no row   │
-                                              │ contention here │
-                                              └────────────────┘
+  snapshot (committed txns ≤ 155):  {100, 150}
+                                    xmax=155 not yet committed → ignore
+       tuple              xmin   xmax    visible?
+       ───────────────    ────   ────    ───────
+       chunk v1           100    150     NO  (xmax 150 committed → superseded)
+       chunk v2           150    ∞       YES (xmin 150 committed, not deleted)
+       chunk v3 (uncommit) 156   ∞       NO  (xmin 156 not in snapshot)
 ```
 
-**What breaks at scale:** with no `connectionTimeoutMillis`, an exhausted pool
-makes the 11th `connect()` wait *indefinitely* rather than failing fast. For a
-single-user CLI you'll never hit it; the moment buffr grows a second concurrent
-caller or a background indexer, pool sizing becomes the first thing to tune. →
-`not yet exercised`.
-
-### Move 2.5 — current state vs future state (pool + locking)
+**The single-writer luck — why buffr never sees a conflict.** Here's the verdict-first
+take: buffr has *exactly one writer* (the CLI process). MVCC's conflict machinery —
+row locks on UPDATE, the `could not serialize`/lost-update problems — only fires when
+*two* transactions touch the *same row* concurrently. buffr never does. So the entire
+pessimistic-vs-optimistic-locking question is *not exercised*:
 
 ```
-  Phase A — now                    Phase B — concurrent callers / indexer
-  ─────────────────────────────    ──────────────────────────────────────
-  bare Pool, max 10, no timeouts    max sized to workload + connectionTimeout
-  one in-process conversation       multiple concurrent ask()/index runs
-  MVCC handles all read/write mix   still MVCC — pool is what needs sizing
-  ON CONFLICT covers write races    maybe SELECT … FOR UPDATE if read-modify
+  the conflict that never happens in buffr
 
-  what doesn't change: MVCC and ON CONFLICT already handle correctness.
-  the gap is admission control (pool), not concurrency control (engine).
+  writer A: update chunk#5 ──┐
+                             ├─► would contend on chunk#5's row lock
+  writer B: update chunk#5 ──┘     (A holds it, B waits, classic pessimistic lock)
+
+  buffr: there is no writer B. one CLI process. the contention is structural-impossible.
 ```
+
+This is worth stating bluntly because it's the load-bearing assumption: buffr's
+concurrency-correctness comes from *having one writer*, not from any locking or
+versioning the code does. No `SELECT ... FOR UPDATE` (pessimistic), no version-column
+check (optimistic) anywhere in the repo. The day a second writer appears — a sync
+process, a second device writing the same `agents` schema — that structural guarantee
+evaporates and you'd need to *add* one of those two strategies.
+
+**The cost buffr DOES pay — dead tuples and HNSW churn.** Even with one writer, MVCC
+isn't free. Every `on conflict do update` in `upsert` (`pg-vector-store.ts:50-54`)
+creates a new tuple version and orphans the old one. Two costs stack:
+
+```
+  re-index the same chunk → MVCC cost, drawn
+
+  heap:   [ chunk#0 v1 ✝ ][ chunk#0 v2 ]   ← dead v1 occupies the page (file 02)
+                  │
+  HNSW:   graph entry for v1 (now dead) ──┐  ← the OLD index entry is dead too
+          graph entry for v2 (new) ───────┘  ← a NEW graph insertion: distance
+                                              computations to link v2's neighbours
+          ✝ both reclaimed only when autovacuum runs
+```
+
+**Consequence:** re-indexing the same corpus isn't just heap bloat (file `02`) — each
+updated chunk forces a *fresh HNSW graph insertion* (file `03`'s expensive write) plus
+leaves a dead graph entry. An upsert-heavy dev loop (re-run the indexer five times)
+inflates both the table and the proximity graph until autovacuum catches up. The fix
+isn't code — it's letting autovacuum run, or `VACUUM`-ing after bulk re-indexes.
+
+**Autovacuum — the GC that closes the loop.** Dead tuples (heap and index) are
+reclaimed by autovacuum, a background process that scans for versions no live snapshot
+can see anymore and frees their space. buffr configures nothing here — it relies on
+Postgres defaults. For a small single-device corpus that's fine; the dead tuples get
+swept and space is reused. It only becomes a knob if write volume outpaces the default
+vacuum cadence (`study-performance-engineering` owns the tuning).
 
 ### Move 3 — the principle
 
-MVCC's gift is that readers and writers don't block each other — concurrency
-correctness in Postgres is mostly free, paid for by keeping multiple row
-versions around. So the bottleneck moves *up* a layer: it's not lock contention
-in the engine, it's admission control at the pool. The lesson for buffr is to
-look in the right place — the unsized `pg.Pool` is the contention point long
-before any row lock is, and `on conflict` already closes the one write-write race
-the repo could hit. Concurrency bugs hide where work *waits*, and here that's the
-pool.
+MVCC buys you the most valuable property in a concurrent database: *readers and writers
+never block each other*. The price is that every update is a copy-and-mark-dead, so
+update-heavy workloads accumulate garbage that vacuum must reclaim. And the deeper
+lesson for buffr specifically: when your concurrency-correctness comes from *having one
+writer* rather than from locks or versions, that correctness is a property of your
+deployment, not your code — and it's the first thing to break when the deployment
+grows a second writer.
 
 ---
 
 ## Primary diagram
 
-The full concurrency picture: pool admission, MVCC visibility, row locks.
+The full MVCC picture: versions, snapshot visibility, the single-writer assumption, the
+vacuum loop.
 
 ```
-  buffr-laptop — concurrency control, full
+  MVCC in buffr — full recap
 
-  ┌─ Application ───────────────────────────────────────────────┐
-  │  search() (read)      upsert()/index (write, holds 1 client) │
-  └────────┬───────────────────────┬─────────────────────────────┘
-           │ pool.query            │ pool.connect (dedicated)
-  ┌─ Pool (db.ts:4) ───────────────▼─────────────────────────────┐
-  │  max 10, no timeouts  ← FIRST contention point under load     │
-  └────────┬───────────────────────┬─────────────────────────────┘
-           ▼                       ▼
-  ┌─ MVCC ───────────────┐  ┌─ Row locks (writes only) ──────────┐
-  │ readers see snapshot │  │ ON CONFLICT (id) DO UPDATE         │
-  │ never block writers  │  │ → atomic insert-or-update           │
-  │ xmin/xmax per tuple  │  │ → idempotent re-index (PK keyed)    │
-  └──────────────────────┘  └────────────────────────────────────┘
+  ┌─ Concurrency layer ────────────────────────────────────────────────┐
+  │                                                                    │
+  │  reader (search)          writer (upsert)                          │
+  │     │ takes snapshot          │ writes new tuple version           │
+  │     ▼                         ▼                                     │
+  │  ┌─ visibility by xmin/xmax ─────────────────────────────┐         │
+  │  │ sees only committed-before-me, not-deleted versions    │         │
+  │  │ NO lock between reader and writer  ←── MVCC's whole job │         │
+  │  └────────────────────────────────────────────────────────┘         │
+  │                                                                    │
+  │  conflict path:  writer A vs writer B on same row → row lock        │
+  │                  ✗ NOT REACHED — buffr has one writer               │
+  │                                                                    │
+  │  cost path:  every UPDATE → dead heap tuple + dead HNSW entry       │
+  │              → autovacuum reclaims (defaults, untuned)              │
+  └────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
 ## Elaborate
 
-MVCC is why Postgres `select`s don't take read locks — the cost is that old row
-versions accumulate (dead tuples) and have to be reclaimed by `VACUUM`,
-Postgres's background garbage collector. This repo never tunes `VACUUM`; for a
-low-write single-device app, autovacuum's defaults are fine, but a high-churn
-table (imagine the memory chunks rewritten constantly) would eventually need
-attention. The `on conflict` clause — Postgres's "upsert," added in 9.5 — is the
-SQL-standard `MERGE`'s pragmatic cousin: it resolves the unique-constraint
-conflict atomically so you never hand-roll the read-check-write race. Optimistic
-vs pessimistic concurrency (`for update` locks vs version-check-and-retry) isn't
-exercised here because no path does read-modify-write on a contended row; if
-buffr grew a counter or a balance, that's where the choice would surface.
+MVCC is Postgres's answer to the oldest concurrency tradeoff: lock-based engines make
+readers wait for writers (or vice versa); MVCC lets both proceed by keeping multiple
+versions. The cost — accumulating dead versions and needing vacuum — is the deal
+Postgres makes, and it's why "vacuum" is a word Postgres DBAs say constantly and MySQL
+(InnoDB, which uses undo logs differently) DBAs say less. For a vector workload the
+twist is that the index is *also* versioned-by-churn: HNSW doesn't update in place, so
+the graph accumulates dead entries exactly like the heap.
+
+Optimistic vs pessimistic concurrency — the two strategies buffr *doesn't* use — are
+worth knowing as the menu for when a second writer arrives. Pessimistic
+(`SELECT ... FOR UPDATE`) locks the row up front; optimistic (a `version int` column
+checked on write) lets writes race and rejects the loser. For buffr's eventual
+sync story, optimistic with a version column fits a low-contention, mostly-disjoint-writes
+shape better than locking. `study-distributed-systems` (if generated) owns the
+multi-writer reconciliation; this file just names that the seam exists.
 
 ---
 
 ## Interview defense
 
-**Q: A `search()` and a memory `upsert()` run at the same moment on the same
-table. Do they block each other?**
-
-> No. MVCC means the `select` reads the versions visible to its snapshot and
-> takes no row locks; the `upsert()` writes a new version. The reader sees the
-> pre-write snapshot, the writer commits a new one, neither waits. Readers don't
-> block writers in Postgres. The only place they'd contend is the connection
-> pool — if `upsert()` has the last connection checked out for its whole
-> transaction, `search()` waits for a *connection*, not for a *lock*.
+**Q: "Does buffr's vector search ever block on a write?"**
 
 ```
-  search (snapshot read) ──┐
-                           ├─ no row contention (MVCC)
-  upsert (new version) ────┘
-  contention is at the pool (db.ts:4), not the rows
+  reader and writer, no lock
+
+  search (reader)  ──takes snapshot──►  sees committed versions only
+  upsert (writer)  ──new tuple──────►  invisible until it commits
+                          ▲ no lock between them — MVCC
 ```
 
-> Anchor: in Postgres readers and writers don't block each other — the
-> bottleneck is pool admission, not locks.
+Answer: "No. MVCC means the reader takes a snapshot and filters tuples by visibility
+against it — it never waits on a lock for an ordinary read. A concurrent upsert writes
+*new* tuple versions beside the old ones, and they're invisible to the in-flight read
+until they commit and the next statement re-snapshots. Readers don't block writers and
+writers don't block readers — that's the entire point of MVCC." Anchor: *MVCC removes
+the reader-writer lock by versioning the rows.*
 
-**Q: Why is `on conflict (id) do update` the right write primitive here?**
+**Q: "What's buffr's concurrency-control strategy?"**
 
-> Because it makes insert-or-update a single atomic statement and keys on the
-> primary key — `chunks.id`, which is aptkit's deterministic `"<docId>#<index>"`.
-> Two effects: re-indexing the same document updates in place instead of
-> duplicating, and there's no read-then-write race where two transactions both
-> check existence and both insert. Postgres resolves the conflict at the row
-> level. It's also what makes the cross-transaction gap in `indexDocumentRow`
-> self-healing — re-run and the upserts are idempotent.
-
-```
-  INSERT … ON CONFLICT (id) DO UPDATE
-    id absent → insert · id present → row-lock + update → new version
-    → idempotent, race-free, dedup by PK
-```
-
-> Anchor: `on conflict` collapses the lost-update race into one atomic,
-> idempotent statement keyed on the deterministic id.
+Answer: "Honestly — having one writer. There's no `FOR UPDATE` (pessimistic) and no
+version-column check (optimistic) anywhere. The single CLI process means two
+transactions never touch the same row, so the conflict machinery never fires.
+Correctness comes from the deployment shape, not the code. The cost it *does* pay is
+MVCC's dead tuples — every upsert update leaves a dead heap tuple and a dead HNSW
+entry that autovacuum has to reclaim. The day a second writer appears, I'd reach for an
+optimistic version column since the writes are mostly disjoint." Anchor: *the
+load-bearing concurrency guarantee is "one writer," not a lock — and that's the first
+thing to break at scale.*
 
 ---
 
 ## See also
 
-- `05-transactions-isolation-and-anomalies.md` — why the dedicated connection
-  matters and how `on conflict` heals the cross-transaction gap.
-- `02-records-pages-and-storage-layout.md` — the `xmin`/`xmax` MVCC stamps in the
-  tuple header.
-- `study-performance-engineering` — pool sizing as a throughput/latency budget.
-- `study-runtime-systems` — the in-process event loop that issues these queries.
+- `05-transactions-isolation-and-anomalies.md` — MVCC is what enforces the isolation
+  level; why one writer makes READ COMMITTED safe.
+- `02-records-pages-and-storage-layout.md` — dead tuples on the heap page; the bloat.
+- `03-btree-hash-and-secondary-indexes.md` — why every update re-inserts the HNSW entry.
+- `07-wal-durability-and-recovery.md` — vacuum, checkpoints, and the WAL.
+- `study-performance-engineering` — autovacuum tuning under write load.

@@ -1,166 +1,204 @@
-# Backpressure, Bounded Work, and Cancellation — mostly the gaps
+# Backpressure, Bounded Work, and Cancellation — the honest gaps
 
-**Industry name(s):** bounded concurrency, backpressure, cancellation/deadlines, graceful shutdown · **Type:** Industry standard
+**Industry name(s):** bounded concurrency, backpressure, cancellation (`AbortSignal`), deadlines / timeouts, graceful shutdown · *Industry standard*
+
+---
 
 ## Zoom out, then zoom in
 
-This is the file where the honest answer is mostly *"not yet exercised."* buffr has no cancellation, no timeouts, no deadlines, no bounded queues, and no signal-handled shutdown. For a single-user local CLI that's a defensible set of omissions — but naming exactly *where* each missing piece would attach, and what failure it would catch, is the whole lesson. The one bound that *does* exist is implicit: the chat UI's busy flag caps in-flight turns at one.
+This is the file where the verdict is mostly **`not yet exercised`** — and that's the lesson, not a cop-out. A turn in this repo has no deadline, no cancel key, no timeout on the Ollama call, and the process has no SIGINT handler. For a single-device personal agent driven by a human typing one question at a time, none of that has bitten yet. This file names exactly what's missing, what makes each one start to matter, and the *one* bounding mechanism the repo does have (the `busy` flag).
 
 ```
-  Zoom out — where bounding/cancellation would live (mostly empty)
+  Zoom out — where bounding would live (mostly empty today)
 
-  ┌─ Turn gate (chat.tsx) ────────────────────────────────────────┐
-  │  busy flag → at most ONE turn in flight  ✓ (the one real bound)│
-  └───────────────────────────────┬───────────────────────────────┘
-                                  │ but inside a turn:
-  ┌─ The agent run ───────────────▼───────────────────────────────┐
-  │  await agent.answer() — NO timeout, NO AbortSignal  ✗          │ ← can hang forever
-  │  trace pending[] — UNBOUNDED fan-out of inserts  ✗            │
-  └───────────────────────────────┬───────────────────────────────┘
-                                  │ at process edge:
-  ┌─ Shutdown ────────────────────▼───────────────────────────────┐
-  │  /exit → close() ✓     SIGINT → no handler ✗                  │
-  └────────────────────────────────────────────────────────────────┘
+  ┌─ Interface layer ────────────────────────────────────────┐
+  │  busy flag: bounds to ONE turn at a time (the one control)│ ← present
+  │  ✗ no cancel key · ✗ no SIGINT handler                   │ ← absent
+  └──────────────────────────┬───────────────────────────────┘
+  ┌─ Runtime layer ──────────▼───────────────────────────────┐
+  │  ✗ no AbortSignal · ✗ no per-turn deadline · ✗ no timeout │ ← absent
+  │  pending[]: bounded per turn (drained each flush)         │ ← present
+  └──────────────────────────┬───────────────────────────────┘
+  ┌─ Storage / Provider ─────▼───────────────────────────────┐
+  │  ✗ no query timeout · ✗ no Ollama request timeout        │ ← absent
+  │  pool max 10 (default): an implicit concurrency bound     │ ← implicit
+  └──────────────────────────────────────────────────────────┘
 ```
 
-Zoom in: the axis is *overload and escape* — what happens when work is too slow, too much, or needs to stop? buffr's current answer at most of these points is "it doesn't stop."
+Zoom in: "bounded work" means putting a ceiling on how much runs at once and how long it may take; "cancellation" means being able to stop in-flight work; "graceful shutdown" means draining cleanly on exit. The repo has the *seriality* bound (one turn at a time) and nothing else — by design.
 
-## Structure pass
+---
 
-**Layers.** Three: the **turn gate** (one bound that exists), the **agent run** (where timeouts/cancellation/queue-bounds would go), and **shutdown** (where signal handling would go).
+## The structure pass
 
-**Axis: control under overload — "what stops runaway or stuck work?"**
+**Layers.** Input bounding (one turn at a time) → work bounding (no deadline, no cancel) → resource bounding (pool max, implicit) → shutdown (none explicit).
+
+**Axis — trace `failure`: when this resource is overloaded or wedged, what happens?**
 
 ```
-  One axis — "what stops it?" — traced down
+  One axis across the layers: "what happens under overload / a wedge?"
 
-  ┌──────────────────────────────────────────────┐
-  │ turn gate: busy flag → 1 concurrent turn       │ → BOUNDED ✓
-  └───────────────────────┬────────────────────────┘
-       ┌──────────────────────────────────────────┐
-       │ agent.answer(): nothing                    │ → UNBOUNDED time ✗ (hangs)
-       │ trace pending[]: nothing                   │ → UNBOUNDED count ✗
-       └───────────────────────┬───────────────────┘
-            ┌─────────────────────────────────────┐
-            │ SIGINT: no handler                    │ → no graceful stop ✗
-            └─────────────────────────────────────┘
-
-  one bound exists; everything below it is open-ended
+  ┌─ input (busy flag) ─────────────┐  bounded: 2nd submit blocked while busy
+  │  → no overload from rapid typing │  (the ONE thing that's handled)
+  └──────────────────────────────────┘
+      ┌─ a wedged Ollama call ──────┐  UNBOUNDED: turn hangs forever, no
+      │  no timeout, no AbortSignal  │  timeout, no cancel — spinner spins on
+      └──────────────────────────────┘
+          ┌─ a slow pg query ───────┐  UNBOUNDED: same — no statement_timeout
+          │  no query deadline       │  set in app code
+          └──────────────────────────┘
+              ┌─ Ctrl-C ────────────┐  ABRUPT: no SIGINT handler → close()
+              │  no graceful shutdown│  skipped, pool not drained, flush lost
+              └──────────────────────┘
 ```
 
-**The seam: the start of `agent.answer()`.** Above it, the busy flag bounds concurrency to one. Below it — inside the turn — there is *no* bound on time and no way to cancel. That boundary is where every missing mechanism in this file would attach.
+The `failure` answer flips from "handled" at the input layer to "unbounded / abrupt" everywhere below it. That contrast *is* the audit.
+
+**Seam — the `await agent.answer(q)` call (`src/session.ts:62`).** The load-bearing joint where a deadline *would* attach but doesn't. On the caller side, the turn is committed to waiting however long the agent takes. On the agent side, there's no signal it can check to bail. The `guarantees` axis would flip here if a timeout existed (best-effort-with-deadline vs wait-forever) — today both sides say "wait forever."
+
+---
 
 ## How it works
 
 ### Move 1 — the mental model
 
-You know how a `fetch()` can hang forever if the server never responds, and the fix is `AbortController` + a timeout that aborts it? buffr's `await agent.answer(question)` is a `fetch()` with no `AbortController` — if Ollama stalls mid-generation, the turn waits indefinitely and the only escape is killing the process. Most of this file is "here's the `AbortController` that isn't there."
+You know `Promise.race([fetch(url), timeout(5000)])` — the pattern that says "give up after 5s." That's the shape of every mechanism this file is about, and the repo has *none* of them in the hot path. The only bounding it does have is the simplest possible one: a flag that says "I'm busy, don't start another." Think of this file as a map of the `Promise.race`-es that aren't there yet.
 
 ```
-  The pattern that's MISSING — a deadline racing the work
+  Cancellation / deadline — the pattern that's ABSENT here
 
-  Promise.race([
-    agent.answer(q),                    ← the work
-    timeout(30_000)  ← rejects after 30s  ← the deadline (not present in buffr)
-  ])
-  // buffr today: just  await agent.answer(q)  — no race, no deadline
+  what a bounded turn WOULD look like:
+    const ctrl = new AbortController()
+    Promise.race([
+      agent.answer(q, { signal: ctrl.signal }),  ◄── cancellable
+      deadline(30_000).then(() => ctrl.abort())   ◄── deadline fires abort
+    ])
+
+  what the repo ACTUALLY does:
+    const answer = await agent.answer(q)   ◄── no signal, no deadline, waits forever
 ```
+
+The gap between those two blocks is the entire content of this file.
 
 ### Move 2 — the walkthrough
 
-**The one bound that exists: the busy flag caps concurrent turns at one.** This is real backpressure, just implicit. The chat UI refuses to start a second turn while one runs (→ `04`):
-
-```ts
-// src/cli/chat.tsx:17 — the only concurrency bound in the repo
-if (busy) return;     // at most one ask() in flight; the rest is serialized
-```
-
-So buffr never has two agent runs racing, never floods Ollama with parallel generations, never opens an unbounded number of pool connections from overlapping turns. The bound is "1," enforced by UI state rather than a semaphore — but it *is* a bound, and it's why the unbounded pieces below don't compound into a real problem at single-user scale.
-
-**Missing: a timeout/deadline on the agent run.** `session.ask` awaits the agent with no clock:
-
-```ts
-// src/session.ts:62 — no timeout, no AbortSignal
-const answer = await agent.answer(question);
-```
-
-If Ollama hangs — model still loading, a generation that never terminates, a dropped HTTP connection that doesn't error — this `await` never settles. The Ink spinner spins forever (`src/cli/chat.tsx:48-51`), the busy flag stays `true`, and the *only* exit is Ctrl-C killing the process. The fix is a `Promise.race` against a timer or threading an `AbortSignal` into the provider — but the aptkit `RagQueryAgent.answer()` signature doesn't take one today, so this is partly an aptkit-side change. **Timeouts/deadlines: not yet exercised.**
-
-**Missing: cancellation (`AbortSignal`).** There's no `AbortController` anywhere in the repo — no way for the user to say "stop this turn, I changed my mind." Even `/exit` mid-turn is gated out by `if (busy) return` (`src/cli/chat.tsx:17`), so you can't even quit while a turn is running; you wait for it or kill the process. Cooperative cancellation would mean an `AbortController` whose signal is checked between agent steps and passed to the HTTP calls. **Cancellation: not yet exercised** — the project context calls this out directly.
-
-**Missing: a bound on the trace sink's fan-out.** `emit()` pushes every event's insert promise into `pending[]` with no cap (→ `03`, `05`):
-
-```ts
-// src/supabase-trace-sink.ts:87-93 — unbounded queue, no concurrency limit
-private push(p: Promise<void>): void { this.pending.push(p); }  // no max length
-async flush(): Promise<void> { await Promise.all(this.pending); } // fires ALL at once
-```
-
-A turn with hundreds of trace events would start hundreds of inserts simultaneously, all contending for the pool's 10 connections — most would queue *inside* the pool waiting for a free connection. In practice a turn emits a handful of events, so this never bites. But it's unbounded by construction: there's no `p-limit`-style concurrency cap, no chunking, no batching into a single multi-row insert. A bounded version would cap in-flight inserts or batch them. **Bounded queue / backpressure on inserts: not yet exercised.**
+**The one bound that exists: the `busy` flag bounds concurrency to one.** The strongest "bounded work" claim the repo can make is that it never runs two turns at once. `if (busy) return` at `src/cli/chat.tsx:18` rejects a second submit while a turn is in flight, and the UI hides the input entirely while busy (`src/cli/chat.tsx:48`). So concurrency is bounded to exactly 1 — which is also why the pool's default max of 10 connections is never a constraint: a single serial turn never opens more than a handful at once. This is real bounding, just the coarsest possible kind.
 
 ```
-  The trace fan-out — unbounded by construction
+  the one real bound — concurrency = 1
 
-  emit emit emit ... emit (N events)
-    │    │    │        │
-    ▼    ▼    ▼        ▼
-  insert insert ... insert     ← all started at once
-    └──────┬───────────┘
-       pool (10 conns) ← the only real limiter, and it's accidental
+  turn in flight (busy=true)
+       │
+  user submits again ──► if(busy) return ──► dropped
+       │                  (input also hidden behind spinner)
+       ▼
+  turn completes ──► busy=false ──► next submit accepted
 ```
 
-**Missing: graceful shutdown on signals.** `/exit` drains cleanly (`session.close()` → `pool.end()`, → `06`), but there's no `process.on('SIGINT')`/`SIGTERM` handler, so Ctrl-C skips it. The graceful-shutdown pattern — catch the signal, stop accepting new work, await in-flight work (or its deadline), `pool.end()`, then exit — isn't here. **Graceful signal shutdown: not yet exercised.**
+**`pending[]` is bounded per turn.** The trace sink's queue (`03`) doesn't grow without bound because `flush()` drains it every turn (`src/supabase-trace-sink.ts:91`). The ceiling is "events emitted in one turn" — small. If a single turn ever emitted thousands of events, this queue would need a periodic mid-run flush; today it doesn't, so it's bounded by the turn boundary. (Compare `turns[]` in `05`, which is *not* bounded — it grows across turns.)
 
-**Why these gaps are defensible today — and when they stop being.** This is a single-user, single-turn-at-a-time local CLI. One human, one question at a time, against a local Ollama and a local Postgres. The busy flag already bounds concurrency to one, so the unbounded fan-out can't actually fan out far, and a hung turn inconveniences one person who can Ctrl-C. The day this changes — multiple users, a server endpoint, turns kicked off programmatically, or an Ollama that's remote and flaky — every one of these gaps becomes a real incident: hung requests with no timeout, insert storms with no cap, no clean drain on deploy-time SIGTERM. The honest framing: these aren't bugs, they're *unbuilt* — correctly deferred for the current shape, first on the list for the next one.
+**Cancellation — `not yet exercised`, nowhere.** Grep the repo for `AbortController`, `AbortSignal`, `.abort(`, `signal:` — nothing. `agent.answer(q)` (`src/session.ts:62`) takes no signal. Once a turn starts, there is no way to stop it: no cancel key in the Ink UI, no signal threaded into the agent, no way to interrupt the Ollama generation mid-stream. If the user changes their mind, they wait for the turn to finish or kill the process. **When this starts to matter:** the moment a turn can run long enough that a user wants to abort it — a 9B model on a slow machine generating a long answer is exactly that case. The place it would attach is `agent.answer`'s call site, threading an `AbortSignal` from a keypress handler.
+
+**Timeouts / deadlines — `not yet exercised`, nowhere.** No `statement_timeout` on the pg side, no timeout option on the Ollama `fetch` (that's inside aptkit's providers, but buffr sets none). A wedged Ollama process — model still loading, GPU contention, a hung socket — hangs the turn indefinitely. The spinner (`src/cli/chat.tsx:48-51`) spins forever; the `busy` flag stays `true`; the UI is stuck until the process is killed. **When this starts to matter:** the first time a backend wedges in practice. A per-turn deadline (`Promise.race` against a timer) is the cheapest fix and would convert "hang forever" into "error after N seconds," which the existing `catch` in `onSubmit` (`src/cli/chat.tsx:30-32`) would already render gracefully.
+
+```
+  the wedge today — failure trace
+
+  await agent.answer(q) ──► Ollama wedged (model loading / hung socket)
+       │ no timeout, no signal
+       ▼ ...waits...
+  spinner spins ∞  ·  busy stays true  ·  UI accepts no input
+       │
+       ▼ only escape: kill the process (Ctrl-C) ── which skips close()
+```
+
+**Graceful shutdown — `not yet exercised`.** There is no `process.on('SIGINT', ...)` and no `process.on('SIGTERM', ...)` anywhere. The *only* clean shutdown path is `/exit` → `session.close()` → `pool.end()` (`src/cli/chat.tsx:18-21` → `src/session.ts:72-74`). Ctrl-C bypasses all of it: the process dies, the OS reclaims the sockets, but `pool.end()` never runs and any trace writes still in `pending[]` for an in-flight turn are lost (the turn is mid-`flush`). Ink restores the terminal on its own signal handling for the common case, but buffr adds no shutdown logic of its own.
+
+```
+  two exit paths — one clean, one abrupt
+
+  ┌─ /exit (clean) ─────────────────────────────────────────┐
+  │ onSubmit sees /exit ─► session.close() ─► pool.end()     │
+  │ ─► sockets drained ─► exit() ─► terminal restored        │
+  └──────────────────────────────────────────────────────────┘
+  ┌─ Ctrl-C (abrupt) ───────────────────────────────────────┐
+  │ SIGINT ─► (no handler) ─► process dies                   │
+  │ ✗ close() skipped  ✗ pool.end() skipped  ✗ flush lost    │
+  │ OS reclaims sockets (no app-level drain)                 │
+  └──────────────────────────────────────────────────────────┘
+```
+
+**Backpressure on streams — `not yet exercised`.** The answer is returned as one complete string (`src/session.ts:62,70`), rendered in one `setTurns` (`src/cli/chat.tsx:29`). There's no token-by-token streaming to the TTY, so there's no fast-producer/slow-consumer mismatch to manage — no `stream.write()` returning `false`, no `drain` event, no pause/resume. Backpressure becomes real only if buffr streams model output as it generates. **When this starts to matter:** the day the UI shows tokens as they arrive instead of waiting for the full answer.
+
+### Move 2 variant — the load-bearing skeleton of "bounded work" (what's missing)
+
+If you were to add bounding, these are the parts, named by what each prevents:
+
+1. **A deadline.** *Missing.* Without it, any backend wedge hangs the turn forever. The cheapest addition: `Promise.race([agent.answer(q), timeout(N)])` at `src/session.ts:62`.
+2. **A cancellation signal.** *Missing.* Without it, a started turn can't be stopped. Needs an `AbortSignal` threaded from a keypress through `agent.answer`.
+3. **A shutdown hook.** *Missing.* Without it, Ctrl-C skips `pool.end()` and loses in-flight flushes. The addition: `process.on('SIGINT', () => session.close().then(() => process.exit()))`.
+
+The one part that *is* present: **the concurrency bound** (the `busy` flag), which prevents overlapping turns. Naming which of the four exist (one) and which don't (three) is the honest audit.
 
 ### Move 3 — the principle
 
-Bounded work and cancellation are the mechanisms that keep a system controllable when something downstream is slow, stuck, or flooded. buffr has exactly one — the busy flag — and it happens to be enough to keep the missing ones from mattering at single-user scale. That's the real lesson about deferral: a single strong bound upstream (one turn at a time) buys you the right to defer the bounds downstream (timeouts, queue caps, cancellation) until the workload shape actually demands them.
+Bounded work is insurance you buy *before* you need it: a deadline, a cancel path, and a shutdown hook cost almost nothing to add and convert "hangs forever / dies dirty" into "fails cleanly / drains cleanly." This repo deliberately skips all three because single-device + human-paced means the failure modes haven't bitten — a human notices a hung turn and kills it, and losing one in-flight trace row on Ctrl-C is harmless. That's a legitimate call at this scale. The principle to carry: **know exactly which bounds you've omitted and what makes each one start to matter**, so you add them the day the scale changes — not the day after an incident.
+
+---
 
 ## Primary diagram
 
-```
-  buffr — bounding & cancellation, present vs absent
+The full bounding picture — one mechanism present, three absent.
 
-  ┌─ PRESENT ─────────────────────────────────────────────────────────────┐
-  │  busy flag (chat.tsx:17) → ≤1 turn in flight                  ✓ BOUND   │
-  │  /exit → session.close() → pool.end() → exit()               ✓ CLEAN   │
-  └───────────────────────────────┬──────────────────────────────────────┘
-                                  │ inside a turn — all ABSENT:
-  ┌─ NOT YET EXERCISED ───────────▼───────────────────────────────────────┐
-  │  timeout/deadline on agent.answer()        ✗ hangs forever            │
-  │  AbortSignal / cooperative cancellation     ✗ no way to stop a turn   │
-  │  bounded queue on trace pending[]           ✗ unbounded fan-out       │
-  │  SIGINT/SIGTERM graceful shutdown           ✗ Ctrl-C skips cleanup    │
-  └────────────────────────────────────────────────────────────────────────┘
-        accidental limiter: the pool's 10 connections cap real concurrency
 ```
+  Bounded work, cancellation, shutdown — full recap
+
+  ┌─ PRESENT ───────────────────────────────────────────────────────┐
+  │  concurrency bound: busy flag ── one turn at a time              │
+  │     src/cli/chat.tsx:18,48                                       │
+  │  queue bound: pending[] drained per flush ── bounded by one turn │
+  │     src/supabase-trace-sink.ts:91                                │
+  └──────────────────────────────────────────────────────────────────┘
+  ┌─ ABSENT (not yet exercised) ────────────────────────────────────┐
+  │  ✗ deadline / timeout   → wedged backend hangs turn forever      │
+  │  ✗ AbortSignal / cancel → started turn can't be stopped          │
+  │  ✗ SIGINT handler       → Ctrl-C skips close()/pool.end()/flush  │
+  │  ✗ stream backpressure  → N/A (answer returned whole, not streamed)│
+  └──────────────────────────────────────────────────────────────────┘
+  The ONLY clean exit: /exit → close() → pool.end() (chat.tsx:18-21)
+```
+
+---
 
 ## Elaborate
 
-These four mechanisms are the standard toolkit for keeping a system controllable under stress: **timeouts/deadlines** put an upper bound on how long any single operation can hold a resource; **cancellation** (`AbortSignal`) lets a caller reclaim that resource early; **bounded queues/backpressure** stop a fast producer from overwhelming a slow consumer (the classic is `p-limit` or a semaphore capping concurrent in-flight work); **graceful shutdown** drains in-flight work before exit so a deploy or a Ctrl-C doesn't sever live requests. The reason buffr can skip all four is that its *one* upstream bound — one turn at a time — collapses the workload to a scale where none of them are load-bearing yet. This is the right way to think about deferral: not "we forgot," but "the workload doesn't generate the failure these prevent — yet." The moment buffr grows a second concurrent caller or a remote Ollama, the deferral expires, and the first thing to build is the timeout on `agent.answer()`, because a hung turn with no escape is the worst of the four failures.
+The three missing mechanisms are a package deal in production services: a request gets a deadline (don't wait forever), a cancellation token (stop work when the client disconnects), and the server gets a SIGTERM handler (drain in-flight work before the orchestrator kills it). They're absent here for the same reason buffr has no load balancer or worker pool — it's a single-device personal tool, not a service under load. The `me.md` framing is honest about this: distributed-systems-at-scale patterns aren't in the portfolio, and inventing them here would be dishonest. The right move is to name them precisely and say when they'd land.
+
+The one to add *first*, if buffr graduates toward unattended use, is the SIGINT handler — it's three lines, it makes Ctrl-C drain the pool and flush traces, and it's the difference between a clean exit and a dirty one. The deadline is second (cheap insurance against a wedged Ollama). Cancellation is third (a UX nicety until turns get long).
+
+---
 
 ## Interview defense
 
-**Q: What stops a runaway or stuck turn in buffr?**
-Upstream, the busy flag bounds it to one turn at a time. *Inside* a turn — nothing. `await agent.answer()` has no timeout and no `AbortSignal`, so a stalled Ollama hangs the turn forever; the only escape is killing the process. That's *not yet exercised* — defensible for a single-user CLI, first thing to fix if Ollama goes remote/flaky.
+**Q: "What happens if the model call hangs? And what happens on Ctrl-C?"**
+
+> Both are unhandled today, deliberately. If Ollama wedges, the turn hangs forever — there's no timeout on the call and no `AbortSignal`, so the spinner spins and the `busy` flag stays true until the process is killed. On Ctrl-C there's no SIGINT handler, so `session.close()` and `pool.end()` are skipped — the OS reclaims the sockets but the app doesn't drain cleanly, and any trace writes still in the `pending[]` queue for an in-flight turn are lost. The only clean exit is `/exit`, which routes through `close()`. At single-device human-paced scale that's an acceptable tradeoff; the day it runs unattended, the first fix is a three-line SIGINT handler, then a per-turn deadline via `Promise.race`.
 
 ```
-  busy flag → ≤1 turn ✓     but agent.answer() → no deadline ✗ → hangs
-```
-Anchor: *one upstream bound (one turn) is what lets the missing downstream bounds not bite yet.*
+  the two gaps, one sketch
 
-**Q: The trace sink fires N inserts at once — what bounds that?**
-Nothing in the sink — `pending[]` is unbounded and `flush` fires all of them with `Promise.all`. The only accidental limiter is the pool's 10 connections, which queues the overflow. A real bound would be a concurrency cap (`p-limit`) or batching into one multi-row insert. In practice a turn emits a handful of events, so it never bites — but it's unbounded by construction. *Not yet exercised.*
+  hang:   await agent.answer(q) ── no timeout/signal ── spins ∞
+  Ctrl-C: SIGINT ── no handler ── close()/pool.end()/flush all skipped
+  clean:  /exit ── close() ── pool.end()  ◄── the only drained path
+```
 
-```
-  N emits → N inserts at once → pool(10) queues the rest (accidental cap)
-```
-Anchor: *the pool size is doing backpressure's job by accident.*
+**Anchor:** "One bound present — `busy` caps concurrency at one turn (`chat.tsx:18`). Three absent — no deadline, no `AbortSignal`, no SIGINT handler; the only clean exit is `/exit` → `close()` at `session.ts:72`."
+
+---
 
 ## See also
 
-- `04-shared-state-races-and-synchronization.md` — the busy flag as the concurrency bound
-- `03-event-loop-and-async-io.md` — the unbounded fan-out that lives on the loop
-- `06-filesystem-streams-and-resource-lifecycle.md` — the shutdown/cleanup half of this story
-- `08-runtime-systems-red-flags-audit.md` — these gaps, ranked by consequence
+- `02-processes-threads-and-tasks.md` — the long-lived process that lacks a shutdown hook
+- `03-event-loop-and-async-io.md` — the `pending[]` queue this file bounds
+- `05-memory-stack-heap-gc-and-lifetimes.md` — `turns[]`, the unbounded structure this file's discipline would cap
+- `08-runtime-systems-red-flags-audit.md` — these gaps ranked by consequence

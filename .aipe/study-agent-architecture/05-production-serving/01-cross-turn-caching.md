@@ -1,170 +1,285 @@
-# Cross-turn caching — caching across a loop, not just one call
+# Cross-Turn Caching
 
-**Industry name(s):** cross-turn caching · prompt-prefix caching ·
-intra-run memoization · semantic cache. **Type label:** Industry
-standard.
-
-**In this codebase: Not yet implemented — and partly N/A for a local
-model.** buffr does no caching across turns or runs. Two of the three
-layers below are less relevant to a local Ollama (no provider-side prefix
-cache to lean on), but the prompt *is* prefix-stable (profile + template
-fixed), which is the precondition the cloud version needs.
+*Industry names: **prompt caching** (provider-side prefix cache) / **memoization**
+(intra-run) / **semantic caching** (cross-run). Type label: Industry standard. In buffr: the
+prefix SHAPE is present (the stable system prompt leads every turn); the billed cache is NOT
+YET (local Ollama doesn't bill); the cross-run cache is NOT YET (each run is a fresh
+conversation). The connection-reuse cousin — the warm pg pool — IS implemented.*
 
 ## Zoom out, then zoom in
 
 ```
-  Zoom out — single-call cache vs the agent versions
+  buffr's serving stack — caching wraps the loop at three radii
 
-  Single-call cache (one request):     Cross-turn cache (a loop):
-    request → hash → hit? return : call   within a run: same sub-step → hit
-                                          across runs: similar sub-step → hit
-                                          provider-side: stable prefix cached
+  ┌─ CROSS-RUN (semantic cache) ─ across separate `npm run chat` runs ──┐  NOT YET
+  │  same/similar question asked twice → reuse the prior answer         │
+  │ ┌─ ★ CROSS-TURN (prompt-prefix cache) ★ ─ within one run ────────┐  │  SHAPE yes, BILL no
+  │ │  stable system prompt re-sent at the FRONT of every turn       │  │
+  │ │ ┌─ INTRA-RUN (memoization) ─ within one turn's tool calls ───┐ │  │  NOT YET
+  │ │ │  same tool + same args → reuse the result, don't re-call   │ │  │
+  │ │ │ ┌─ THE LOOP ─ run-agent-loop.ts:76-202 ──────────────────┐ │ │  │
+  │ │ │ │  model.complete(system, messages) — once PER TURN      │ │ │  │
+  │ │ │ └─────────────────────────────────────────────────────────┘ │ │  │
+  │ │ └─────────────────────────────────────────────────────────────┘ │  │
+  │ └─────────────────────────────────────────────────────────────────┘  │
+  └───────────────────────────────────────────────────────────────────────┘
 ```
 
-Zoom in: single-call caching keys on one request. An agent runs many
-turns per task, and many tasks repeat sub-steps — so there are three
-cache scopes a loop opens that a single call doesn't. buffr opens none of
-them yet, which is fine for a single-user local tool but is the first
-thing to add under load.
+A single LLM call caches one thing: the request. A *loop* re-issues a request every turn, and
+each turn re-sends the same stable prefix — profile + instructions — at the front. That
+front-loaded stability is the prompt-prefix-cache shape (★ marks it), and it exists in buffr's
+`messages` array whether or not the provider bills for it. The three radii above are the same
+idea applied at three distances: within a turn, across turns, across runs.
 
 ## Structure pass
 
-**Layers.** Three cache scopes: provider-prefix, intra-run, cross-run
-semantic — cheapest to most useful.
+Three cache layers, traced along ONE axis: **how far the reuse reaches**.
 
-**Axis — "what's re-derived, and at what scope?"** A stable system
-prompt re-sent every turn (prefix). A sub-result re-derived within one
-task (intra-run). A similar sub-result across tasks (cross-run). buffr
-re-derives all three.
+```
+  Axis = REUSE DISTANCE · trace how far each cache layer carries a result forward
 
-**Seam.** The `model.complete` / `tools.callTool` boundaries — the
-points where a cache would intercept. buffr's prompt assembly puts the
-stable part first (profile + template), which is exactly the seam a
-prefix cache keys on.
+  INTRA-RUN memoization     reach = within one turn   same tool+args → skip the re-call
+  ────────────────────────────────────────────────────────────────────────────────────
+  CROSS-TURN prefix cache   reach = across turns       stable front of `messages` reused
+  ──────────────── ★ SEAM: in-process vs provider-side ★ ──────────────────────────────
+  CROSS-RUN semantic cache  reach = across runs        same question → reuse the answer
+```
+
+The seam is *who owns the cache*. Above it, memoization and semantic caching are **your**
+code — a `Map`, a vector lookup you write. The prefix cache below the conceptual front is
+**the provider's** — you don't store anything; you just keep the prefix byte-identical and the
+provider recognizes it. buffr's prefix is structurally cacheable (`run-agent-loop.ts:94,124` —
+profile + instructions lead the array) but local Ollama is the provider, and it doesn't bill,
+so there is no win to capture today.
 
 ## How it works
 
-#### Move 1 — the mental model
+### Move 1 — mental model
 
-You keep the stable part of a request stable so an HTTP cache or
-`fetch` keep-alive can reuse it. Cross-turn caching is that instinct at
-three scopes inside an agent: reuse the stable prompt prefix, reuse a
-sub-result within a task, reuse a similar sub-result across tasks.
-
-```
-  Pattern — three cache scopes inside an agent
-
-  ┌─ Agent run (task A) ─────────────────────────┐
-  │  turn 1: retrieve "X"  ──┐                    │
-  │  turn 2: reason          │ intra-run hit      │
-  │  turn 3: retrieve "X" ◄──┘ (same sub-step)    │
-  └───────────────────────────────────────────────┘
-  ┌─ Agent run (task B, later) ──────────────────┐
-  │  turn 1: retrieve "X" ◄── cross-run semantic  │
-  │          (similar to A's)  hit                │
-  └───────────────────────────────────────────────┘
-  + provider-prefix: stable system prompt cached every turn
-```
-
-#### Move 2 — the walkthrough (what buffr has and lacks)
-
-**Prefix scope: buffr's prompt is prefix-stable, but Ollama doesn't
-bill it.** The system prompt assembles the profile and base template
-first (`rag-query-agent.js:28-32`) — stable across every turn of a run.
-On a cloud provider with prompt-prefix caching, putting the stable part
-first is exactly what lets the provider cache the prefix and charge less
-per turn. buffr runs Gemma locally via Ollama, so there's no provider
-bill to cut — the prefix-stability is correct prompt hygiene but buys no
-cost win here. It *would* matter if buffr moved to a cloud model.
-
-**Intra-run scope: buffr re-derives within a run.** Within one task,
-buffr's loop can call `search_knowledge_base` more than once
-(`maxToolCalls: 4`). If the model emits the same query twice, buffr
-re-runs the full embed-and-search both times — there's no memoization on
-`(tool name + args)`. A small intra-run cache (a `Map` keyed on the tool
-call) would skip the duplicate. The cost saved is one embedding call plus
-one vector search per duplicate — modest at single-user scale, real under
-load.
-
-**Cross-run scope: no semantic cache.** A later question semantically
-close to an earlier one re-runs retrieval from scratch. A cross-run
-semantic cache would embed the sub-query and return a cached result if
-close enough. buffr doesn't do this — and here the sharper-for-agents
-tradeoff bites: a stale cross-run hit poisons the *whole trajectory*,
-not one response. The agent reasons forward on a stale sub-result and
-every downstream turn inherits the error. So the gate is freshness:
-don't cache retrieval whose underlying data can change mid-task (buffr's
-notes change as you write), and never cache a side-effecting tool call
-(buffr's tool is read-only, so that half is free).
+A cache is a bet that you will pay the same cost twice. The frontend reflex: keep the *stable
+part* of a request stable so an HTTP cache can reuse it — same URL, same headers, the response
+comes from cache instead of the origin. Prompt-prefix caching is exactly that bet at the token
+level: keep the front of the prompt byte-identical across turns, and the provider reuses the
+already-computed attention state for that prefix instead of recomputing it.
 
 ```
-  Comparison — buffr today vs the cache scopes
+  THE SHAPE — keep the front stable so the cache can reuse it
 
-  ┌──────────────────┬──────────────┬──────────────────────────┐
-  │ scope            │ buffr status │ note                     │
-  ├──────────────────┼──────────────┼──────────────────────────┤
-  │ provider-prefix  │ N/A (local)  │ prompt IS prefix-stable  │
-  │ intra-run memoize│ none ✗       │ re-runs duplicate searches│
-  │ cross-run semantic│ none ✗      │ freshness risk if added  │
-  └──────────────────┴──────────────┴──────────────────────────┘
+  HTTP cache:   GET /v1/profile  (stable URL+headers)  → cache HIT → skip origin
+  PREFIX cache: [stable system prompt][growing messages] → cache HIT on the prefix → skip recompute
+                 └─────── reused ──────┘└── recomputed ──┘
 ```
 
-#### Move 3 — the principle
+### Move 2 — the three layers
 
-A loop opens cache scopes a single call doesn't have: a stable prefix
-re-sent every turn, a sub-result re-derived within a task, a similar one
-across tasks. The agent-specific hazard is that a stale cache hit
-poisons the whole trajectory, not one response — so gate every cache on
-freshness and never cache a side-effecting call. buffr's prompt hygiene
-(stable prefix first) is the precondition for the cloud version; its
-single-user local setup means the caches aren't worth their complexity
-yet.
+**Cross-turn: the prefix cache (the shape buffr has, the bill it doesn't).**
+
+Every turn, the loop calls `model.complete` with the same `system` and a `messages` array that
+only ever grows at the tail. The stable system prompt — profile + instructions — sits at the
+front and never changes. That is the prefix-cache shape: the expensive, repeated part is
+front-loaded and stable.
+
+```
+  CROSS-TURN — the stable prefix leads every turn (the cacheable front)
+
+  turn 0:  [SYSTEM: profile+instructions] [user q]
+  turn 1:  [SYSTEM: profile+instructions] [user q][assistant][tool_result]
+  turn 2:  [SYSTEM: profile+instructions] [user q][assistant][tool_result][assistant][tool_result]
+            └──────── IDENTICAL prefix ────────┘ └──────────── grows at the TAIL ─────────────┘
+              ↑ a billed provider reuses THIS               ↑ only this is recomputed
+```
+
+```ts
+// @aptkit/runtime — run-agent-loop.ts:94,124 — the stable prefix is structural, not added by you.
+const messages: ModelMessage[] = [{ role: 'user', content: userPrompt }];   // :94 — array seeded
+// ...each turn, inside the for-loop:
+const response = await model.complete({
+  system,                 // ← profile + instructions: IDENTICAL every turn = the cacheable prefix
+  messages,               // ← grows at the TAIL only (assistant + tool_result appended below)
+  tools: forceFinal ? undefined : toolSchemas,
+  maxTokens,
+});
+messages.push({ role: 'assistant', content: response.content });            // :124 — append, never rewrite the front
+```
+
+Annotation: nothing in buffr *configures* a cache here — the win is free if it exists, because
+the shape is already correct. On a billed provider (Anthropic, OpenAI) you would mark the
+stable prefix as cacheable and pay a fraction for those tokens on turns 1..N. On local Ollama
+the model recomputes every turn but you aren't billed, so there's no money on the table — the
+shape is right, the win is absent. **buffr's would-need: move to a billed provider, and this
+prefix becomes real per-turn savings with zero code change to the array.** (Mechanics of how
+the bill works: `study-ai-engineering/06-production-serving/`.)
+
+**Intra-run: memoization (NOT YET — and barely needed).**
+
+Within one run, if the agent called the *same tool with the same args* twice, you could skip
+the second call and reuse the first result. That's plain memoization — a `Map` keyed on
+`(toolName, args)`.
+
+```
+  INTRA-RUN — same tool+args → serve from memory, don't re-execute
+
+  callTool("search_knowledge_base", {q:"X"})  → MISS → execute → store under key (name, {q:"X"})
+  callTool("search_knowledge_base", {q:"X"})  → HIT  → return stored result, skip pgvector
+```
+
+Bridge from primitive: it's `Promise.all()` you'd dedupe — same as wrapping a `fetch` in a
+`Map<url, Promise>` so two callers for the same URL share one in-flight request. buffr doesn't
+wire this because `maxToolCalls:4` already caps the loop at four tool calls total, and the
+agent rarely repeats an identical query inside one run. **buffr's would-need: a longer
+iteration budget or a planner that re-issues identical sub-queries — then memoization stops
+being noise.**
+
+**Cross-run: semantic caching (NOT YET — no shared store across runs).**
+
+Across separate runs, if a new question is semantically close to one already answered, you
+could return the cached answer and skip the whole loop. That's a semantic cache: embed the
+question, vector-lookup against past (question → answer) pairs, return on a near hit.
+
+```
+  CROSS-RUN — embed the new question, reuse a near-identical prior answer
+
+  new question ─▶ embed ─▶ vector lookup over (past_question → answer) pairs
+                              │ similarity ≥ threshold?
+                  ┌── yes ────┴──── no ──┐
+                  ▼                       ▼
+            return cached answer    run the full loop (then cache this pair)
+            (skip the loop)
+```
+
+But each `npm run chat` run starts a **fresh conversation** — `startConversation`
+(`session.ts:55`) opens a new conversation id every run, and the loop is seeded empty
+(`run-agent-loop.ts:94`). There is no cross-run answer cache today. (buffr *does* persist
+episodic memory across runs via `createConversationMemory`, but that surfaces past exchanges as
+*retrieval* inside a fresh loop — it is recall, not a cache that short-circuits the loop.)
+**buffr's would-need: a (question-embedding → answer) table consulted before the loop runs.**
+
+**The connection-reuse cousin buffr DOES have: the warm pg pool.**
+
+Not a token cache, but the same serving instinct — *don't re-pay a setup cost you'll pay every
+turn*. buffr holds ONE `pg` `Pool` across the whole session instead of opening a connection per
+turn.
+
+```
+  WARM POOL — one connection set, reused across every turn (the fetch keep-alive analogue)
+
+  createPool() ──once──▶ ┌─ Pool (warm) ─┐  turn 0 ─┐
+                         │  connections   │  turn 1 ─┼─▶ borrow → query → return (no reconnect)
+                         │  kept open     │  turn N ─┘
+                         └────────────────┘
+  pool.end() ──on close──▶ drained
+```
+
+```ts
+// src/session.ts:39 — the warm pool, created ONCE for the whole session.
+const pool = createPool(cfg.databaseUrl);     // every turn's pgvector query borrows from THIS
+// ...all turns reuse `pool` (PgVectorStore, profile load, persistMessage, trace) ...
+// src/session.ts:73 — drained only when the session closes.
+async close(): Promise<void> { await pool.end(); }
+```
+
+Annotation: this is the direct analogue of a `fetch` with HTTP keep-alive — the TCP/TLS
+handshake is paid once and the connection is reused for every subsequent request. The
+one-shot `ask` CLI opens and closes per call; the *session* keeps the pool warm because it
+knows it will run many turns. This is the connection-reuse serving win buffr actually ships.
+
+### Move 3 — the principle
+
+**Cache the part that repeats, at the radius it repeats — and never cache a thing that can go
+stale inside a trajectory.** The prefix repeats every turn (cache it at the provider). A
+connection repeats every turn (reuse it — the warm pool). An answer might repeat across runs
+(semantic cache, if you have a shared store). The sharp edge is the cross-run cache: a single
+LLM call that serves a stale cached answer is one wrong response, but an agent that reads a
+stale cached answer at the *start* of a loop poisons the **whole trajectory** — every
+subsequent turn reasons off a wrong premise. The blast radius of a stale cache scales with the
+length of the loop, not with one call.
 
 ## Primary diagram
 
-```
-  Cross-turn caching (would-be in buffr; buffr's state marked)
+The three radii plus the warm-pool cousin, with buffr's status on each.
 
-  PREFIX:   profile+template first → cacheable prefix  (N/A: local Ollama)
-  INTRA-RUN: Map[(tool,args)] within a run             (✗ not built)
-  CROSS-RUN: embed sub-query → semantic cache          (✗ + freshness risk)
-            gate: don't cache changeable data; never cache side effects
 ```
+  Cross-turn caching in buffr — three radii + the connection cousin
+
+  CROSS-RUN  semantic cache    embed question → reuse prior answer    NOT YET (fresh conv :55)
+  ─────────────────────────────────────────────────────────────────────────────────────────
+  CROSS-TURN prefix cache      stable system prompt leads :94,:124    SHAPE yes · BILL no (local)
+  ─────────────────────────────────────────────────────────────────────────────────────────
+  INTRA-RUN  memoization       same tool+args → reuse result          NOT YET (maxToolCalls:4 caps it)
+  ─────────────────────────────────────────────────────────────────────────────────────────
+  COUSIN     warm pg pool      one connection set reused :39,:73       IMPLEMENTED (the real win)
+
+  Sharp edge: a stale CROSS-RUN hit poisons the WHOLE trajectory, not just one call.
+```
+
+The shape is right at every radius; the only *captured* win today is the warm pool. The rest
+flips on the day buffr moves to a billed provider or grows a shared answer store.
 
 ## Elaborate
 
-Cross-turn caching is the agent-scale version of single-call caching
-(which would be in a future `study-ai-engineering` production-serving
-file). The reason it's a separate concern: the unit of execution is a
-multi-turn loop, so the same sub-step recurs within and across runs, and
-a cache error compounds across the trajectory instead of staying local.
-For buffr, the highest-value first cache is intra-run memoization on the
-search tool — cheap to add, no freshness risk if scoped to one run.
+The three radii fail differently, and conflating them is a common interview slip. The prefix
+cache is *safe* — its content is your own stable system prompt, so a hit is always correct; the
+only question is whether the provider bills cheaply for it. The semantic cache is *dangerous* —
+its content is a prior *answer*, which can be stale, wrong, or about a subtly different
+question that merely embeds close; that's why it poisons trajectories. Memoization sits between:
+safe within one run (the world doesn't change mid-loop for a read tool) but unsafe to persist
+across runs (the knowledge base may have re-indexed). The radius determines the staleness risk.
+
+The fleet shape of this is where caching becomes real money. On a billed provider serving many
+users, the prefix cache turns the shared system prompt into a once-paid cost amortized across
+every turn of every user — and at fleet scale a shared semantic cache in front of the loop can
+deflect a large fraction of requests before they ever hit the model. buffr is single-user on a
+free local model, so neither earns its keep yet; the warm pool is the one connection-reuse win
+that pays off even at N=1, because the setup cost is per-turn regardless of user count.
+
+Cross-ref `study-ai-engineering/06-production-serving/` for the call-level prompt-caching
+mechanics (how the provider marks and bills a cached prefix) and
+`study-ai-engineering/01-llm-foundations/06-token-economics.md` for why a cached prefix is
+money — the per-token cost model a hit avoids.
 
 ## Interview defense
 
-**Q: How would you cache buffr under load?**
-Three scopes. Intra-run memoization first — a `Map` keyed on `(tool,
-args)` so a duplicate search within one run skips re-embedding. Then, if
-buffr moved to a cloud model, lean on prompt-prefix caching — buffr's
-prompt is already prefix-stable (profile + template first), which is the
-precondition. Cross-run semantic cache last and most carefully, gated on
-freshness, because a stale hit poisons the whole trajectory, not one
-answer. The read-only tool means I never have to worry about caching a
-side effect.
+**Q: "Do you cache anything in your agent? Why or why not?"**
+
+Model answer: "Three radii, and I'm honest about which are real. The prefix-cache *shape* is
+already there — my loop re-sends the same system prompt (profile + instructions) at the front
+of the `messages` array every turn (`run-agent-loop.ts:94,124`), which is exactly the
+front-stable shape a billed provider would cache. But I run local Ollama, which doesn't bill,
+so there's no win to capture today — the shape is right, the savings are absent until I move to
+a billed provider, at which point it's free money with zero array changes. Intra-run
+memoization and a cross-run semantic cache I deliberately don't have: `maxToolCalls:4` caps
+repeat tool calls, and each run starts a fresh conversation (`session.ts:55`) so there's no
+cross-run answer to reuse. The one cache cousin I *do* ship is the warm pg pool
+(`session.ts:39,73`) — one connection set reused across every turn, the keep-alive win that
+pays off even at one user. The trap I'd avoid is a cross-run semantic cache: a stale hit there
+doesn't ruin one answer, it poisons the whole trajectory, because every later turn reasons off
+the wrong premise."
 
 ```
-  intra-run memoize → prefix cache → cross-run semantic (freshness-gated)
+  The defense in one picture
+
+  prefix cache?   shape YES (system prompt leads every turn :94,:124) · bill NO (local Ollama)
+  memoization?    NO — maxToolCalls:4 caps repeats
+  semantic cache? NO — fresh conversation per run (:55); and a stale hit poisons the trajectory
+  warm pool?      YES — one connection reused across turns (:39,:73), the real win
 ```
 
-**Anchor:** "A stale cache hit poisons the whole trajectory, not one
-response — gate every agent cache on freshness."
+Anchor: *Prefix-cache shape present (stable system prompt at the front, `run-agent-loop.ts:94,124`)
+but unbilled on local Ollama; no memoization (`maxToolCalls:4` caps it) and no cross-run semantic
+cache (fresh conversation per run, `session.ts:55`) — and a stale cross-run hit would poison the
+whole trajectory; the one captured win is the warm pg pool (`session.ts:39,73`), the keep-alive
+cousin.*
 
 ## See also
 
-- `02-fan-out-backpressure.md` · `03-per-tool-circuit-breaking.md` — the
-  other agent-scale serving concerns
-- `04-agent-infrastructure/02-agent-memory-tiers.md` — the
-  retrieval-memory store a cache would sit in front of
-- `02-agentic-retrieval/01-agentic-rag.md` — the retrieval loop that
-  repeats sub-steps
+- `02-fan-out-backpressure.md` — the other serving control that scales with N; caching reduces
+  the per-call cost, backpressure bounds the call *rate*.
+- `03-per-tool-circuit-breaking.md` — the third serving control; a breaker that opens means a
+  cache miss can't even reach the dependency.
+- `../04-agent-infrastructure/01-context-engineering.md` — the `messages` array whose stable
+  front *is* the cacheable prefix.
+- `../04-agent-infrastructure/02-agent-memory-tiers.md` — episodic memory (retrieval-recall)
+  vs a semantic answer cache: recall feeds the loop, a cache short-circuits it.
+- `study-ai-engineering/06-production-serving/` — the call-level prompt-caching mechanics and
+  billing this file points back to.
+- `study-ai-engineering/01-llm-foundations/06-token-economics.md` — why a cached prefix is money.

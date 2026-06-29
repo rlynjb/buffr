@@ -1,294 +1,215 @@
-# LLM observability — full-signal trajectory traces
+# LLM observability
 
-*Industry standard (LLM tracing / spans). buffr's `SupabaseTraceSink` persists all 6 CapabilityEvent types into `agents.messages` with `event.timestamp` as `created_at` — a complete, ordered, replayable trajectory.*
+### Traces, spans, and replay — the trace sink that records every event the agent emits into a local table
 
-## Zoom out, then zoom in
-
-This is the rich one. Most RAG demos log "question → answer" and call it observability. buffr captures the *whole trajectory* — every Thought, every tool-call with its args, every tool result with duration and error, every model's token usage, every warning — into one ordered table. That trace is three things at once: a debugging tool, a partial cost ledger, and the future fine-tuning corpus.
+Evals tell you if the system is good *in aggregate*. Observability tells you what *one specific run* actually did — every model call, every tool call, the args that caused each, the duration and tokens. This is the half of the folder that buffr does well: the **trace sink** (`SupabaseTraceSink`) captures all six event types the agent emits and writes them into a local Postgres table. It's the "an `ai_trace` table for solo work" pattern — no SaaS, no dashboard, just a queryable record on your laptop.
 
 ```
-  Zoom out — where the trace is produced and where it lands
-
-  ┌─ Agent loop (aptkit) ───────────────────────────────────────┐
-  │  runAgentLoop emits CapabilityEvents at every beat:          │
-  │   step · tool_call_start · tool_call_end · model_usage ·     │
-  │   warning · error                                            │
-  └───────────────────────────┬─────────────────────────────────┘
-                              │  trace.emit(event)   ← SYNC (aptkit contract)
-  ┌─ Trace sink (buffr) ──────▼─────────────────────────────────┐
-  │  ★ SupabaseTraceSink — switch on event.type → queue insert ★ │  ← we are here
-  │   emit() queues a Promise; flush() awaits them all           │
-  └───────────────────────────┬─────────────────────────────────┘
-                              │  persistMessage(...) — await on flush()
-  ┌─ Storage ─────────────────▼─────────────────────────────────┐
-  │  agents.messages  (created_at = event.timestamp)             │
-  │   → the trajectory store · the fine-tuning corpus            │
-  └─────────────────────────────────────────────────────────────┘
+THE OBSERVABILITY STACK
+┌──────────────────────────────────────────────────────────────┐
+│  Agent run   RagQueryAgent emits CapabilityEvents             │
+├──────────────────────────────────────────────────────────────┤
+│  ★ TRACE SINK   SupabaseTraceSink.emit()  (THIS FILE)         │
+│      6 events → agents.messages  (traces + spans)             │
+├──────────────────────────────────────────────────────────────┤
+│  Store       Postgres agents.messages (local, queryable)     │
+├──────────────────────────────────────────────────────────────┤
+│  Replay      aptkit replay-runner.ts  ── ✗ UNWIRED in buffr   │
+│  Dashboard   ── ✗ none ·  Cost ($)  ── ✗ none                 │
+└──────────────────────────────────────────────────────────────┘
 ```
 
-Zoom in: observability is the three pillars — logs, metrics, traces. buffr's `agents.messages` is primarily a **trace** (the ordered sequence of one agent run), carries one **metric** inline (`tokens_used`, from `model_usage` events), and treats `warning`/`error` events as structured **logs**. The clever part is the design: `emit()` is synchronous (aptkit forces it), so the sink can't `await` inside it — it queues writes and drains them later, while still preserving correct order via the event's own timestamp.
+Lead with the sink because it's the load-bearing, *implemented* piece. The replay runner and dashboard are named gaps below it.
 
 ## Structure pass
 
-**Layers:** the loop (produces events) → the sink (queues + drains) → the table (durable, ordered).
-
-**Axis — "what's the timing guarantee at this boundary?" — traced across the sink:**
+Two terms structure observability: a **trace** is the whole story of one request (the conversation row), and a **span** is one timed unit of work inside it (a tool call, with `durationMs`). The axis that organizes the events is **cause vs. effect**: `tool_call_start` records the *cause* (the args that triggered the call), `tool_call_end` records the *effect* (result, error, duration). buffr persists both, so the trajectory is replayable in order.
 
 ```
-  trace "when does the write actually happen?" across the sink
-
-  ┌─ emit() ────────────┐  seam   ┌─ pending[] ─────┐  seam   ┌─ flush() ──────┐
-  │ called SYNC, during │ ═══════►│ Promise queued, │ ═══════►│ await all      │
-  │ the agent run       │ (no     │ NOT yet awaited │ (drain  │ writes settle  │
-  │ returns void        │  await) │                 │  point) │ ordered by     │
-  │                     │         │                 │         │ created_at     │
-  └─────────────────────┘         └─────────────────┘         └────────────────┘
-   guarantee: never blocks         guarantee: in-flight        guarantee: durable
-
-  the timing answer FLIPS: emit is fire-and-forget; flush is the durability barrier
+ONE AXIS — cause ──► effect, per event type        persisted as
+  step             assistant text (a reasoning beat)   role='assistant'
+  tool_call_start  CAUSE: toolName + args              role='tool_call'   tool_calls
+  tool_call_end    EFFECT: result/error + durationMs   role='tool'        tool_results  ← SPAN
+  model_usage      provider/model + tokens             role='model_usage' tokens_used
+  warning / error  the failure beats                   role=type          content
+        ▲
+   TRACE = one conversation row gathering all of the above, ordered by created_at
 ```
 
-**The seam:** `emit()` → `flush()` is where "fired" becomes "durable." If buffr called `await trace.flush()` and the writes raced each other on insert time, rows could land out of order. The fix lives at the table boundary: `created_at` is set from `event.timestamp` (captured at emit, deterministic), not from `now()` at insert. So **replay order is the emit order, regardless of which insert finishes first.** That single decision is what makes the trace replayable.
+The seam: aptkit's contract makes `emit()` **synchronous** (it returns `void`, no `await`), but the writes are to Postgres, which is async. buffr resolves this by *queuing* the insert promises and awaiting them all in `flush()` after the run. The ordering is preserved not by insert timing (those race) but by writing the **event timestamp** into `created_at` — so replay order matches emit order deterministically.
 
 ## How it works
 
-### Move 1 — the mental model
+### Move 1 — mental model: the sink is a sync fan-out into a queue, drained once
 
-You know how React's `useEffect` cleanup or a logging middleware fires a side effect *without* blocking the render? aptkit's trace contract is that: `emit()` must return `void` immediately — it can't be async, because the loop calls it inline between model calls and won't wait. So the sink does what a buffered logger does: it captures the work as a pending Promise, returns instantly, and someone drains the buffer later (`flush()`). The trick that keeps it correct: stamp each event with *when it happened*, not *when it's written*.
-
-```
-  the sync-emit / async-flush pattern
-
-  loop ──emit(e1)──► sink: pending.push(write(e1))  ──► returns void (no wait)
-  loop ──emit(e2)──► sink: pending.push(write(e2))  ──► returns void
-  loop ──emit(e3)──► sink: pending.push(write(e3))  ──► returns void
-       ...
-  session ──flush()──► await Promise.all(pending)   ──► all rows durable
-                       order preserved by created_at = e.timestamp (set at emit)
-```
-
-### Move 2 — the step-by-step walkthrough
-
-This sink is reached on *every* agent run — `runAgentLoop` emits events throughout, and `src/session.ts:63` calls `trace.flush()` after each answer.
-
-**Step 1 — `emit()` is synchronous and switches on the event type.** aptkit's `CapabilityTraceSink` contract says `emit(event): void`. buffr's sink reads `event.timestamp` once, then dispatches on `event.type` — six cases, each mapping the event to a `messages` row shape.
-
-```ts
-// src/supabase-trace-sink.ts:53-85
-emit(event: CapabilityEvent): void {
-  const { pool, conversationId } = this.opts;
-  const at = event.timestamp;                 // ← captured at emit, used for created_at
-  switch (event.type) {
-    case 'step': /* assistant reasoning text */ ...
-    case 'tool_call_start': /* toolName + args */ ...
-    case 'tool_call_end': /* result + error + durationMs */ ...
-    case 'model_usage': /* provider/model + token counts */ ...
-    case 'warning':
-    case 'error': /* a message string */ ...
-  }
-}
-```
-
-It returns `void` — no `await` anywhere inside. That's mandatory: the loop calls this between `model.complete` calls and will not wait on a DB round-trip per event.
-
-**Step 2 — each of the 6 event types maps to a specific row shape.** This is the heart of "full-signal." Most loggers drop everything but the assistant text; buffr persists all six. Here's the mapping, with what each captures and why it matters.
-
-```ts
-// src/supabase-trace-sink.ts:57-83 (the six cases)
-case 'step':                                                     // ← the Thought
-  if (event.content)
-    this.push(persistMessage(pool, conversationId, event.role, event.content, { createdAt: at }));
-  return;
-case 'tool_call_start':                                          // ← the Action (the CAUSE)
-  this.push(persistMessage(pool, conversationId, 'tool_call', event.toolName, {
-    toolCalls: { toolName: event.toolName, args: event.args }, createdAt: at }));
-  return;
-case 'tool_call_end':                                            // ← the Observation + timing
-  this.push(persistMessage(pool, conversationId, 'tool', event.toolName, {
-    toolResults: { result: event.result, error: event.error, durationMs: event.durationMs }, createdAt: at }));
-  return;
-case 'model_usage':                                              // ← the cost metric
-  this.push(persistMessage(pool, conversationId, 'model_usage', '', {
-    model: `${event.provider}/${event.model}`,
-    tokensUsed: (event.inputTokens ?? 0) + (event.outputTokens ?? 0), createdAt: at }));
-  return;
-case 'warning':
-case 'error':                                                    // ← structured logs
-  this.push(persistMessage(pool, conversationId, event.type, event.message, { createdAt: at }));
-  return;
-```
-
-Walk the six:
-
-- **`step`** — the assistant's reasoning text (the Thought). Skipped if empty. → `role` row with `content`.
-- **`tool_call_start`** — the Action *with its args*. This is the causal record — "the model searched for X." Args are the thing most loggers drop, and they're exactly what you need to debug a bad retrieval. → `tool_call` row, args in `tool_calls` jsonb.
-- **`tool_call_end`** — the Observation: the result, any `error`, and `durationMs` (per-tool latency). → `tool` row, in `tool_results` jsonb.
-- **`model_usage`** — emitted by the loop per `complete()` when `response.usage` is present (run-agent-loop.ts:111-122). Fills the otherwise-orphaned `tokens_used` column. → `model_usage` row.
-- **`warning`** / **`error`** — structured log lines (e.g., the context-guard refusal from `06-error-recovery.md`). → row keyed by the event type.
+The agent emits events one at a time, synchronously, mid-run — it can't wait for a database. The sink's job is to translate each event into a queued insert *without blocking*, then drain the queue once at the end. Think of it as a buffered writer: `emit()` appends, `flush()` commits.
 
 ```
-  Layers-and-hops — the 6 event types into one table
-
-  ┌─ Loop ────────────────┐  emit(type)         ┌─ Sink ──────────────────┐
-  │ produces, per turn:    │ ───────────────────►│ switch(type):           │
-  │  step                  │                     │  step→ role row          │
-  │  tool_call_start       │                     │  call_start→ tool_call   │
-  │  tool_call_end         │                     │  call_end→ tool          │
-  │  model_usage           │  hop: persistMessage│  usage→ model_usage      │
-  │  warning / error       │ ───────────────────►│  warn/err→ warning/error │
-  └────────────────────────┘                     └──────────┬───────────────┘
-                                                 hop: insert │ created_at=e.ts
-                                                             ▼
-                                              ┌─ agents.messages ──────────┐
-                                              │ ordered trajectory + tokens │
-                                              └──────────────────────────────┘
+THE SINK PATTERN (sync emit, deferred drain)
+   agent ──emit(e)──► switch(e.type) ──► persistMessage(...)  ──► pending[]  (queued)
+   agent ──emit(e)──► ...                                          ▲ no await here
+   agent ──emit(e)──► ...
+                                        run ends
+   session ──flush()──► Promise.all(pending)  ──► all rows committed, ordered by created_at
 ```
 
-**Step 3 — writes are queued, not awaited (the sync/async split).** `push()` just appends the in-flight Promise to a `pending` array. No `await`. The DB round-trip happens in the background while the loop keeps running.
+Bridging from what you know: this is the same shape as a logging library with an async transport — `log()` is fire-and-forget into a buffer, and you `flush()` on shutdown. The twist is the *ordering guarantee*: because concurrent inserts race, buffr stamps `created_at` from the event itself so the *read-back* order is deterministic regardless of which insert lands first.
 
-```ts
-// src/supabase-trace-sink.ts:50, 87-93
-private readonly pending: Promise<void>[] = [];
-private push(p: Promise<void>): void {
-  this.pending.push(p);                 // ← capture the in-flight write, return immediately
-}
-async flush(): Promise<void> {
-  await Promise.all(this.pending);      // ← THE durability barrier
-}
-```
+### Move 2 — the SupabaseTraceSink, in code
 
-This is the only way to honor a synchronous `emit()` while still doing async I/O: capture the Promise, drain it later. `flush()` is the single point where buffr says "now everything is durable."
+Every event type is captured. The previous version dropped tool args, durations, and tokens on the floor; this one persists the full trajectory.
 
-**Step 4 — `created_at = event.timestamp` makes order deterministic.** Here's the subtle, load-bearing decision. The pending writes settle in *whatever order Postgres finishes them* — that's a race. If `created_at` were `now()` at insert, the rows would be timestamped by the race, and replay order would be wrong. Instead, `persistMessage` coalesces the event's own timestamp into `created_at`.
-
-```ts
-// src/supabase-trace-sink.ts:26, 30 (inside persistMessage)
-const createdAt = extra?.createdAt && extra.createdAt.length > 0 ? extra.createdAt : null;
-// ...
-`... created_at) values ($1,...,coalesce($8::timestamptz, now()))`,   // ← event time wins; now() only if absent
-```
-
-So even though three inserts might land out of order, `order by created_at` replays them in the exact sequence the loop produced them. **The trajectory is replayable because order comes from emit-time, not insert-time.**
+**emit() is sync — it queues, never awaits.** The aptkit `CapabilityTraceSink` contract returns `void`. So `emit` pushes a promise and returns immediately; nothing blocks the agent.
 
 ```
-  Step 4 — why created_at = event.timestamp matters
-
-  emit order:   e1(t=0) ──► e2(t=1) ──► e3(t=2)
-  insert race:  e3 lands first, then e1, then e2   (Promise.all, no order)
-  rows:         created_at = t=0, t=1, t=2  ◄── from event, NOT insert
-  replay:       order by created_at ─► e1, e2, e3   ✓ correct sequence restored
+src/supabase-trace-sink.ts:53  emit(event): void          ← sync, returns void
+              :87  private push(p) { this.pending.push(p) }  ← queue, no await
+              :91  async flush() { await Promise.all(this.pending) }  ← drain once
 ```
 
-**Step 5 — the session flushes after every answer.** Back at buffr's layer, `flush()` is called once per turn, right after the answer is ready and before the (best-effort) memory write.
-
-```ts
-// src/session.ts:62-63
-const answer = await agent.answer(question);
-await trace.flush();                       // ← drain all queued trajectory writes for this turn
-```
-
-After this line returns, the full trajectory of that one answer is durable in `agents.messages`, ordered, with token usage attached.
-
-### Move 2 variant — the load-bearing skeleton
-
-The kernel of this trace: **sync emit that queues a write → a flush barrier that drains the queue → an emit-time timestamp persisted as the order key.**
-
-- Drop **the queue (write synchronously inside emit)** → impossible: aptkit's `emit` is `void`, you can't `await` a DB call there. The whole pattern exists to bridge a sync interface to async I/O.
-- Drop **the flush barrier** → writes may still be in-flight when the process exits; you lose the tail of the trajectory.
-- Drop **`created_at = event.timestamp`** → rows are ordered by the insert race; the replay sequence is scrambled and the trace becomes unreadable as a trajectory. This is the part people forget — they log everything, then can't reconstruct the order.
-
-Optional hardening: per-tool `durationMs` (latency signal), `tokens_used` (cost signal), `error`/`warning` capture (failure signal). These enrich the trace; the skeleton above is what makes it a *trace* at all.
-
-### Move 2.5 — current state vs future state
+**tool_call_start persists the CAUSE — args.** This is the line that turns the table from "what happened" into "*why* it happened": the args that triggered the tool are stored in `tool_calls`.
 
 ```
-  Phase A (today)                       Phase B (the gaps)
-  ─────────────                         ──────────────────
-  full trajectory captured              replay HARNESS (read the rows back,
-  ordered by created_at                   re-run / inspect a past run)
-  tokens_used per model call            cost dashboard (sum tokens × price)
-  durationMs per tool                   latency dashboard (p50/p95 over runs)
-  warning/error rows                    alerting on error-rate
+src/supabase-trace-sink.ts:62  case 'tool_call_start':
+              :63  persistMessage(..., 'tool_call', event.toolName, {
+                     toolCalls: { toolName, args: event.args },  ← THE CAUSE
+                     createdAt: at })
 ```
 
-Everything Phase B needs is *already in the table* — the data is captured, it's just not read back yet. A replay harness reads `agents.messages` ordered by `created_at` and reconstructs the run; a cost view sums `tokens_used`; a latency view aggregates `durationMs`. What doesn't have to change: the sink, the loop, the schema. The trace was designed to be read; nobody's reading it yet.
+**tool_call_end persists the EFFECT — result, error, and the span duration.** `durationMs` is what makes this a *span*, not just a log line: you get the timed cost of every tool call.
+
+```
+src/supabase-trace-sink.ts:67  case 'tool_call_end':
+              :68  persistMessage(..., 'tool', event.toolName, {
+                     toolResults: { result, error, durationMs },  ← EFFECT + SPAN
+                     createdAt: at })
+```
+
+**model_usage fills the tokens column.** Provider and model are flattened to `provider/model`; input + output tokens sum into `tokens_used` — the column that was otherwise orphaned.
+
+```
+src/supabase-trace-sink.ts:73  case 'model_usage':
+              :74  persistMessage(..., 'model_usage', '', {
+                     model: `${event.provider}/${event.model}`,
+                     tokensUsed: (inputTokens ?? 0) + (outputTokens ?? 0),  ← fills tokens_used
+                     createdAt: at })
+```
+
+**created_at carries the event timestamp for deterministic replay order.** Every branch passes `createdAt: at` (the `event.timestamp`). `persistMessage` coalesces it into the column, so reading the trace back in `created_at` order reproduces emit order — not the race between flush inserts.
+
+```
+src/supabase-trace-sink.ts:55  const at = event.timestamp     ← captured once
+   persistMessage ... coalesce($8::timestamptz, now())         ← event time wins
+   ⇒ SELECT ... ORDER BY created_at  =  exact emit order        ← deterministic replay
+```
+
+**Where it's wired.** `src/session.ts:55`–`56` opens a conversation row and constructs the sink; `:63` flushes after each turn. One conversation = one trace; the sink fans every event into its messages.
+
+```
+src/session.ts:55  conversationId = startConversation(pool, cfg.appId)   ← the trace
+              :56  trace = new SupabaseTraceSink({ pool, conversationId })
+              :63  await trace.flush()                                    ← drain per turn
+```
+
+### Move 2.5 — current vs. future: recorded, but not replayed or visualized
+
+buffr *records* a complete, ordered, replay-ready trajectory. It does nothing further with it yet.
+
+```
+                       buffr today          gap
+ capture (6 events)     ████ complete        —
+ spans (durationMs)     ████ captured         —
+ tokens                 ████ captured         —
+ REPLAY a trajectory    ░░░░                  replay-runner.ts exists in aptkit, UNWIRED
+ dashboard / charts     ░░░░                  none
+ cost ($)               ░░░░                  tokens captured, never priced
+```
+
+- **Replay (Case B).** aptkit ships `replay-runner.ts` — it lists artifact JSON files, validates each against a capability-replay shape, and reports pass/fail. buffr captures everything a replay needs but never calls it: there's no step that turns an `agents.messages` trace into a replay artifact and re-asserts it.
+- **Dashboard (Case B).** No UI. The data is a Postgres table; you read it with SQL or not at all.
+- **Cost (Case B).** `tokens_used` is populated, but never multiplied by a price. For a local Ollama model the dollar cost is ~zero, but the *token* cost (latency proxy) is right there and unsummarized.
 
 ### Move 3 — the principle
 
-Observability for an agent is "capture the whole trajectory, ordered, so you can answer questions you didn't know to ask." The two decisions that make buffr's trace good generalize everywhere: **(1) bridge a sync emit to async I/O by queuing and draining, never by blocking the hot path; (2) order by event-time, not write-time, or your trace lies about sequence.** Get those two right and your "log" becomes a replayable trajectory — and a trajectory of (question, reasoning, tool-calls, answer) tuples is exactly the corpus you fine-tune on later.
+**Capture the cause, the effect, and the clock — or the trace can't answer "why."** A log that records only outputs tells you *what* the agent said; a trace that records args (cause), results+errors (effect), and durations+timestamps (the clock) tells you *why* it said it and *what it cost*. buffr's sink captures all three, which is exactly what makes the unwired replay and cost-summary *possible* — the data is already on disk; the gap is only the reader.
 
 ## Primary diagram
 
-```
-  buffr observability — emit → queue → flush → ordered table, one frame
+The full path from agent event to a replayable, ordered local trace — and the readers buffr hasn't built.
 
-  ┌─ Agent loop ────────────────────────────────────────────────┐
-  │  per turn, emits CapabilityEvents (sync, fire-and-forget):    │
-  │   step ─ tool_call_start ─ tool_call_end ─ model_usage ─      │
-  │   warning ─ error          each carries event.timestamp       │
-  └───────────────────────────┬──────────────────────────────────┘
-                              │ trace.emit(e)  (returns void)
-  ┌─ SupabaseTraceSink ───────▼──────────────────────────────────┐
-  │  switch(e.type) → persistMessage(...)  ─► pending.push(write)  │
-  │  (no await — write is in-flight)                              │
-  │                                                                │
-  │  session: await trace.flush() ─► Promise.all(pending)         │
-  │           └─ DURABILITY BARRIER (once per answer)             │
-  └───────────────────────────┬──────────────────────────────────┘
-                              │ insert, created_at = e.timestamp
-  ┌─ agents.messages ─────────▼──────────────────────────────────┐
-  │  role | content | tool_calls | tool_results | model |         │
-  │  tokens_used | created_at                                     │
-  │  order by created_at ─► replayable trajectory  (= FT corpus)  │
-  └────────────────────────────────────────────────────────────────┘
+```
+                    LLM OBSERVABILITY (buffr)
+   RagQueryAgent ─emit(event)─► SupabaseTraceSink  [src/supabase-trace-sink.ts:53]
+       (sync)                        │ switch(type)
+                                     ├ tool_call_start → tool_calls (CAUSE: args)
+                                     ├ tool_call_end   → tool_results (EFFECT + durationMs ← SPAN)
+                                     ├ model_usage     → tokens_used
+                                     ├ step            → assistant text
+                                     └ warning/error   → content
+                                     │  push → pending[]   (no await)
+                       session.ts:63 │  flush() → Promise.all
+                                     ▼
+            Postgres agents.messages  (created_at = event.timestamp ⇒ ordered TRACE)
+                                     │
+         ✗ replay-runner.ts (aptkit, UNWIRED)   ✗ dashboard   ✗ cost($)
 ```
 
 ## Elaborate
 
-LLM observability matured as teams realized a chat completion is opaque — you see the answer, not the reasoning, the retrieved context, the tool args, or the token spend. The industry settled on *spans*: a trace is a tree/sequence of timed spans (model call, tool call, retrieval), each with inputs, outputs, and timing. buffr's `agents.messages` is a flat-but-ordered version of that — each row is effectively a span (the `tool_call_end` row carries `durationMs`, the span's duration). The sync-emit / async-flush split is the same shape as a buffered, batched logger (OpenTelemetry's BatchSpanProcessor does exactly this). The `created_at = event.timestamp` decision is the same lesson distributed tracing learned the hard way: order by the event's logical time, not the storage write time, because writes race. What buffr adds on top of generic tracing is intent: these rows are the `conversations`/`messages` tables, and they're explicitly the trajectory corpus a future fine-tune would train on (`../06-finetuning-and-training/` territory) — so the trace isn't just for debugging, it's a data asset. The one thing the trace can't catch is the `02-tool-calling.md` empty-query failure, because that failure produces a *clean* `tool_call_start`/`tool_call_end` pair — the trace shows success because every layer reported success.
+Why the sync-emit/deferred-flush split is the correct shape and not a workaround: the agent loop is latency-sensitive and runs on the user's request path; making `emit()` `await` a Postgres insert would serialize the agent behind the database, adding a round-trip per event to every response. Decoupling capture (cheap, sync, in-memory queue) from durability (one batched `Promise.all` at the seam) keeps the hot path fast and pays the I/O cost once, off the critical loop. The cost of the split is that a crash mid-run loses the unflushed queue — acceptable for solo observability, not for an audit log, and worth naming as the tradeoff.
+
+Why `created_at = event.timestamp` is load-bearing for replay, not a nicety: replay means re-running the recorded sequence *in order*. If you ordered by insert time, concurrent flushes would scramble the sequence — tool_call_end could land before its own tool_call_start. Stamping the column from the event's own timestamp makes `ORDER BY created_at` reproduce the exact emit order deterministically, which is the precondition for the unwired `replay-runner` to ever do its job. The capture was designed *for* a replay that isn't wired yet — which is exactly why [B3.11] is a small wiring exercise, not a rebuild.
 
 ## Project exercises
 
-> No curriculum file present; exercises derived from the codebase.
+### Add a tokens/latency summary query over captured traces
 
-### Build a trajectory replay harness
+- **Exercise ID:** [B3.5] (cite [C3.5], Phase 3) — Case A: the data is captured; this is the next step — read it.
+- **What to build:** A small CLI/SQL report over `agents.messages` that, per conversation, sums `tokens_used` and sums tool-call `durationMs` (from `tool_results`), and prints a per-run and mean latency/token summary.
+- **Why it earns its place:** buffr captures spans and tokens but never surfaces them — the table is write-only in practice. This turns the trace into the cost/latency dashboard buffr lacks, with zero new capture work.
+- **Files to touch:** new `src/cli/trace-summary.ts` (sibling to `src/cli/eval-cmd.ts`) reading `agents.messages` via `src/db.ts`; schema in `sql/001_agents_schema.sql`.
+- **Done when:** A command prints per-conversation total tokens and total tool latency, plus the mean across recent runs, sourced entirely from captured traces.
+- **Estimated effort:** 0.5–1 day.
 
-- **Exercise ID:** OBS-1 (Case A — trace captured, replay not yet built). **The highest-leverage observability exercise.**
-- **What to build:** a CLI that takes a `conversation_id`, reads its `agents.messages` ordered by `created_at`, and reconstructs the run as a readable trajectory (Thought / Action+args / Observation+duration / tokens), proving the trace is replayable.
-- **Why it earns its place:** Phase B's headline gap. The data is captured; nobody reads it back. A working replay is the "my traces are actually replayable, here's proof" artifact — and it depends on the `created_at = event.timestamp` decision being correct.
-- **Files to touch:** new `src/cli/replay-cmd.ts`, query `agents.messages` via `src/db.ts`; map the role/jsonb shapes from `src/supabase-trace-sink.ts:57-83`.
-- **Done when:** a multi-turn conversation replays in the exact order the loop produced it, with args, durations, and token counts shown.
-- **Estimated effort:** 1–4hr.
+### Wire the replay runner against recorded trajectories
 
-### Aggregate token usage into a per-conversation cost view
-
-- **Exercise ID:** OBS-2 (Case A — metric captured, not aggregated).
-- **What to build:** a query/CLI that sums `tokens_used` per `conversation_id` (and optionally multiplies by a per-model rate) so each session has a cost figure.
-- **Why it earns its place:** `tokens_used` is already populated from `model_usage` events but never read — this turns a stored metric into an actual cost ledger, the start of cost observability.
-- **Files to touch:** new query in `src/cli/` reading `agents.messages.tokens_used`; no schema change needed.
-- **Done when:** `npm run cost` (or similar) prints total tokens per conversation, sourced from the `model_usage` rows.
-- **Estimated effort:** 1–2hr.
+- **Exercise ID:** [B3.11] (cite [C3.11], Phase 3) — Case B: aptkit's `replay-runner.ts` exists but buffr never calls it. This exercise is primary.
+- **What to build:** A step that exports an `agents.messages` trace (ordered by `created_at`) into a replay artifact JSON, then runs aptkit's `evaluateReplayArtifactFiles` to validate/re-assert it — closing the capture→replay loop the sink was designed for.
+- **Why it earns its place:** buffr records a complete, ordered, replay-ready trajectory and then does nothing with it. Wiring the runner turns "we have traces" into "we can re-run and re-check a past trajectory" — regression-proofing the agent's behavior.
+- **Files to touch:** new exporter reading `agents.messages` (`src/supabase-trace-sink.ts` schema); import `evaluateReplayArtifactFiles` from aptkit; a `replay/` artifact dir; a CLI in `src/cli/`.
+- **Done when:** A recorded conversation exports to an artifact, the replay runner validates it, and a deliberately corrupted artifact is reported as failed.
+- **Estimated effort:** 2–3 days.
 
 ## Interview defense
 
-**Q: Walk me through buffr's observability. What do you capture, and how is it stored?**
-Answer: the full agent trajectory. `SupabaseTraceSink` handles all six `CapabilityEvent` types — `step` (the Thought), `tool_call_start` (the Action with args, the cause), `tool_call_end` (the Observation with result, error, and `durationMs`), `model_usage` (token counts), and `warning`/`error` — mapping each to a row in `agents.messages`. So I capture the reasoning, the tool args, the results, latency, and token spend, not just the final answer.
+**Q: "`emit()` is synchronous but you're writing to Postgres. How does that not block the agent or lose ordering?"**
+
+Two moves. For *blocking*: `emit()` honors aptkit's sync `void` contract by pushing the insert promise into a `pending[]` queue and returning immediately — nothing on the agent's hot path awaits the database. The writes drain once at the seam via `flush()` → `Promise.all`, so I/O is paid in one batch off the critical loop. For *ordering*: the batched inserts race, so I don't trust insert time — I stamp `created_at` from `event.timestamp`, so reading the trace back `ORDER BY created_at` reproduces exact emit order. The tradeoff is that a crash before `flush()` loses the unflushed queue, which is fine for solo observability.
 
 ```
-  6 events → agents.messages: step·call_start·call_end·model_usage·warning·error
+   emit() ─► queue (sync, no await)        ⇒ agent never blocks
+   flush() ─► Promise.all (batched I/O)    ⇒ paid once at the seam
+   created_at = event.timestamp            ⇒ deterministic replay order (not insert race)
 ```
 
-**Q: `emit()` can't be async — how do you write to Postgres without blocking the loop, and how do you keep the rows in order?**
-Answer: two decisions. First, sync-emit / async-flush: `emit()` queues the write Promise into a `pending` array and returns `void` immediately; `flush()` awaits `Promise.all(pending)` once per answer — that's the durability barrier, never on the hot path. Second — and this is **the part people forget** — `created_at` is set from `event.timestamp` (captured at emit), not `now()` at insert. The queued writes settle in a race, but ordering by `created_at` restores the exact emit order. Without that, the trace would be ordered by the insert race and you couldn't replay it.
+*Anchor: capture is sync and cheap; durability is deferred and batched; order comes from the event clock, not the insert clock.*
+
+**Q: "You capture traces — so what can't you do yet?"**
+
+I can't *replay* or *visualize* them. The capture is complete: all six events, tool args (cause), results/errors and `durationMs` (effect + spans), tokens — ordered for deterministic replay. But the readers aren't wired: aptkit's `replay-runner` exists and buffr never calls it, there's no dashboard, and `tokens_used` is captured but never summarized or priced. The data was deliberately captured replay-ready, so closing these is wiring ([B3.11], [B3.5]), not a rebuild.
 
 ```
-  emit→queue (void) · flush→drain (barrier) · created_at=event.timestamp (order survives the race)
+   capture   ████ complete (6 events, spans, tokens, ordered)
+   replay    ░░░░ replay-runner exists in aptkit, unwired
+   summarize ░░░░ tokens/latency captured, never read
 ```
+
+*Anchor: buffr's trace is a fully-stocked warehouse with no one yet sent in to read the shelves.*
 
 ## See also
 
-- `02-eval-methods.md` — the eval that *should* read this trace (agent-path faithfulness).
-- `03-react-pattern.md` — the trajectory these events record is the ReAct transcript.
-- `../04-agents-and-tool-use/06-error-recovery.md` — the `warning`/`error` events this sink persists.
-- `../04-agents-and-tool-use/02-tool-calling.md` — the one failure the trace can't catch (clean success on an empty query).
-- `01-eval-set-types.md` — the trace is where a regression set's frozen bugs would be read from.
+- **`03-llm-as-judge-bias.md`** — the judged answers and their chunks are recorded here; replay + judge together regression-proof behavior.
+- **`02-eval-methods.md`** — aggregate scores vs. per-run traces: two complementary views of the same system.
+- **`../06-production-serving/`** — captured tokens/latency are the raw input to cost tracking and rate limiting.
+- **`study-debugging-observability/`** — the general trace/span/replay treatment this file specializes to the agent.
+- **`../04-agents-and-tool-use/`** — the agent loop whose events the sink captures.

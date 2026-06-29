@@ -1,243 +1,163 @@
-# Per-Chunk Insert Loop
+# Per-Chunk Insert Loop — N round-trips inside one transaction
 
-**Industry names:** row-at-a-time insert · the N+1 write · single-row vs bulk insert
-(the fix is multi-row `VALUES` / `COPY`). **Type:** Industry standard anti-pattern (here,
-at a benign scale).
+**Industry name(s):** row-at-a-time INSERT vs multi-row INSERT / bulk load (COPY); chatty database access. **Type:** Industry standard.
 
----
+`PgVectorStore.upsert` writes a document's chunks one INSERT at a time, inside a transaction. Functionally correct, atomic — and N round-trips where one would do.
 
 ## Zoom out, then zoom in
 
-When a document is indexed, its chunks have to land in `agents.chunks`. buffr writes them
-one INSERT at a time, in a loop, inside a single transaction. That's one network
-round-trip to Postgres per chunk. The transaction is the right call; the row-at-a-time
-loop is the part that scales badly — though not at the size buffr runs today.
+When a document is indexed, its chunks (each a 768-dim vector plus metadata) have to land in `agents.chunks`. The question is how many times the application talks to Postgres to make that happen.
 
 ```
-  Zoom out — where the insert loop sits
+  Zoom out — where the insert loop lives
 
-  ┌─ Pipeline (aptkit) ─────────────────────────────────────────┐
-  │  chunk doc → embed all chunks → store.upsert(chunks[])       │
-  └──────────────────────────────────┬──────────────────────────┘
-                                      │
-  ┌─ Storage: PgVectorStore.upsert (pg-vector-store.ts:38-65) ──▼┐
-  │  begin                                                       │
-  │  for (const c of chunks)  ← ★ one INSERT per chunk ★         │ ← we are here
-  │    client.query(insert ... on conflict ...)                  │
-  │  commit                                                      │
-  └──────────────────────────────────┬──────────────────────────┘
-                                      │ pg wire (one round-trip per query)
-  ┌─ Postgres ─────────────────────▼─────────────────────────────┐
-  │  agents.chunks                                               │
-  └──────────────────────────────────────────────────────────────┘
+  ┌─ Index path ─────────────────────────────────────────────────┐
+  │  pipeline.index → store.upsert(chunks)                        │
+  └───────────────────────────┬───────────────────────────────────┘
+  ┌─ PgVectorStore.upsert ────▼───────────────────────────────────┐
+  │  src/pg-vector-store.ts:38                                    │
+  │    begin                                                       │
+  │    for (c of chunks) { ★ await client.query(INSERT one row) ★}│ ← we are here
+  │    commit                                                      │
+  └───────────────────────────┬───────────────────────────────────┘
+  ┌─ Postgres — agents.chunks ▼───────────────────────────────────┐
+  │  N parameterized INSERTs, N network round-trips               │
+  └───────────────────────────────────────────────────────────────┘
 ```
 
-Zoom in: the pattern is **row-at-a-time insert inside one transaction**. The question this
-file answers: what does the loop cost (N round-trips), what does the transaction buy
-(atomicity, one fsync), and when does the round-trip count start to hurt.
+Zoom in: the pattern is **row-at-a-time INSERT** — the chatty-access anti-pattern. The transaction wrapping is right (all-or-nothing). What's left on the table is collapsing N INSERTs into one multi-row INSERT (or a COPY), turning N round-trips into one.
 
----
+## The structure pass
 
-## Structure pass
-
-**Layers.** Two: the transaction envelope (`begin` / `commit` / `rollback` at
-`pg-vector-store.ts:42,58,60`) and the per-chunk INSERT inside it (lines 43-57).
-
-**Axis — cost (round-trips per upsert).** Hold "how many times do we cross the wire to
-Postgres?" constant:
+Axis: **cost** — number of client↔server round-trips per document indexed.
 
 ```
-  One question — "how many wire round-trips to upsert N chunks?" —
+  axis = "round-trips to Postgres per document"
 
-  ┌─ transaction envelope ──────────────────────────┐
-  │  begin (1)  ...  commit (1)         → 2 fixed    │  cheap, amortized over the batch
-  └─────────────────────────────────────────────────┘
-       ┌─ per-chunk loop ──────────────────────────┐
-       │  INSERT × N                  → N round-trips│  ← THIS scales with N
-       └────────────────────────────────────────────┘
-
-  total = N + 2 round-trips. the envelope is fixed; the loop is linear in chunks.
+  ┌─ caller: upsert(chunks) ────────┐   → 1 call, conceptually
+  └─────────────────┬────────────────┘
+  ┌─ inside: begin + loop + commit ─▼───┐   ═══ THE FLIP ═══
+  │  begin               → 1 round-trip │   one logical write
+  │  INSERT × N          → N round-trips│   becomes N+2 physical
+  │  commit              → 1 round-trip │   round-trips
+  └─────────────────┬────────────────────┘   ← seam: 1 → N
+  ┌─ Postgres ──────▼────────────────────┐
+  │  each INSERT parsed, planned, written │
+  └───────────────────────────────────────┘
 ```
 
-**Seam — the loop boundary inside the txn.** The seam worth studying is between "one
-transaction" (good — atomic, one commit) and "N statements" (the cost — each `client.query`
-is a separate request/response on the wire). The transaction makes the *durability* cost
-cheap (one fsync at commit), but does nothing about the *round-trip* cost (still N).
-
----
+**Seam:** the `for` loop inside the transaction. One logical operation ("store this doc's chunks") becomes N+2 physical round-trips. Each is cheap on a localhost connection; the cost is the *count*, which scales with chunks-per-document.
 
 ## How it works
 
 ### Move 1 — the mental model
 
-You know the classic N+1 query problem on the read side — a list view that fires one query
-per row instead of one query for all rows? This is the *write*-side twin: one INSERT per
-chunk instead of one INSERT for all chunks. The strategy buffr uses: **wrap the N writes
-in a transaction so they're atomic and commit once — but still pay the wire round-trip N
-times.**
+You know the difference between calling `INSERT` in a loop versus `INSERT INTO t VALUES (...), (...), (...)` with all rows in one statement? Same data lands either way; one is N statements and N round-trips, the other is one. buffr does the loop version. The transaction makes it atomic — but atomic and one-round-trip are different properties, and buffr has the first without the second.
 
 ```
-  Per-chunk loop — the shape
+  row-at-a-time (now)          multi-row (possible)
 
-  begin ──┐
-          ├─► INSERT chunk[0]   ← round-trip 1
-          ├─► INSERT chunk[1]   ← round-trip 2
-          ├─► INSERT chunk[2]   ← round-trip 3
-          │        ...
-          ├─► INSERT chunk[N-1] ← round-trip N
-  commit ─┘   ← one fsync for the whole batch
-
-  the commit is batched (good); the INSERTs are not (the cost)
+  begin                        begin
+  INSERT (c1)  ──►             INSERT VALUES
+  INSERT (c2)  ──►               (c1),(c2),...,(cN)  ──► ONE round-trip
+  ...  × N                     commit
+  commit
+  → N+2 round-trips            → 3 round-trips total
 ```
 
-### Move 2 — the walkthrough
+### Move 2 — the load-bearing skeleton
 
-**The transaction envelope — the part that's right.** `pg-vector-store.ts:38-65`:
+The kernel is the loop body. From `src/pg-vector-store.ts:38-65`:
 
 ```ts
 async upsert(chunks: Chunk[]): Promise<void> {
-  for (const c of chunks) this.assertDim(c.vector);   // ← validate all before any write
-  const client = await this.pool.connect();           // ← one connection for the whole batch
+  for (const c of chunks) this.assertDim(c.vector);   // dim check, in-memory, cheap
+  const client = await this.pool.connect();           // grab one pooled connection
   try {
-    await client.query('begin');                      // ← open txn
+    await client.query('begin');                      // ── round-trip 1
     for (const c of chunks) {
-      ...
-      await client.query(`insert into agents.chunks ... on conflict (id) do update ...`,
-        [c.id, docId, this.appId, chunkIndex, content, toVectorLiteral(c.vector), ...]);
-    }                                                 // ← ★ one round-trip PER chunk ★
-    await client.query('commit');                     // ← one fsync for all of them
+      // ... unpack docId / chunkIndex / content from meta ...
+      await client.query(
+        `insert into agents.chunks (...) values ($1,...,$6::vector,...)
+         on conflict (id) do update set ...`,         // ── round-trip per chunk
+        [c.id, docId, this.appId, chunkIndex, content,
+         toVectorLiteral(c.vector), this.embeddingModel, c.meta],
+      );
+    }
+    await client.query('commit');                     // ── round-trip N+2
   } catch (err) {
-    await client.query('rollback');                   // ← all-or-nothing on failure
+    await client.query('rollback');                   // atomicity: all or nothing
     throw err;
   } finally {
-    client.release();                                 // ← back to the pool, not closed
+    client.release();                                 // return connection to pool
   }
 }
 ```
 
-Three things this gets right, before the criticism: it grabs *one* connection for the whole
-batch (not one per chunk), it validates every dimension *before* writing anything
-(line 39 — no half-written batch on a bad vector), and it's atomic — a failure rolls back
-the whole document, so you never get a partially-indexed doc. The `on conflict (id) do
-update` makes it an idempotent upsert: re-indexing the same file overwrites cleanly.
+Named by what breaks if removed:
 
-**The load-bearing skeleton — what breaks if you remove each part:**
+- **`begin` / `commit`** — drop these and a mid-document failure leaves the doc half-indexed. They're the atomicity skeleton; keep them. This is *correct*.
+- **the per-chunk `await client.query(INSERT)`** — this is the cost. Each iteration is a full parse + plan + execute + network round-trip. Replace the loop body with one multi-row INSERT and N round-trips collapse to one, inside the same transaction. Nothing about atomicity changes.
+- **`on conflict (id) do update`** — the upsert semantics (re-indexing a doc overwrites its chunks). Load-bearing for correctness, and it survives a multi-row rewrite — multi-row INSERT supports `ON CONFLICT` too.
+- **`client.release()` in `finally`** — drop this and you leak the connection back-pressure; the pool starves. Correct as written.
 
-```
-  upsert kernel — name each part by what breaks without it
+**Optional hardening, not skeleton:** for a *large* bulk load (thousands of chunks), even multi-row INSERT is beaten by `COPY ... FROM`, which skips per-row statement overhead entirely. That's the right tool for a corpus import; overkill for a single markdown file.
 
-  1. one pooled connection      remove → connect per chunk; handshake × N (catastrophic)
-  2. begin/commit envelope      remove → N separate txns; N fsyncs; not atomic
-  3. assertDim before writes    remove → a bad vector mid-loop leaves a partial batch
-  4. on conflict do update      remove → re-indexing a file throws on duplicate id
-  5. rollback on error          remove → a mid-batch failure leaves the doc half-written
-  ── the cost, not the skeleton ──
-  6. the per-chunk loop itself  this is the N round-trips — replaceable by multi-row VALUES
-```
-
-Parts 1-5 are the skeleton — pull any and correctness or amortization breaks. Part 6, the
-loop, is the *performance* part: it's correct but it's N round-trips where it could be one.
-
-**The fix, and why it's not in yet.** A multi-row insert collapses N round-trips into one:
-
-```
-  pseudocode — multi-row VALUES (the throughput fix)
-
-  build one INSERT with N value-tuples:
-    insert into agents.chunks (...) values
-      ($1,$2,...), ($9,$10,...), ($17,...), ...      // all chunks, one statement
-    on conflict (id) do update set ...
-  → ONE round-trip, still inside the txn, still atomic
-
-  for very large batches: COPY ... FROM STDIN is faster still
-```
-
-**Does it matter at laptop scale? No.** A document chunks into maybe tens of rows. Tens of
-round-trips over a warm local pool is a handful of milliseconds — invisible next to the
-embed call that produced those vectors, let alone next to gemma2. The per-chunk loop only
-becomes a real cost during *bulk* load — importing thousands of chunks at once — where N
-round-trips and N `toVectorLiteral` string allocations (line 55) add up. For interactive,
-hand-fed indexing, the simple loop is the right call: easy to read, obviously correct, and
-fast enough.
+**Does it matter at laptop scale?** A markdown doc chunks into maybe 5-30 chunks, so that's 5-30 INSERTs per file on a localhost Postgres — single-digit milliseconds each, and they're not on any chat hot path (this runs at index time). The cost is real and the fix is clean, but it earns nothing until either the per-doc chunk count or the corpus size grows a lot. It's the *first* thing to reach for if indexing ever feels slow — bigger lever than the cross-file serialization in `02`, because it cuts round-trips multiplicatively.
 
 ### Move 3 — the principle
 
-Separate the two costs a write batch carries: **durability** (fsyncs) and **round-trips**
-(wire crossings). A transaction batches the first and leaves the second alone. buffr
-correctly batched durability and left round-trips row-at-a-time — fine until N is large,
-at which point multi-row `VALUES` or `COPY` batches the second cost too. Knowing *which*
-cost a transaction does and doesn't amortize is the lesson.
-
----
+Round-trips are the unit of database cost, not statements. The loop is correct and atomic; it's just chatty. The general move: when you're writing N rows in a loop, ask whether they can be one multi-row statement — same transaction, same atomicity, one-Nth the round-trips. And past a threshold, reach for the bulk-load path (COPY) that skips per-row overhead entirely. buffr left the cheap collapse undone because at its scale the round-trips are free; that's a defensible call, not an oversight.
 
 ## Primary diagram
 
 ```
-  Per-chunk insert loop — durability batched, round-trips not
+  Per-chunk insert loop — one document, N+2 round-trips
 
-  ┌─ PgVectorStore.upsert(chunks[]) ──────────────────────────────────┐
-  │  assertDim × N  (validate first — no partial batch)               │
-  │  pool.connect()  ← ONE connection for the batch                   │
-  │  ┌──────────────────────────────────────────────────────────┐    │
-  │  │ begin                                                     │    │
-  │  │   INSERT chunk[0] ─┐                                      │    │
-  │  │   INSERT chunk[1]  ├─ N round-trips  ← the cost (linear)  │    │
-  │  │   ...              │                                      │    │
-  │  │   INSERT chunk[N-1]┘                                      │    │
-  │  │ commit            ← ONE fsync  ← durability batched (good)│    │
-  │  └──────────────────────────────────────────────────────────┘    │
-  │  catch → rollback (atomic)   finally → client.release() (pooled)  │
-  └────────────────────────────────────┬──────────────────────────────┘
-                                        │ pg wire
-  ┌─ Postgres: agents.chunks ─────────▼───────────────────────────────┐
-  │  on conflict (id) do update  → idempotent re-index                │
-  └────────────────────────────────────────────────────────────────────┘
+  ┌─ PgVectorStore.upsert ───────────────────────────────────────┐
+  │  pool.connect()  → one pooled connection                     │
+  │  ┌─────────────────────────────────────────────────────────┐ │
+  │  │ begin                          ── round-trip 1            │ │
+  │  │ for c in chunks:                                          │ │
+  │  │   INSERT ... ON CONFLICT DO UPDATE  ── round-trip × N     │ │
+  │  │ commit                         ── round-trip N+2          │ │
+  │  └─────────────────────────────────────────────────────────┘ │
+  │  on error → rollback (atomic)   ·  finally → client.release()│
+  └───────────────────────────┬───────────────────────────────────┘
+                              │  N+2 physical round-trips
+  ┌─ Postgres — agents.chunks ▼───────────────────────────────────┐
+  │  could be 3 with a multi-row INSERT in the same transaction   │
+  └───────────────────────────────────────────────────────────────┘
 ```
-
----
 
 ## Elaborate
 
-The single-row-in-a-loop insert is one of the most common DB performance footguns because
-it's the *natural* way to write the code — you have an array, you loop, you insert. It only
-shows up in profiles under volume. The two escalating fixes — multi-row `VALUES`, then
-`COPY` — are standard Postgres bulk-load technique. pgvector inserts have an extra wrinkle:
-each insert also triggers HNSW index maintenance, so bulk-loading with the index present is
-slower than loading then indexing — another reason `COPY`-then-index matters at real volume.
+This is the textbook chatty-database pattern, and it's everywhere because the naive loop is the obvious way to write it. The reason it's tolerable here and not in a high-throughput service: localhost latency is sub-millisecond and the write volume is tiny. In a cloud setup with the DB across a network hop (which buffr explicitly is *not* this phase — `src/db.ts` is a direct connection), each round-trip would carry real network latency and the loop would dominate index time.
 
-This pairs with `02-embedding-roundtrip`: the per-chunk write *is* the "write" half of that
-file's GPU-idle gap. Collapsing N inserts into one shortens the write, which shortens the
-idle window the GPU waits through.
-
----
+For *why* each INSERT costs what it does — parse/plan/execute, WAL append, the HNSW index maintenance per row — see **`study-database-systems`** (query execution, durability). For the pooled connection this loop borrows, see `04-connection-pool-reuse.md`. This file owns the *round-trip count* read.
 
 ## Interview defense
 
-**Q: Your upsert loops one INSERT per chunk. Why not bulk-insert?**
+**Q: Your upsert loops one INSERT per chunk. Why, and what would you change?**
 
-Correctness-wise it's solid — one pooled connection, one transaction, atomic rollback,
-idempotent via `on conflict`. The transaction batches durability: one fsync at commit, not
-N. What it *doesn't* batch is wire round-trips — it's N `client.query` calls, one per chunk.
+> It's atomic and correct — wrapped in begin/commit with `ON CONFLICT DO UPDATE` for re-indexing, and it releases the connection in a `finally`. The weakness is round-trips: a doc with N chunks is N+2 round-trips to Postgres. I'd collapse the loop body into one multi-row INSERT — same transaction, same atomicity, one round-trip instead of N. For a big corpus import I'd go further to `COPY`, which skips per-row statement overhead entirely.
 
 ```
-  durability:    begin..commit → 1 fsync          ← batched (good)
-  round-trips:   INSERT × N    → N wire crossings ← NOT batched (the cost)
+  loop:  begin · INSERT×N · commit   → N+2 round-trips
+  fix:   begin · INSERT VALUES(...)×1 · commit → 3
 ```
 
-The fix is a multi-row `VALUES` to collapse N round-trips into one, or `COPY` for very large
-batches. I haven't done it because a document is tens of chunks over a warm local pool —
-single-digit milliseconds, dwarfed by the embed call and gemma2. The loop is the right call
-for hand-fed indexing; multi-row is what I'd reach for if I bulk-imported a corpus. The part
-I'd flag: with pgvector, each insert also does HNSW maintenance, so at real volume you'd
-`COPY` first and build the index after.
+**Q: Why ship it as a loop then?**
 
-**Anchor:** `pg-vector-store.ts:38-65`.
+> Round-trips are free at my scale — localhost Postgres, sub-millisecond per call, and it runs at index time, not on a chat turn no user's waiting. The multi-row rewrite earns nothing until chunk-per-doc or corpus size grows. That said, it's the *first* lever I'd pull if indexing got slow, because cutting round-trips is a multiplicative win — bigger than parallelizing the file loop.
 
----
+> Anchor: `src/pg-vector-store.ts:43-57` (the loop body), `:42`/`:58` (the txn that stays).
 
 ## See also
 
-- `02-embedding-roundtrip.md` — the write loop is the "write" half of the GPU-idle gap.
-- `04-connection-pool-reuse.md` — why grabbing one connection per batch is cheap.
-- `audit.md` §4 (the per-vector string allocation), §5, §8 (red flag #5).
-- `study-database-systems` — transactions, WAL, fsync, and HNSW index maintenance on insert.
+- `00-overview.md` — finding #3
+- `audit.md` — lens 5 (I/O), lens 8 (red flags #3)
+- `02-embedding-roundtrip.md` — the embed step these writes follow
+- `04-connection-pool-reuse.md` — the pooled connection this loop borrows
+- `05-per-turn-memory-and-trace-cost.md` — the per-turn write side
+- **`study-database-systems`** — INSERT cost, WAL, index maintenance

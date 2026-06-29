@@ -1,204 +1,281 @@
-# 05 — Skeptical Reviewer Questions
+# 05 — The Skeptical Reviewer's Questions
 
-This is the cross-examination. The first four files built the case; this one stress-tests
-it the way a skeptical staff engineer, a hiring panel, or a promo committee would. Coach
-posture, no softening: for each question you get the *strong* answer in your voice, the
-weak answer to *avoid*, and the one-line anchor you'd say while you sketch. The questions
-are ordered hardest-first — if you can hold Q1 and Q2, the rest follow.
+The review room. Everything in `01`–`04` was you presenting; this file is the skeptic pushing
+back. The coach job here is blunt: for each objection, the *weak* answer that loses the room,
+the *strong* answer in your voice that holds, and the one-line anchor you land it on. Hold the
+anchors, not the prose — the anchor is what survives the adrenaline.
 
-## How to use this file
+## Zoom out — the seven pushbacks, ranked by danger
 
-```
-  each question, three parts
-
-  ┌─ the question (asked at its sharpest) ───────────────────────────────┐
-  │  ▶ STRONG answer — first person, in Rein's voice, documented         │
-  │  ▷ WEAK answer  — what NOT to say, and why it loses the room         │
-  │  ⚓ anchor       — the one line + citation you say while you draw     │
-  └───────────────────────────────────────────────────────────────────────┘
-```
-
-The discipline: **never invent to escape a question.** If the honest answer is "that
-number doesn't exist yet, here's the gate that produces it," that *is* the strong answer. A
-fabricated metric or an invented user dies on the follow-up; a named gap survives it.
-
----
-
-## Q1 — "One user, one device. This is a toy, not a real problem."
-
-**▶ STRONG:** "It's a *proof problem, not a market problem.* The deliverable is one good
-agent with measured eval numbers — not a platform. One user is the correct scope for the
-claim I'm actually making, which is 'I can build the engineering under a real RAG agent and
-prove it with numbers.' More users would be scope I'd have to defend with evidence I don't
-have — the opposite of what a measured portfolio piece is for."
-
-**▷ WEAK:** "Well, it could scale to more users later." — This concedes the frame. You're
-now defending a market you explicitly didn't claim. Don't.
-
-**⚓** *One user is the right scope for the claim; more users = scope to defend without
-evidence.* `agent-layer-plan.md:6`
+Not all objections are equal. Some are fatal if fumbled (the "one user" and "off-the-shelf"
+ones); some are easy points if you're ready. Here they are, ordered by how much a bad answer
+costs you.
 
 ```
-  proof problem  → one user is correct scope (claim: "I can build + measure")
-  market problem → many users you'd have to defend → NOT the claim being made
+  The skeptic's attack order — most dangerous first
+
+  ┌─ FATAL IF FUMBLED ────────────────────────────────────────────────┐
+  │  Q1 "one user proves nothing"        → reframe: proof not market   │
+  │  Q2 "why not just use Hermes?"        → turnkey hides the signal    │
+  └───────────────────────────────┬───────────────────────────────────┘
+  ┌─ COSTLY IF VAGUE ─────────────▼───────────────────────────────────┐
+  │  Q3 "this is just RAG"                → the weak-model robustness   │
+  │  Q4 "no market = no problem"          → cost of NOT solving (career)│
+  │  Q5 "why defer the phone/RLS/HTTP?"   → one-way doors, named returns│
+  └───────────────────────────────┬───────────────────────────────────┘
+  ┌─ EASY POINTS IF READY ────────▼───────────────────────────────────┐
+  │  Q6 "where's the eval rigor?"         → 3 metrics, hard gate, loop  │
+  │  Q7 "what if you're wrong about it?"  → the I-don't-know recovery   │
+  └───────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## Q2 — "Couldn't you just use Hermes? Why reinvent it?"
+## Q1 — "One user proves nothing. This is a toy."
 
-**▶ STRONG:** "I evaluated Hermes directly — it's a multi-agent platform on fine-tuned
-models and it ships a working agent. But a turnkey tool hides exactly the parts that signal
-engineering skill: the provider contract, the RAG pipeline, the evals with numbers. My goal
-is to *expose* those, so I built them. I did borrow Hermes' best idea — trajectory capture —
-so fine-tuning stays answerable later. I rejected the platform, not the patterns."
-
-**▷ WEAK:** "Hermes is too complicated / I wanted to do it myself." — Sounds like NIH. The
-strong version is that buying *defeats the purpose of the project*, with a specific list of
-what it hides.
-
-**⚓** *A turnkey tool hides exactly the parts that signal engineering skill.*
-`agent-layer-plan.md:25`
-
----
-
-## Q3 — "Isn't building from scratch just Not-Invented-Here syndrome?"
-
-**▶ STRONG:** "The build is *scoped*. I don't reinvent the agent loop or vector search — I
-use AptKit, stock Gemma off-the-shelf, and pgvector for the commodity layers. I built only
-the judgment layer: the Gemma provider contract, the from-scratch retrieval pipeline, and
-the evals. Reinventing the commodity parts would cost scope and hide the interesting ones.
-Build the glue and the judgment; buy the substrate."
-
-**▷ WEAK:** "I built everything myself to really understand it." — Overclaims and signals
-poor scoping judgment. The senior move is knowing what *not* to build.
-
-**⚓** *Build the glue and the judgment layer; don't reinvent the loop or vector search.*
-`agent-layer-plan.md:35`
-
----
-
-## Q4 — "You have no eval numbers. How is this 'measured'?"
-
-**▶ STRONG:** "The gate is precision@5 ≥ 0.8, and the harness is wired — precision@k and
-recall@k against a labeled set. The number comes from running it. I'm honest about the
-gaps: faithfulness uses a rubric judge with Claude as grader so the model doesn't grade
-itself, and that's defined in aptkit but not yet wired into buffr. The *deliverable* is the
-Phase-4 one-pager — the numbers, the failure breakdown, and the decision made from them. A
-named gate with a named gap is stronger than a number I made up."
-
-**▷ WEAK:** "precision@5 is around 0.85." — If you can't reproduce it on demand, this is the
-answer that ends the interview. Never quote a number you haven't run.
-
-**⚓** *precision@5 ≥ 0.8 is the gate; the harness is wired, the number comes from running
-it; faithfulness is defined-but-unwired, named not hidden.* `agent-layer-plan.md:93`
+The most dangerous question, because the lazy answer (defensiveness) confirms the skeptic's
+prior.
 
 ```
-  the decision tree IS the artifact, not any single number:
-  ≥0.8 → ship · 50-80% retrieval-bound → fix retrieval ·
-  50-80% model-bound → fallback/maybe-FT · <50% → architecture problem
+  Q1 — the reframe that wins it
+
+  WEAK:   "well, it could scale to more users later…"
+          (concedes the frame — now you're defending a toy)
+
+  STRONG: flip market → proof
+          n=1 is empty for retention/churn — but precision@k,
+          faithfulness, JSON-validity are SYSTEM properties, honest
+          at any scale. one user = zero market noise = clean test bench.
 ```
+
+**Strong answer, your voice:**
+> "It proves the thing I'm trying to prove. I'm not measuring a user base — retention and
+> churn are statistically empty at n=1, and I won't quote them. I'm measuring properties of
+> the system: precision@k, faithfulness, JSON-validity. Those are fully honest with one user,
+> and one user means zero market noise in the signal. It's a proof problem, not a market
+> problem, and one user is the cleanest possible bench for it. If you want to probe whether I
+> can do the engineering, n=1 is exactly the right scope."
+
+**Anchor:** *"It's a proof problem, not a market problem — and the metrics are honest at n=1."*
 
 ---
 
-## Q5 — "You deferred the phone, the sync, the API. Did you give up, or plan?"
+## Q2 — "Why not just use Hermes? It already does this."
 
-**▶ STRONG:** "Planned, and I can prove it: every deferred phase has a named seam it plugs
-into. The Edge-Function store plugs into the `VectorStore` contract; RLS plugs into the
-`app_id` column already on every table; fine-tuning plugs into the trajectory already
-captured. The scaffolding is built; only the policies and adapters are deferred. And the
-build order is deliberate — laptop brain first, so the sync/merge problem, the hardest
-part, is the *second* thing I solve, not the first."
+The build-vs-buy challenge. The strong answer is *already having evaluated it* — you didn't
+build out of ignorance.
 
-**▷ WEAK:** "I ran out of time for the phone." — Reframes a deliberate risk-sequencing
-decision as a failure to finish. It was a *choice*, made for a documented reason.
+```
+  Q2 — the asymmetry, stated flat
 
-**⚓** *Every deferred phase reuses this schema and the VectorStore contract — no rework.*
-`...graduation-design.md:188`
+  WEAK:   "I wanted to build my own version" (sounds like NIH syndrome)
+
+  STRONG: "I evaluated Hermes directly and chose to build."
+          Hermes solves the PRODUCT problem and hides the PROOF problem.
+          the provider contract, the RAG pipeline, the evals — the parts
+          you'd probe — are exactly what it abstracts away.
+          (and I'm not naive: I reuse aptkit's loop + pgvector. build the
+           glue and judgment; buy the substrate.)
+```
+
+**Strong answer, your voice:**
+> "I evaluated Hermes directly — it's the obvious buy. I chose to build because a turnkey tool
+> hides exactly the parts that signal skill. Hermes is a multi-agent platform on Nous's
+> fine-tuned models; using it gives me a working agent and zero proof I can build one. The
+> provider contract, the RAG pipeline, the eval numbers — what you'd actually probe — are the
+> parts it abstracts. But I'm not reinventing everything: I reuse aptkit's agent loop and
+> pgvector's search because rebuilding those costs scope and hides nothing. I build the glue
+> and the judgment layer. That's where the signal lives."
+
+**Anchor:** *"A turnkey tool hides exactly the parts that signal skill."*
 
 ---
 
-## Q6 — "Why centralize the agent layer but not the data? Isn't that half a solution?"
+## Q3 — "This is just RAG. Everyone's built a RAG demo."
 
-**▶ STRONG:** "It's the *right* half. The apps already have good schemas — `app_buffr`,
-`contrl`, and so on. Forcing them into one shared data model would be a migration with no
-payoff. What's missing is a shared *reasoning* layer. So the `agents` schema holds only RAG
-infrastructure — corpus copies, chunks, conversations — and apps write *into* it with their
-`app_id` when they want something indexed. Centralize the agent layer; leave the data where
-it already works."
+The "not impressive" jab. The answer is the *weak local model* — the constraint that turned a
+demo into engineering.
 
-**▷ WEAK:** "Centralizing the data was too hard." — It wasn't avoided for difficulty; it was
-rejected because it's the wrong design. The apps' schemas are an asset, not an obstacle.
+```
+  Q3 — where the engineering actually got hard
 
-**⚓** *Centralize the agent layer, not the data — apps keep their schemas.*
-`agent-layer-plan.md:83`
+  WEAK:   "but mine has memory and trajectory capture too!"
+          (feature-listing — the skeptic shrugs)
+
+  STRONG: the hard part wasn't RAG — it was making a WEAK local model
+          behave. stock Gemma 2, not a frontier API:
+          • messy JSON → structured-generation to tame it
+          • passed top_k:1, starving multi-part Qs → a minTopK floor
+          • hallucinated a filter key → guard that ignores absent keys
+          a hosted frontier model HIDES all three. the local constraint
+          surfaced them — and surfacing + fixing them is the signal.
+```
+
+**Strong answer, your voice:**
+> "The RAG shape is the easy part — I'll grant that. What's not easy, and what I'd point you
+> at, is making a *weak local model* behave. I'm running stock Gemma 2 on my own machine, not
+> a frontier API. Gemma emitted messy JSON, so I leaned on structured-generation to tame it.
+> It passed top_k:1 and starved multi-part questions, so I wired a minTopK floor. It
+> hallucinated a filter key that silently zeroed out retrieval, so I added a guard that
+> ignores keys absent from the metadata. A hosted frontier model hides all three of those.
+> The local constraint surfaced them, and finding and fixing them is exactly the engineering."
+
+**Anchor:** *"The hard part wasn't RAG — it was making a weak local model behave."*
 
 ---
 
-## Q7 — "Why now? Why not wait until you've learned more?"
+## Q4 — "No market means no real problem. Who's this for?"
 
-**▶ STRONG:** "Because the pieces are already shipped and the pivot needs proof *today*. I've
-shipped RAG (AdvntrCue), on-device AI (dryrun/contrl), and meta-tooling (aipe) separately —
-buffr is the one artifact that composes them into a measured system. Waiting doesn't make
-the parts easier to assemble; it lets them age separately while the pivot stays an unbacked
-claim. The cost of doing nothing compounds every month."
+The product-thinking challenge. Answer with the *cost of not solving* — the career problem,
+named without flinching.
 
-**▷ WEAK:** "I felt ready." — Not an argument. The strong version is the *compounding cost*
-of the unproven pivot plus the *already-shipped* adjacent work ready to compose.
+```
+  Q4 — name the real beneficiary and the real cost
 
-**⚓** *The pieces are shipped; the pivot needs proof today; the cost of doing nothing
-compounds.* `me.md` portfolio + file 01.
+  WEAK:   "it's for me, personally" (sounds like a hobby)
+
+  STRONG: two problems, one coat. product pain is real but secondary.
+          the load-bearing problem is a CAREER one: 7 yrs frontend reads
+          as a frontend engineer until there's proof of the AI-eng
+          combination. cost of NOT solving = the pivot stalls. the
+          beneficiary is the portfolio case, and that's a real problem.
+```
+
+**Strong answer, your voice:**
+> "It's for one person, and I won't pretend otherwise — but that's the right answer, not a
+> dodge. There are two problems here. The product pain is real: my context is scattered across
+> the apps I've shipped and nothing reasons across them. But the load-bearing problem is a
+> career one — seven years of frontend reads as a frontend engineer until there's a proof
+> artifact for the AI-engineering combination. The cost of not solving it is concrete: the
+> pivot stalls, and 'pivoting to AI' stays a claim with nothing under it. The beneficiary is
+> the portfolio case. That's a real problem with a real cost — it just isn't a market."
+
+**Anchor:** *"The cost of not solving it is the pivot stalls — that's a real problem, not a market."*
 
 ---
 
-## Q8 — "The whole thing hangs on Gemma, which can't even tool-call. Isn't that fragile?"
+## Q5 — "Deferring the phone, RLS, the HTTP API — isn't that just unfinished?"
 
-**▶ STRONG:** "Yes, and I named it as *the* riskiest piece and de-risked it first. Gemma has
-no native tool-calling, so the provider emulates it — render the tool schema into the
-prompt, parse the JSON back out. That emulation *is* the engineering, and it's exactly the
-kind of hard part a turnkey tool hides. The model itself is swappable: it sits behind the
-`ModelProvider` contract with a fallback chain that can put Claude behind Gemma when
-tool-calling falls short. Self-hosted means my data and memory are mine — not that one model
-is welded in."
-
-**▷ WEAK:** "Gemma works fine for me." — Dismisses a real, documented fragility. Naming the
-risk *and* the mitigation (swappable provider + fallback) is the senior answer.
-
-**⚓** *Gemma's missing tool-calling is the riskiest piece, de-risked first; the model is
-swappable behind the ModelProvider contract.* `...aptkit-packages-design.md:136`
+The "you ran out of time" trap. Answer: every cut is a *decision* with a *named return path*,
+and the phone specifically is a one-way-door dodge.
 
 ```
-  risk:       Gemma emits no tool_use blocks
-  mitigation: emulate (prompt→JSON→parse) + provider-fallback chain (Claude behind Gemma)
-  the emulation IS the portfolio signal, not a bug to hide
+  Q5 — cuts are decisions, not gaps
+
+  WEAK:   "I'd do those next if I had time" (concedes it's unfinished)
+
+  STRONG: each cut is documented with a reason and a no-rework return:
+    phone   → one-way door (sync forces irreversible choices) — dodged
+              on purpose until the single brain is proven
+    RLS     → app_id column shipped NOW (cheap), policy deferred (cheap
+              later) — the forward-compat line drawn exactly right
+    HTTP    → YAGNI for one client; wraps the SAME SQL when app #2 lands
+    all reachable on the same schema + VectorStore port — additive, not rework.
 ```
+
+**Strong answer, your voice:**
+> "None of those are unfinished — they're cuts, each with a reason and a return path that costs
+> no rework. The phone is the clearest: laptop-phone sync forces irreversible choices —
+> conflict resolution, sync protocol — and I refuse to lock those in before the single brain
+> is even proven good. So I deferred it on purpose. RLS: I shipped the app_id column now
+> because adding a column to a live corpus later is a migration, but I deferred the policy
+> because that's a few lines whenever app #2 arrives. The HTTP API is YAGNI for one client and
+> wraps the same SQL later. Every one of those is named in a design spec and reachable on the
+> same schema. That's scope discipline, not an unfinished list."
+
+**Anchor:** *"Every cut is a decision with a named, no-rework return path — including dodging the phone's one-way door."*
 
 ---
 
-## The meta-lesson
+## Q6 — "Where's the eval rigor? Anyone can claim their agent works."
+
+The easy points — if you're ready. Lead with the three distinct metrics and the hard gate.
 
 ```
-  the pattern across all eight answers
+  Q6 — three metrics, one hard gate, a decision loop
 
-  every strong answer does the same three things:
-    1. names the documented decision (with a citation)
-    2. reframes an apparent weakness as a deliberate choice
-    3. NEVER invents a number, a user, or a market to escape
+  WEAK:   "it works pretty well in my testing" (a vibe, not a number)
 
-  the weak answers all do the same wrong thing:
-    they concede the skeptic's frame instead of correcting it
+  STRONG: precision@k / recall@k (retrieval) · faithfulness via rubric
+          judge (synthesis) · JSON-validity (the weak model). three
+          metrics localize the failure. hard gate: precision@5 ≥ 0.8
+          before integration. the Phase-4 write-up — numbers + failure
+          breakdown + chosen next action — IS the portfolio artifact.
 ```
 
-The single highest-leverage habit: when a question implies "this is too small / too
-hand-built / too unmeasured," **don't apologize and don't inflate.** Name why the small,
-hand-built, gate-measured shape is the *correct* shape for the claim you're actually making.
-The one-user scope, the from-scratch build, and the not-yet-run number are not the
-weaknesses of this project — handled right, they're its three strongest signals.
+**Strong answer, your voice:**
+> "Three metrics, and they don't overlap. Precision and recall@k on a labeled set for
+> retrieval, faithfulness scored by a rubric judge for synthesis, JSON-validity rate for the
+> weak model's tool calls. When quality drops, one number can't tell me why — these three
+> localize it to retrieval, synthesis, or the model. There's a hard gate: precision@5 clears
+> 0.8 before I build the agent on top. And the output is a written decision — the numbers, the
+> failure categories, the next action — made from the evidence. That write-up is the artifact
+> that proves AI engineering versus playing with an LLM."
+
+**Anchor:** *"Three non-overlapping metrics, a precision@5 ≥ 0.8 gate, and a decision made from the numbers."*
+
+---
+
+## Q7 — "What if you're wrong, and the evals come back bad?"
+
+The pressure question — and the place to model the "I don't know" recovery. The strong move is
+*not* to defend; it's to show the failure has a planned, evidence-driven response.
+
+```
+  Q7 — being wrong is a BRANCH in the design, not a surprise
+
+  WEAK:   "I'm confident it'll be fine" (the skeptic now wants you wrong)
+
+  STRONG: "then the design already tells me what to do." bad evals aren't
+          a failure of the project — they're an INPUT to the Phase-4 gate:
+          50–80% retrieval-bound → fix retrieval; model-bound → escalate /
+          maybe fine-tune; <50% → architecture problem, rethink it.
+          the project's deliverable is the DECISION, so a bad number is
+          still a successful outcome of the experiment.
+```
+
+**Strong answer, your voice:**
+> "Then the design already tells me what to do — that's the point of measuring. Bad evals
+> aren't a failure of the project; they're the input the whole thing is built to consume. If
+> precision lands 50 to 80% and it's retrieval-bound, I fix retrieval. Model-bound, I escalate
+> the fallback chain and consider fine-tuning only if the failure's narrow. Below 50%, it's an
+> architecture problem and I rethink the design instead of papering over it with training. The
+> deliverable here is the *decision made from evidence* — so a number coming back bad is still
+> a successful run of the experiment. The honest version of this project survives being
+> wrong."
+
+**Anchor:** *"Bad evals are an input to the decision, not a failure of the project — the deliverable is the decision."*
+
+---
+
+## Primary diagram — the defense on one page
+
+Every objection, its anchor, the one line that holds it.
+
+```
+  THE DEFENSE — objection → anchor, one frame
+
+  Q1 "one user"        ──► proof problem, not market — metrics honest at n=1
+  Q2 "why not Hermes"  ──► a turnkey tool hides exactly the parts that signal skill
+  Q3 "just RAG"        ──► the hard part was making a WEAK local model behave
+  Q4 "no market"       ──► cost of not solving = the pivot stalls (a real problem)
+  Q5 "unfinished"      ──► every cut is a decision with a no-rework return path
+  Q6 "eval rigor"      ──► 3 non-overlapping metrics, precision@5 ≥ 0.8 gate
+  Q7 "what if wrong"   ──► bad evals are an INPUT to the decision, not a failure
+```
+
+## The principle
+
+Under pressure, you don't win by having more facts — you win by having already *named the
+weakness yourself* before the skeptic does. Every hard question here (one user, off-the-shelf,
+just RAG, no market) is one you raised and answered in `01`–`04`. The skeptic can't corner you
+on a hole you already walked them through. The strongest defense of a problem selection is a
+brief honest enough that the objections are already inside it.
 
 ## See also
 
-- `01-problem-brief.md` — the case these questions stress-test.
-- `02-scope-cuts-and-non-goals.md` — the cut reasoning behind Q5 and Q6.
-- `03-options-and-opportunity-cost.md` — the build-vs-buy reasoning behind Q2 and Q3.
-- `04-success-metrics-and-feedback-loop.md` — the metric honesty behind Q4.
-- `.aipe/study-system-design/07-deferred-body.md` — the deferral defense behind Q5.
+- `01-problem-brief.md` — why this / why now / why her / cost of not solving
+- `02-scope-cuts-and-non-goals.md` — the cuts behind Q5
+- `03-options-and-opportunity-cost.md` — the build-vs-buy behind Q2
+- `04-success-metrics-and-feedback-loop.md` — the metrics and gate behind Q1, Q6, Q7
+- `.aipe/rehearse-interview-defense` — the codebase-defense companion to this problem defense

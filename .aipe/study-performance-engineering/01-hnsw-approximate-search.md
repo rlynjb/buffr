@@ -1,274 +1,199 @@
-# HNSW Approximate Search
+# Approximate Nearest-Neighbour Search — the HNSW index
 
-**Industry names:** approximate nearest-neighbor (ANN) search · HNSW (Hierarchical
-Navigable Small World) index · vector similarity search. **Type:** Industry standard.
+**Industry name(s):** approximate nearest-neighbour search (ANN); Hierarchical Navigable Small World graph (HNSW). **Type:** Industry standard.
 
----
+This is the single most consequential performance mechanism in buffr's retrieval path — and the one place where the repo leaves a known dial untouched.
 
 ## Zoom out, then zoom in
 
-Every chat turn, buffr has to answer one question: *of the thousands of chunk embeddings
-in the database, which `k` are closest to this query's embedding?* The naive answer is
-"compare against all of them." HNSW is the thing that lets you skip almost all of them and
-still get the right answer. It's the main performance win in the entire system — and it's
-exactly one SQL clause.
+Here's the whole thing. When you ask buffr a question, the query has to find the handful of most-relevant chunks out of every chunk you've ever indexed. The naive way compares your query against *every* row — linear in corpus size. The way buffr actually does it is sub-linear, and that's the win.
 
 ```
-  Zoom out — where HNSW sits in a chat turn
+  Zoom out — where ANN search lives
 
-  ┌─ Session layer (src/session.ts) ───────────────────────────┐
-  │  ask()  →  agent.answer()  →  search_knowledge_base tool    │
-  └─────────────────────────────────┬──────────────────────────┘
-                                     │  embed query (768-dim vector)
-  ┌─ Storage layer (PgVectorStore) ─▼──────────────────────────┐
-  │  search(vector, k)                                          │
-  │    ┌──────────────────────────────────────────────────┐    │
-  │    │ ★ ORDER BY embedding <=> $1 LIMIT k ★             │ ←  we are here
-  │    │   HNSW index does the work, not a full scan       │    │
-  │    └──────────────────────────────────────────────────┘    │
-  └─────────────────────────────────┬──────────────────────────┘
-                                     │  pgvector + HNSW (sql/001:28-29)
-  ┌─ Postgres ─────────────────────▼───────────────────────────┐
-  │  agents.chunks  ·  embedding vector(768)  ·  cosine index   │
-  └────────────────────────────────────────────────────────────┘
+  ┌─ Session layer ─────────────────────────────────────────────┐
+  │  src/session.ts  agent.answer(question)                      │
+  └───────────────────────────┬──────────────────────────────────┘
+                  embed query  │  (Ollama → 768-dim vector)
+  ┌─ Storage layer ───────────▼──────────────────────────────────┐
+  │  PgVectorStore.search()   src/pg-vector-store.ts:67           │
+  │     ★ HNSW approximate search via `<=>` + LIMIT k ★           │ ← we are here
+  │     order by embedding <=> $query  limit k                    │
+  └───────────────────────────┬──────────────────────────────────┘
+                              │  graph traversal, not table scan
+  ┌─ pgvector / Postgres ─────▼──────────────────────────────────┐
+  │  agents.chunks  USING hnsw (embedding vector_cosine_ops)      │
+  │  sql/001_agents_schema.sql:28-29                              │
+  └───────────────────────────────────────────────────────────────┘
 ```
 
-Zoom in: the pattern is **approximate** nearest-neighbor. You trade a tiny, tunable amount
-of recall (you might miss a true top-k result occasionally) for a massive drop in work —
-from comparing against every row (linear) to walking a graph (roughly logarithmic). The
-question this file answers: how does one `ORDER BY ... <=> ... LIMIT k` become sub-linear,
-and what knobs is buffr leaving at their defaults?
+Zoom in: the pattern is **approximate nearest-neighbour search** — trading exact correctness for speed. You don't get *the* k closest vectors guaranteed; you get k vectors that are *almost certainly* the closest, in a fraction of the time. The "almost" is the whole bargain, and it's tunable. buffr takes the default bargain.
 
----
+## The structure pass
 
-## Structure pass
-
-**Layers.** Three: the SQL query buffr writes (`pg-vector-store.ts:70-77`), the pgvector
-operator `<=>` that computes cosine distance, and the HNSW index underneath that decides
-*which rows to even compute distance for*.
-
-**Axis — cost (work per query).** Hold "how many distance computations happen?" constant
-and trace it down:
+Trace one axis — **cost** (compute per query) — across the layers, and watch where it flips.
 
 ```
-  One question — "how many distance comparisons per query?" — down the layers
+  axis = "compute per query"  — traced down the stack
 
-  ┌──────────────────────────────────────────────┐
-  │ SQL: ORDER BY embedding <=> $1 LIMIT k        │  → looks like "compare all, sort, take k"
-  └──────────────────────────────────────────────┘
-      ┌──────────────────────────────────────────┐
-      │ pgvector <=> operator                     │  → one cosine distance per row IT VISITS
-      └──────────────────────────────────────────┘
-          ┌──────────────────────────────────────┐
-          │ HNSW index                            │  → visits ~log(N) rows, not all N
-          └──────────────────────────────────────┘
-
-  the SQL reads like a linear scan; the index makes it sub-linear. that gap IS the win.
+  ┌─ query string ──────────────────┐   → O(1) to hand off
+  └─────────────────┬────────────────┘
+  ┌─ embed ────────▼────────────────┐   → one model forward pass (Ollama)
+  └─────────────────┬────────────────┘
+  ┌─ HNSW search ──▼────────────────┐   ═══ THE FLIP ═══
+  │  exact: O(N) full scan          │   default would be linear
+  │  HNSW:  ~O(log N) graph walk    │   ← seam: linear → sub-linear
+  └─────────────────┬────────────────┘
+  ┌─ return k rows ▼────────────────┐   → O(k), k≈3-4
+  └──────────────────────────────────┘
 ```
 
-**Seam — the index decision.** The load-bearing seam is between "the query as written" and
-"the rows actually visited." A plain B-tree can't help an `ORDER BY distance` query; the
-HNSW index is what flips this from O(N) to ~O(log N). That seam is created at
-`sql/001_agents_schema.sql:28-29` — and it's where the untuned knobs live.
-
----
+**Layers:** query → embed → search → return. **Seam:** the HNSW index is the load-bearing boundary — on one side a query against `agents.chunks` would be a sequential scan computing cosine distance for every row; on the other side it's a navigable-graph walk that visits a tiny fraction of nodes. The cost axis flips from `O(N)` to roughly `O(log N)` exactly there. That flip *is* the pattern.
 
 ## How it works
 
 ### Move 1 — the mental model
 
-You know how a binary search tree lets you find a value without scanning every node —
-you follow pointers, halving the search space each hop? HNSW is that idea generalized to
-high-dimensional space: a layered graph where each node (a chunk embedding) links to its
-nearest neighbors, and you *navigate* toward the query by greedily hopping to whichever
-neighbor is closer. The strategy in one sentence: **don't compare against everything;
-walk a graph of "who's near whom" and follow the gradient toward the query.**
+You know how a binary search tree turns an `O(N)` scan into an `O(log N)` descent by giving you a structure that lets you skip most of the data? HNSW is that idea for high-dimensional vectors — except the structure is a multi-layer graph instead of a tree, and the descent is "greedily hop to the neighbour closest to my query" instead of "go left or right."
 
 ```
-  HNSW — the navigable graph (simplified, 2 layers)
+  HNSW — the navigable-graph kernel
 
-  query ●                          layer 1 (sparse, long hops)
-         ╲                          ┌───┐        ┌───┐
-          ╲ enter here ───────────► │ A │───────►│ B │   greedy: hop to closer neighbor
-           ╲                        └─┬─┘        └─┬─┘
-            ╲                         │ drop down  │
-             ▼                      ┌─▼─┐  ┌───┐ ┌─▼─┐    layer 0 (dense, short hops)
-          ┌───┐  ┌───┐  ┌───┐       │ A │─►│ c │►│ B │─►..  refine until no neighbor
-          │ . │  │ . │  │ . │       └───┘  └───┘ └───┘      is closer → those are top-k
-          └───┘  └───┘  └───┘
-        NOT VISITED (the win: most rows are never touched)
+  layer 2 (sparse, long hops)    ●─────────────●
+                                  │             │
+  layer 1 (denser)          ●────●────●────●────●
+                                  │    │    │
+  layer 0 (every node)   ●─●─●─●─●─●─●─●─●─●─●─●─●
+                              ▲                ▲
+                          enter here      query lands near here
+                          (top), greedily   → return k nearest
+                          descend toward
+                          the query vector
 ```
 
-You enter at a sparse top layer, take long hops to get into the right neighborhood fast,
-then drop into denser layers for fine-grained refinement. The rows you never visit are the
-rows you never pay for — that's the sub-linear behavior.
+The plain-English strategy: enter at the sparse top layer, greedily walk toward your query vector taking big hops, then drop a layer and repeat with smaller hops, until at the bottom layer you're among the true nearest neighbours. You never touch most of the graph. That's the sub-linear cost.
 
-### Move 2 — the walkthrough
+### Move 2 — the step-by-step walkthrough
 
-**The query buffr actually writes.** Here is the entire search, `pg-vector-store.ts:67-85`:
+**The query operator.** This is where the index gets used. In `PgVectorStore.search` (`src/pg-vector-store.ts:67-78`):
 
 ```ts
-async search(vector: number[], k: number): Promise<Hit[]> {
-  this.assertDim(vector);                              // ← guard: 768-dim or throw
-  const { rows } = await this.pool.query(
-    `select id, content, chunk_index, document_id, meta,
-            1 - (embedding <=> $1::vector) as score    // ← cosine SIMILARITY = 1 - distance
-     from agents.chunks
-     where app_id = $2                                 // ← partition filter (multi-tenant)
-     order by embedding <=> $1::vector                 // ← THE ANN clause: order by distance
-     limit $3`,                                        // ← stop at k — this is what makes
-    [toVectorLiteral(vector), this.appId, k],          //   the index worth using
-  );
-  ...
-}
+const { rows } = await this.pool.query(
+  `select id, content, chunk_index, document_id, meta,
+          1 - (embedding <=> $1::vector) as score   // <=> is cosine DISTANCE
+   from agents.chunks
+   where app_id = $2
+   order by embedding <=> $1::vector                // ← THIS line triggers HNSW
+   limit $3`,                                        // ← LIMIT k is what makes it ANN
+  [toVectorLiteral(vector), this.appId, k],
+);
 ```
 
-The load-bearing line is the `order by embedding <=> $1::vector ... limit $3` pair. `<=>`
-is pgvector's cosine-distance operator. `ORDER BY <distance> LIMIT k` is the exact query
-shape pgvector's HNSW index is built to accelerate — without the `LIMIT`, Postgres would
-have to order *all* rows and the index buys you nothing. The `LIMIT k` is what lets the
-index stop after collecting k good candidates.
+The load-bearing parts, named by what breaks without each:
 
-**The index that makes it sub-linear.** The query above is only fast because of this, at
-`sql/001_agents_schema.sql:28-29`:
+- `order by embedding <=> $1::vector` — drop this and Postgres has no reason to use the HNSW index; it scans. The ordering-by-distance is the literal trigger for the graph walk.
+- `limit $3` (the `k`) — drop the LIMIT and you've asked for *all* rows sorted by distance, which forces a full computation. The bounded `k` is what lets HNSW stop early. **This is the part people forget:** without the LIMIT, the index can't help you — ANN is "nearest *k*," and the *k* is load-bearing.
+- `where app_id = $2` — a filter applied alongside the vector search. At buffr's scale this is fine, but a selective filter combined with HNSW is the classic pgvector sharp edge: the index returns its best `k` *then* filters, so an aggressive `app_id` filter on a large corpus can return fewer than `k` results. Not a problem at one `app_id` = `'laptop'`, worth knowing.
+
+**The index definition — and the dials that aren't set.** The whole performance character lives in `sql/001_agents_schema.sql:28-29`:
 
 ```sql
 create index if not exists chunks_embedding_hnsw
   on agents.chunks using hnsw (embedding vector_cosine_ops);
+  -- no  WITH (m = ..., ef_construction = ...)
+  -- and no  SET hnsw.ef_search = ...  at query time
 ```
 
-`using hnsw` builds the navigable graph. `vector_cosine_ops` tells it to build that graph
-under cosine distance — which has to match the `<=>` operator the query uses, or the index
-won't be used at all. That match is the seam: query operator and index opclass must agree.
-
-**The load-bearing skeleton — what breaks if you remove each part:**
-
 ```
-  HNSW search kernel — name each part by what breaks without it
+  the three HNSW dials — none set in this repo
 
-  1. the distance operator (<=>)      remove → no notion of "near"; can't rank at all
-  2. ORDER BY distance                remove → rows come back unordered; not nearest-first
-  3. LIMIT k                          remove → must rank ALL rows; index gives no speedup
-  4. matching opclass (cosine)        mismatch → planner ignores the index, full scan
-  5. the HNSW index itself            remove → correct results, but O(N) linear scan
-```
-
-Strip the index (part 5) and the query still returns *correct* answers — just slowly, by
-brute force. Strip the `LIMIT` (part 3) and even with the index you're back to ranking
-everything. That's the recognition test: the index and the `LIMIT k` are a pair.
-
-**Where it's untuned — the honest part.** HNSW has three knobs, and buffr sets none of them:
-
-```
-  knob              where it lives        what it controls          buffr's value
-  ────────────────  ────────────────────  ────────────────────────  ──────────────
-  m                 CREATE INDEX WITH(...) graph connectivity        DEFAULT (16)
-  ef_construction   CREATE INDEX WITH(...) build-time accuracy       DEFAULT (64)
-  ef_search         SET hnsw.ef_search    query-time recall↔latency  DEFAULT (40)
+  ┌─ build time ──────────────┬─ effect ──────────────────────────┐
+  │  m (default 16)           │  graph connectivity; higher = better
+  │                           │  recall, bigger index, slower build │
+  │  ef_construction (def 64) │  build-time search width; higher =  │
+  │                           │  better recall, slower build        │
+  ├─ query time ──────────────┼───────────────────────────────────┤
+  │  ef_search (default 40)   │  query-time search width; higher =  │
+  │                           │  better recall, slower query        │
+  └───────────────────────────┴───────────────────────────────────┘
+   buffr uses all three defaults → the default speed/recall bargain
 ```
 
-The `CREATE INDEX` at `sql/001:28-29` has no `WITH (m = ..., ef_construction = ...)`
-clause, and there is no `SET hnsw.ef_search` anywhere in the query path
-(`pg-vector-store.ts:70-77` sets nothing). So the recall-vs-latency tradeoff is running on
-pgvector's defaults, unmanaged. **Does it matter at laptop scale? No — not yet.** The
-defaults are tuned for exactly this regime: a modest corpus where even a near-linear scan
-would be fast. It becomes a real lever past roughly 10^5 chunks, where `ef_search` is the
-dial you'd turn to trade a few ms of latency for a few points of recall.
+What breaks if you ignore these: nothing, at small corpus size — the defaults give good recall when there are few chunks. What breaks at scale: as the corpus grows, default `ef_search=40` can start missing true neighbours, and you'd see precision@k drop in the eval harness (`src/cli/eval-cmd.ts`) without knowing why. The fix is `SET hnsw.ef_search` higher and re-measure — but **you can't tune what you don't measure**, and the latency side of that curve isn't measured yet (audit lens 2).
 
 ### Move 2.5 — current state vs future state
 
 ```
-  Phase A — now (small corpus)          Phase B — large corpus (not yet reached)
-  ──────────────────────────────        ─────────────────────────────────────────
-  index untuned, defaults fine          ef_search becomes the recall/latency dial
-  recall ~perfect (few rows total)      raise ef_search → better recall, slower query
-  latency dominated by gemma2, not      lower ef_search → faster, may miss true top-k
-  the search                            m / ef_construction set at build for the corpus
-  → nothing to change                   → tune, then re-run eval-cmd.ts to verify recall
+  Phase A (now)                    Phase B (tune when corpus grows)
+  ─────────────                    ──────────────────────────────
+  HNSW with defaults               HNSW with m / ef_construction set
+  ef_search = 40 (implicit)        ef_search raised per recall target
+  recall: good at small N          recall: held as N grows
+  latency: unmeasured              latency: measured against ef_search
+  → the right call now             → gated on: eval precision dropping
+                                      OR a measured latency budget
 ```
 
-The eval harness (`eval-cmd.ts`) is already the instrument that would verify a tuning
-change: change `ef_search`, re-run, watch mean R@3. The dial and the gauge both exist; the
-corpus just isn't big enough yet to need them.
+What *doesn't* have to change: the query in `search()` stays identical — tuning is a `SET` and an index rebuild, not a code change. The `PgVectorStore` contract is untouched. That's the payoff of having the dial live in the index, not the application.
 
 ### Move 3 — the principle
 
-Approximate-nearest-neighbor is a recall-for-speed trade you get to *tune*, not a binary.
-The discipline isn't "use HNSW" — it's "know which knob trades which axis, and measure the
-result before and after." buffr has the index and the eval gauge; what it hasn't done yet
-is connect them, because at this scale it doesn't have to.
-
----
+Approximate nearest-neighbour search is a speed-for-correctness trade, and the trade is *tunable*, not fixed. The generalizable lesson: when a system gives you a knob between "fast" and "correct," shipping the default is the right first move — but only if you've also built the measurement that tells you when the default stops being good enough. buffr has the first half. The HNSW index is the main retrieval win and it's free; the unfinished work is the recall-vs-latency curve that would tell you when to turn the dial.
 
 ## Primary diagram
 
 ```
-  HNSW approximate search — full path, one chat turn
+  ANN search, full path — one query through the HNSW index
 
-  ┌─ Service: PgVectorStore.search() ───────────────────────────────────┐
-  │  assertDim(768) → build query → pool.query(...)                      │
-  └───────────────────────────────────┬─────────────────────────────────┘
-                                       │ SQL over warm pool
-  ┌─ Postgres + pgvector ─────────────▼─────────────────────────────────┐
-  │  ORDER BY embedding <=> $query  LIMIT k                              │
-  │     │                                                                │
-  │     ▼  uses ↓                                                        │
-  │  ┌─ HNSW index (chunks_embedding_hnsw, vector_cosine_ops) ────────┐  │
-  │  │  enter top layer → greedy hops → drop layers → refine          │  │
-  │  │  visits ~log(N) rows  ·  knobs m / ef_construction / ef_search │  │
-  │  │  ★ all three at DEFAULT — untuned (sql/001:28-29) ★            │  │
-  │  └────────────────────────────────────────────────────────────────┘  │
-  │     │                                                                │
-  │     ▼ top-k rows                                                     │
-  │  score = 1 - distance  →  rebuild meta {docId, chunkIndex, text}     │
-  └──────────────────────────────────────────────────────────────────────┘
+  ┌─ Session ────────────────────────────────────────────────────┐
+  │  question ──embed(Ollama)──► 768-dim query vector             │
+  └───────────────────────────────┬───────────────────────────────┘
+                                  │  toVectorLiteral → '[0.1,0.2,...]'
+  ┌─ PgVectorStore.search ───────▼───────────────────────────────┐
+  │  order by embedding <=> $q   ← triggers HNSW graph walk       │
+  │  where app_id = 'laptop'     ← post-filter                    │
+  │  limit k (≈3-4)              ← bounds the search, enables ANN │
+  └───────────────────────────────┬───────────────────────────────┘
+  ┌─ pgvector ───────────────────▼───────────────────────────────┐
+  │  HNSW: enter top layer → greedy descend → bottom-layer k-NN   │
+  │  dials: m, ef_construction (build) · ef_search (query) = ALL  │
+  │         DEFAULT                                                │
+  └───────────────────────────────┬───────────────────────────────┘
+                                  │  k rows, score = 1 - distance
+  ┌─ back to Session ────────────▼───────────────────────────────┐
+  │  hits → search_knowledge_base tool → gemma2:9b (DOMINANT cost)│
+  └───────────────────────────────────────────────────────────────┘
 ```
-
----
 
 ## Elaborate
 
-HNSW comes from the 2016 Malkov & Yashunin paper; it won as the default ANN index because
-it's incremental (you can insert without rebuilding) and gives excellent recall/latency
-without the training step that IVF or product-quantization indexes need. pgvector added
-HNSW in 0.5.0, which is why it's available here.
+HNSW comes from Malkov & Yashunin (2016), building on the small-world-graph idea — that you can navigate a huge graph in a few hops if it has a mix of short and long edges. pgvector added HNSW in 0.5.0 as the higher-recall alternative to its earlier IVFFlat index. The reason it dominates ANN in practice: it builds incrementally (no training step, unlike IVFFlat which needs a `CREATE INDEX` over existing data to pick centroids), so it works well when you're inserting chunks over time — exactly buffr's index-as-you-go pattern.
 
-The thing worth internalizing: buffr's `<=>` + `LIMIT k` is the *same retrieval shape* as
-AdvntrCue's pgvector RAG in Rein's portfolio. Swap the vector store (pgvector → Pinecone →
-Qdrant) and this exact pattern survives — embedding + ANN + top-k retrieval. The vendor is
-incidental; the pattern transfers. That's why it earns the lead pattern file.
-
----
+For how the graph traversal actually executes inside Postgres — buffer pages, the index scan node, why `order by ... limit` is a Top-N — see **`study-database-systems`** (query execution + indexes). For why this is the right vector-store choice for a single-Postgres-instance RAG app, see **`study-ai-engineering`** (retrieval). This file owns the *performance* read: the cost flip and the untuned dials.
 
 ## Interview defense
 
-**Q: Your vector search is `ORDER BY ... LIMIT k`. Isn't that a full sort of every row?**
+**Q: Your vector search is `order by embedding <=> $q limit k`. Walk me through why that's fast.**
 
-It reads like one, but no — there's an HNSW index on the embedding column
-(`chunks_embedding_hnsw`, cosine opclass). The planner uses it to walk a navigable graph
-and collect the k nearest candidates without ranking the whole table. The `LIMIT k` is
-load-bearing: drop it and the index gives no speedup, because now I genuinely do have to
-order everything.
+> The `<=>` is cosine distance, and the `order by ... limit k` is what lets pgvector use the HNSW index instead of scanning every chunk. HNSW is a multi-layer navigable graph — you enter at a sparse top layer, greedily hop toward the query vector, drop layers as you go, and end up among the true nearest neighbours having touched a tiny fraction of nodes. That turns an `O(N)` distance computation over the whole table into roughly `O(log N)`. The LIMIT is load-bearing — it's "nearest *k*", and without the bound the index can't stop early.
 
 ```
-  with LIMIT k:    index walks ~log(N) rows → k results        sub-linear
-  without LIMIT:   must rank all N rows                         linear, index useless
+  enter top → greedy descend → k-NN at bottom layer
+  O(N) scan ───────────────────► ~O(log N) walk
+              the LIMIT k is what enables the early stop
 ```
 
-The part people forget: **the index opclass and the query operator must match.** My index
-is `vector_cosine_ops` and my query uses `<=>` (cosine distance). If I'd built the index
-for L2 distance, the planner would silently ignore it and fall back to a full scan — same
-correct answers, no speedup, and nothing in the query would look wrong.
+**Q: What's the weakness in how you set it up?**
 
-**Anchor:** `pg-vector-store.ts:70-77` (the query) + `sql/001:28-29` (the index). And I'll
-say the honest part — the index is untuned (no `m`/`ef_construction`/`ef_search`), which is
-correct for my corpus size and would be the first dial I'd turn past ~10^5 chunks.
+> It's untuned — I'm on pgvector's defaults for `m`, `ef_construction`, and `ef_search`. That's the right call at my corpus size because defaults give good recall when N is small, and the cost is already paid. The honest gap is that I haven't measured the recall-vs-latency curve, so I can't yet tell you *when* the default `ef_search=40` starts dropping true neighbours. The fix is `SET hnsw.ef_search` and re-run my precision eval — but I'd want the latency instrumentation closed first so I'm trading against a number, not a guess.
 
----
+> Anchor: `src/pg-vector-store.ts:70-78` (the query), `sql/001_agents_schema.sql:28-29` (the untuned index).
 
 ## See also
 
-- `02-embedding-roundtrip.md` — where the query vector comes from before search runs.
-- `06-no-caching.md` — the query embed that feeds this search is recomputed every time.
-- `audit.md` §5 (io-network-and-database) and §8 (red flag #2, untuned index).
-- `study-database-systems` — HNSW index internals, storage layout, planner behavior.
+- `00-overview.md` — finding #1, where this ranks
+- `audit.md` — lens 5 (I/O bottlenecks), lens 8 (red flags #2)
+- `02-embedding-roundtrip.md` — the embed step that feeds this search
+- `06-no-caching.md` — why an identical query re-runs this whole path
+- **`study-database-systems`** — how the HNSW index executes inside Postgres
+- **`study-ai-engineering`** — retrieval pipeline + vector store choice

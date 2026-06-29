@@ -1,44 +1,47 @@
-# Frontend Engineering — `buffr-laptop`
+# Study — Frontend Engineering (buffr-laptop)
 
-The frontend layer of this repo is a React app that renders to a terminal instead of a
-browser. One component, three hooks, one async seam. This guide treats that surface as
-what it is: your seven years of React, applied to an unfamiliar host. No on-ramp on what
-a hook or a controlled input is — you wrote those before. The new idea is the render
-target (stdout via Ink), and the guide is built around making *that* click.
+Your React knowledge, applied to a terminal. The frontend surface here is not a browser — it's an **interactive CLI (Ink)**, React-in-the-terminal. Same hooks, same component model, same reconciliation discipline you've shipped for seven years; a different paint target (the terminal grid) and a different input platform (raw-mode TTY stdin). This guide reads that one surface honestly: what's exercised, what's `not yet exercised`, and which patterns carry weight.
+
+The whole frontend is one component (`<Chat>` in `src/cli/chat.tsx`, 64 lines) sitting on top of a data layer (`createChatSession` in `src/session.ts`). That's it. So this guide is short and dense — no padding, no inventing patterns to fill a checklist.
 
 ## Reading order
 
-1. **`00-overview.md`** — one page. The rendering mode in a sentence, the state graph in
-   one diagram, the network seam in one diagram, the three patterns named with files.
-   Skim only this and you know the whole surface.
-2. **`audit.md`** — the 8-lens frontend audit. What each lens finds, or `not yet exercised`
-   stated honestly. Lenses 5–7 (routing, styling, browser/build) are mostly N/A and say so.
-3. **Pattern files** (Pass 2) — one per pattern the repo actually exercises:
-   - `01-react-without-the-dom.md` — the reconciler-vs-host-renderer split; how Ink paints
-     React to a TTY.
-   - `02-hooks-state-in-a-cli.md` — the `useState` triad (`turns`/`input`/`busy`) and the
-     controlled-input loop.
-   - `03-async-ui-with-a-busy-flag.md` — `try/catch/finally` + `busy` + `<Spinner>`, the
-     loading-state triad on a local async call.
-   - `04-session-as-the-data-layer.md` — `<Chat>` (display state) ↔ `session.ts` (canonical
-     state); the seam between client copy and source of truth.
-   - `05-jsx-to-esm-build.md` — `react-jsx` automatic runtime + `tsc` → ESM, run by Node
-     with no bundler.
+```
+  start here
+      │
+      ▼
+  00-overview.md      one page: the rendering mode, the state graph,
+      │               the data seam, the three load-bearing patterns
+      ▼
+  audit.md            Pass 1 — the 8-lens frontend audit.
+      │               What's exercised, what isn't, with file:line.
+      ▼
+  01..05              Pass 2 — the patterns this repo actually runs.
+                      Each a full concept file (zoom out → how it
+                      works → interview defense).
+```
+
+## Pass 2 — the discovered patterns
+
+| file | pattern | what it is in industry terms |
+|------|---------|------------------------------|
+| `01-react-without-the-dom.md` | the reconciler (Ink) | virtual-DOM reconciliation that paints to a terminal instead of the browser DOM |
+| `02-hooks-state-in-a-cli.md` | the useState triad | local component state (`turns` / `input` / `busy`) — the entire state graph |
+| `03-async-ui-with-a-busy-flag.md` | the loading state (`busy` flag) | the loading/success/error machine around an awaited call, with `try/finally` |
+| `04-session-as-the-data-layer.md` | the container/presentational seam (`session.ts` ↔ `<Chat>`) | server-state acquisition pushed behind a façade the component just calls |
+| `05-controlled-text-input.md` | controlled input (`TextInput`) | value-owned-by-React text input with `onChange`/`onSubmit`, over raw-mode stdin |
 
 ## Cross-links to neighboring guides
 
-The frontend guide owns the framework-and-platform layer only. Mechanism-level topics
-belong to their owning generators:
+This guide owns the **framework-and-platform layer only**. The mechanism-level teaching lives next door:
 
-- **`study-system-design`** — server-state vs client-state ownership (the `turns` /
-  Postgres split), the warm-pool + held-conversation architecture, cache-as-architecture.
-- **`study-software-design`** — module depth and interface design of `ChatSession`
-  (`ask`/`close`) and where `<Chat>` would grow components.
-- **`study-runtime-systems`** — the event loop that suspends `await session.ask()`, raw-mode
-  stdin scheduling, and the missing cancellation on an in-flight turn.
-- **`study-networking`** — the wire under `session.ask()`: the pg protocol and the Ollama
-  HTTP calls.
-- **`study-performance-engineering`** — there is no bundle and the tree is tiny; FCP/LCP/
-  bundle-size measurement has nothing to measure here yet.
-- **`study-security`** — `DATABASE_URL`/secrets in `.env`, trust boundaries. No XSS/CSP
-  surface (no browser).
+- **`study-runtime-systems`** — the event loop, the microtask queue, and how `await session.ask()` yields without blocking the render. The frontend guide says *when* `busy` flips; the runtime guide says *how* the loop schedules the resumption.
+- **`study-system-design`** — where state and data live at the system level: the warm pg pool, the single long-lived conversation, the local-SQLite-canonical / cloud-mirror story. `04-session-as-the-data-layer` cross-links here.
+- **`study-software-design`** — module depth and interface design behind the `ChatSession` façade. The container/presentational seam is a deep-module argument; that vocabulary is owned there.
+- **`study-networking`** — the wire under `session.ask()` (Ollama HTTP, Postgres protocol). The frontend guide stops at the seam; the bytes belong there.
+- **`study-performance-engineering`** — render counts, reconciliation cost, and the keystroke-re-render question as *measured numbers*. The frontend guide names the risk; performance owns the measurement.
+- **`study-security`** — trust boundaries on the input. The CLI takes free-text stdin and forwards it to an agent; injection lives there, not here.
+
+## How to use this guide
+
+You don't need the on-ramp. You know what a hook is, what controlled input means, what reconciliation buys you. The value here is the **translation**: every browser instinct you have, mapped onto where it does and doesn't hold when React's paint target is a terminal. Read `00-overview.md`, then go straight to whichever pattern file names something you'd have to defend in an interview.

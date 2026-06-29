@@ -1,233 +1,183 @@
 # Heuristic Before LLM
 
-*Cheap-path routing / pre-LLM gating — Project-specific pattern (not yet exercised).*
+*Industry name: pre-LLM routing / cheap-path short-circuit / classifier gate. Type: **Language-agnostic** pattern.*
 
 ## Zoom out, then zoom in
 
-The model is the most expensive box in buffr — slowest on a laptop, most tokens, most non-determinism (`06-token-economics.md`). The cheapest engineering win is often *not calling it*: handle the trivial cases with a deterministic check first. buffr does **not** do this — every question, however trivial, runs the full agent loop. Here's the path that exists, and the gate that doesn't.
+The cheapest LLM call is the one you don't make. *Heuristic-before-LLM* is a cheap test that runs *first* and decides whether the expensive model call is even needed. Here's where it would sit in buffr — and the honest truth is the slot is empty.
 
 ```
-  Zoom out — where a pre-LLM gate WOULD sit in buffr
-
-  ┌─ TUI layer (Ink) ───────────────────────────────────┐
-  │  chat.tsx → session.ask(question)                    │
-  └──────────────────────────┬───────────────────────────┘
-                             │  every question, unconditionally
-  ┌─ Session layer (buffr) ──▼───────────────────────────┐
-  │  ★ no gate here ★ ── would route cheap cases out     │ ← the missing fast-path
-  │  ask(): persistMessage → agent.answer → memory       │
-  └──────────────────────────┬───────────────────────────┘
-                             │  ALWAYS hits the loop
-  ┌─ Agent layer (aptkit) ───▼───────────────────────────┐
-  │  RagQueryAgent.answer → runAgentLoop (model + tools) │
-  └──────────────────────────────────────────────────────┘
+buffr stack — the missing cheap gate
+┌───────────────────────────────────────────────────────────┐
+│ chat.tsx   user types a turn                                │
+├───────────────────────────────────────────────────────────┤
+│ ★ session.ask()   ← WHERE A HEURISTIC GATE WOULD GO         │ no gate today
+├───────────────────────────────────────────────────────────┤
+│ RagQueryAgent.answer()   "Always call search first"         │ always pays
+├───────────────────────────────────────────────────────────┤
+│ retrieval (embed → pgvector) + GemmaModelProvider           │ embed + generate, every turn
+└───────────────────────────────────────────────────────────┘
 ```
 
-Zoom in: a heuristic-before-LLM is a router with two exits — a cheap deterministic exit for inputs you can answer (or reject) without the model, and the expensive LLM exit for everything else. The pattern is just an `if` that runs *before* the costly call. buffr has no such `if`: `session.ask` goes straight to `agent.answer` for `"hi"`, `""`-ish junk, and a real question alike. This file is honest about that gap and gives a concrete Case-B.
+Every turn — even `"hi"` or `"thanks"` — runs the full pipeline: embed the query, hit pgvector, build a prompt, call `gemma2:9b`. The system prompt literally says *"Always call the search_knowledge_base tool first."* **This is Case B: not implemented.** There is no cheap path. This file teaches the pattern and makes the gate the exercise.
 
-## Structure pass
+## Structure pass — trace *cost-per-turn* across input types
 
-Trace the axis **who decides the answer for this input — code or the model?** across where the gate would split.
+Pick one axis: **what does a turn cost, by how trivial it is?** Trace it and watch buffr charge full price for everything.
 
 ```
-  Axis: "who decides this input's answer?" — with vs without the gate
-
-  WITHOUT gate (buffr today)        WITH gate (the pattern)
-  ┌─ session.ask ──────────┐        ┌─ session.ask ──────────────┐
-  │ everything → model     │        │ cheap check first:         │
-  │ control = MODEL always │        │   match? → CODE decides    │ ← control flips
-  └────────────┬───────────┘        │   else  → MODEL decides    │
-               ▼                     └────────────┬───────────────┘
-        runAgentLoop                              ▼
-                                          gate is the seam
+cost per turn, by triviality (buffr today)
+  "hi"                    │ embed + pgvector + LLM │ FULL price  ← overpaid
+  "thanks"                │ embed + pgvector + LLM │ FULL price  ← overpaid
+  "what's my deploy cmd?" │ embed + pgvector + LLM │ FULL price  ← justified
+  ───────────────────────────────────────────────────────────────────────
+  no seam: every input takes the same expensive path
 ```
 
-The seam is the gate itself, and the axis flips *across it*: above the gate, code can decide (return a canned reply, reject empty input, skip retrieval); below it, the model decides. buffr's seam is currently a no-op — control never flips to code because there's no gate, so the model decides everything, including the cases code could have handled for free. That permanent "model decides" is the inefficiency this pattern fixes.
+There's no seam — that's the problem. A good system has a fork right at the top: trivial inputs peel off to a cheap canned response; substantive ones go to the LLM. Buffr has one road for all traffic. The consequence is concrete: greetings and acknowledgments each trigger an embedding call *and* a 9B-model generation, for an answer that didn't need either.
 
 ## How it works
 
-#### Move 1 — the mental model
+### Move 1 — the mental model: a guard clause before the expensive work
 
-You know how you guard a `fetch()` with an early return — `if (!query.trim()) return;` — so you don't fire a network request for empty input? A heuristic-before-LLM is that early return, scaled to "don't fire the *model* for inputs a cheap rule can settle." The strategy: **try the cheap deterministic path first; fall through to the model only when the cheap path can't answer.**
-
-```
-  Pattern — the two-exit router (a guard clause before the costly call)
-
-  input ──► ┌─ cheap heuristic ─────────────┐
-            │  empty / greeting / regex hit? │
-            └───────┬───────────────┬─────────┘
-                yes │           no  │
-                    ▼               ▼
-            return canned /   runAgentLoop (model + retrieval)
-            reject early      ← the expensive path
-            (NO model call)
-```
-
-The whole pattern is the top diamond. Everything below it is the existing buffr path; the gate just decides whether you ever get there.
-
-#### Move 2 — the step-by-step walkthrough
-
-**The unconditional entry point.** buffr's `session.ask` runs the same three steps for every input — persist, run the agent, remember — with no branch on what the input is.
+You write these constantly in frontend: `if (!query.trim()) return;` before firing a fetch. Heuristic-before-LLM is that guard clause, scaled up: a cheap, deterministic test (regex, length, keyword, a tiny classifier) that handles the easy cases *without* the model, and only falls through to the LLM when the cheap test can't.
 
 ```
-  ChatSession.ask — src/session.ts:60-71 (annotated)
-
-  async ask(question: string): Promise<string> {
-    await persistMessage(pool, conversationId, 'user', question);   // always
-    const answer = await agent.answer(question);                    // ← always hits the loop
-    await trace.flush();
-    try { await memory.remember({ conversationId, question, answer }); } catch {}
-    return answer;
-  }
+the guard-clause shape
+  input
+    │
+  cheap test (regex/length/keyword)
+    ├── matches "trivial" ──▶ canned/cheap response   ← no embed, no LLM
+    └── falls through ──────▶ full RAG + LLM pipeline  ← pay only when needed
 ```
 
-There's no `if` before `agent.answer`. `"hi"`, a one-word typo, or a genuine question all take the identical, expensive route. That's the gap: the cheapest possible inputs pay the full model cost.
+### Move 2 — the moving parts
 
-**Where the loop confirms it always runs the model.** Even inside the agent, the system template *forces* a retrieval-then-answer flow — there's no early exit for trivial input.
+#### Bridge: it's the `if (!q) return;` you already have, but smarter
 
-```
-  RagQueryAgent system template — rag-query-agent.ts:20-27 (annotated)
+`chat.tsx` already has the dumb version (`chat.tsx:23`: `if (!q) return;` for empty input). The pattern extends that: instead of just rejecting empty input, *classify* the input and route it. The natural home is `session.ask()` — before it persists the turn and calls the agent.
 
-  'You are a personal knowledge assistant.',
-  `Always call the ${SEARCH_KNOWLEDGE_BASE_TOOL_NAME} tool first ...`,  // ← ALWAYS retrieve
-  '... Ground every answer in the retrieved chunks ...',
-```
+Here's `session.ask()` today, with the gap marked (`src/session.ts:60–71`):
 
-"Always call the tool first" means even `"hi"` triggers an embedding + a pgvector search + a synthesis call. The model decides everything because the prompt tells it to, and nothing upstream intercepts. (Note: this template lives in aptkit and buffr passes its own `profile` but not a custom `prompt` — so the gate belongs in buffr's `ask`, before the agent, not inside aptkit.)
-
-**Where the gate would go — buffr-side, before `agent.answer`.** The clean insertion point is a guard clause in `ask`, returning before the costly call when a cheap rule fires.
-
-```
-  Layers-and-hops — the gate buffr could add (Case B), all buffr-side
-
-  ┌─ session.ask (buffr) ───────────────────────────────────────────┐
-  │  const q = question.trim();                                     │
-  │  if (q === '') return 'Ask me something about your notes.';     │ ← exit 1: reject
-  │  if (/^(hi|hello|hey)\b/i.test(q)) return 'Hi! What ...?';      │ ← exit 2: canned
-  │  // else fall through:                                          │
-  │  const answer = await agent.answer(q);  ← model only NOW        │ ← exit 3: expensive
-  └─────────────────────────────────────────────────────────────────┘
-   exits 1 & 2 skip: embedding call + pgvector search + synthesis call
+```ts
+async ask(question: string): Promise<string> {
+  // ◀── A HEURISTIC GATE WOULD GO HERE:
+  //     if (isTrivial(question)) return cannedReply(question);  ← skip everything below
+  await persistMessage(pool, conversationId, 'user', question);
+  const answer = await agent.answer(question);   // ← always embeds + calls gemma2:9b
+  await trace.flush();
+  try { await memory.remember({ conversationId, question, answer }); } catch {}
+  return answer;
+}
 ```
 
-Exits 1 and 2 save a full model round-trip plus a retrieval — the most expensive operations in the system — for inputs that never needed them. This is entirely buffr-side; aptkit is untouched.
+Annotation that matters: every line after the proposed gate is the expensive part — `agent.answer()` runs retrieval (an embedding call to Ollama + a pgvector query) and a generation call. A trivial input pays all of it for nothing.
 
-#### Move 2.5 — current state vs future state
+#### The agent reinforces "always pay"
 
-Built-but-absent: the entry point exists, the gate doesn't.
+Even if you wanted the agent to skip retrieval, it won't — its system template hard-codes it (`rag-query-agent.ts:20–27`):
 
-```
-  Phase A (now) vs Phase B (Case B) — input routing
-
-  Phase A — NO GATE                 Phase B — CHEAP PATH FIRST
-  ┌──────────────────────────┐      ┌──────────────────────────────┐
-  │ ask → agent.answer always│      │ ask → guard clause:          │
-  │ "hi" costs a full loop   │  ──► │   trivial → canned/reject    │
-  │                          │      │   real    → agent.answer     │
-  └──────────────────────────┘      └──────────────────────────────┘
-  must change: a few lines in session.ask. What does NOT change:
-  the agent, retrieval, aptkit, the ledger.
+```ts
+const DEFAULT_SYSTEM_TEMPLATE = [
+  'You are a personal knowledge assistant.', '',
+  `Always call the ${SEARCH_KNOWLEDGE_BASE_TOOL_NAME} tool first to retrieve relevant`,
+  'passages before answering. ...',
+].join('\n');
 ```
 
-The cost is a few lines and a judgment call about which heuristics are *safe* (false positives that wrongly skip the model are the risk). That risk is why the kernel below matters.
-
-#### Move 2 variant — the load-bearing skeleton
-
-The pattern has a tiny kernel; name each part by what breaks without it.
+So the cheap path *cannot* live inside the agent — the agent's instructions forbid skipping retrieval. It has to live *above* the agent, in `session.ask()`. That placement is the key design call.
 
 ```
-  Kernel — pre-LLM gate
-
-  1. a CHEAP predicate     — drop it → no way to identify the trivial case
-  2. a SAFE default exit   — drop it → false positive wrongly skips a real question
-  3. FALL-THROUGH to model — drop it → you've replaced the LLM, not gated it
-
-  hardening (optional): metrics on hit-rate, a confidence threshold,
-  multiple heuristics tried in order.
+where the gate must live
+  session.ask()      ← gate HERE (above the agent) ✓ can short-circuit
+  RagQueryAgent      ← gate can't live here; "always search" is its contract ✗
 ```
 
-The load-bearing, easily-forgotten part is **part 3, the fall-through**: a gate that doesn't fall through to the model is no longer a gate — it's a brittle rules engine that fails on anything unanticipated. The skill is making the predicate *conservative*: only fire on cases you're certain about, fall through on doubt.
+### Move 2.5 — current vs future state
 
-#### Move 3 — the principle
+**Current:** no gate. Greetings, thanks, and one-word inputs all run embed + pgvector + `gemma2:9b`.
 
-The cheapest LLM call is the one you don't make. Route the inputs a deterministic rule can settle — empty input, greetings, exact-match commands — out *before* the model, and reserve the expensive, non-deterministic path for genuine questions. The discipline is conservatism: only short-circuit when you're sure, always fall through on doubt. buffr pays full price for every "hi" today; a few lines of guard clause in `session.ask` would fix it without touching the agent.
+**Future (the exercise):** add `isTrivial(question)` in `session.ask()` — a regex/length test for greetings, acknowledgments, and empty-ish input — returning a canned reply that skips retrieval and generation entirely. Conservative on purpose: when in doubt, fall through to the LLM. A false "trivial" (skipping a real question) is far worse than a false "substantive" (paying for a greeting).
+
+```
+current → future
+  CURRENT │ every turn → embed + pgvector + LLM
+  FUTURE  │ isTrivial? ──yes──▶ canned reply (0 cost)
+          │           └─no───▶ embed + pgvector + LLM
+  bias: when unsure, DON'T skip — pay rather than mishandle a real question
+```
+
+### Move 3 — the principle that generalizes
+
+> **Pay for intelligence only when intelligence is needed. A deterministic test handles the trivial tail for free; reserve the model for inputs that actually need it — and bias the test toward over-paying, because misrouting a real question is the expensive mistake.**
+
+The asymmetry is the whole design. The cost of mis-skipping (a real question gets a canned "hi there!") is a broken product. The cost of mis-paying (a greeting runs the full pipeline) is a few wasted milliseconds and tokens. So the heuristic must be tight — only the unambiguous trivial cases — and everything else falls through to the model. Cheap-path routing is an optimization, never a correctness gamble.
 
 ## Primary diagram
 
-```
-  Heuristic-before-LLM — the gate buffr lacks, where it belongs
+The gate buffr is missing, and the asymmetry that shapes it.
 
-  input (question)
-        │
-  ┌─ session.ask [src/session.ts:60] ─────────────────────────────┐
-  │  ┌─ GATE (Case B — not present today) ─────────────────────┐  │
-  │  │  empty?     → reject (no model)                         │  │  exit 1
-  │  │  greeting?  → canned reply (no model)                   │  │  exit 2
-  │  │  else ───────────────────────────────────────────────┐ │  │
-  │  └──────────────────────────────────────────────────────│─┘  │
-  │  await agent.answer(q)  ◄── ALWAYS reached today ────────┘    │  exit 3
-  └───────────────────────────────┬────────────────────────────────┘
-                                  ▼
-  runAgentLoop → embed → pgvector search → gemma2:9b synthesis
-  (the expensive path; exits 1&2 would skip ALL of this)
+```
+heuristic-before-LLM (the slot in session.ask())
+  question
+     │
+  ┌──────────── isTrivial(question)? ────────────┐   ← MISSING in buffr today
+  │ regex: greetings, thanks, len<3, empty-ish    │
+  └───────────────────┬───────────────────────────┘
+        trivial │                 │ not trivial / unsure
+                ▼                 ▼
+        canned reply        agent.answer()  → embed + pgvector + gemma2:9b
+        (0 embed, 0 LLM)    (full price)
+  ───────────────────────────────────────────────────────────────────────
+  asymmetry: mis-skip a real Q = broken product (bad)
+             mis-pay for "hi"   = a few wasted ms (fine)
+  ∴ keep the trivial set TINY; fall through when unsure
 ```
 
 ## Elaborate
 
-"Heuristic before LLM" is one instance of a general systems rule: put the cheap, certain, deterministic work before the expensive, uncertain, probabilistic work. The same shape shows up as cache-before-compute, validate-before-process, and rate-limit-before-handle. For LLM apps specifically it matters more because the expensive path isn't just slow — it's *non-deterministic* and *unbounded in cost*, so every call you avoid is a call that can't hallucinate, can't run up tokens, and can't make the user wait on a 9B model.
-
-The tension to respect: heuristics are brittle by nature, and an over-eager gate that wrongly short-circuits a real question is worse than no gate. That's why the conservative-predicate + always-fall-through skeleton is the load-bearing part. Connections: this is the input-side sibling of `06-production-serving/`'s caching (output-side cheap path), and it composes with `04-agents-and-tool-use/04-routing` (a richer router that picks *which* expensive path, where this one picks *whether* to take any).
+- **Origin.** The pattern predates LLMs — it's the cache/fast-path idea from systems work (check the cheap thing first). In LLM apps it shows up as intent classifiers, regex guards, and small-model routers in front of the expensive model. The modern framing is the "model cascade": cheap model/heuristic first, escalate only on miss.
+- **Adjacent concepts.** *Token economics* (06) — this is the most aggressive economy, spending zero tokens. *Routing* (sub-section 04) — the agentic cousin, where a model picks the path. *Caching* (sub-section 06) — same spirit, different mechanism (remember past answers vs short-circuit trivial ones).
+- **Honest gap.** **Not implemented at all** — there's no classifier, no regex gate, no length check beyond the empty-string guard. And the agent's "always search" contract means the gate can't live in the agent; it has to be added above it in `session.ask()`.
+- **What to read next.** File 08 — provider abstraction, the seam that makes *all* these swaps (including a cheap-model router) a constructor change.
 
 ## Project exercises
 
-No curriculum file present; exercises derived from the codebase. This concept is **not yet exercised** — Case B (a fast-path / skip-retrieval gate).
+### Add a triviality gate to session.ask()
 
-### EX-07-1 — Add a conservative pre-LLM guard clause
+- **Exercise ID:** [B1.13] (Phase 1 — LLM foundations) — **Not yet implemented** (Case B; no cheap path exists).
+- **What to build:** An `isTrivial(question)` helper (regex for greetings/thanks, length threshold, empty-ish) and a small canned-response map, wired into the top of `session.ask()` so trivial inputs return immediately without embedding or calling `gemma2:9b`. Bias it conservative: only unambiguous cases short-circuit.
+- **Why it earns its place:** It's the first place buffr stops paying for intelligence it doesn't need, and it teaches the mis-skip/mis-pay asymmetry hands-on.
+- **Files to touch:** new `src/triviality.ts`; `src/session.ts:60` (gate at the top of `ask()`). Note it must live here, not in the agent (the agent's "always search" prompt forbids skipping).
+- **Done when:** `"hi"` and `"thanks"` return a canned reply with no `model_usage` row written, while a real question still runs the full pipeline.
+- **Estimated effort:** 1–4hr
 
-- **Exercise ID:** EX-07-1
-- **What to build:** A guard clause at the top of `session.ask` that handles empty/whitespace input (reject with a prompt) and a small set of greetings (canned reply) *without* calling `agent.answer`, then falls through to the agent for everything else.
-- **Why it earns its place:** Eliminates the most wasteful calls (a full loop for `"hi"`) in a few lines, entirely buffr-side; demonstrates the cheap-path-first discipline.
-- **Files to touch:** `src/session.ts:60-71` (the `ask` method). Do not edit aptkit.
-- **Done when:** `"hi"` and `""` return without any model or pgvector call (verifiable via the trace: no `model_usage` row), while real questions still run the loop.
-- **Estimated effort:** 1-4hr
+### Measure the trivial-traffic share
 
-### EX-07-2 — Measure the gate's hit rate
-
-- **Exercise ID:** EX-07-2
-- **What to build:** Emit a trace/log when the gate short-circuits, then a script that reports what fraction of inputs were handled cheaply — turning the optimization into a measured one and guarding against over-eager false positives.
-- **Why it earns its place:** A gate without a hit-rate metric can silently hurt (wrongly skipping real questions); measurement is what makes it safe to keep.
-- **Files to touch:** the guard from EX-07-1; `src/supabase-trace-sink.ts` (reuse the `warning`/event path) or a simple log; a new `scripts/gate-hit-rate.ts`.
-- **Done when:** you can report cheap-path hit rate and confirm no real questions were short-circuited.
-- **Estimated effort:** 1-4hr
+- **Exercise ID:** [B1.14] (Phase 1 — LLM foundations)
+- **What to build:** Log how many turns `isTrivial` would catch over a real session, to size the savings before committing to the gate.
+- **Why it earns its place:** Justifies the optimization with data — if 0% of traffic is trivial, the gate isn't worth the misroute risk.
+- **Files to touch:** instrumentation in `src/session.ts`; depends on [B1.13]'s `isTrivial`.
+- **Done when:** a session report prints the fraction of turns classified trivial and the tokens those turns would have spent.
+- **Estimated effort:** <1hr
 
 ## Interview defense
 
-**Q: "Does buffr do anything cheaper than the LLM for trivial inputs?"**
+**Q: "Buffr calls the LLM on every turn, including 'hi'. How would you fix that, and what's the risk?"**
 
-No — `session.ask` calls `agent.answer` unconditionally, and the agent's prompt says "always call the search tool first," so even `"hi"` triggers an embedding, a pgvector search, and a synthesis call. There's no pre-LLM gate; the cheapest fix is a guard clause in `ask`.
-
-```
-  buffr today: "hi" ──► full loop (embed + search + model)
-  the fix:     "hi" ──► canned reply (no model)
-```
-
-*Anchor:* unconditional `agent.answer(question)` at `src/session.ts:62`; "always call the tool" at `rag-query-agent.ts:23`.
-
-**Q: "What's the risk of adding heuristic short-circuits?"**
-
-False positives — a too-eager rule that wrongly skips the model for a real question. The load-bearing safeguard is the *fall-through*: only short-circuit on cases you're certain about, fall through to the model on any doubt, and measure the hit rate to catch mistakes.
+Model answer: Add a heuristic gate in `session.ask()`, above the agent — a regex/length test that catches unambiguous trivial inputs (greetings, thanks) and returns a canned reply, skipping both the embedding call and the `gemma2:9b` generation. It has to live above the agent because the agent's system prompt hard-codes "always call search first," so the agent can't be the one to skip. The risk is the asymmetry: mis-skipping a real question gives the user a broken canned reply, which is far worse than mis-paying for a greeting. So I keep the trivial set tiny and fall through to the LLM whenever unsure — it's an optimization, never a correctness gamble.
 
 ```
-  conservative predicate + always fall through
-
-  sure it's trivial?  yes → canned     no → model (NEVER guess)
+the fix and its risk
+  gate in session.ask() (above agent) → isTrivial? → canned | full pipeline
+  risk: mis-skip real Q = broken UX  >>  mis-pay "hi" = wasted ms
+  ∴ tiny trivial set, fall through when unsure
 ```
 
-*Anchor:* the gate belongs before `agent.answer` at `src/session.ts:62`, with the model as the default exit.
+Anchor: *Cheap gate above the agent; bias toward paying, because misroute is the expensive error.*
 
 ## See also
 
-- `06-token-economics.md` — the expensive path this gate avoids (latency is the local budget).
-- `08-provider-abstraction.md` — the provider behind the expensive exit.
-- `../04-agents-and-tool-use/01-agents-vs-chains.md` — the loop the gate routes around.
-- `../06-production-serving/` — caching, the output-side cheap path.
+- `06-token-economics.md` — the cost this gate avoids paying.
+- `08-provider-abstraction.md` — the seam that makes a cheap-model router a one-line swap.
+- `../04-agents-and-tool-use/` — routing, the agentic version of this gate.

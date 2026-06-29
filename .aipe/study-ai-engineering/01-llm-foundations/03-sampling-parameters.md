@@ -1,229 +1,184 @@
 # Sampling Parameters
 
-*Decoding parameters — temperature / top-p / top-k — Industry standard.*
+*Industry name: decoding / sampling parameters (temperature, top-p, top-k). Type: **Industry standard.***
 
 ## Zoom out, then zoom in
 
-`01-what-an-llm-is.md` ended on a fact: the model's output is *sampled*, so the same prompt can give different answers. Sampling parameters are the dials on that pick. buffr leaves them at Gemma's defaults — it sets none in `src/` — which for a grounded RAG agent is a missed lever. Here's where the dials *would* sit.
+The model produces a probability for every next token. *Sampling* is how one token gets picked. Here's where that knob would sit — and the honest truth is buffr never turns it.
 
 ```
-  Zoom out — where the sampling dials live (and don't, in buffr)
-
-  ┌─ Agent layer ───────────────────────────────────────┐
-  │  RagQueryAgent.answer → runAgentLoop                  │
-  └──────────────────────────┬───────────────────────────┘
-                             │  ModelRequest {system, messages, tools}
-  ┌─ Provider layer ─────────▼───────────────────────────┐
-  │  GemmaModelProvider.complete → this.chat({...})       │
-  │     options?: { ★ temperature / top_p / top_k ★ }     │ ← the dials go HERE
-  │     buffr passes NONE → Ollama/gemma2:9b defaults     │   (currently empty)
-  └──────────────────────────┬───────────────────────────┘
-                             │  HTTP /api/chat
-  ┌─ Ollama / gemma2:9b ─────▼───────────────────────────┐
-  │  next-token sampling, using whatever defaults apply   │
-  └──────────────────────────────────────────────────────┘
+buffr stack — the sampling knob (currently untouched)
+┌───────────────────────────────────────────────────────────┐
+│ session.ts / RagQueryAgent   builds ModelRequest            │
+├───────────────────────────────────────────────────────────┤
+│ GemmaModelProvider.complete  payload: {model, messages,     │
+│                              stream:false}  ← no options{}  │
+├───────────────────────────────────────────────────────────┤
+│ ★ Ollama /api/chat options{} EMPTY → defaults apply         │ the knob, left at factory
+├───────────────────────────────────────────────────────────┤
+│ gemma2:9b   samples next token from the distribution        │
+└───────────────────────────────────────────────────────────┘
 ```
 
-Zoom in: at each next-token step the model produces a *ranking* over the whole vocabulary. Sampling parameters decide how that ranking becomes a single pick. **Temperature** flattens or sharpens the ranking; **top-k** keeps only the k highest; **top-p** keeps the smallest set whose probabilities sum past p. For a RAG agent that should parrot retrieved facts, you want the pick *boring and repeatable* — low temperature. buffr doesn't set that today, so this file is mostly study plus a Case-B exercise to expose it.
+Every other file in this section anchors to active code. This one is **Case B-ish: the capability exists in the stack but buffr never drives it.** Buffr sets no `temperature`, no `top_p`, no `top_k`. Ollama applies `gemma2:9b`'s defaults. This file teaches the knob, shows you the exact empty slot where it'd go, and makes wiring it the exercise.
 
-## Structure pass
+## Structure pass — trace *determinism* across the stack
 
-The dials would live at one layer, but they shape behavior at another. Trace the axis **how much randomness is allowed?** across the seam.
+Pick one axis: **is the output reproducible?** Trace it and find where reproducibility is lost.
 
 ```
-  Axis: "how random is the next token?" — across the request seam
-
-  ┌─ Agent / app layer ──────────────────────┐
-  │  decides INTENT: "be faithful to chunks" │  desired = LOW randomness
-  └─────────────────────┬─────────────────────┘
-                        │  seam: ModelRequest → chat options
-  ┌─ Provider/Ollama ───▼─────────────────────┐
-  │  actual SAMPLING happens here             │  actual = DEFAULT randomness
-  │  (buffr passes no temperature)            │  (intent never reaches here)
-  └───────────────────────────────────────────┘
+determinism, request → response
+  buffr request      │ no temperature set      │ reproducible? UNKNOWN
+  Ollama defaults    │ temperature = default>0 │ NON-deterministic  ★ flips here
+  gemma2:9b sample   │ random draw each call   │ different text per call
 ```
 
-The seam is the `this.chat({...})` call inside `GemmaModelProvider`. The app layer *knows* it wants faithful, low-variance answers — but that intent dies at the seam because buffr never encodes it as a `temperature` option. The axis "how random" should flip from "we want it low" above the seam to "it's low" below it; right now it flips to "whatever Gemma defaults to." That gap is the whole lesson of this file.
+The seam is Ollama's default temperature. Because buffr passes nothing, the default (greater than zero) applies, which means **the same question can yield different answers across runs.** That's invisible until you try to write a stable eval (file 05 of sub-section 05) or use the unwired `RubricJudge`, both of which want `temperature=0` to be reproducible. Buffr hasn't hit that wall yet because it has no automated generation eval wired — but the wall is there.
 
 ## How it works
 
-#### Move 1 — the mental model
+### Move 1 — the mental model: a dial from "boring" to "wild"
 
-You know how `Math.random()` gives a uniform pick, but you sometimes want a *weighted* pick — bias toward certain outcomes? Sampling parameters are the weighting controls on the model's next-token pick. The strategy: **the model gives you a probability distribution; temperature/top-k/top-p reshape or truncate it before you draw one sample.**
-
-```
-  Pattern — three dials reshaping the same next-token distribution
-
-  raw ranking for next token (after "The capital of France is"):
-    Paris   ████████████████  0.82
-    Lyon    ███               0.06
-    France  ██                0.04
-    a       ██                0.03  ... long tail ...
-
-  temperature ↓ (e.g. 0.1): sharpen → Paris ~0.99  → near-deterministic
-  temperature ↑ (e.g. 1.2): flatten → tail gets real odds → creative/risky
-
-  top-k = 1:  keep only {Paris}                 → always Paris (greedy)
-  top-p = 0.9: keep smallest set summing ≥ 0.9  → {Paris, Lyon} only
-```
-
-For RAG you want the left column: sharpen and truncate so the model picks the obvious, grounded token. For brainstorming you'd want the right.
-
-#### Move 2 — the step-by-step walkthrough
-
-**Where the dials would be passed.** aptkit's Gemma transport already has a slot for them — `options?: Record<string, unknown>` — but `complete` never fills it.
+You know `Math.random()` and a seed. Temperature is the seed's *intensity*: at 0 the model always takes the single most-likely token (deterministic, repetitive, safe); as temperature rises, lower-probability tokens get a real chance (creative, varied, riskier).
 
 ```
-  GemmaChatTransport payload — gemma-provider.ts:19-25 (annotated)
-
-  export type GemmaChatTransport = (payload: {
-    model: string;
-    messages: { role: string; content: string }[];
-    stream: false;
-    options?: Record<string, unknown>;   // ← temperature / top_p / top_k live HERE
-    signal?: AbortSignal;
-  }) => Promise<OllamaChatResponse>;
+the distribution, reshaped by temperature
+  raw probs over next token:   ▁▂▆█▃▁
+  ─────────────────────────────────────
+  temp = 0   →  pick the peak only      ████ ← always same token (argmax)
+  temp = 0.7 →  mostly peak, some spread ▂▄██▃ ← natural variety
+  temp = 1.5 →  flattened, wild          ▄▅▆▆▅▄ ← surprising / incoherent
 ```
 
-The slot maps straight onto Ollama's `options` object. Pass `{ temperature: 0.2 }` and Ollama honors it. The contract is ready; buffr just doesn't reach for it.
-
-**Where the call is made — with the slot empty.** Look at the actual `this.chat({...})` in `complete`:
+`top-k` and `top-p` are guardrails on top: top-k = "only consider the k most-likely tokens"; top-p (nucleus) = "only consider the smallest set of tokens whose probability sums to p." They clip the tail so high temperature doesn't pull in absurd tokens.
 
 ```
-  GemmaModelProvider.complete — gemma-provider.ts:69-74 (annotated)
-
-  lastResponse = await this.chat({
-    model: this.defaultModel,
-    messages,
-    stream: false,                              // (non-streaming — see 05-streaming)
-    ...(request.signal ? { signal: request.signal } : {}),
-  });                                            // ← NO `options`. No temperature set.
+top-k and top-p clip the tail before sampling
+  full vocab:  [the, base, knowledge, ... , aardvark, ... , zylophone]
+  top-k = 5 →  [the, base, knowledge, search, query]   ← keep 5, drop rest
+  top-p = 0.9→ [the, base, knowledge]                  ← keep until cumulative ≥ 0.9
+  then temperature samples WITHIN the kept set
 ```
 
-No `options` key. So sampling runs at Ollama's / `gemma2:9b`'s defaults for every buffr call. There's also nothing in `src/session.ts` or `src/config.ts` that sets a temperature — confirmed by reading both. This is the honest gap: buffr's answers are as random as the default allows, even though a grounded knowledge assistant wants them tight.
+### Move 2 — the moving parts
 
-**The one place a temperature *is* threaded — for contrast.** aptkit's `RubricJudge` (an eval component, not in buffr's hot path) does accept and pass a `temperature`. It's worth seeing so you know the plumbing exists.
+#### Bridge: this is the `options` object you never filled in
 
-```
-  Layers-and-hops — temperature plumbed (judge) vs not (buffr loop)
+In frontend, `fetch(url, options)` — when you omit `options`, you get defaults (GET, no headers). Same here. The Gemma transport has an `options` slot in its payload type, and buffr passes it empty. From `gemma-provider.ts:19–25` (the transport type) and `:69–74` (the call):
 
-  ┌─ RubricJudge (aptkit eval) ─┐  temperature ──► generateStructured
-  │  options.temperature        │  ──────────────► model.complete(opts)   ✔ threaded
-  └──────────────────────────────┘
+```ts
+export type GemmaChatTransport = (payload: {
+  model: string;
+  messages: { role: string; content: string }[];
+  stream: false;
+  options?: Record<string, unknown>;     // ← temperature/top_p/top_k would live HERE
+  signal?: AbortSignal;
+}) => Promise<OllamaChatResponse>;
 
-  ┌─ buffr session loop ────────┐  (no temperature)
-  │  GemmaModelProvider          │  ──────────────► chat({ ...no options }) ✗ default
-  └──────────────────────────────┘
-```
-
-`rubric-judge.ts:64,99-104` carries `temperature` into `generateStructured`; buffr's loop carries none. Same provider interface, opposite choices — the judge cares about calibrated scoring, buffr (today) doesn't encode any preference.
-
-#### Move 2.5 — current state vs future state
-
-This concept is built-but-not-active in buffr's path: the slot exists, the value doesn't.
-
-```
-  Phase A (now) vs Phase B (Case B) — sampling control
-
-  Phase A — TODAY                    Phase B — exposed temperature
-  ┌──────────────────────────┐       ┌──────────────────────────────┐
-  │ chat({ ...no options })  │       │ chat({ options: {            │
-  │ temperature = default    │  ──►   │   temperature: cfg.temp(0.2) │
-  │ answers vary run-to-run  │       │ }})  → grounded, repeatable  │
-  └──────────────────────────┘       └──────────────────────────────┘
-  what must change: pass an options object from config into the
-  transport. What does NOT change: the provider interface, the loop,
-  retrieval — all untouched.
+// ...inside complete():
+lastResponse = await this.chat({
+  model: this.defaultModel,
+  messages,
+  stream: false,
+  ...(request.signal ? { signal: request.signal } : {}),
+  // ← NO options. ModelRequest.temperature is never read by the Gemma provider.
+});
 ```
 
-The migration cost is tiny (one config field, one options object) because aptkit already exposes the slot.
+Annotation that matters: the `options` field is *typed and ready*, but `complete()` never populates it. Even `request.temperature` (which `generateStructured` does pass through for the `RubricJudge`) is silently dropped here — the Gemma provider doesn't forward it. So today, the dial is welded at Ollama's default.
 
-#### Move 3 — the principle
+```
+the empty slot
+  ModelRequest.temperature ──X──▶ (dropped by GemmaModelProvider)
+  payload.options          = (absent)
+        │
+        ▼
+  Ollama applies gemma2:9b defaults (temp≈0.7-ish, top_p, top_k built in)
+```
 
-Sampling parameters are where you encode *what kind of answer you want* — faithful and repeatable, or creative and varied. A grounded RAG agent wants low temperature so it parrots the retrieved facts instead of embroidering them. Leaving the dials at default isn't neutral; it's an unstated choice to accept whatever variance the model ships with. Name the choice, then set it.
+### Move 2.5 — current vs future state
+
+**Current:** no sampling params anywhere. Generation is at Ollama's defaults; output varies run to run. The `RubricJudge` (file 04) accepts a `temperature` option and `generateStructured` forwards it into `ModelRequest`, but the **Gemma provider drops it**, so even the judge can't get deterministic output today.
+
+**Future (the exercise):** thread an `options` object through `GemmaModelProvider`, mapping `request.temperature` (and configured top-p/top-k) into the Ollama payload. Then `temperature: 0` actually reaches the model, and reproducible evals become possible.
+
+```
+current → future
+  CURRENT:  request.temperature → [dropped] → Ollama default (>0)  ← varies
+  FUTURE:   request.temperature → options.temperature → Ollama     ← honored
+                                  (0 = deterministic, reproducible evals)
+```
+
+### Move 3 — the principle that generalizes
+
+> **Sampling is a policy choice, not a default. "Creative" and "reproducible" are opposite ends of one dial, and you should set it on purpose per use-case.**
+
+A RAG answer wants *low* temperature — you're grounding in retrieved facts, you don't want invention. An LLM judge wants temperature **0** — the same input must score the same way every run, or your eval is noise. Buffr leaving the dial at the default means generation is mildly creative *by accident*, and any future judge is non-reproducible *by accident*. Accidents are not a policy.
 
 ## Primary diagram
 
-```
-  Sampling in buffr — the dials, present in the contract, absent in use
+The knob, its empty slot in buffr, and what setting it unlocks.
 
-  next-token distribution (inside gemma2:9b)
+```
+sampling, the whole picture
+  gemma2:9b raw distribution over next token
         │
-        │  reshaped by → temperature (sharpen/flatten)
-        │                top-k       (keep k best)
-        │                top-p       (keep cumulative p)
+   ┌────┴──────────────────────────────────────────┐
+   │  top_k / top_p clip the tail   ← NOT SET       │
+   │  temperature reshapes peak     ← NOT SET       │
+   └────┬──────────────────────────────────────────┘
+        │  buffr passes options:{} (empty)
         ▼
-  ┌─ Provider seam (gemma-provider.ts) ───────────────────────────┐
-  │  transport payload.options ── slot exists [gemma:19-25]       │
-  │  complete() → chat({...}) ── slot left EMPTY [gemma:69-74]    │ ← buffr's gap
-  └───────────────────────────────────────────────────────────────┘
-        │ contrast
-        ▼
-  RubricJudge → generateStructured(temperature) [rubric-judge.ts:99] ← plumbed
-        │
-        ▼
-  Phase B exercise: thread cfg.temperature → options.temperature
+  Ollama defaults sample → one token → text
+  ─────────────────────────────────────────────
+  consequence: same question, different answers run-to-run
+  blocked: deterministic RubricJudge, reproducible generation evals
 ```
 
 ## Elaborate
 
-Temperature comes from the softmax that turns the model's raw scores (logits) into probabilities: dividing logits by a temperature `T` before softmax sharpens (`T<1`) or flattens (`T>1`) the distribution. `T→0` approaches greedy decoding (always the top token); `T=1` is the model's "natural" distribution. Top-k and top-p (nucleus sampling) are truncation strategies layered on top — they decide *which* tokens are even eligible before temperature weights them.
-
-For an application engineer the takeaway is that these are the cheapest behavior dials you have — no retraining, no prompt rewrite, just a number. RAG, structured extraction, and any task where you want the *same* answer to the *same* input lean low. Open-ended generation leans higher. buffr sits squarely in the first camp and should set a low temperature; that it doesn't yet is the gap this file names. This connects forward to `04-structured-outputs.md` (low temperature makes valid JSON more likely) and `05-evals-and-observability/` (non-determinism is what makes evals statistical rather than exact).
+- **Origin.** Temperature comes from the softmax: dividing logits by T before normalizing. T→0 sharpens to argmax; T→∞ flattens to uniform. Top-k (Fan 2018) and nucleus/top-p (Holtzman 2019) were introduced to fix high-temperature incoherence by truncating the unreliable tail.
+- **Adjacent concepts.** *Tokenization* (02) produces the distribution this file samples from. *Evals* (sub-section 05) is the consumer that *needs* `temperature=0`. *Structured output* (04) is more reliable at low temperature — less drift away from the required JSON shape.
+- **Honest gap.** Not just unset — the Gemma provider actively **drops** `request.temperature`. Wiring sampling is two changes: forward the value *and* expose a config for it. Don't claim buffr "uses defaults intentionally"; it uses them because the plumbing was never run.
+- **What to read next.** File 04 — structured output, which is the use-case that benefits most from turning this dial to 0.
 
 ## Project exercises
 
-No curriculum file present; exercises derived from the codebase. This concept is **not yet exercised** — Case B (expose a temperature config).
+### Thread sampling parameters through the Gemma provider
 
-### EX-03-1 — Expose and wire a generation temperature
+- **Exercise ID:** [B1.5] (Phase 1 — LLM foundations) — **Not yet implemented** (Case B; the slot exists, nothing fills it).
+- **What to build:** Make `GemmaModelProvider.complete` map `request.temperature` (and constructor-configured `top_p`/`top_k`) into the Ollama `payload.options`. Add a `temperature` knob to buffr's session config and default RAG answers to a low value (e.g. 0.2). Note the provider lives in aptkit and is consumed by buffr — if you can't edit aptkit, wrap it with a buffr-side provider that injects `options` before delegating, mirroring file 01's logging-provider pattern.
+- **Why it earns its place:** This is the single change that unlocks reproducible evals and the `RubricJudge`. Today the dial is welded; this is the wrench.
+- **Files to touch:** `src/session.ts:46` (configure temperature); `src/config.ts` (read an env var); a buffr-side `src/sampling-provider.ts` wrapper if aptkit is read-only.
+- **Done when:** passing `temperature:0` produces byte-identical output across two runs of the same prompt; the default RAG path runs at a configured low temperature.
+- **Estimated effort:** 1–4hr
 
-- **Exercise ID:** EX-03-1
-- **What to build:** Add an `OLLAMA_TEMPERATURE` (default `0.2`) to `loadConfig`, and pass `options: { temperature }` through `GemmaModelProvider` construction so buffr's RAG answers run at low, repeatable temperature instead of the model default.
-- **Why it earns its place:** Closes the named gap — encodes "be faithful to retrieved chunks" as an actual sampling choice. Highest-leverage, lowest-effort behavior change in the repo.
-- **Files to touch:** `src/config.ts` (add field), `src/session.ts:46` (pass into `GemmaModelProvider` options). aptkit's transport already accepts `options` — do not edit aptkit.
-- **Done when:** the same question asked twice returns the same answer (or near-identical), and a test confirms the temperature reaches the transport payload.
-- **Estimated effort:** 1-4hr
+### Prove non-determinism today, determinism after
 
-### EX-03-2 — Measure the variance the default temperature costs you
-
-- **Exercise ID:** EX-03-2
-- **What to build:** A script that asks one fixed question N times at default temperature and again at `0.2`, then reports answer-text variance (e.g. distinct outputs), demonstrating *why* low temperature matters for a knowledge assistant.
-- **Why it earns its place:** Makes the abstract "non-determinism" concrete and justifies EX-03-1 with data.
-- **Files to touch:** new `scripts/temperature-variance.ts`; reads `src/session.ts`. No aptkit edits.
-- **Done when:** the script prints variance at both settings and the low setting is visibly tighter.
-- **Estimated effort:** 1-4hr
+- **Exercise ID:** [B1.6] (Phase 1 — LLM foundations)
+- **What to build:** A script that asks the same question 5 times and reports how many distinct answers come back — run it before [B1.5] (expect variation) and after with `temperature:0` (expect one distinct answer).
+- **Why it earns its place:** Converts "non-deterministic by accident" from a claim into a measured before/after.
+- **Files to touch:** new `scripts/sampling-variance.ts`; depends on [B1.5].
+- **Done when:** before-run shows >1 distinct answer, after-run shows exactly 1.
+- **Estimated effort:** <1hr
 
 ## Interview defense
 
-**Q: "What temperature does buffr use for its RAG answers, and is that right?"**
+**Q: "What temperature does buffr use and why?"**
 
-It uses the model default — buffr sets none. For a grounded assistant that's wrong; you'd want a low temperature (~0.2) so the model repeats retrieved facts faithfully instead of sampling from the tail and embroidering.
-
-```
-  RAG wants the left dial
-
-  faithful answer  ◄── low T ── default ── high T ──► creative answer
-       (want this)                              (not for RAG)
-```
-
-*Anchor:* `chat({...})` at `gemma-provider.ts:69-74` passes no `options` — the slot at `:19-25` is unused.
-
-**Q: "Temperature vs top-p — what's the difference?"**
-
-Temperature *reshapes* the whole distribution (sharper or flatter); top-p *truncates* it to the smallest set of tokens whose probabilities sum past p, then samples from that nucleus. One scales odds; the other cuts the tail.
+Model answer: Honestly, none — buffr passes no `options` to Ollama, so `gemma2:9b`'s default (above zero) applies and answers vary run to run. That's an accident, not a policy. For a RAG system grounded in retrieved facts I'd set a low temperature (~0.2) to suppress invention, and for the LLM judge I'd set 0 for reproducibility. The deeper issue is that the Gemma provider currently drops `request.temperature` entirely, so even the judge can't get deterministic output — fixing that is one change to forward the value into the payload `options`.
 
 ```
-  reshape vs truncate
-
-  temperature: ████▁▁▁ → █████▁▁  (re-weight all)
-  top-p 0.9:   ████▁▁▁ → ████ | ✂ (drop the tail past 0.9)
+the honest answer
+  buffr today  │ options:{} → Ollama default → varies    ← accident
+  should be    │ RAG: temp≈0.2  │  judge: temp=0          ← policy
+  blocker      │ provider drops request.temperature       ← fix first
 ```
 
-*Anchor:* both ride in the same `options` object slot — `gemma-provider.ts:19-25`.
+Anchor: *No dial set today; the slot exists, the provider drops it, fixing it unlocks reproducible evals.*
 
 ## See also
 
-- `01-what-an-llm-is.md` — why output is sampled in the first place.
-- `04-structured-outputs.md` — low temperature raises the odds of valid structured output.
-- `08-provider-abstraction.md` — the provider seam where these options would be passed.
-- `../05-evals-and-observability/02-eval-methods.md` — why non-determinism makes evals statistical.
+- `02-tokenization.md` — the token distribution this knob reshapes.
+- `04-structured-outputs.md` — the path that most wants temperature near 0.
+- `../05-evals-and-observability/` — the consumer that breaks without `temperature=0`.

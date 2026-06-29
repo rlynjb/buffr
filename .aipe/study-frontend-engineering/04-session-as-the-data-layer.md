@@ -1,291 +1,221 @@
-# session-as-the-data-layer
+# Session as the data layer — the container/presentational seam
 
-*Container/data-layer seam · client-state vs canonical-state · Project-specific*
+**Industry name(s):** container/presentational split · smart vs dumb components · data-layer façade · dependency injection via props. **Type:** Industry-standard pattern, project-specific: the façade is a plain object, not a component.
+
+---
 
 ## Zoom out, then zoom in
 
-In your browser apps the seam between "the component" and "the data" is usually a
-`fetch()` URL or a react-query hook. Here it is a single object — `ChatSession` — handed to
-`<Chat>` as a prop. The component knows nothing about Postgres, Ollama, the aptkit agent, or
-the trace sink; it knows two methods, `ask` and `close`. That object *is* the data layer,
-and the boundary between it and the component is the most interesting seam in this repo.
+`<Chat>` renders. `createChatSession` knows about Postgres, Ollama, the agent, the embedder, and memory. The two are joined by exactly one method call. Here's the seam — it's the single most important boundary in this frontend, because it's the one that keeps the UI free of backend concerns.
 
 ```
-  Zoom out — the component / data-layer split
+  Zoom out — the seam between presentation and data
 
-  ┌─ UI layer (terminal) ───────────────────────────────────────┐
-  │  <Chat session={session}/>   src/cli/chat.tsx:9              │
-  │   owns: turns / input / busy  (DISPLAY state)                │
-  │   calls: session.ask(q)  ·  session.close()                 │
-  └───────────────────────────────┬──────────────────────────────┘
-                  ★ THE SEAM ★      │  ChatSession contract: { ask, close }
-  ┌─ Data layer ──────────────────▼──────────────────────────────┐
-  │  createChatSession()  src/session.ts:34   (CANONICAL state)   │ ← we are here
-  │   warm pg pool · one held conversation · agent built once    │
-  │   ask(): persist → answer → flush → remember                 │
-  └───────────────────────────────┬──────────────────────────────┘
-                                  │  pg / Ollama / aptkit
-  ┌─ Storage + model layer ───────▼──────────────────────────────┐
-  │  Postgres + pgvector   ·   Ollama                            │
-  └──────────────────────────────────────────────────────────────┘
-```
-
-**Zoom in.** Two patterns meet here. **Container/data-layer separation**: `<Chat>` is pure
-presentation + local UI state; `ChatSession` is all the side effects. And **client-copy vs
-canonical-copy**: `turns` (in the component) is a *display* mirror; the real record lives in
-Postgres, written by `ask()`. The question: *who owns the truth about the conversation, and
-what does the component actually hold?*
-
-## Structure pass
-
-One axis: **state — who owns it, where does it live, is it the source of truth?** This axis
-makes the seam pop because state-ownership *flips* across it.
-
-```
-  One axis — "where's the source of truth?" — across the seam
-
-  ┌─ <Chat>  chat.tsx:9 ──────────────────────────────────┐
-  │  turns: Turn[]   → DISPLAY copy, never re-read from DB │  → not the truth
-  └───────────────────────────────────────────────────────┘
-            ═══════════ session.ask(q) ═══════════  (state-ownership flips here)
-  ┌─ ChatSession  session.ts:34 ──────────────────────────┐
-  │  messages / conversations in Postgres                 │  → the truth
-  │  persisted every turn  (session.ts:62-67)             │
+  ┌─ Presentation (UI layer) ────────────────────────────┐
+  │  <Chat>  (src/cli/chat.tsx)                           │ ← presentational
+  │    knows: turns, input, busy, how to render            │
+  │    knows NOTHING about pg / agent / Ollama            │
+  └───────────────────────────┬──────────────────────────┘
+        ════════════════════════╪═══  ◄── THE SEAM: session.ask()
+  ┌─ Data layer (the container) ▼────────────────────────┐
+  │  createChatSession()  (src/session.ts:34)            │ ← smart
+  │    warm pg Pool · embedder · store · pipeline · tool  │
+  │    · model · profile · memory · agent · trace sink    │
+  └───────────────────────────┬──────────────────────────┘
+                  pg · HTTP    │
+  ┌─ Storage / Provider ──────▼──────────────────────────┐
+  │  Postgres + pgvector  ·  Ollama (gemma2)              │
   └───────────────────────────────────────────────────────┘
 ```
 
-- **Layers:** component (display state) → session contract (`ask`/`close`) → persistence
-  (pg).
-- **Axis:** state-ownership. Above the seam, `turns` is a throwaway display buffer. Below
-  it, Postgres holds the canonical, replayable record. The *same conversation* has two
-  representations and the seam is where ownership flips from "ephemeral UI" to "durable
-  truth."
-- **The load-bearing seam:** the `ChatSession` interface (`session.ts:29-32`), exactly two
-  methods. It is a deep module in Ousterhout's sense — a one-line interface (`ask(q) →
-  string`) hiding a warm pool, a held conversation, an agent loop, a trace sink, and a memory
-  engine. *That narrow interface over a deep implementation is why `<Chat>` stays 64 lines.*
+**Zoom in:** the concept is the **container/presentational split** — keep the component dumb about *where data comes from*, push all acquisition behind a façade it merely calls. The façade here is `ChatSession`, a two-method object (`ask`, `close`) injected into `<Chat>` as a prop (`src/cli/chat.tsx:9`). The component awaits `session.ask(q)` and renders the string back. It never imports `pg`. That decoupling is the whole pattern.
+
+---
+
+## The structure pass
+
+One axis: **"who knows about the backend?"** Trace it across the seam and it flips hard — full ignorance on one side, full knowledge on the other. That clean flip is what makes the seam load-bearing.
+
+```
+  Axis — "knows the backend exists?" — across the seam
+
+  ┌─ <Chat> (presentational) ─────┐
+  │  imports: ink, react,         │   → NO: knows only session.ask(): Promise<string>
+  │  TextInput, Spinner, session  │
+  └───────────────┬───────────────┘
+        ══════════╪══════════  ◄── seam: the ChatSession contract
+  ┌─ createChatSession ▼──────────┐
+  │  imports: pg pool, embedder,  │   → YES: owns the entire pipeline
+  │  store, agent, trace, memory  │
+  └───────────────────────────────┘
+```
+
+- **Layers:** the component (renders) → the façade contract (`ChatSession`) → the data layer (pg/agent/Ollama).
+- **Axis (knowledge of the backend):** `<Chat>` knows *nothing* — its only data import is `session` and the `ChatSession` type (`chat.tsx:5`). Cross the seam and `createChatSession` knows *everything* — nine collaborators wired in `session.ts:39–57`.
+- **The seam:** the `ChatSession` type (`src/session.ts:29–32`) — a contract of two async methods. It's a **deep module** seam: a tiny interface (`ask`/`close`) hiding a large implementation (warm pool, agent loop, trace flush, memory write). The interface depth argument is owned by `study-software-design`; here we care that it lets the UI stay testable and dumb.
+
+---
 
 ## How it works
 
 ### Move 1 — the mental model
 
-You know the container/presentational split: a "smart" container does the data work and
-passes plain data down to a "dumb" presentational component. Here the container work is
-hoisted *out of React entirely* into a plain async factory, and the component receives the
-result as a prop. The shape:
+You've drawn this seam a hundred times: a "container" component that fetches and a "presentational" one that just renders props. The twist here is that the container isn't a component at all — it's a plain factory that returns an object you inject. Same boundary, lighter mechanism.
 
 ```
-  The pattern — narrow interface, deep implementation
+  Pattern — dumb view, smart façade, one contract between
 
-   <Chat>  ──calls──►  session.ask(q)  ─────────►  string
-     │                       │
-     │ knows only:           │ hides:
-     │   ask(q) → string     │   pg pool, conversation id,
-     │   close()             │   agent.answer(), trace.flush(),
-     │                       │   memory.remember()
-     ▼                       ▼
-   64 lines, zero            76 lines, all the
-   infra knowledge           side effects
+   ┌──────────────┐   session prop (DI)   ┌──────────────────┐
+   │   <Chat>     │ ◄──────────────────── │ createChatSession │
+   │ (renders)    │                       │  (wires backend)  │
+   │              │ ── session.ask(q) ──► │                   │
+   │              │ ◄── Promise<string> ─ │                   │
+   └──────────────┘                       └──────────────────┘
+       knows only the contract                owns everything
 ```
 
-The strategy: **the component holds display state and a reference to a deep data module; the
-module holds the canonical state and every side effect.** The seam between them is two
-method signatures.
+The strategy in one sentence: **the component depends on a narrow contract, not on the backend; the backend is constructed once and injected, so the view can't see past the seam.**
 
 ### Move 2 — the walkthrough
 
-#### The contract — two methods, defined as a type
+#### The contract — two async methods, nothing else
 
 ```ts
-// src/session.ts:29-32
+// src/session.ts:29–32
 export type ChatSession = {
   ask(question: string): Promise<string>;
   close(): Promise<void>;
 };
 ```
 
-This type *is* the seam. `<Chat>` imports it (`chat.tsx:5`) and takes it as a prop
-(`chat.tsx:9`). Everything the component can do to the data layer is in these two lines. The
-boundary condition: because the contract is this narrow, the entire data layer — pg, Ollama,
-aptkit, the trace sink — could be swapped for an in-memory fake in a test, and `<Chat>`
-wouldn't know. That substitutability is the payoff of a narrow seam.
+This type *is* the seam. Bridge from what you know: it's the prop interface of a presentational component — the only surface the view is allowed to touch. Everything the data layer does (persist, retrieve, generate, trace, remember) collapses into `ask(): Promise<string>`. The view can't reach a pg client through this type even if it tried; the contract physically hides it.
 
-#### The factory — built once, before mount
-
-```tsx
-// src/cli/chat.tsx:62-63
-const session = await createChatSession();   // all the wiring happens here, once
-render(<Chat session={session} />);          // component receives the ready object
-```
-
-`createChatSession()` (`session.ts:34`) does the expensive one-time setup *before* React
-mounts: it opens the warm pg pool (`session.ts:39`), builds the embedder/store/pipeline/tool
-(`session.ts:40-45`), constructs the model and agent (`session.ts:46-57`), and starts one
-conversation (`session.ts:55`). All of this is hoisted out of the component so `<Chat>`
-never re-runs it. The boundary condition: this is a top-level `await` (`chat.tsx:62`) — if
-it throws (e.g. `DATABASE_URL` unset, `session.ts:37`), it rejects *before* `render()`, so
-there is no rendered error state, just a crash. (`audit.md` red-flag 4.)
-
-#### `ask()` — the four side effects behind one return value
-
-From `<Chat>`'s view, `ask(q)` is one await that returns a string. Behind the seam it is
-four ordered steps:
+#### The container — wired once, off the render path
 
 ```ts
-// src/session.ts:60-71
-async ask(question: string): Promise<string> {
-  await persistMessage(pool, conversationId, 'user', question);  // 1 write user turn (canonical)
-  const answer = await agent.answer(question);                    // 2 run the RAG agent
-  await trace.flush();                                            // 3 persist the trajectory
-  try {
-    await memory.remember({ conversationId, question, answer });  // 4 best-effort episodic memory
-  } catch {
-    // swallow: memory is best-effort, the turn already succeeded
-  }
-  return answer;
+// src/session.ts:34–57 (condensed)
+export async function createChatSession(): Promise<ChatSession> {
+  const pool = createPool(cfg.databaseUrl);                    // warm pg pool
+  const embedder = new OllamaEmbeddingProvider({ … });
+  const store = new PgVectorStore({ pool, … });
+  const pipeline = createRetrievalPipeline({ embedder, store });
+  const tool = createSearchKnowledgeBaseTool(pipeline, { minTopK: 4 });
+  const tools = new InMemoryToolRegistry([tool.definition], { … });
+  const model = new ContextWindowGuardedProvider(new GemmaModelProvider({ … }), { maxTokens: 8192 });
+  const profile = await loadProfile(pool, cfg.appId);
+  const memory = createConversationMemory({ embedder, store });
+  const conversationId = await startConversation(pool, cfg.appId);
+  const agent = new RagQueryAgent({ model, tools, profile, trace });
+  return { async ask(q) { … }, async close() { … } };
 }
 ```
 
-Walk it as a layers-and-hops — the one `await session.ask(q)` from the component fans into
-four sinks:
+Nine collaborators, wired top to bottom, all **before** `<Chat>` ever renders — the factory is `await`ed at module load (`chat.tsx:62`) and the resulting object is handed in as a prop. This is the "smart" half: it owns construction order, the warm pool, the one long-lived conversation. The component sees none of it. Boundary condition: because this runs once at startup, the cost (pool warm-up, profile load) is paid before the UI appears, not per turn — that's deliberate (the long-lived session is the point; see `study-system-design`).
 
-```
-  Layers-and-hops — one ask() call, four persistence hops
-
-  ┌─ UI ─────────┐  await session.ask(q)   ┌─ ChatSession.ask()  session.ts:60 ─────┐
-  │ <Chat>       │ ──────────────────────► │  hop 1 persistMessage → pg (user turn) │
-  │ chat.tsx:28  │                         │  hop 2 agent.answer() → Ollama+pgvector│
-  │              │                         │  hop 3 trace.flush()  → pg (trajectory)│
-  │ setTurns     │  answer string          │  hop 4 memory.remember → pgvector      │
-  │ (+buffr)  ◄──┤ ◄────────────────────── │        (best-effort, try/catch)        │
-  └──────────────┘                         └────────────────────────────────────────┘
-```
-
-The key insight for the *frontend* seam: hop 1 writes the user turn to the database, and the
-component *also* appends that same turn to `turns` (`chat.tsx:25`). Those are two independent
-writes of the same fact — the component never reads the turn back from the DB. So `turns` is
-a **write-through display copy**, and Postgres is canonical. They can diverge: if hop 1
-succeeds but hop 2 throws, the catch in `<Chat>` (`chat.tsx:30`) shows an `error:` bubble
-while the DB holds the orphaned user turn with no answer. (`audit.md` red-flag 1.) The
-load-bearing decision worth naming: step 4 is wrapped in its own `try/catch` (`session.ts:64-69`)
-so a memory-write failure *never* loses the answer the user is about to see — the answer is
-already in hand by step 3.
-
-#### `close()` — the teardown, called from `/exit`
-
-```ts
-// src/session.ts:72-74
-async close(): Promise<void> {
-  await pool.end();   // drain the warm pg pool
-}
-```
-
-The component calls this on `/exit` or `/quit` *before* exiting Ink (`chat.tsx:18-21`):
+#### Injection — the seam crossed at the boundary
 
 ```tsx
-// src/cli/chat.tsx:18-22
-if (q === '/exit' || q === '/quit') {
-  await session.close();   // drain the pool first
-  exit();                  // then tear down the Ink app
-  return;
-}
+// src/cli/chat.tsx:9, 62–63
+function Chat({ session }: { session: ChatSession }) { … }   // receives the façade as a prop
+// ...
+const session = await createChatSession();   // construct the container
+render(<Chat session={session} />);          // inject it
 ```
 
-The ordering matters: `close()` before `exit()` so the pg pool drains cleanly before the
-process tears down the render loop. The boundary condition: `exit()` (from `useApp()`,
-`chat.tsx:10`) unmounts the Ink tree and returns control to the shell — it is the terminal
-analog of unmounting the React root.
+This is dependency injection, plain and direct: build the data layer outside the component, pass it in. Bridge: it's the same move as passing an `onSubmit` handler or a data prop down to a dumb child — the child declares what it needs (`{ session }`) and the parent supplies it. Because injection happens at the root, swapping the real `ChatSession` for a fake one in a test is a one-line substitution — the component never constructs its own dependency, so there's nothing to mock around.
+
+#### The one call site
+
+```tsx
+// src/cli/chat.tsx:28
+const answer = await session.ask(q);
+```
+
+That single line is every interaction the UI has with the entire backend. Persist, retrieve-augmented generation, trace flush, memory write — all of it is behind those eleven characters. The view's job ends at "await the string, render it."
+
+### Move 2 variant — the load-bearing skeleton
+
+The irreducible core: **a narrow contract + a factory that builds the impl + injection at the boundary.** Named by what breaks:
+
+- Collapse the **contract** (let `<Chat>` import `createPool` directly) → the component now knows pg; you can't render it without a database, and the test must stand up Postgres.
+- Drop **injection** (have `<Chat>` call `createChatSession()` itself) → the component owns its dependency's lifecycle; no fake session, no isolated render test.
+- Drop the **factory** (inline the wiring into the component) → the nine collaborators and their construction order leak into the view; the deep module becomes a shallow mess.
+
+Optional hardening not present: the contract is a hand-written type, not an interface with multiple implementations — there's one `ChatSession` today. That's fine; the seam is real because the *boundary* is enforced, not because there are two impls.
 
 ### Move 3 — the principle
 
-**Keep the data layer out of the component, behind the narrowest interface that does the
-job.** `<Chat>` is testable and tiny because all the side effects live behind `ask`/`close`.
-And know which copy of your state is canonical: `turns` is for the eyes, Postgres is for the
-record, and they are written separately on purpose. The general lesson — a deep module with a
-narrow interface buys you a presentation layer that doesn't have to know how the sausage is
-made, and a clear answer to "which copy is the truth" prevents the whole class of
-client/server divergence bugs.
+The container/presentational split survives every framework rotation because it's not a React idea — it's **dependency inversion**: the high-level policy (render a conversation) depends on an abstraction (`ChatSession`), not on the low-level details (pg, Ollama, the agent). Buffr proves you don't need a "container component" to get it — a plain factory plus a prop is enough. The test that the seam is real: can you render `<Chat>` with a three-line fake session and no database? Here, yes — and that's the entire payoff.
+
+---
 
 ## Primary diagram
 
-The full seam, both methods, both state copies, all four hops.
+The full seam: construction below, injection at the root, one call across.
 
 ```
-  session-as-the-data-layer — the complete frame
+  buffr's data seam — construct below, inject at root, one call across
 
-  ┌─ UI layer  src/cli/chat.tsx ─────────────────────────────────┐
-  │  <Chat>  display state: turns / input / busy                 │
-  │    onSubmit:  await session.ask(q)        :28                │
-  │    /exit:     await session.close() → exit() :18-21          │
-  └───────────────┬──────────────────────────────────────────────┘
-       ChatSession │ contract  { ask, close }   session.ts:29-32
-  ┌────────────────▼─────────────────────────────────────────────┐
-  │  createChatSession()  src/session.ts:34  (built once :62)    │
-  │    warm pool :39 · agent built once :57 · 1 conversation :55 │
-  │                                                              │
-  │    ask(q):  1 persistMessage  → pg   (canonical user turn)   │
-  │             2 agent.answer    → Ollama + pgvector            │
-  │             3 trace.flush     → pg   (trajectory)            │
-  │             4 memory.remember → pgvector  (best-effort)      │
-  │    close(): pool.end()                                       │
-  └───────────────┬──────────────────────────────────────────────┘
-                  │
-  ┌───────────────▼──────────────────────────────────────────────┐
-  │  Postgres + pgvector  —  the CANONICAL conversation record   │
-  └──────────────────────────────────────────────────────────────┘
+  ┌─ entry (src/cli/chat.tsx:62–63) ────────────────────────┐
+  │  const session = await createChatSession()              │
+  │  render(<Chat session={session} />)        ── inject ──┐ │
+  └────────────────────────────────────────────────────────┼─┘
+  ┌─ Presentation: <Chat> ──────────────────────────────────▼┐
+  │  receives { session } · renders turns/input/busy         │
+  │  await session.ask(q)  ◄── the ONLY backend touch        │
+  └───────────────────────────┬──────────────────────────────┘
+        ════════════════════════╪═══  ◄── ChatSession contract (session.ts:29)
+  ┌─ Data layer: createChatSession (session.ts:34) ▼─────────┐
+  │  pool · embedder · store · pipeline · tool · model ·      │
+  │  profile · memory · conversation · agent · trace          │
+  └───────────────────────────┬──────────────────────────────┘
+                  pg · HTTP    │
+  ┌─ Storage / Provider ──────▼──────────────────────────────┐
+  │  Postgres + pgvector  ·  Ollama (gemma2)                 │
+  └───────────────────────────────────────────────────────────┘
 ```
+
+---
 
 ## Elaborate
 
-Hoisting the data layer into a plain factory rather than a `useEffect` + Context is a
-deliberate choice that fits a single-screen CLI: there is exactly one consumer, the session
-outlives every render, and it is built before mount, so there is nothing for an effect to
-manage. In a browser SPA with multiple screens you would more likely wrap this in a Context
-provider or a query client so any component could reach it — but that is solving a problem
-this app doesn't have. The pattern that *would* change the shape: if a second screen needed
-the same session, or if the conversation had to survive a remount, the factory would move
-behind a provider. For one held conversation in one process, the prop is the honest seam.
-The client/canonical split here is the frontend face of a system-design decision — see
-`study-system-design` for the warm-pool-and-held-conversation architecture and why Postgres
-is the source of truth.
+Container/presentational was Dan Abramov's 2015 framing; hooks later blurred the *component* version of it (you can `useQuery` inside a "presentational" component now). What didn't blur is the underlying principle — keep the view dumb about data acquisition. Buffr lands on the cleanest expression: the data layer is a plain async factory, injected once. The same seam is what lets the broader system swap the backend (the one-shot `ask` CLI vs this long-lived session) without touching the UI — and what lets `study-software-design` call `ChatSession` a deep module: maximal hidden implementation behind a minimal interface.
+
+Read next: `03-async-ui-with-a-busy-flag.md` (the await around `ask()`) and `02-hooks-state-in-a-cli.md` (why `turns` is a projection of what lives below this seam). System-level ownership — the warm pool, the single conversation across turns — is `study-system-design`; the interface-depth argument is `study-software-design`.
+
+---
 
 ## Interview defense
 
-**Q: The component appends to `turns` AND the session writes to Postgres. Isn't that storing
-the same thing twice?**
+**Q: "Where's your data-fetching layer, and how does the UI stay testable?"**
+
+Behind a façade. "`<Chat>` is presentational — it receives a `ChatSession` prop and only ever calls `session.ask()`. All the backend wiring lives in `createChatSession`, constructed once and injected at the root. To test the UI I pass a three-line fake session; no Postgres needed, because the component never constructs its own dependency."
 
 ```
-  turns (component)          messages (Postgres)
-  ─────────────────          ───────────────────
-  display copy               canonical record
-  written on submit/answer   written by ask() hop 1+3
-  never read back            replayable, full-signal
-  lost on exit               durable across sessions
+  the seam, testability view
+  <Chat>  ──session.ask()──►  ChatSession contract
+                                  ├─ real: pg + agent + Ollama
+                                  └─ fake: () => "stub answer"   ← test swaps here
 ```
 
-Yes, deliberately. `turns` is the *display* copy — it exists to paint the screen and is
-thrown away on exit. Postgres is the *canonical* copy — the replayable, full-signal record.
-The component never reads `turns` back from the DB; it's a write-through mirror. The honest
-caveat is they can diverge: if the DB write of the user turn succeeds but the agent throws,
-the screen shows an error while the DB holds an orphaned turn. Naming that divergence is the
-signal you understand which copy is the truth. Anchor: *"`turns` is for the eyes, Postgres is
-the record — two writes of the same fact, only one is canonical."*
+Anchor: *"The component imports the `ChatSession` type, never `pg` — the contract physically hides the backend (chat.tsx:5 vs session.ts:39)."*
 
-**Q: Why is `memory.remember()` wrapped in its own try/catch when the whole `ask` could just
-throw?**
+**Q: "Why a plain factory instead of a container component?"**
 
-Because by the time step 4 runs, the answer the user asked for is already computed (step 2)
-and the trajectory is already persisted (step 3). A failure to write *episodic memory* is not
-a reason to lose the answer the user is about to see — so it is swallowed (`session.ts:64-69`)
-and `ask()` returns the answer anyway. It is a best-effort enrichment, ranked below the
-turn's success. Naming that ordering — answer first, memory best-effort — shows you read the
-failure model, not just the happy path. Anchor: *"memory is best-effort; the turn already
-succeeded, so a memory-write failure can't be allowed to drop the answer."*
+Because there's nothing to render in the container — it's pure construction. A component would add a render cycle and lifecycle for zero benefit. A factory returning an injected object is the lighter expression of the same dependency inversion. The load-bearing point: the pattern is the *boundary*, not the mechanism — container component, hook, or factory all achieve it; pick the lightest.
+
+```
+  same seam, three mechanisms
+  container component │ custom hook │ plain factory  ← buffr
+  all = "view depends on a contract, not the backend"
+```
+
+---
 
 ## See also
 
-- `02-hooks-state-in-a-cli.md` — the `turns` display copy this file contrasts with the DB.
-- `03-async-ui-with-a-busy-flag.md` — the `await` whose four hops this file unpacks.
-- `00-overview.md` — the network-seam diagram.
-- Cross-link: `study-system-design` — warm pool, held conversation, source-of-truth ownership.
-- Cross-link: `study-software-design` — `ChatSession` as a deep module with a narrow interface.
+- `03-async-ui-with-a-busy-flag.md` — the await wrapping `session.ask()`
+- `02-hooks-state-in-a-cli.md` — `turns` as a projection of state below the seam
+- `01-react-without-the-dom.md` — the view that consumes this façade
+- `audit.md` lens 3 (component-architecture)
+- cross-link: `study-software-design` (`ChatSession` as a deep module), `study-system-design` (warm pool, long-lived conversation)

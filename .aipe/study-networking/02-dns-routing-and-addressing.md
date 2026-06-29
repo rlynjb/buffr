@@ -1,222 +1,203 @@
-# DNS, Routing, and Addressing
+# 02 · DNS, Routing, and Addressing
 
-**Industry name(s):** name resolution / host addressing / origin
-resolution. **Type:** Industry standard.
+> Name resolution and the loopback interface (`localhost`) — Industry standard
+> · the host string (`OLLAMA_HOST`) + the connection string (`DATABASE_URL`)
 
 ## Zoom out, then zoom in
 
-Before any byte travels, the runtime has to turn a *name* into an
-*address*. buffr names its two providers as strings — one a literal
-`http://localhost:11434`, one whatever host is buried in `DATABASE_URL` —
-and the runtime resolves each to an IP before opening a socket. Here's
-where that naming lives.
+Where does "addressing" even live in buffr? In exactly two strings: the host
+the model server lives at, and the connection string the database lives at.
+buffr does no routing, runs behind no proxy, sits behind no edge. Resolution is
+whatever the OS does with two hostnames.
 
 ```
-  Zoom out — where addressing happens
+  Zoom out — addressing lives in two config values
 
-  ┌─ Config layer ───────────────────────────────────────────┐
-  │  src/config.ts                                           │
-  │    ollamaHost = OLLAMA_HOST || 'http://localhost:11434'  │ ← ★ here
-  │    databaseUrl = DATABASE_URL  (host embedded in URL)    │ ← ★ here
-  └─────────────────────────────┬─────────────────────────────┘
-                                │  name strings handed down
-  ┌─ Transport layer (runtime / aptkit / pg / Node) ─────────┐
-  │  resolve name → IP  →  open TCP socket                    │
-  └─────────────────────────────┬─────────────────────────────┘
-                                │
-  ┌─ Network ────────────────────▼───────────────────────────┐
-  │  loopback 127.0.0.1  (default)   or   a real DB host      │
-  └──────────────────────────────────────────────────────────┘
+  ┌─ Config layer (src/config.ts) ──────────────────────────────┐
+  │  ★ ollamaHost  = "http://localhost:11434"   (line 14)       │
+  │  ★ databaseUrl = process.env.DATABASE_URL   (line 12)       │
+  └───────┬──────────────────────────────────┬──────────────────┘
+          │ resolve "localhost"               │ resolve DB host
+          ▼                                   ▼
+  ┌─ Loopback interface ────┐         ┌─ Resolver (OS / DNS) ────┐
+  │  127.0.0.1 / ::1        │         │  host inside DATABASE_URL│
+  │  → Ollama, never on NIC │         │  → Postgres (reindb)     │
+  └─────────────────────────┘         └──────────────────────────┘
 ```
 
-Zoom in. The concept is **addressing**: how a human-readable name becomes
-the IP a socket connects to. In this repo it's almost entirely the
-*trivial* case — `localhost` — which is exactly why it's worth being
-precise about what's happening, because the trivial case hides the
-machinery that a real remote host would expose.
+Zoom in: addressing is the step *before* any connection — turning a name into an
+address the kernel can dial. The loopback interface (`localhost`) is the
+interesting case, because it's a name that deliberately never leaves the machine.
 
 ## Structure pass
 
-**Layers.** Config (names as strings) → transport (resolution) → network
-(IP). buffr owns only the top layer; it never resolves anything itself.
+**Layers.** Config (two strings) → Resolution (OS resolver / loopback) →
+Transport (the actual socket, covered in `03`). This file owns the middle layer
+only.
 
-**Axis — "where does the name get turned into an address?"** Trace it:
+**Axis — trace `does this leave the machine?`**
 
 ```
-  axis: "who resolves the name to an IP?"
+  axis = "does resolution leave the box?"
 
-  ┌─ config.ts ──────────────┐  → NOBODY (just a string)
-  └──────────────────────────┘
-  ┌─ pg / aptkit fetch ──────┐  → the LIBRARY asks the OS resolver
-  └──────────────────────────┘
-  ┌─ OS resolver ────────────┐  → localhost: hosts file → 127.0.0.1
-  │                          │     real host: /etc/resolv.conf → DNS
-  └──────────────────────────┘
+  ┌─ Ollama host ──────────────┐   "localhost"
+  │  → loopback 127.0.0.1/::1  │   NEVER leaves the box
+  └────────────────────────────┘   (no DNS query on the wire)
 
-  buffr never touches DNS; it only supplies the name
+  ┌─ Database host ────────────┐   host inside DATABASE_URL
+  │  → could be localhost,     │   MAY leave the box, depending
+  │    a LAN IP, or a DNS name │   on what the credential names
+  └────────────────────────────┘
 ```
 
-**Seam.** The load-bearing seam is config → transport: buffr's
-responsibility *ends* at producing a correct name string. Everything past
-that — resolution, routing, the socket — is the library's. That seam is
-why "DNS" barely appears in buffr's code: the code lives entirely on the
-naming side of it.
+**Seam.** The load-bearing seam is the loopback boundary itself: `localhost`
+resolves *without DNS* — the OS short-circuits it to the loopback interface.
+That's why the model server has effectively zero name-resolution latency and
+zero DNS-failure surface.
 
 ## How it works
 
 ### Move 1 — the mental model
 
-You've typed `fetch('http://localhost:3000/api')` a thousand times. You
-never wrote the DNS lookup — the browser/runtime did it. buffr is
-identical: it produces the URL/host string and hands it to a library that
-does the lookup. The only thing worth learning here is *what the name
-resolves to* in each of the two cases, because the default (`localhost`)
-and the realistic alternative (a remote DB) resolve through completely
-different paths.
+You know how typing `localhost:3000` in a browser hits your own dev server
+without ever touching the internet? Same primitive here. `localhost` is a
+reserved name the OS maps to the loopback interface — a virtual network device
+that loops packets straight back to the kernel. No router, no DNS server, no
+NIC.
 
 ```
-  Resolution paths — two names, two routes
+  Pattern — loopback short-circuits the resolver
 
-  name "localhost"  ──► hosts file (/etc/hosts) ──► 127.0.0.1
-                        (no DNS query leaves the box)
-
-  name "db.example"  ─► resolver (/etc/resolv.conf) ─► DNS server
-                        ──► A/AAAA record ──► public IP
+   "localhost"
+       │
+       ▼ (OS hosts file / built-in rule, NOT a DNS query)
+   127.0.0.1  (IPv4)  or  ::1  (IPv6)
+       │
+       ▼
+   loopback interface  ──►  kernel  ──►  Ollama on :11434
+       (packets never reach a network card)
 ```
 
-### Move 2 — walk the addressing
+### Move 2 — the walkthrough
 
-**Ollama: a hard-coded loopback host.** `src/config.ts:14` —
-`ollamaHost: env.OLLAMA_HOST || 'http://localhost:11434'`. The default
-name is `localhost`. `localhost` is *not* a DNS name in practice — it's an
-entry in the OS hosts file that maps to `127.0.0.1` (loopback). No DNS
-query leaves the machine. The packet never touches a network card; the
-kernel loops it back internally. This is the cheapest possible "network"
-hop and the reason the missing TLS (file `04`) is defensible: there's no
-wire to sniff.
+**The model-server address is one literal string.** buffr never parses a URL,
+never does a manual lookup. It hands the host straight to aptkit
+(`src/config.ts:14`):
 
-```
-  Ollama addressing — name to loopback, no DNS
-
-  ┌─ config.ts:14 ─────┐  "http://localhost:11434"
-  │ ollamaHost         │ ──────────────┐
-  └────────────────────┘               │ aptkit fetch()
-                                       ▼
-                              OS hosts file lookup
-                                       │ localhost → 127.0.0.1
-                                       ▼
-                              kernel loopback (lo0) — no NIC, no DNS
-                                       ▼
-                              Ollama listening on 127.0.0.1:11434
+```ts
+ollamaHost: env.OLLAMA_HOST || 'http://localhost:11434',
 ```
 
-The override path matters: set `OLLAMA_HOST=http://192.168.1.50:11434`
-and the same code now addresses another box on your LAN — still no DNS
-(it's already an IP), but now real packets on a real interface. Set a
-hostname and *now* the resolver runs. buffr's code doesn't change; the
-string does. That's the whole point of keeping the host in config.
+That string flows into both providers verbatim (`src/session.ts:40,46`):
 
-**Postgres: the host is hidden inside the connection string.** `src/db.ts`
-passes `connectionString: databaseUrl` to `pg.Pool`. The host isn't a
-separate field — it's a component of the URL
-(`postgres://user:pass@HOST:5432/reindb?sslmode=...`). node-postgres parses
-the URL, extracts the host, and resolves it. With a local Postgres the
-host is `localhost` (hosts file again). With a remote/managed Postgres —
-the realistic Supabase case the project context names — the host is a real
-DNS name, and *this* is the one place in the entire repo where a genuine
-DNS query would leave the machine.
-
-```
-  Postgres addressing — host extracted from the URL
-
-  DATABASE_URL = postgres://u:p@HOST:5432/reindb?sslmode=require
-                                  └─┬─┘
-  ┌─ db.ts:4-5 ──────────┐        │ pg parses URL, pulls host
-  │ new pg.Pool({         │        ▼
-  │   connectionString }) │   resolve HOST:
-  └───────────────────────┘     localhost → 127.0.0.1 (hosts file)
-                                 db.foo.supabase.co → DNS A record
-                                          ▼
-                                 open TCP to resolved IP : 5432
+```ts
+const embedder = new OllamaEmbeddingProvider({ model: '…', host: cfg.ollamaHost });
+const model = new ContextWindowGuardedProvider(new GemmaModelProvider({ host: cfg.ollamaHost }), …);
 ```
 
-**Proxies, CDN, edge, load balancers — none.** There is no proxy config,
-no edge layer, no LB. Both connections are direct: process → resolved IP →
-provider. A managed Postgres might sit behind the provider's own
-connection pooler/proxy (e.g. a PgBouncer endpoint), but that's
-*their* infrastructure reached as a normal host — buffr neither knows nor
-configures it. From buffr's side it's one direct connection to one host.
-`not yet exercised`: any proxy/edge buffr itself stands up or routes
-through.
+Inside aptkit, `defaultHttpTransport` strips a trailing slash and appends the
+path — `fetch(\`${base}/api/chat\`)`. The *resolution* of `localhost` happens
+inside `fetch` → Node's network stack → the OS, which sees `localhost` and uses
+the loopback rule rather than emitting a DNS query. So the model server has no
+DNS dependency at all.
+
+**The database address is opaque to buffr.** buffr never sees the host — it's
+buried inside `DATABASE_URL` and parsed by node-postgres, not by buffr
+(`src/db.ts:4`):
+
+```ts
+return new pg.Pool({ connectionString: databaseUrl });
+```
+
+Whether that host is `localhost`, a `192.168.x.x` LAN address, or a real DNS
+name like `db.internal.example.com` is decided entirely by the credential. If
+it's a DNS name, *then* a real lookup happens — and DNS-resolution latency and
+failure become real. Today, for a single-device setup, it's almost certainly
+loopback or a local socket, so the same "no real DNS" property holds. But this is
+**inferred** from the single-device design, not pinned by code — buffr can't see
+the host.
+
+```
+  Layers-and-hops — two addresses, two resolution paths
+
+  ┌─ Config ──────────────────────────────────────────┐
+  │ ollamaHost "localhost"   databaseUrl (host hidden) │
+  └───┬───────────────────────────────┬────────────────┘
+      │ loopback rule                  │ resolver (DNS if a name)
+      ▼                                ▼
+  ┌─ Loopback ──────┐            ┌─ OS resolver ───────┐
+  │ 127.0.0.1 / ::1 │            │ name → A/AAAA record │
+  │ → Ollama        │            │ → Postgres           │
+  └─────────────────┘            └──────────────────────┘
+   no DNS, no failure             DNS only if host is a name
+```
+
+### Move 2.5 — current vs future
+
+Phase A (now): both endpoints are effectively local. `localhost` for Ollama is
+loopback by definition; the DB is single-device. No DNS on the wire, no resolver
+failure mode.
+
+Phase B (if the DB moves off-box): the moment `DATABASE_URL` names a remote host,
+a real DNS lookup enters the path — and with it, resolution latency, TTL caching,
+and a brand-new failure mode (NXDOMAIN, resolver timeout) that buffr has no
+handling for. What *doesn't* change: the Ollama path stays loopback; buffr's code
+stays identical (it already just passes strings through).
 
 ### Move 3 — the principle
 
-**Keep names in config, not in code, and resolution stops being your
-problem.** buffr never writes a DNS lookup, yet it works against
-loopback, a LAN IP, or a remote DNS-named host — because the only thing
-that changes is a string in `.env`. The code lives on the naming side of
-the resolution seam, and that's what makes the same code portable across
-all three addressing cases.
+Addressing is the cheapest place to make a system local-first: point everything
+at loopback or the same LAN and the entire class of DNS/routing/edge failures
+disappears. buffr gets this for free on the model path and inherits it (probably)
+on the DB path — but only the model path is *guaranteed* loopback by the literal
+`localhost`.
 
 ## Primary diagram
 
-Both providers' addressing in one frame.
-
 ```
-  Addressing — both boundaries, name → IP → socket
+  buffr addressing — recap
 
-  ┌─ config.ts ──────────────────────────────────────────────┐
-  │  ollamaHost  = "http://localhost:11434"   (:14)          │
-  │  databaseUrl = "postgres://…@HOST:5432/…" (:11, in URL)  │
-  └───────┬───────────────────────────────────┬──────────────┘
-          │ host string                        │ host inside URL
-          ▼ aptkit fetch                        ▼ pg.Pool parses
-   ┌─ resolver ─────────┐              ┌─ resolver ───────────┐
-   │ localhost          │              │ localhost → hosts    │
-   │   → hosts file     │              │ OR db host → DNS ★   │
-   │   → 127.0.0.1      │              │   (only real DNS hit │
-   └────────┬───────────┘              │    in the whole repo)│
-            │ TCP 11434                └─────────┬────────────┘
-            ▼                                    │ TCP 5432
-     Ollama (loopback)                           ▼
-                                          Postgres (local or remote)
+  Ollama:    "http://localhost:11434"  (src/config.ts:14)
+             → loopback 127.0.0.1/::1, no DNS, no NIC
+
+  Postgres:  host inside DATABASE_URL  (src/db.ts:4, opaque to buffr)
+             → loopback / LAN today (inferred); DNS only if a remote name
+
+  routing/proxy/CDN/edge/load-balancer:  not yet exercised
 ```
 
 ## Elaborate
 
-The reason `localhost` resolving via the hosts file (not DNS) matters:
-it's instant, it never fails on a flaky network, and it can't be
-intercepted off-box. Most of buffr's "no timeouts / no retries"
-posture (file `07`) is *survivable* precisely because the default
-addressing is loopback — there's no DNS latency, no resolution failure, no
-route flap to retry around. Point `DATABASE_URL` at a remote DNS host and
-that assumption evaporates: now DNS can be slow or fail, and the absence
-of timeouts becomes a real risk. Addressing and resilience are coupled.
+`localhost` resolving without DNS is an OS guarantee (the loopback rule predates
+DNS being on the hot path), which is why local model servers universally bind
+there — zero resolution cost, and the loopback interface can't be reached from
+off-box, so it's a free trust boundary. That last part (loopback as a security
+boundary) is `study-security`'s to judge; this guide only notes that the address
+itself never leaves the machine.
 
 ## Interview defense
 
-**Q: "Does this app do DNS resolution?"**
+**Q: Does buffr do any DNS resolution?**
 
-> Effectively no, in the default config. Ollama is `localhost`, which
-> resolves via the hosts file to 127.0.0.1 — no DNS query leaves the box.
-> Postgres' host lives inside `DATABASE_URL`; if that points at localhost
-> it's the hosts file again. The only real DNS hit is when `DATABASE_URL`
-> names a remote host — a managed Postgres — and even then pg and the OS
-> resolver do it, not buffr's code.
+Answer: "Effectively none. The model server is `localhost`, which the OS maps to
+the loopback interface without a DNS query (`src/config.ts:14`). The database
+host is hidden inside `DATABASE_URL` and parsed by node-postgres; for a
+single-device setup it's loopback or LAN, so still no real DNS — but buffr can't
+see the host, so that's inferred from the design, not pinned by code."
 
 ```
-  localhost → hosts file → 127.0.0.1   (no DNS)
-  remote DB host → resolver → DNS → public IP   (the one real lookup)
+  "localhost" → loopback rule → 127.0.0.1, no DNS query emitted
 ```
 
-Anchor: *"`config.ts:14` defaults to `localhost`; the only DNS surface is
-a remote host in `DATABASE_URL`."*
+**Q: What changes if you move Postgres to a remote host?**
+
+Answer: "A real DNS lookup enters the connect path, adding resolution latency and
+a new failure mode buffr doesn't handle (NXDOMAIN, resolver timeout). The code
+doesn't change — buffr already just passes the connection string through — but the
+failure surface grows."
 
 ## See also
 
-- `01-network-map.md` — the boundaries these names address.
-- `03-tcp-udp-connections-and-sockets.md` — the socket opened to the
-  resolved IP.
-- `04-tls-and-trust-establishment.md` — `sslmode` lives in the same
-  `DATABASE_URL` that carries the host.
-- `study-security` — `DATABASE_URL` as a secret; host trust.
+- `03-tcp-udp-connections-and-sockets.md` — what happens *after* the address resolves
+- `04-tls-and-trust-establishment.md` — why a remote DB host makes sslmode urgent
+- `study-security` — loopback as a trust boundary

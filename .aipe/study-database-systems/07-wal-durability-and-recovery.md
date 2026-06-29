@@ -1,72 +1,91 @@
 # WAL, durability, and recovery
 
-**Subtitle:** write-ahead log / fsync durability boundary / crash recovery — *Industry standard*
+**Industry name:** the write-ahead log (WAL) · durability / fsync ·
+crash recovery and point-in-time recovery (PITR) — *Industry standard*
 
 ---
 
-## Zoom out, then zoom in
+## Zoom out — where this concept lives
 
-Durability is the D in ACID: once a transaction commits, it survives a crash.
-Postgres delivers it with a write-ahead log — every change is appended to the
-WAL and flushed to disk *before* the transaction reports success. This repo
-doesn't configure any of it; durability is whatever Postgres's default
-`fsync=on` gives. The interesting question isn't "how is the WAL tuned" (it
-isn't) — it's "what does `commit` actually promise, and where does the repo's
-two-transaction write leave a recovery gap."
+This is the bottom of the map (`01`) — seam 3, the durability boundary. It answers the
+last ACID letter: **D**urability. When `upsert`'s `commit` returns, what *exactly* is
+guaranteed to survive a power cut? The WAL is the mechanism, and where buffr's
+durability story ends (no archiving, no PITR) is the honest edge of this file.
 
 ```
-  Zoom out — the WAL underpins every commit
+  where durability sits
 
-  ┌─ Service ───────────────────────────────────────────────┐
-  │  upsert() commit · documents commit · messages commit    │
-  └──────────────────────────┬───────────────────────────────┘
-  ┌─ Transaction layer ──────▼───────────────────────────────┐
-  │  begin/commit (05)                                        │
-  └──────────────────────────┬───────────────────────────────┘
-  ┌─ ★ WAL + durability ★ ───▼───────────────────────────────┐ ← THIS FILE
-  │  append change → fsync → ack commit · crash → replay WAL │
-  └──────────────────────────────────────────────────────────┘
+  ┌─ Transaction layer ─────────────────────────────────────┐
+  │  commit returns to the application                       │
+  └───────────────────────────┬─────────────────────────────┘
+                              │  "is it safe now?"
+  ┌─ Durability layer ────────▼─────────────────────────────┐
+  │  ★ write-ahead log (WAL) — fsync'd on commit ★           │
+  │  the heap pages get written LATER (checkpoint)           │
+  └───────────────────────────┬─────────────────────────────┘
+                              │  recovery replays WAL after a crash
+  ┌─ Storage layer ───────────▼─────────────────────────────┐
+  │  heap pages on disk + WAL segments                       │
+  │  (no archiving / no PITR configured in this repo)        │
+  └───────────────────────────────────────────────────────────┘
 ```
 
-Zoom in: the WAL is an append-only log of *intentions*. Before Postgres modifies
-a data page in the buffer cache, it writes a record describing the change to the
-WAL and flushes that. So even if the modified data page never made it to disk
-before a crash, the WAL has the record, and recovery replays it. The question:
-what's the exact durability boundary for each write in this repo, and what does a
-crash mid-`indexDocumentRow` leave behind?
+---
+
+## Zoom in — narrow to the concept
+
+The question: *when buffr's `commit` returns, what survives a crash — and what
+wouldn't?* The counterintuitive answer: at commit, the *data pages aren't written to
+their final home yet*. What's durable is the **write-ahead log** — a sequential record
+of the change, fsync'd to disk before commit returns. The heap catches up later. Name
+the WAL, walk commit → crash → recovery, then mark exactly where buffr's durability
+guarantee stops (local crash recovery: yes; point-in-time restore: not configured).
 
 ---
 
 ## The structure pass
 
-**Layers.** Durability decomposes into:
+### Layers
 
 ```
-  ┌─ Commit ack ─────────────────────┐  client hears "committed"
-  └──────────────┬────────────────────┘
-  ┌─ WAL fsync ──▼────────────────────┐  the durability boundary
-  │   record flushed to disk           │  ← "committed" means past here
-  └──────────────┬────────────────────┘
-  ┌─ Data page write (later) ▼────────┐  buffer cache → disk, lazily
-  │   checkpoint flushes dirty pages   │
-  └────────────────────────────────────┘
+  commit returns          →  the application believes the write is safe
+    WAL fsync             →  the change is durably logged (THIS is the guarantee)
+      checkpoint          →  dirty heap pages flushed to their final location (later)
+        recovery          →  on restart, replay WAL from last checkpoint
 ```
 
-**Axis — trace `durability` (will it survive a crash?) down the layers.** *At
-what point is this write safe?*
+### Axis: trace *"what is durable RIGHT NOW?"* down the layers
 
-- Commit ack: the client *believes* it's durable.
-- WAL fsync: it *is* durable — the change is on disk in the log. **This is the
-  boundary.**
-- Data page write: the data file catches up later; irrelevant to durability
-  because the WAL already has the change.
+```
+  "what survives a power cut at this instant?"  — traced at commit time
 
-**Seam — the fsync at commit.** Above it: the change lives only in RAM (buffer
-cache + WAL buffers) — a crash loses it. Below it: the WAL record is on disk — a
-crash *replays* it. The guarantee that flips is *survives a crash*, and it flips
-exactly at the `commit`'s fsync. Every `commit` in the repo crosses this seam;
-the cross-transaction write in `indexDocumentRow` crosses it *twice*, separately
-— which is the recovery gap.
+  ┌──────────────────────────────────────────────┐
+  │ heap page in shared_buffers (RAM)             │  → NOT durable. it's in memory.
+  └───────────────────────┬───────────────────────┘
+      ┌───────────────────▼───────────────────┐
+      │ WAL record fsync'd to disk             │  → DURABLE. this is the line.
+      └───────────────────┬───────────────────┘
+          ┌───────────────▼───────────────────┐
+          │ heap page flushed at checkpoint    │  → eventually durable, not yet
+          └────────────────────────────────────┘
+
+  the answer flips at the WAL fsync: the change is safe once it's in the log,
+  NOT once it's in the heap. recovery rebuilds the heap from the log.
+```
+
+### Seams
+
+```
+  seam 1  RAM ↔ WAL         the durability line. Before the WAL fsync, a crash loses
+                          the write. After it, the write survives — even though the
+                          heap page is still dirty in memory.
+  seam 2  local ↔ archived   buffr's edge. WAL gives LOCAL crash recovery for free.
+                          PITR (restore to a past moment) needs WAL *archiving*,
+                          which is NOT configured. → not yet exercised.
+```
+
+Hand off: durability lives at the WAL fsync, not the heap write; local recovery is
+automatic; point-in-time recovery is the unconfigured edge.
 
 ---
 
@@ -74,206 +93,209 @@ the cross-transaction write in `indexDocumentRow` crosses it *twice*, separately
 
 ### Move 1 — the mental model
 
-You've built optimistic UI with a pending queue: you record the intended change
-in a durable local log *before* you apply it to the screen, so if the render
-crashes you can replay the queue and rebuild the UI. The WAL is exactly that
-discipline inside the database — write the intent to a durable log first, apply
-it to the data pages whenever, and on crash replay the log to reconstruct any
-applied-but-not-yet-flushed changes.
+You know how you append to a log file before doing the expensive work, so that if you
+crash mid-work you can replay the log and finish? That's *exactly* the WAL — "write the
+intent to a sequential log, fsync it, *then* you're allowed to say it's done; apply it
+to the real data structure whenever's convenient." The heap is the expensive
+random-access structure; the WAL is the cheap sequential append that makes the heap
+recoverable.
 
 ```
-  WAL — log the intent before the change (the kernel)
+  write-ahead logging — the kernel
 
-  1. modify request ─► write WAL record (the intent)
-                            │
-  2.                    fsync WAL to disk  ◄── commit waits HERE
-                            │
-  3.                    ack "committed"  (now durable)
-                            │
-  4.  (lazily)  apply change to data page in cache → disk at checkpoint
+  a write happens:
+    1. record the change in the WAL (sequential append)   ← cheap, fast
+    2. fsync the WAL to disk                               ← the durability point
+    3. NOW commit may return "done"  ◄─── the guarantee
+    4. ...later... flush the dirty heap page (checkpoint)  ← lazy, batched
 
-  crash after step 2 → recovery replays WAL record → change restored
-  crash before step 2 → change never happened (correct: not acked)
+  crash after step 3, before step 4?
+    → on restart, REPLAY the WAL from the last checkpoint → heap rebuilt. no data lost.
 ```
 
-The load-bearing part is the ordering: **WAL first, data page second.** Drop
-that and a crash between the data-page write and its log record could leave a
-half-written page with no way to know — the "write-ahead" *is* the guarantee.
+The name says it: write *ahead* — the log is written *before* the data page it
+describes. That ordering is the whole invariant.
 
-### Move 2 — walk durability in this repo
+### Move 2 — walk it
 
-**Every commit waits on the WAL fsync.** When `upsert()` runs `commit`
-(`pg-vector-store.ts:58`), Postgres flushes the WAL records for all the chunk
-inserts to disk, *then* returns. By the time the `await client.query('commit')`
-resolves in JS, the chunks are durable. Same for the documents insert's implicit
-commit (`runtime.ts:11`) and each `messages` insert
-(`supabase-trace-sink.ts:27`). **What this means concretely:** if the Node
-process dies the instant after a `commit` resolves, those rows are still there
-when Postgres restarts — recovery replays the WAL.
-
-**Recovery is automatic and the repo relies on it implicitly.** Nobody wrote
-recovery code; there's none to write. On restart after a crash, Postgres reads
-the WAL from the last checkpoint forward and replays every committed change not
-yet in the data files. The repo's only "recovery" posture is idempotency: the
-`on conflict do update` writes (`05`, `06`) mean re-running an index or replaying
-a turn can't duplicate rows.
-
-**The two-transaction write has a two-fsync recovery gap.** Connect this to `05`.
-`indexDocumentRow` commits txn A (documents), then txn B (chunks) — two separate
-fsyncs, two separate durability boundaries:
+**Commit fsyncs the WAL, not the heap.** When `PgVectorStore.upsert` runs `commit`
+(`pg-vector-store.ts:58`), here's what physically happens, step by step:
 
 ```
-  indexDocumentRow — durability boundaries, two separate crossings
+  upsert commit — what's on disk at each step
 
-  txn A: INSERT documents → commit → fsync ✓ ──► [documents DURABLE]
-                                                       │
-                                          ⚠ crash here
-                                                       │
-  txn B: begin → insert chunks → commit → fsync ✓ ──► [chunks DURABLE]
-
-  recovery after a crash in the gap:
-    WAL has txn A (durable) → documents row survives
-    txn B never committed   → no chunks
-    result: a durable, retrievable-from-corpus document with no embeddings
+  step 1:  insert chunk → row written into a heap page in shared_buffers (RAM)
+  step 2:  the change also appended to the WAL buffer
+  step 3:  commit → WAL buffer fsync'd to the WAL segment on disk  ◄── DURABLE HERE
+  step 4:  commit returns to upsert's await
+  step 5:  ...minutes later... checkpoint flushes the dirty heap page to its file
 ```
 
-This is the same anomaly as `05`, seen through the durability lens: recovery
-faithfully restores exactly what committed, and what committed was *only* the
-documents row. WAL recovery doesn't heal the gap — it *preserves* it. The heal is
-the application's job (re-index, idempotent). That's the honest boundary: the WAL
-guarantees per-transaction durability, not cross-transaction atomicity.
+**Consequence:** the instant `await client.query('commit')` returns, the chunk
+insert is safe even though the actual `chunks` heap page might still be sitting dirty
+in RAM. If the machine loses power at step 4, restart replays the WAL and the chunk is
+there. If it loses power at step 2 (before the fsync), the transaction never committed
+and the chunk simply isn't there — which is correct, because `commit` never returned.
 
-**Backups, PITR, archiving: none of it.** The repo configures no WAL archiving
-(`archive_mode`), no base backups, no point-in-time recovery. There's no
-`pg_dump` in the scripts, no restore path. For a single-device personal RAG
-where the source corpus is re-indexable markdown and the database is a derived
-artifact, that's a defensible call — you can rebuild from source. But it's worth
-naming: **there is no backup strategy, and the durability story stops at "the WAL
-survives a process crash," not "the data survives a disk failure."** → `not yet
-exercised`.
+**This is what makes upsert's atomicity real.** Tie it back to file `05`: `upsert`
+wraps its chunk loop in `begin`/`commit`. The reason "all chunks or none" *survives a
+crash* is the WAL — the commit record is the atomic flip. WAL replay either finds the
+commit record (replay all the chunk inserts) or doesn't (replay none). The transaction
+boundary from file `05` and the durability boundary here are the same line, enforced
+by the same WAL commit record.
 
-### Move 2.5 — current state vs future state (durability posture)
+**The cross-transaction anomaly, through the durability lens.** Now re-read file `05`'s
+anomaly with the WAL in hand. `indexDocumentRow` does two commits:
 
 ```
-  Phase A — now                    Phase B — if the DB becomes authoritative
-  ─────────────────────────────    ──────────────────────────────────────
-  fsync=on default (per-txn safe)   same — plus WAL archiving (archive_mode)
-  no backups / no PITR              base backup + continuous WAL archive
-  recovery = restart replay only    PITR: restore to any point in time
-  corpus is the real source         DB holds data not re-derivable (memory!)
+  the two-transaction write — durability view
 
-  the tell: conversation MEMORY chunks are NOT re-derivable from the corpus.
-  the day those matter, "rebuild from source" stops being a backup plan.
+  insert documents ──commit (WAL fsync #1)──► DURABLE ░crash░ insert chunks (no commit)
+       │                                                              │
+       ▼ WAL has the documents commit record                         ▼ no WAL record
+  recovery replays documents row → it's there                   chunks → never written
+
+  the document is durably, permanently orphaned. the WAL faithfully preserved
+  exactly the half that committed. durability is working CORRECTLY — the bug is
+  that the atom was the wrong size (file 05), not that durability failed.
 ```
 
-That last line is the real finding: indexed *documents* are re-derivable, but
-*memory* chunks (`meta.kind='memory'`, written by `memory.remember()` in
-`session.ts`) are generated from conversations and aren't in the source corpus.
-Once memory matters, "no backups, rebuild from markdown" no longer covers
-everything.
+That's the subtle point: durability did its job perfectly. It durably persisted the
+inconsistent state, because the inconsistency was baked in at the transaction
+boundary, above the WAL. Durability can't save you from an atom that's the wrong size.
+
+**Migrations are WAL-protected too.** `runMigration` (`migrate.ts:8-20`) wraps the
+whole schema script in one `begin`/`commit`. Postgres supports transactional DDL, so
+the WAL makes the *entire migration* atomic and durable: either the whole
+`001_agents_schema.sql` applied and survives a crash, or none of it did. A crash
+mid-migration leaves the schema untouched, not half-built. That's a real strength worth
+naming — many databases can't do transactional DDL.
+
+**Where buffr's durability story ends — local recovery only.** Here's the honest edge.
+WAL gives you *crash recovery* for free: kill the process, restart, Postgres replays
+the WAL from the last checkpoint, and you're consistent. buffr gets that automatically;
+it configures nothing and needs nothing.
+
+What buffr does **not** have is anything *beyond* local crash recovery:
+
+```
+  durability ladder — buffr's rung
+
+  rung                          mechanism                buffr?
+  ────────────────────────────  ───────────────────────  ──────────────────
+  crash recovery (local)        WAL replay on restart     ✓ automatic, free
+  point-in-time recovery (PITR) WAL archiving + base      ✗ NOT configured
+                                backup → restore to any
+                                past moment
+  off-machine durability        replicate WAL to standby  ✗ NOT configured (file 08)
+  scheduled logical backup      pg_dump on a cron         ✗ not in repo
+```
+
+**Consequence:** a corrupted disk, an accidental `delete from chunks`, or a dropped
+table is *unrecoverable* in buffr today — there's no base backup + archived WAL to
+roll back to, and no `pg_dump` schedule. The only safety net is "the source markdown
+still exists, so re-index from scratch." For a single-device personal RAG corpus
+that's a defensible call — the documents are reproducible from their source files
+(`source_path`, `documents.source_path`) — but it's a *choice*, and it's invisible. The
+moment the corpus contains anything not reproducible from source (the conversation
+trajectories in `messages`, the episodic memory chunks), that gap becomes real data
+loss with no restore path.
 
 ### Move 3 — the principle
 
-The WAL gives you exactly one durability promise: a *committed* transaction
-survives a crash, because its intent hit the log before the commit was
-acknowledged. It does not promise cross-transaction atomicity (the gap survives
-recovery, it doesn't get healed), and it does not protect against disk loss
-(that's backups, which this repo doesn't have). Knowing precisely where the
-durability boundary sits — at the per-transaction fsync — is what lets you reason
-about what a crash actually costs: here, at worst, an orphaned document a
-re-index fixes, and conversation memory that has no second copy.
+Durability is a *line drawn at the WAL fsync*, not at the heap write — commit means
+"the log is on disk," and the heap catches up lazily. That decoupling is what makes
+Postgres fast (sequential log writes, lazy random heap writes) *and* recoverable
+(replay the log). But durability only protects what the transaction boundary captured:
+it'll faithfully preserve an inconsistent state if the atom was the wrong size, and it
+gives you *local* recovery only — surviving a process crash is free, surviving a disk
+failure or a fat-fingered DELETE needs backups and archiving you have to set up
+deliberately.
 
 ---
 
 ## Primary diagram
 
-The full durability path and the recovery outcomes.
+The full durability picture: commit → WAL → checkpoint → recovery, with buffr's edge marked.
 
 ```
-  buffr-laptop — WAL durability + recovery
+  WAL durability in buffr — full recap
 
-  WRITE PATH (every commit):
-  ┌─ Service ─────┐  commit   ┌─ Postgres ───────────────────────┐
-  │ upsert()      │ ────────► │ 1. WAL record appended            │
-  │ documents     │           │ 2. fsync WAL  ◄── durability seam │
-  │ messages      │ ◄──────── │ 3. ack commit                     │
-  └───────────────┘  resolved │ 4. data page flushed @ checkpoint │
-                              └───────────────────────────────────┘
-
-  RECOVERY (on restart after crash):
-    replay WAL from last checkpoint → restore committed-but-unflushed
-
-  indexDocumentRow gap:  txn A durable ✓  ⚠  txn B lost  →  orphan doc
-    WAL preserves the gap; app heals via idempotent re-index
-
-  NOT CONFIGURED:  WAL archiving · base backups · PITR
-    risk: memory chunks (not in corpus) have no second copy
+  ┌─ Application ──────────────────────────────────────────────────────┐
+  │  upsert: await commit  ◄─── returns only after WAL fsync           │
+  └───────────────────────────┬────────────────────────────────────────┘
+                              │
+  ┌─ Durability layer ────────▼────────────────────────────────────────┐
+  │  1. change → shared_buffers (RAM, dirty heap page)                  │
+  │  2. change → WAL buffer                                             │
+  │  3. commit → WAL fsync to disk   ◄═══ THE DURABILITY LINE ═══       │
+  │  4. ...later... checkpoint flushes dirty heap pages                 │
+  │                                                                    │
+  │  crash → restart → replay WAL from last checkpoint → consistent     │
+  │  ✓ local crash recovery: AUTOMATIC                                  │
+  │  ✗ PITR / WAL archiving / pg_dump: NOT CONFIGURED                   │
+  │     → disk failure or bad DELETE = unrecoverable (re-index instead) │
+  └────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
 ## Elaborate
 
-The write-ahead logging rule — log the change before applying it — is the
-foundation of crash recovery in every serious database (Postgres WAL, MySQL
-redo log, SQLite WAL mode). It turns durability from "flush every data page on
-every commit" (slow, random I/O) into "append to one sequential log on every
-commit" (fast, sequential I/O) plus lazy background page writes at checkpoints.
-PITR builds on the same log: archive every WAL segment and you can replay the
-database forward to any moment, which is how you recover from "someone dropped a
-table at 2pm" rather than just a crash. This repo stops at crash recovery
-because the database is mostly a derived artifact — a deliberate scope, with the
-one caveat that memory chunks break the "rebuild from source" assumption. See
-`study-system-design` for the broader durability-boundary decision.
+Write-ahead logging is the foundational durability technique in every serious
+database (Postgres WAL, MySQL redo log, SQLite WAL mode). The shared insight: random
+writes to the data file are slow and unsafe to do eagerly, so you make durability cheap
+by appending to a sequential log and fsyncing *that*, then apply the changes to the data
+file lazily and in batches (the checkpoint). It's the same trick an event-sourced
+system uses — the log is the source of truth, the materialised state is a cache you can
+rebuild.
+
+PITR — the rung buffr skips — works by keeping one base backup plus every WAL segment
+since, so you can replay forward to any chosen moment ("restore to 3:00pm, just before
+the bad delete"). It's the standard production safety net and it's genuinely *not
+needed* for a reproducible-from-source single-device corpus — until the database holds
+state that *isn't* reproducible (conversation history, episodic memory). That's the
+trigger to revisit. `study-system-design` owns the backup-strategy decision; this file
+just marks that the mechanism is absent and why that's currently acceptable.
 
 ---
 
 ## Interview defense
 
-**Q: When `await client.query('commit')` resolves in your code, what's
-guaranteed?**
-
-> That the transaction's WAL records are fsynced to disk — it's durable. Postgres
-> writes every change to the write-ahead log and flushes that log *before*
-> acknowledging the commit. So in `upsert()` at `pg-vector-store.ts:58`, once the
-> `commit` await resolves, those chunks survive a process crash: on restart,
-> recovery replays the WAL. The data file pages get written lazily at a
-> checkpoint, but durability doesn't wait on them — the WAL already has the
-> change.
+**Q: "When upsert's commit returns, what's actually on disk?"**
 
 ```
-  commit → append WAL → fsync ◄(durable here) → ack → (page flush later)
+  commit time — what's durable
+
+  RAM:  dirty heap page (the chunk row)      → NOT yet on disk
+  DISK: WAL record, fsync'd                   → DURABLE ◄── the guarantee
+  later: checkpoint flushes the heap page
 ```
 
-> Anchor: "committed" means the WAL fsync happened, not that the data page was
-> written.
+Answer: "The WAL record, fsync'd — not the heap page. Commit returns the moment the
+write-ahead log is durably on disk; the actual `chunks` heap page can still be dirty in
+RAM and gets flushed later at a checkpoint. If the box loses power right after commit
+returns, recovery replays the WAL and the chunk is there. Durability lives at the WAL
+fsync, not the heap write." Anchor: *commit means the log is on disk, not the data
+page.*
 
-**Q: A crash hits mid-`indexDocumentRow`. What does recovery give you back?**
+**Q: "Can buffr recover from an accidental `delete from chunks`?"**
 
-> Exactly what committed — which might be only the documents row. The function
-> commits documents in one transaction, then chunks in another. If the crash
-> lands in the gap, WAL recovery restores the committed documents row and the
-> uncommitted chunks simply never existed. Recovery *preserves* the gap, it
-> doesn't heal it — that's the application's job via idempotent re-index. And
-> there's no backup beyond crash recovery, so a disk failure loses the lot;
-> documents re-index from the corpus, but conversation memory doesn't.
-
-```
-  crash in gap → WAL replays txn A (documents) → txn B (chunks) gone
-  heal = re-index (idempotent), NOT recovery
-```
-
-> Anchor: WAL guarantees per-transaction durability; it doesn't give you
-> cross-transaction atomicity or disk-failure protection.
+Answer: "No. WAL gives local crash recovery for free — kill and restart, it replays. But
+there's no WAL archiving, no PITR, no `pg_dump` schedule. A bad DELETE or a disk failure
+has no restore path. The only recovery is re-indexing from the source markdown, which
+works for the corpus because documents carry their `source_path` — but *not* for the
+conversation trajectories or episodic memory, which aren't reproducible from source.
+That's the gap that turns real the moment the database holds anything you can't
+regenerate." Anchor: *WAL = crash recovery for free; PITR and backups are a separate,
+unconfigured rung.*
 
 ---
 
 ## See also
 
-- `05-transactions-isolation-and-anomalies.md` — the two-transaction write whose
-  durability gap this file traces.
-- `06-locks-mvcc-and-concurrency-control.md` — idempotent `on conflict` writes,
-  the application-level heal for the gap.
-- `08-replication-and-read-consistency.md` — where WAL goes when there's a
-  replica.
-- `study-system-design` — the durability-boundary and backup-scope decision.
+- `05-transactions-isolation-and-anomalies.md` — the commit record is the atomic flip;
+  the cross-transaction anomaly durably preserves the inconsistency.
+- `02-records-pages-and-storage-layout.md` — dirty heap pages, checkpoints, vacuum.
+- `08-replication-and-read-consistency.md` — replicating the WAL to a standby (absent).
+- `study-system-design` — the backup-strategy decision (re-index vs PITR vs replica).

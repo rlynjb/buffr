@@ -1,43 +1,37 @@
-# Study — Performance Engineering · buffr-laptop
+# Study — Performance Engineering (buffr-laptop)
 
-What is measurably slow or expensive in this repo, why, and which change improves it
-without just moving the bottleneck. Grounded in the real files — no invented scale.
+What is measurably slow or expensive in this repo, why, and which change improves it without just moving the bottleneck somewhere else.
 
-This is a self-hosted, single-device personal RAG agent: Postgres + pgvector (HNSW
-cosine), Ollama-served embeddings (`nomic-embed-text:v1.5`, 768-dim) and generation
-(`gemma2:9b`), a long-lived Ink chat session. There is no load, no traffic, no SLA.
-That fact shapes every verdict below: most "costs" here are real but **don't matter at
-laptop scale yet** — and the guide says so honestly rather than inflating them.
+This is an **audit-style** guide. One audit walks the 8 lenses; the numbered files each deep-dive one performance pattern the repo actually exercises.
 
 ## Reading order
 
 ```
-  1. 00-overview.md   the map: where time and money go, ranked findings
-  2. audit.md         Pass 1 — the 8-lens walk, "not yet exercised" named honestly
-  3. 01..06           Pass 2 — the six performance patterns this repo actually exercises
+  00-overview.md   ← start here: the map, ranked findings, what's not measured yet
+  audit.md         ← Pass 1: the 8-lens walk, file:line grounded
+  ───────────────────────────────────────────────────────────
+  01-hnsw-approximate-search.md          the main latency win (untuned)
+  02-embedding-roundtrip.md              batched-per-doc, serial-across-files
+  03-per-chunk-insert-loop.md            one INSERT per chunk in a txn
+  04-connection-pool-reuse.md            one warm pool across a whole session
+  05-per-turn-memory-and-trace-cost.md   the write amplification per chat turn
+  06-no-caching.md                       identical query re-embeds every time
 ```
 
-## Pass 2 — the patterns this repo exercises
+## How to read a finding
 
-```
-  01-hnsw-approximate-search.md      sub-linear ANN recall — the main perf win, untuned
-  02-embedding-roundtrip.md          batched-per-doc embed, serial-across-files index
-  03-per-chunk-insert-loop.md        one INSERT per chunk inside a txn (no COPY / multi-row)
-  04-connection-pool-reuse.md        warm pg pool amortized across a whole chat session
-  05-per-turn-memory-and-trace-cost.md  the extra embed+upsert and write-amplified trace
-  06-no-caching.md                   identical query re-embeds every time (the absent layer)
-```
+Every claim is anchored to a real `file:line`. The discipline throughout: **name the cost, then say whether it matters at laptop scale.** Most of these costs are real and most of them don't matter yet — because the dominant per-turn cost is `gemma2:9b` generation, which Ollama owns and this repo doesn't control. A finding that can't name a number it would change stays in the audit; it doesn't get a pattern file.
 
-The file list is the artifact: a senior engineer skimming it sees what's interesting
-about this repo's performance shape before opening anything.
+## The standard-term-leads convention
 
-## Cross-links — adjacent guides
+These files lead with the established industry term and put the repo's local name in parens on first use — "approximate nearest-neighbour search (the HNSW index)", "the connection pool (`pg.Pool`)", "write amplification (the 6-event trace fan-out)", "batching (the per-doc embed call)". After first mention the local name stands alone. You learn the transferable word, then bind it to this repo.
 
-```
-  study-database-systems   HNSW internals, txn/durability, index storage  ← the mechanism
-  study-networking         Ollama HTTP roundtrip, pg wire, pooling        ← the transport
-  study-ai-engineering     embeddings, RAG retrieval, eval harness        ← the AI layer
-```
+## Cross-links to neighbouring guides
 
-A finding belongs to the generator that owns the mechanism. This guide MEASURES; it
-cross-links rather than re-teaching how HNSW or TCP pooling work internally.
+- **`study-database-systems`** — the storage-engine mechanics underneath: how the HNSW index actually traverses its graph, what `begin`/`commit` costs, MVCC, and why a multi-row INSERT beats a loop. This guide *measures* those; that guide *explains* them.
+- **`study-networking`** — the transport layer under every Ollama call and every `pg` query: connection reuse, the HTTP roundtrip to `/api/embed`, timeouts, pooling. The serialization findings here bottom out in network behaviour there.
+- **`study-ai-engineering`** — the retrieval pipeline, embedding model choice, eval harness, and the RAG shape these costs hang off. Why precision@k matters, what `nomic-embed-text` is doing, where caching would change eval cost.
+
+## Partition seam
+
+This guide measures and improves observed bottlenecks. It does **not** explain execution mechanisms (that's `study-runtime-systems`) or architecture-scale tradeoffs (that's `study-system-design`). When a finding bottoms out in "how does pgvector's HNSW graph traverse," it cross-links rather than re-teaching.

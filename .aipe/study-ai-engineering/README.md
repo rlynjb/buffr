@@ -1,48 +1,51 @@
-# Study — AI Engineering: buffr-laptop
+# Study — AI Engineering for buffr-laptop
 
-A per-codebase AI-engineering + ML study guide for `buffr-laptop`, generated against the aipe v1.69.1 `study-ai-engineering` spec. Written in the teacher voice (`teacher.md`), calibrated to the reader (`me.md`): diagram-first, pattern as the primary anchor, concept → mechanism → code at real `file:line`.
+An AI-engineering study guide generated against **this repo** (`buffr-laptop`) — a local RAG agent over Ollama (`gemma2:9b` + `nomic-embed-text:v1.5`) and Postgres/pgvector. Each concept file teaches the pattern, then anchors it to real code at `file:line`.
 
-**Shape:** LLM application engineering (loopd-shaped). buffr is a local-first RAG agent — Ollama `gemma2:9b` generation + `nomic-embed-text:v1.5` embeddings, Postgres + pgvector retrieval, a bounded tool-calling agent loop. It trains no model, so the classical-ML sections are study-only.
+**Shape of this codebase:** LLM application engineering (the loopd shape) — single-purpose retrieval over a personal corpus, a bounded tool-calling agent, retrieval-based evals. It is **not** classical ML: buffr trains no model. SECTION 04 (machine learning) is therefore taught as new ground with buildable exercises, not as a description of existing code.
 
-## Start here
+## Reading order
 
-- **`00-overview.md`** — the whole system in one diagram, the one seam to understand first, reading order.
-- **`ai-features-in-this-codebase.md`** — the AI-feature ledger (every feature, its pattern, its tokens).
-- **`ml-features-in-this-codebase.md`** — honest: no trained model in this repo.
+Start with **`00-overview.md`** — the whole system in one frame, the two paths, and the load-bearing facts (768 one-way door, the emulated-tool-calling ceiling, what's not yet exercised).
 
-## Sections
+Then the sub-sections, in build order:
 
-| Dir | Topic | Weight in buffr |
-|-----|-------|-----------------|
-| `01-llm-foundations/` | what an LLM is, tokenization, sampling, structured output, streaming, token economics, heuristic-before-LLM, provider abstraction, user-override locks | **core** (Ollama, 768-dim) |
-| `02-context-and-prompts/` | context window, lost-in-the-middle, prompt chaining | **core** (guard + profile) |
-| `03-retrieval-and-rag/` | embeddings, model choice, chunking, vector DBs, dense/sparse, hybrid+RRF, reranking, query rewriting, stale embeddings, incremental indexing, RAG, GraphRAG | **the heart of buffr** |
-| `04-agents-and-tool-use/` | agents vs chains, tool calling, ReAct, routing, agent memory, error recovery | **core** (the loop) |
-| `05-evals-and-observability/` | eval set types, methods, judge bias, observability | **core** (P@k wired, faithfulness not) |
-| `06-production-serving/` | caching, cost, prompt injection, rate limiting, retry/circuit-breaker | mostly *not yet exercised* |
-| `07-system-design-templates/` | search ranking, tech-support chatbot (interview reframes) | every guide |
-| `08-machine-learning/` | supervised pipeline, features, splits, imbalance, calibration, recommenders, on-device, quantization, drift, retraining | *study-only* (no model trained) |
-| `09-ml-system-design-templates/` | recommender, anomaly detection, object detection (interview reframes) | every guide |
+1. **`01-llm-foundations/`** — the model as a function; tokens, sampling, structured output, streaming, cost, heuristic-before-LLM, provider abstraction, override locks.
+2. **`02-context-and-prompts/`** — the finite context window, lost-in-the-middle, prompt chaining.
+3. **`03-retrieval-and-rag/`** — the core of buffr: embeddings → chunking → pgvector → ANN → RAG. Plus the patterns buffr doesn't yet run (hybrid, rerank, query rewrite, GraphRAG).
+4. **`04-agents-and-tool-use/`** — the agent loop, the emulated tool-calling path, ReAct, routing, episodic memory, error recovery.
+5. **`05-evals-and-observability/`** — eval sets, methods, LLM-as-judge bias, the trace sink.
+6. **`06-production-serving/`** — caching, cost, prompt injection, rate limiting, retry/circuit breaker.
+7. **`07-system-design-templates/`** — interview reframes: search ranking, tech-support chatbot.
+8. **`08-machine-learning/`** — classical ML as new ground.
+9. **`09-ml-system-design-templates/`** — interview reframes: recommender, anomaly detection, object detection.
 
-## The patterns buffr actually exercises (the load-bearing files)
+Root files:
 
-- `03-retrieval-and-rag/11-rag.md` + `01-embeddings.md` + `10-incremental-indexing.md` — the index path and query path.
-- `04-agents-and-tool-use/02-tool-calling.md` + `gemma` emulation in `01-llm-foundations/08-provider-abstraction.md` — the reliability seam.
-- `04-agents-and-tool-use/01-agents-vs-chains.md` — the bounded loop (maxTurns=6, maxToolCalls=4, forced synthesis).
-- `04-agents-and-tool-use/05-agent-memory.md` — retrieval-based **episodic** memory (`@aptkit/memory`).
-- `05-evals-and-observability/02-eval-methods.md` + `04-llm-observability.md` — precision@k/recall@k and the full-signal trajectory trace.
-- `01-llm-foundations/06-token-economics.md` — `model_usage` token persistence (partial cost observability).
+- **`ai-features-in-this-codebase.md`** — every AI feature buffr actually ships, with inputs/outputs/model/cost/failure-modes.
+- **`ml-features-in-this-codebase.md`** — the honest "buffr trains nothing" page.
 
-## Cross-links to sibling guides
+## How to read each concept file
 
-These concepts live where they belong; this guide points at them rather than restating:
+Every file follows the same shape (from `format.md`): **Subtitle → Zoom out → Structure pass → How it works (pattern + your code at `file:line`) → Primary diagram → Elaborate → Project exercises → Interview defense → See also.** Diagrams lead; prose fills in; real code appears with line-by-line annotation at the load-bearing parts.
 
-- **Prompt engineering** (`.aipe/study-prompt-engineering/`) — the system-prompt anatomy, the profile-as-context prompt, structured-output contracts, injection defenses.
-- **Agent architecture** (`.aipe/study-agent-architecture/`) — the ReAct reasoning pattern, agentic retrieval, the single-agent vs multi-agent boundary.
-- **Database systems** (`.aipe/study-database-systems/`) — pgvector storage, the HNSW index, cosine distance, the dropped FK on `chunks.document_id`.
-- **DSA foundations** (`.aipe/study-dsa-foundations/`) — vectors, cosine similarity, ANN vs exact k-NN, the heap behind top-k.
-- **Testing** (`.aipe/study-testing/`) — the eval seam, `node:test`, DB-gated tests, the RubricJudge as the missing faithfulness test.
+## Where buffr's code lives (quick map)
 
-## Honest gaps (the "not yet exercised" list)
+```
+src/pg-vector-store.ts     PgVectorStore — upsert/search over pgvector, 768 assert
+src/runtime.ts             indexDocumentRow — documents row + chunk indexing
+src/session.ts             createChatSession — the warm session, agent, memory
+src/profile.ts             loadProfile — me.md into the system prompt
+src/supabase-trace-sink.ts SupabaseTraceSink — full-trajectory capture
+src/cli/index-cmd.ts       npm run index — chunk → embed → store
+src/cli/eval-cmd.ts        npm run eval — precision@k / recall@k
+src/cli/chat.tsx           the Ink chat TUI
+sql/001_agents_schema.sql  documents/chunks/conversations/messages/profiles
+eval/queries.json          the labeled eval set
+```
 
-Fine-tuning · reranking · hybrid/sparse/keyword search · streaming · caching · chunking-strategy tuning · faithfulness eval · tool-arg-schema validation · rate limiting / backpressure / circuit breakers. Each is covered as study material with a concrete "how to make it apply" in this repo.
+aptkit (`@rlynjb/aptkit-core`, consumed never edited) supplies the agent loop, retrieval pipeline, the `search_knowledge_base` tool, `createConversationMemory`, the precision/recall scorers, and the (unwired) `RubricJudge`.
+
+## Cross-links
+
+- `study-prompt-engineering/` · `study-agent-architecture/` · `study-database-systems/` · `study-dsa-foundations/` · `study-testing/`

@@ -1,217 +1,235 @@
-# Recommender systems — content-based, collaborative, hybrid
+# Recommender Systems
 
-*Industry standard (recommender systems). buffr has no recommender and is single-user, so collaborative filtering is structurally impossible — not yet implemented; only content-based + rules is viable.*
+### *industry: recommender systems (content-based vs collaborative vs hybrid) · type: the three ways to decide what to surface next*
 
-## Zoom out, then zoom in
+## Zoom out
 
-A recommender answers "what should I show this user next" without the user asking a question. There are three classic families, and which one you *can* build is decided by your data shape, not your preference. buffr already has the raw material for one of them sitting in its vector store — item embeddings — and is structurally locked out of another, because it has exactly one user. This file teaches all three honestly, then shows which is the only one buffr could ship.
+Every "you might also like" is a recommender, and they split into three families by *what signal they learn from*. This is the first file in the section where the pipeline isn't a classifier — it's a ranker over items for a user. But the shape rhymes: data in, features out, a model that scores, a deployed ranking. See where the family choice sits:
 
+**A recommender pipeline, with the family-choice stage marked**
 ```
-  Zoom out — where a recommender WOULD attach in buffr
-
-  ┌─ Provider layer (Ollama, local) ───────────────────────────┐
-  │  nomic-embed-text:v1.5 → item embeddings                    │
-  └─────────────────────────┬───────────────────────────────────┘
-                            │  vector(768) per chunk
-  ┌─ Storage layer (Postgres + pgvector) ───────────────────────┐
-  │  agents.chunks.embedding   ← item feature vectors EXIST      │
-  │  agents.messages           ← interaction log (single user)   │
-  └─────────────────────────┬───────────────────────────────────┘
-                            │
-  ┌─ Service layer (none today) ────────────────────────────────┐
-  │  ★ "related notes" recommender  ← WOULD attach here ★        │ ← we are here
-  │     content-based (item-item cosine) + rules ONLY            │
-  └──────────────────────────────────────────────────────────────┘
+┌──────────┐  ┌──────────┐  ┌───────┐  ┌────────────────────────────┐  ┌──────────┐
+│ Items +  │─►│ Features │─►│ Split │─►│ ★ CHOOSE THE SIGNAL ★       │─►│ Rank &   │ ◄── this file
+│ inter-   │  │ (item or │  │ (by   │  │  content / collaborative /  │  │ serve    │
+│ actions  │  │  user)   │  │ user) │  │  hybrid                     │  │ top-N    │
+└──────────┘  └──────────┘  └───────┘  └────────────────────────────┘  └──────────┘
+                                                  │
+                  what data exists DECIDES which family is even possible ─┘
 ```
-
-Zoom in: **content-based** recommends items *similar to ones the user liked*, using item feature vectors and a similarity metric — which is, in shape, exactly what buffr's cosine retrieval already does. **Collaborative filtering** ignores item content and learns from the *user-item interaction matrix* — "people who liked what you liked also liked X" — which requires a *population* of users. **Hybrid** combines them. buffr is single-user, so collaborative filtering has no population to borrow from. Its only viable recommender is content-based plus rules.
+The family is not a taste preference — it's forced by the data you actually have, which is the whole tension this file resolves for buffr.
 
 ## Structure pass
 
-**Layers:** the signal source (item features vs interaction matrix) → the similarity/scoring model → the ranked list shown to the user.
+One axis separates the three families: **does the recommender learn from item content, from other users' behavior, or both?**
 
-**Axis — "where does the recommendation signal come from?"** Trace that one question across the families.
-
+**The one axis: where the signal comes from, with the seam buffr falls on**
 ```
-  trace "where does the signal come from?" across the three families
+   CONTENT-BASED              COLLABORATIVE              HYBRID
+   ┌──────────────┐           ┌──────────────┐           ┌──────────────┐
+   │ item features │           │ user×item     │           │ both signals  │
+   │ + this user's │           │ interaction   │           │ blended       │
+   │ own profile   │           │ matrix        │           │               │
+   │               │           │ (OTHER users) │           │               │
+   └──────────────┘           └──────────────┘           └──────────────┘
+   needs: item content        needs: MANY users          needs: both
+   works for 1 user           needs: cross-user overlap   best when rich
 
-  ┌─ content-based ──────┐   ITEM FEATURES        (buffr: ✓ embeddings exist)
-  │  item ↔ item similar  │   "like things you liked"  needs: 1 user's history
-  └──────────────────────┘
-  ┌─ collaborative ──────┐   INTERACTION MATRIX   (buffr: ✗ only 1 user)
-  │  user ↔ user / factor │   "users like you liked X"  needs: a POPULATION
-  └──────────────────────┘
-  ┌─ hybrid ─────────────┐   BOTH                 (buffr: ✗ blocked by CF)
-  │  blend the two        │   "content + crowd"        needs: both signals
-  └──────────────────────┘
+   ┌──────────────────────────────── THE SEAM ───────────────────────────────┐
+   │ COLLABORATIVE filtering REQUIRES other users to borrow taste from.        │
+   │ buffr is effectively SINGLE-USER — a personal RAG over your own markdown.  │
+   │ With one user there is no user×item matrix to factorize. Collaborative     │
+   │ filtering is IMPOSSIBLE here, not just unbuilt. Content + rules is the     │
+   │ ONLY viable shape.                                                          │
+   └───────────────────────────────────────────────────────────────────────────┘
 ```
-
-**The seam:** between *content signal* and *collaborative signal* — and the axis flips hard across it. Content-based needs only the items themselves plus one user's preferences; collaborative needs many users' overlapping interactions. buffr sits entirely on the content side of that seam because it has one user. So the seam isn't a tuning knob for buffr — it's a wall. Everything buffr could build lives left of it.
+The seam is decisive for buffr: single-user kills the collaborative family outright, so the design space narrows to content-based plus rules before you write a line.
 
 ## How it works
 
-### Move 1 — the mental model
+### Move 1 — Mental model
 
-You already know the engine: it's the exact cosine search from `src/pg-vector-store.ts`, pointed at a different question. Retrieval asks "which chunks are nearest *this query vector*?" Content-based recommendation asks "which items are nearest *the items this user already liked*?" Same vector space, same distance metric — the query is just an item (or the average of liked items) instead of a search string. Collaborative filtering is a different animal entirely: no item content, just a giant sparse matrix of who-interacted-with-what, factorized into latent taste dimensions.
+The mental model: **content-based recommends things *similar to what you liked* (item-to-item by features); collaborative recommends things *liked by people similar to you* (user-to-user by behavior).** Content asks "what is this item like?"; collaborative asks "who else acted like you, and what did they pick?"
 
+**The two questions, side by side**
 ```
-  Pattern — content-based is item-item cosine (the engine buffr has)
-
-  liked item  ●─────► nearest neighbors in embedding space
-              │        ┌──────────────────────────────────┐
-              │        │   ●  ● liked                       │
-              ▼        │      ●◄── recommend (high cosine)  │
-        embed once     │  ●      ● far (low cosine, skip)   │
-        (or avg of     │      ●                             │
-         liked items)  └──────────────────────────────────┘
-                       cosine(liked, candidate) → rank → top-k
+   CONTENT-BASED                          COLLABORATIVE
+   "you liked item A"                     "you behaved like user U"
+        │                                      │
+        ▼                                      ▼
+   find items whose FEATURES                find what user U liked
+   resemble A's features                   that you haven't seen
+        │                                      │
+        ▼                                      ▼
+   recommend B (similar item)              recommend C (peer's pick)
+   ── needs NO other users ──              ── needs MANY other users ──
 ```
+Content-based is the family that survives with a single user — it never looks past your own item features and your own history.
 
-### Move 2 — the step-by-step walkthrough
+### Move 2 — Walk the mechanism
 
-**Content-based filtering — similarity over item features.** Bridge from buffr's retrieval: you already embed every chunk and run cosine search. Content-based recs reuse that. Represent each item by its feature vector (buffr's `agents.chunks.embedding`, 768-d from nomic-embed-text). Build a user profile as the items they engaged with — or just the average of their liked-item vectors. Then score every candidate item by cosine to that profile and return the top-k, excluding items already seen. No other users required; it works for a population of one.
+**Part 1 — Content-based: build an item feature vector and a user profile, then score by similarity.** Each item gets a feature vector; the user profile is an aggregate of items they engaged with; recommendation is nearest items to the profile.
 
+**Content-based scoring = similarity between user profile and item vectors**
 ```
-  Content-based — pseudocode (this is item-item cosine)
-
-  recommend_content(liked_items, all_items, k):
-    profile = mean([ embed(i) for i in liked_items ])   // user = avg of liked
-    scored = []
-    for item in all_items:
-      if item in liked_items: continue                  // don't re-recommend
-      s = cosine(profile, embed(item))                  // 1 - distance
-      scored.append((item, s))
-    return top_k(scored, k)                             // highest cosine wins
-```
-
-Strength: handles brand-new items the day they're added (their embedding exists immediately — see `11-cold-start.md`). Weakness: it can only recommend *more of the same* — it has no way to surface something dissimilar that the user would nonetheless love, because it never sees other users' surprising overlaps.
-
-**Collaborative filtering — the user-item matrix and matrix factorization.** This is the family buffr can't have, so understand exactly why. Build a matrix `R` with users as rows, items as columns, and each cell the interaction (rating, click, view). It's mostly empty. Matrix factorization approximates `R ≈ U · Vᵀ`, where `U` gives each user a short latent vector and `V` gives each item one; the dot product `U[u]·V[i]` predicts the missing cells. "Users like you also liked X" falls out because two users with similar `U` vectors get similar predictions. The whole thing is powered by *overlap between users* — the off-diagonal structure of `R`.
-
-```
-  Collaborative — the user-item matrix (needs a POPULATION)
-
-            item_A  item_B  item_C  item_D
-  user_1 [    5      ?       3       ? ]
-  user_2 [    4      2       ?       1 ]   ← many rows = signal
-  user_3 [    ?      2       5       1 ]
-  ...
-  factorize:  R  ≈  U · Vᵀ     (predict the ? cells)
-
-  buffr's reality:
-  user_1 [    5      ?       3       ? ]   ← ONE row
-  (no other rows → nothing to borrow → CF is impossible)
+   user profile  ●───────► (mean of liked item vectors)
+                  \
+                   \  cosine
+                    \
+   item vectors:  ◇  ◇  ◇  ◇      score each item by similarity to the profile
+                  └──┬──────────────┐
+                     ▼              ▼
+              top-N nearest items ─► recommend
 ```
 
-The killer detail for buffr: with one user, `R` has one row. There are no "users like you" because there is no *you-plural*. Factorization of a single-row matrix learns nothing transferable — every prediction collapses back to that one user's own history, which is just content-based filtering wearing a costume. State it plainly: **buffr cannot do collaborative filtering, full stop, until it has a population of users.**
+**Part 2 — Collaborative: factorize the user×item interaction matrix.** The matrix is mostly empty (most users touched few items). Matrix factorization learns low-rank user and item vectors whose dot product reconstructs the observed cells and predicts the empty ones. Illustrative, not buffr code:
 
-**Hybrid — blend content and collaborative.** When you have both signals, combine them — e.g. score = `α · content_cosine + (1-α) · collaborative_predicted`, or use content to cover items collaborative hasn't seen yet (cold-start) and collaborative to add crowd wisdom on popular items. Hybrid is the production default at scale precisely because each family covers the other's blind spot. buffr can't reach hybrid either, because one of its two terms (collaborative) is structurally unavailable.
-
-```
-  Hybrid — blend the two signals (blocked for buffr: CF term is empty)
-
-  candidate ─┬─► content cosine     ─┐
-             │                        ├─► α·content + (1-α)·collab ─► rank
-             └─► collaborative pred  ─┘
-                       ▲
-                 buffr: this term doesn't exist (single user)
-                 → hybrid degenerates to pure content
-```
-
-**So what buffr can actually build: content-based + rules.** With collaborative and hybrid off the table, the viable recommender is cosine over `agents.chunks.embedding` plus *heuristic rules* to break ties and shape the list — recency (prefer newer notes), section (prefer same source doc, or deliberately diversify across docs), and dedup (don't recommend two near-identical chunks). Rules stand in for the crowd signal buffr doesn't have: instead of "people like you liked this," you encode "items like this, recently, from a relevant section." It's the single-user-honest recommender.
-
-```
-  buffr's only viable recommender — content cosine + rule layer
-
-  liked/current note
-        │ embed
-        ▼
-  ┌─ content-based core ─────────┐   item-item cosine over agents.chunks.embedding
-  │  top-k nearest by cosine      │   (pg-vector-store.ts:67 search())
-  └──────────────┬────────────────┘
-                 │ candidates
-                 ▼
-  ┌─ rule layer (stands in for crowd) ─┐
-  │  + recency boost                    │
-  │  + same/diverse-section heuristic   │
-  │  + dedup near-identical chunks      │
-  └──────────────┬──────────────────────┘
-                 ▼  ranked "related notes"
+**Matrix factorization — learn latent user/item vectors that reconstruct interactions (illustrative)**
+```python
+# ILLUSTRATIVE ONLY — not buffr code. Requires MANY users; buffr has one.
+#   R ≈ U · Vᵀ      R: users×items (sparse),  U: users×k,  V: items×k
+for (u, i, observed) in interactions:          # only the FILLED cells
+    pred  = dot(U[u], V[i])
+    error = observed - pred
+    U[u] += lr * (error * V[i] - reg * U[u])   # nudge user vector
+    V[i] += lr * (error * U[u] - reg * V[i])   # nudge item vector
+# empty cells are then predicted by U[u] · V[i]  ── impossible with a single user
 ```
 
-### Move 3 — the principle
+**Part 3 — Why collaborative collapses to nothing with one user.** The interaction matrix is a single row. There is no second user to borrow taste from; factorization has nothing to generalize across.
 
-Your data shape, not your ambition, decides which recommender you can build. Item features alone get you content-based; a population of overlapping users gets you collaborative; both get you hybrid. A single-user system has exactly one move — content-based plus rules — and any "collaborative" approach you bolt on quietly collapses back into that one user's own history.
+**Single-user interaction matrix — a degenerate one-row case**
+```
+              item1 item2 item3 item4
+   you   ►   [  1     0     1     0  ]   ◄── ONE row, no peers
+            ┌──────────────────────────────────────────┐
+            │ no other rows ⇒ no cross-user signal ⇒    │
+            │ collaborative filtering has no input.      │
+            │ Only the item FEATURES (columns) remain.   │
+            └──────────────────────────────────────────┘
+```
+
+**Part 4 — Hybrid: blend content scores with rules.** Even without collaborative signal, you combine content similarity with business rules — recency, diversity, deduplication.
+
+**Hybrid for a single user = content similarity × rules**
+```
+   content score  ──┐
+                    ├─► weighted blend ─► re-rank ─► top-N
+   recency boost  ──┤        │
+   already-seen   ──┘   drop already-read, enforce diversity
+   penalty
+```
+For buffr the "hybrid" is content-based embeddings plus deterministic rules — there is no collaborative term to blend in.
+
+### Move 2.5 — current vs future
+
+**What buffr can do vs what's structurally impossible**
+```
+   POSSIBLE (content-based, Case B to build)      IMPOSSIBLE (collaborative)
+   ┌────────────────────────────────────┐         ┌────────────────────────────────┐
+   │ recommend-next-doc / related-chunks │         │ "users like you also read…"     │
+   │ via embedding similarity over the    │         │ needs a user×item matrix with   │
+   │ existing 768-dim chunk vectors +     │   ✗     │ MANY users. buffr is single-user│
+   │ recency rules                         │         │ ⇒ no matrix ⇒ not buildable      │
+   │ ── uses agents.chunks embeddings     │         │ (not "not yet" — never, as-is)  │
+   └────────────────────────────────────┘         └────────────────────────────────┘
+```
+The only recommender buffr can honestly build is content-based over its own embeddings; the collaborative family is off the table by construction, not by backlog.
+
+### Move 3 — The principle
+
+The principle: **the data you have decides the family before any modeling choice — collaborative filtering buys you "wisdom of the crowd" only if there is a crowd.** A single-user system has no crowd, so it must lean entirely on item content (and rules) and accept that it can never surprise you with a peer's taste. Don't reach for matrix factorization out of habit; check whether a user×item matrix even exists first.
 
 ## Primary diagram
 
-```
-  Recommender families — signal source, requirement, and buffr's verdict
+The full picture — three families, the data each demands, and the one branch buffr can actually take.
 
-  ┌─ CONTENT-BASED ──────────────────────────── VIABLE for buffr ─┐
-  │  signal: item feature vectors (agents.chunks.embedding)        │
-  │  engine: cosine, same as pg-vector-store.ts search()           │
-  │  needs: one user's history          → buffr HAS this           │
-  └────────────────────────────────────────────────────────────────┘
-  ┌─ COLLABORATIVE ──────────────────────────── IMPOSSIBLE ───────┐
-  │  signal: user-item matrix R ≈ U·Vᵀ                             │
-  │  needs: a POPULATION of users       → buffr has ONE row        │
-  └────────────────────────────────────────────────────────────────┘
-  ┌─ HYBRID ─────────────────────────────────── BLOCKED ──────────┐
-  │  signal: content + collaborative blended                       │
-  │  needs: both                        → CF term empty → degrades │
-  └────────────────────────────────────────────────────────────────┘
-        ↓ buffr's only build:
-  ┌─ CONTENT-BASED + RULES (recency / section / dedup) ───────────┐
-  │  rules stand in for the crowd signal a single user can't give  │
-  └────────────────────────────────────────────────────────────────┘
+**The recommender decision, with buffr's forced path**
 ```
+                        ┌─────────────────────────┐
+                        │ what data do you HAVE?   │
+                        └─────────────┬───────────┘
+            ┌─────────────────────────┼─────────────────────────┐
+            ▼                         ▼                         ▼
+   item features only?        many users' behavior?       both, richly?
+            │                         │                         │
+            ▼                         ▼                         ▼
+   ┌────────────────┐        ┌────────────────┐        ┌────────────────┐
+   │ CONTENT-BASED   │        │ COLLABORATIVE   │        │ HYBRID          │
+   │ profile↔item sim│        │ matrix factor.  │        │ blend both      │
+   └────────┬───────┘        └────────────────┘        └────────────────┘
+            │                         ✗ (no crowd)
+   ★ buffr lives here ★
+   ┌──────────────────────────────────────────────────────────────────────┐
+   │ recommend-next-doc via cosine over agents.chunks' 768-dim embeddings   │
+   │ + recency rules. SINGLE-USER ⇒ content-based + rules is the only shape. │
+   └──────────────────────────────────────────────────────────────────────┘
+```
+For buffr, the flowchart has exactly one open exit, and it runs on embeddings the repo already stores.
 
 ## Elaborate
 
-The content-vs-collaborative split goes back to the 1990s (GroupLens for collaborative; content-based filtering from information retrieval), and the modern collaborative workhorse — matrix factorization — was cemented by the Netflix Prize (2006–2009), where SVD-style latent-factor models dominated. The field has since moved to neural and two-tower retrieval models, but the data requirement is unchanged: collaborative methods are powered by *interaction overlap between users*, and no architecture conjures that from a single user. There's a deep rhyme worth noticing: buffr's existing RAG retrieval (`../03-retrieval-and-rag/11-rag.md`) and a content-based recommender are the *same operation* — embed, cosine, top-k — differing only in whether the "query" is a typed question or an item the user just engaged with. That's why the recommender is a small lift on top of what `src/pg-vector-store.ts` already does. The honest ceiling is the multi-user version: once `agents.messages` accumulates trajectories from many users, collaborative and hybrid open up — but buffr is single-user today, so that's a future, not a feature.
+The sharp edges:
+
+- **Content-based can't surprise you.** It only ever recommends things similar to what you've already engaged with — a filter bubble of one. Collaborative's whole value is *serendipity* from peers, which a single-user system structurally forfeits.
+- **The cold-start problem hits these families differently.** Content-based handles new *items* fine (it has features) but needs a user profile to start; collaborative needs interactions for both. This is the subject of the next file, `11-cold-start.md`.
+- **Implicit vs explicit feedback.** Few systems get star ratings; most infer preference from clicks, dwell, opens. buffr's `agents.messages` (which docs got retrieved and used) is exactly this kind of *implicit* signal — a latent profile source.
+- **Rules carry more weight than people admit.** Recency, diversity, dedup, and "don't show what they just read" often matter more than the model's score. For a single-user recommender, rules are most of the system.
+- **buffr's honest line.** buffr stores 768-dim chunk embeddings in `agents.chunks` and serves them by cosine in `src/pg-vector-store.ts` — that's the entire engine a content-based recommender needs. The honest gap: there is no recommender feature yet, and there *can't* be a collaborative one because buffr is single-user (a personal RAG over your own markdown). A `recommend-next-doc` / related-chunks feature over those embeddings plus recency rules is the one buffr-plausible new build.
 
 ## Project exercises
 
-> No curriculum file present; exercises derived from the codebase.
+### Build a content-based "related chunks / next doc" recommender
 
-### Build a content-based "related notes" recommender
-
-- **Exercise ID:** REC-1 (Case B — no recommender exists). **The core recommender exercise.**
-- **What to build:** given a note (or the current note in context), return the top-k most similar *other* notes by item-item cosine over `agents.chunks.embedding`, excluding the source note itself. Reuse the existing cosine search — fetch the source note's embedding, then `search()` for nearest neighbors.
-- **Why it earns its place:** it's the one recommender family a single-user system can actually ship, and it's a small lift on the cosine engine already in the repo. The "I turned our retrieval into a related-content recommender" story.
-- **Files to touch:** new `src/recommend.ts` calling `PgVectorStore.search` in `src/pg-vector-store.ts:67`; reuse pool/embedder/store setup from `src/cli/eval-cmd.ts:13-16`; read embeddings from `agents.chunks.embedding`.
-- **Done when:** given a note id, the command prints k related notes ranked by cosine, with the source note excluded.
+- **Exercise ID:** [B2C.10] Phase 2C
+- **What to build:** Not yet implemented — buffr trains nothing. Add a content-based recommender over buffr's existing 768-dim embeddings: given the doc/chunk you're currently reading (or the last one retrieved), return the top-N most similar *other* chunks by cosine, then re-rank with rules — boost recent docs, drop the current doc, enforce source diversity so all N aren't from one file. No training, no collaborative term — pure item-similarity + rules.
+- **Why it earns its place:** It's the only recommender family buffr can honestly ship, and it reuses the embedding index that already exists — so it teaches content-based + hybrid-rules end to end on real data, and produces a genuinely useful feature.
+- **Files to touch:** new `ml/recommender.py` or a CLI command alongside `src/cli/`, reads `agents.chunks` embeddings via the `src/pg-vector-store.ts` contract, recency from `documents`/`created_at`, writes the ranking logic and a short eval to `ml/README.md`.
+- **Done when:** given a seed chunk it returns top-N related chunks; the current doc is excluded; a recency boost and a per-source diversity cap are applied and visible in the output; a note states plainly why no collaborative term exists.
 - **Estimated effort:** 1 day.
 
-### Add a rule-based ranking layer
+### Derive a user profile vector from agents.messages (implicit feedback)
 
-- **Exercise ID:** REC-2 (Case B — no ranking heuristics exist; depends on REC-1).
-- **What to build:** layer recency and section heuristics on top of REC-1's cosine candidates — boost newer notes (using `created_at`), and add a same-vs-diverse-section toggle plus near-duplicate dedup. These rules stand in for the collaborative signal a single user can't provide.
-- **Why it earns its place:** makes explicit *why* buffr leans on rules — there's no population to give crowd signal, so heuristics carry the load collaborative filtering would otherwise carry.
-- **Files to touch:** extend `src/recommend.ts`; read `created_at` / `meta` from `agents.chunks` (and document timestamps); no new table needed.
-- **Done when:** two notes with near-identical cosine are broken apart by recency/section rules, and near-duplicate chunks are collapsed.
-- **Estimated effort:** 4–8 hr (after REC-1).
+- **Exercise ID:** [B2C.10b] Phase 2C
+- **What to build:** Not yet implemented — buffr trains nothing. Treat `agents.messages` as implicit-feedback signal: extract which chunks were retrieved and actually used across conversations, average their embeddings into a single *user profile vector*, and recommend the nearest unread chunks to that profile. This is content-based recommendation driven by behavior rather than a single seed item.
+- **Why it earns its place:** It shows you can manufacture a user profile from implicit signals — the realistic case, since nobody hands you star ratings — using the trajectory table buffr already captures.
+- **Files to touch:** new `ml/user_profile.py`, reads `agents.messages` (retrieved/used chunk references) and `agents.chunks` embeddings, writes the profile-building logic to `ml/README.md`.
+- **Done when:** a single profile vector is built from message history, top-N recommendations are returned against it excluding already-seen chunks, and a note explains why this is still content-based (one user) and not collaborative.
+- **Estimated effort:** 1 day.
 
 ## Interview defense
 
-**Q: Why can't buffr do collaborative filtering, and what can it do instead?**
-Answer: collaborative filtering is powered by the user-item interaction matrix — "users like you also liked X" — and buffr is single-user, so that matrix has exactly one row. There's no population to borrow signal from; factorizing one row just hands back that user's own history. So the only viable recommender is content-based: item-item cosine over `agents.chunks.embedding`, which is the same engine as `src/pg-vector-store.ts` retrieval, plus rule heuristics (recency, section) to stand in for the crowd signal.
+Most candidates reach for matrix factorization reflexively. Knowing *why* it's impossible for a single-user system — and what you build instead — is the staff-level signal that data shape drives the design.
 
+**Q: How would you add recommendations to a single-user RAG like buffr?**
 ```
-  CF needs many rows of R · buffr has 1 row · → content-based + rules only
+   single user ─► no user×item matrix ─► collaborative is OUT
+        │
+        └─► content-based: cosine over existing embeddings + recency/diversity rules
 ```
+Anchor: with one user there's no crowd to borrow from, so the only viable family is content-based plus rules.
 
-**Q: A content-based recommender and buffr's RAG retrieval — how are they related?**
-Answer: they're the same operation. Both embed, run cosine, and take top-k over `agents.chunks.embedding`. The only difference is the "query": retrieval uses a typed question, content-based recs use an item the user just engaged with (or the average of their liked items). **The part people forget: content-based recs inherit retrieval's blind spot — they can only suggest *more of the same*, because with no other users there's no source of pleasant surprise.**
+**Q: Content-based vs collaborative — when does each win?**
+```
+   CONTENT-BASED                 COLLABORATIVE
+   wins: cold items, niche,      wins: serendipity, dense
+   single user, explainable      cross-user signal, scale
+        │                             │
+        └─ buffr's regime ────────────┘ (needs many users — buffr has one)
+```
+Anchor: content-based wins when items have features and users are few; collaborative wins when many users overlap — and buffr structurally can't reach the second.
 
+**Q: Where's the implicit feedback in buffr?**
 ```
-  retrieval: query string → cosine → top-k  ·  content recs: liked item → cosine → top-k
+   agents.messages ─► which chunks were retrieved & used
+        │
+        └─ average their embeddings ─► a USER PROFILE vector (no ratings needed)
 ```
+Anchor: `agents.messages` is captured trajectory data — implicit feedback you can aggregate into a profile without ever asking for an explicit rating.
 
 ## See also
 
-- `11-cold-start.md` — content-based recs dodge item cold-start (new items are recommendable the moment their embedding exists); the cold-start that does bite is new-user/new-system.
-- `09-calibration.md` — the recommender ranks on cosine, and ranking is order-invariant, so it dodges calibration the same way buffr's retrieval does.
-- `../03-retrieval-and-rag/11-rag.md` — the retrieval pipeline the recommender reuses wholesale.
-- `../03-retrieval-and-rag/04-vector-databases.md` — the pgvector store (`agents.chunks.embedding`) the recommender queries.
+- `./09-calibration.md` — when a recommender's scores feed a downstream threshold, calibration starts to matter.
+- `./11-cold-start.md` — the new-user / new-item / new-system problem these families each hit differently.
+- `../03-retrieval-and-rag/` — buffr's embedding index, the engine a content-based recommender reuses wholesale.
+- `../05-evals-and-observability/` — `eval/queries.json` and ranking metrics (P@1/R@3) reused to evaluate recommendations.
+- `../09-ml-system-design-templates/` — where "single-user ⇒ content-based + rules" becomes a documented design constraint.

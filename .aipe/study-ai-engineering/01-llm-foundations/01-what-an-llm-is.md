@@ -1,229 +1,220 @@
 # What an LLM Is
 
-*Large language model · the next-token function — Industry standard.*
+*Industry name: large language model (LLM) / autoregressive transformer. Type: **Industry standard.***
 
 ## Zoom out, then zoom in
 
-Before anything clever — retrieval, agents, tool calls — there's one box at the center of buffr that does the actual thinking, and it's dumber than you'd guess. Here's where it sits.
+Here is the whole buffr stack, top to bottom. The thing this file is about — the model itself — is one box near the bottom, marked ★.
 
 ```
-  Zoom out — where the LLM lives in buffr
-
-  ┌─ TUI layer (Ink) ───────────────────────────────────┐
-  │  chat.tsx   →   session.ask(question)                │
-  └──────────────────────────┬───────────────────────────┘
-                             │  string in
-  ┌─ Agent layer (aptkit) ───▼───────────────────────────┐
-  │  RagQueryAgent.answer → runAgentLoop                  │
-  │     loop: build prompt → ★ MODEL.complete ★ → parse  │ ← we are here
-  └──────────────────────────┬───────────────────────────┘
-                             │  HTTP POST /api/chat
-  ┌─ Provider layer ─────────▼───────────────────────────┐
-  │  GemmaModelProvider  →  Ollama  →  gemma2:9b weights  │
-  └──────────────────────────┬───────────────────────────┘
-                             │  retrieval is a separate hop
-  ┌─ Storage layer ──────────▼───────────────────────────┐
-  │  Postgres + pgvector (search_knowledge_base tool)    │
-  └──────────────────────────────────────────────────────┘
+buffr stack — where the model sits
+┌───────────────────────────────────────────────────────────┐
+│ chat.tsx (Ink TUI)        you type → setTurns → spinner     │ UI
+├───────────────────────────────────────────────────────────┤
+│ session.ask()            persist turn → agent.answer()      │ orchestration
+├───────────────────────────────────────────────────────────┤
+│ RagQueryAgent.answer()   runAgentLoop, maxTurns:6           │ agent loop
+├───────────────────────────────────────────────────────────┤
+│ ContextWindowGuardedProvider   {maxTokens:8192} gate        │ guard
+├───────────────────────────────────────────────────────────┤
+│ ★ GemmaModelProvider.complete()   tokens in → content out   │ THE MODEL
+├───────────────────────────────────────────────────────────┤
+│ Ollama HTTP  POST /api/chat  → gemma2:9b weights            │ runtime
+└───────────────────────────────────────────────────────────┘
 ```
 
-Zoom in: that `★ MODEL.complete ★` box is the LLM. Strip away the framing and it's a **function** — you hand it a sequence of tokens, it hands you back the most-likely next tokens, one at a time, until it decides to stop. That's it. It is not a database (it doesn't *store* your documents — that's pgvector's job two layers down), and it is not a reasoner with a logic engine inside. It's a very good autocomplete that has read a lot. The single most useful mental correction for a frontend engineer pivoting in: treat it like a flaky `fetch()` to a probabilistic endpoint, not like a function you wrote.
+Everything above the ★ is plumbing you wrote. The ★ box is the only place "intelligence" happens — and it is far dumber than the plumbing makes it look. Strip away the agent loop, the guard, the TUI, and what's left is a function: you hand it text, it hands you text back. That's the whole contract. This file is about taking that literally.
 
-## Structure pass
+## Structure pass — trace *state* down the stack
 
-Three layers wrap the model in buffr. Trace one axis — **who owns the truth?** — down the stack and watch the answer flip.
+Pick one axis: **where does state live?** Trace it from the top box to the bottom and watch it vanish.
 
 ```
-  Axis: "who holds the ground truth?" — traced down the stack
-
-  ┌─ Agent loop (RagQueryAgent) ─────────────┐
-  │  owns the QUESTION + the conversation     │  truth = the user's intent
-  └─────────────────────┬─────────────────────┘
-                        │  seam: prompt assembly
-  ┌─ Model (gemma2:9b) ─▼─────────────────────┐
-  │  owns nothing durable; pure transform     │  truth = NONE (it guesses)
-  └─────────────────────┬─────────────────────┘
-                        │  seam: the tool call
-  ┌─ Storage (pgvector) ▼─────────────────────┐
-  │  owns the indexed documents               │  truth = the actual facts
-  └───────────────────────────────────────────┘
+state ownership, top → bottom
+ chat.tsx                 │ holds turns[] in React state     ← remembers
+ session.ask()            │ holds conversationId, pool        ← remembers
+ RagQueryAgent.answer()   │ holds nothing between calls       ← forgets
+ GemmaModelProvider       │ holds nothing between calls   ★   ← forgets
+ ─────────────────────────┼─────────────────────────────  THE SEAM
+ gemma2:9b weights        │ frozen, identical every call      ← cannot remember
 ```
 
-The seam that matters is the one *above* the model: the agent must hand the model everything it needs as tokens, because the model owns no truth of its own. The model layer is stateless and forgetful — every call starts from zero. The whole RAG architecture exists because of this one fact: the model can't look anything up, so you have to retrieve the facts (pgvector) and paste them into the prompt before you call it. Hold that and the rest of buffr makes sense.
+The seam is right above the model. Above it, state accumulates (your conversation, your DB rows). At and below the model, **there is no state** — the weights are frozen, the function is pure, and every call starts from zero. The only way the model "knows" anything about this turn is what you put in the input string *this call*. That single fact — memory lives above the seam, never in the model — is what makes RAG (03) and conversation memory (04) necessary instead of optional.
 
 ## How it works
 
-#### Move 1 — the mental model
+### Move 1 — the mental model: a pure function
 
-You know how a `fetch()` is a function from a request to a response — same inputs, you hope for same-ish outputs, but it's I/O so you wrap it in loading/error states? An LLM is that, with one twist: the output is *sampled*, so the same input can give different outputs. The underlying strategy: **predict the next token from all prior tokens, append it, repeat.**
-
-```
-  Pattern — the next-token loop (what gemma2:9b does internally)
-
-  prompt tokens:  [The] [cat] [sat] [on] [the]
-                                              │
-                        ┌─────────────────────▼──────────────────┐
-                        │  model: P(next | all prior tokens)      │
-                        │  → ranks every possible next token      │
-                        └─────────────────────┬──────────────────┘
-                                              │ pick one (sampling)
-                                              ▼
-  appended:       [The] [cat] [sat] [on] [the] [mat]
-                                              │
-                        ┌─────────────────────▼──────────────────┐
-                        │  feed the WHOLE sequence back in        │
-                        └─────────────────────┬──────────────────┘
-                                              ▼
-                               ... until [<end>] token → stop
-```
-
-The loop runs inside the model on every call. buffr never sees individual tokens — it sees the final string — but that loop is what `eval_count` (output tokens) counts later in the token ledger.
-
-#### Move 2 — the step-by-step walkthrough
-
-**The function signature buffr actually calls.** Forget the math. From buffr's side, the LLM is one method: `complete(request) → response`. The request carries a system prompt, the messages so far, and (optionally) tool schemas; the response carries content blocks. Here's the real provider in aptkit, the thing `session.ts:46` wraps.
+You already know pure functions from frontend. `formatPrice(cents) → "$4.20"` — same input, deterministic output, no hidden state. An LLM is that shape, with one twist: the output is sampled from a probability distribution, so it's a *pure function with a random seed*, not a deterministic one. Same input can give different text (that's sampling — file 03). But it never *remembers* the last call.
 
 ```
-  GemmaModelProvider.complete — gemma-provider.ts:52-92 (annotated)
+the model as a function
+        input tokens                         output content
+   ┌──────────────────────┐             ┌──────────────────────┐
+   │ system prompt        │             │ {type:'text',        │
+   │ + profile (me.md)    │  ──────▶    │  text:'...'}         │
+   │ + tool schemas       │   f(x)      │   OR                 │
+   │ + the question       │             │ {type:'tool_use',    │
+   │ + retrieved chunks   │             │  name, input}        │
+   └──────────────────────┘             └──────────────────────┘
+        one big string                    one structured block
+            ▲
+            └─ everything the model "knows" this turn is in here
+```
 
-  async complete(request: ModelRequest): Promise<ModelResponse> {   // ← the function
-    const baseMessages = this.buildMessages(request);               // tokens-in, assembled
-    ...
-    lastResponse = await this.chat({                                // HTTP → Ollama → gemma2:9b
-      model: this.defaultModel,                                     // 'gemma2:9b'
-      messages, stream: false, ...                                  // non-streaming: wait for all of it
+That's it. There is no fifth input called "what we talked about yesterday." If it's not in the string on the left, the model cannot use it.
+
+### Move 2 — the moving parts
+
+#### The input is assembled, then flattened to text
+
+Buffr builds a structured `ModelRequest` (system, messages, tools), but `gemma2:9b` can't take structured tools, so the provider flattens everything into plain strings before the HTTP call. This is `buildMessages` in the Gemma provider (`packages/providers/gemma/src/gemma-provider.ts:94–108`):
+
+```ts
+private buildMessages(request: ModelRequest): { role: string; content: string }[] {
+  const messages: { role: string; content: string }[] = [];
+  const system = buildSystemText(request);        // ← tools get rendered INTO this text
+  if (system) messages.push({ role: 'system', content: system });
+  for (const message of request.messages) {
+    messages.push({
+      role: message.role,
+      content:
+        typeof message.content === 'string'
+          ? message.content
+          : flattenContent(message.content),       // ← structured blocks → string
     });
-    raw = lastResponse.message?.content ?? '';                      // tokens-out, as one string
-    ...
-    return this.toResponse([{ type: 'text', text: raw }], lastResponse);
   }
+  return messages;
+}
 ```
 
-One call in (`request`), one string out (`raw`). No memory between calls, no database read inside the model. Everything the model "knows" about your question came in through `request`.
-
-**Where the model sits in buffr's wiring.** `src/session.ts:46` constructs it once, behind a guard:
+The annotation that matters: by the time the input crosses the wire, it is **one array of `{role, content:string}`**. The model never sees a "tool" type. The structure you carefully built upstream is theatre below the seam — it's all text.
 
 ```
-  src/session.ts:46 — the model is built once per session
-
-  const model = new ContextWindowGuardedProvider(
-    new GemmaModelProvider({ host: cfg.ollamaHost }),   // ← the raw next-token function
-    { maxTokens: 8192 }                                  // ← a wrapper that pre-checks size
-  );
+upstream structure → wire reality
+  ModelRequest                       Ollama /api/chat body
+  ┌─────────────────┐                ┌──────────────────────────┐
+  │ system: "..."   │                │ messages: [              │
+  │ tools: [{...}]  │  buildMessages │   {role:'system', ...},  │
+  │ messages: [...] │  ────────────▶ │   {role:'user', ...}     │
+  └─────────────────┘                │ ], stream:false          │
+   typed, structured                 └──────────────────────────┘
+                                       flat strings only
 ```
 
-`GemmaModelProvider` is the function. `ContextWindowGuardedProvider` is a frontend-familiar idea: an input-validation wrapper that rejects the call *before* it goes out if the prompt is too big — like guarding a `fetch()` body against a max payload size. The model itself doesn't reject; the wrapper does.
+#### The output is text, or text *parsed* as a tool call
 
-**Why "not a database" is the load-bearing distinction.** The agent loop crosses a seam every time it needs a *fact*: it stops asking the model and calls `search_knowledge_base`, which hits pgvector.
+The HTTP response is always text (`message.content`). The provider then decides: is this text actually a tool call in disguise? `complete()` (`gemma-provider.ts:52–92`):
+
+```ts
+raw = lastResponse.message?.content ?? '';
+if (wantsTool) {
+  const call = parseToolCall(raw);               // try to read JSON {"tool":...} out of the text
+  if (call) {
+    return this.toResponse(
+      [{ type: 'tool_use', id: this.nextToolUseId(call.name), name: call.name, input: call.input }],
+      lastResponse,
+    );
+  }
+  if (looksLikeToolAttempt(raw)) continue;        // looked like a botched tool call → retry once
+}
+return this.toResponse([{ type: 'text', text: raw }], lastResponse);
+```
+
+So `complete()` returns one of two content shapes — `{type:'text'}` or `{type:'tool_use'}` — but **both come from the same text response**. The `tool_use` block is something *buffr's code* manufactured by parsing JSON out of prose. The model emitted characters; the structure is downstream interpretation. (Full treatment in file 04.)
 
 ```
-  Layers-and-hops — the model can't look things up, so the loop does
-
-  ┌─ Agent loop ─┐  hop 1: "answer this, here are tools"   ┌─ Model ──────┐
-  │ runAgentLoop │ ───────────────────────────────────────►│ gemma2:9b    │
-  └──────┬───────┘  hop 4: final grounded answer ◄───────── └──────┬───────┘
-         │                                              hop 2 │ "call search_knowledge_base"
-         │  hop 3: query → ranked chunks                      ▼
-         │  ┌─ Storage (pgvector) ─────────────────────────────────┐
-         └─►│ agents.chunks — the ACTUAL documents (the truth)     │
-            └──────────────────────────────────────────────────────┘
+output: one text, two interpretations
+   Ollama returns:  '{"tool":"search_knowledge_base","arguments":{"query":"..."}}'
+                            │
+                  parseToolCall(raw)
+              ┌─────────────┴─────────────┐
+        parses?                       doesn't parse?
+              │                             │
+    [{type:'tool_use', ...}]      [{type:'text', text: raw}]
 ```
 
-Hop 2 is the model admitting it doesn't know — it emits a tool call instead of an answer. Hop 3 fetches the truth from storage. The model never touched the database; the loop did, then pasted the result back into the next prompt. If you forget this and expect the model to "remember" an indexed doc, you'll be confused why answers drift — it never had the doc unless retrieval put it in the prompt.
+#### No memory: every `answer()` starts cold
 
-#### Move 3 — the principle
+`RagQueryAgent.answer()` (`packages/agents/rag-query/src/rag-query-agent.ts:62`) takes a `question` string and runs a fresh loop. It holds no history field. Buffr's own `session.ts` even calls this out in a comment: *"RagQueryAgent.answer() treats each question independently."* The model's "memory" of your last turn is reconstructed *every call* from retrieval (the `search_knowledge_base` tool) and the injected profile — never from the model itself.
 
-An LLM is a stateless function from tokens to tokens, sampled — not a knowledge store and not a deductive engine. Every capability you want from it (facts, memory, structure, tools) is something *you* engineer around it by controlling what tokens go in. That single reframe is why buffr is mostly plumbing: retrieval, prompts, and a loop, all in service of feeding one forgetful function the right tokens.
+### Move 3 — the principle that generalizes
+
+> **Treat the LLM as exactly a function: `f(string) → string`. Every bug that isn't a parsing bug is a "you put the wrong thing in the string" bug.**
+
+The model didn't "forget" your name — your name wasn't in the input. It didn't "ignore" the document — the document wasn't retrieved into the prompt. It didn't "hallucinate maliciously" — you gave it a question with no grounding and sampled from its prior. Once you stop anthropomorphizing the box and start auditing the input string, debugging gets boring in the good way.
 
 ## Primary diagram
 
-```
-  The LLM as a function, in full — buffr's call path
+The full picture: structured upstream, flat at the seam, text out, interpreted downstream, zero memory.
 
-  ┌─ TUI ─────────┐   question (string)
-  │  chat.tsx     │ ──────────────────────────────────┐
-  └───────────────┘                                    ▼
-  ┌─ Agent (aptkit) ───────────────────────────────────────────────┐
-  │  RagQueryAgent.answer → runAgentLoop                            │
-  │    assemble request {system, messages, tools}                   │
-  │            │                                                    │
-  │            ▼                                                    │
-  │   ┌─ Provider ──────────────────────────────────────────────┐  │
-  │   │ ContextWindowGuardedProvider  (size pre-check, :46)      │  │
-  │   │   └─► GemmaModelProvider.complete (gemma-provider.ts:52) │  │
-  │   │         └─► HTTP /api/chat → Ollama → gemma2:9b          │  │
-  │   │               next-token loop → one string out           │  │
-  │   └──────────────────────────────────────────────────────────┘ │
-  │            │ tool call? ──► search_knowledge_base ──► pgvector   │
-  │            ▼                                                    │
-  │   final grounded answer (string)                               │
-  └────────────────────────────────────────────────────────────────┘
-   stateless · sampled · owns no truth · re-prompted every turn
+```
+the LLM, end to end in buffr
+  session.ask("what's my deploy command?")
+        │  (state lives here and above)
+        ▼
+  RagQueryAgent.answer(q)  ── builds ModelRequest {system, tools, messages} ──┐
+        │                                                                      │
+  ════════════════════════════ THE SEAM (no state below) ════════════════════ │
+        ▼                                                                      │
+  GemmaModelProvider.complete(request)                                         │
+        │  buildMessages → flat [{role,content:string}]                        │
+        ▼                                                                      │
+  Ollama POST /api/chat → gemma2:9b → message.content (TEXT)                   │
+        │                                                                      │
+        ▼  parseToolCall(raw)                                                  │
+  ┌──────────────┬─────────────────┐                                          │
+  {type:'text'}   {type:'tool_use'} ────────────────────────────────────────┘
+        │                                  (loop feeds tool result back as new input)
+        ▼
+  finalText → session persists it → React renders it
 ```
 
 ## Elaborate
 
-The "function from tokens to tokens" framing is the transformer-era reframe of language modeling: older models predicted the next word too, but transformers made the context (all prior tokens) cheap enough to attend over at scale. The practical fallout for an application engineer is that *context is the only input you control*. You can't reach into the weights; you can only change the prompt. That's why the next four files in this section — tokenization, sampling, structured output, and ultimately provider abstraction — are all about controlling or measuring the tokens crossing that one function boundary.
-
-Adjacent concepts: the model's forgetfulness is what `02-context-and-prompts/` and `03-retrieval-and-rag/` exist to compensate for; its probabilistic output is what `05-evals-and-observability/` exists to measure; its statelessness is what makes `04-agents-and-tool-use/` a *loop* rather than a single call.
+- **Origin.** "Attention Is All You Need" (2017) gave the transformer; GPT-2/3 made the autoregressive "predict the next token" framing dominant. `gemma2:9b` is Google's open-weight model in that lineage, 9 billion parameters, run locally by Ollama.
+- **Adjacent concepts.** *Tokenization* (02) is how the input string becomes the actual integers the function consumes. *Sampling* (03) is the random-seed knob on this function. *Provider abstraction* (08) is the seam between buffr and "which function" — swap `gemma2:9b` for another and the contract holds.
+- **What to read next.** File 02 — because "tokens in, tokens out" is literally true, and the token count is the budget everything else fights over.
 
 ## Project exercises
 
-No curriculum file present; exercises derived from the codebase. This concept is **exercised** (Case A) — `gemma2:9b` is the brain in buffr's loop.
+### Prove the model is stateless
 
-### EX-01-1 — Prove statelessness with a two-call experiment
+- **Exercise ID:** [B1.1] (Phase 1 — LLM foundations)
+- **What to build:** A throwaway script that calls `agent.answer("My name is Rein.")` then `agent.answer("What is my name?")` on the *same* session and asserts the second answer does **not** contain "Rein" (because nothing persisted it into the second input). Then add the name to the profile and watch it appear.
+- **Why it earns its place:** Nothing teaches "the model has no memory" like watching it fail to remember a thing you just said, then succeed once you put that thing in the input string.
+- **Files to touch:** new `scripts/prove-stateless.ts`; read-only against `src/session.ts`, `src/profile.ts`.
+- **Done when:** the first assertion (no recall) passes and the second (recall via profile) passes, in one run.
+- **Estimated effort:** <1hr
 
-- **Exercise ID:** EX-01-1
-- **What to build:** A throwaway script that calls `GemmaModelProvider` (via a fresh `createChatSession`) twice with a fact-bearing question, where the fact is only available via retrieval, and a second time with retrieval disabled — showing the model "forgets" between calls and only knows what's in the prompt.
-- **Why it earns its place:** Makes the abstract "stateless function" claim concrete and undeniable; it's the mental model the whole repo depends on.
-- **Files to touch:** a new `scripts/llm-statelessness.ts` (mirror `src/cli/ask` usage of `createChatSession`), reading `src/session.ts` for the wiring. Do not edit aptkit.
-- **Done when:** running it prints the same question answered two ways and you can point at the prompt difference that caused it.
-- **Estimated effort:** 1-4hr
+### Log the exact string crossing the seam
 
-### EX-01-2 — Surface the model identity in the trace
-
-- **Exercise ID:** EX-01-2
-- **What to build:** Confirm (and if missing, assert in a test) that every `model_usage` row written by `SupabaseTraceSink` records `provider/model` = `gemma/gemma2:9b`, so the ledger names exactly which function produced each answer.
-- **Why it earns its place:** Ties the "one function" idea to observability — you can audit which model answered, the first step to ever swapping it.
-- **Files to touch:** `src/supabase-trace-sink.ts:73-78` (read), a new test under the existing test dir asserting the `model` string shape.
-- **Done when:** a test fails if the persisted `model` field stops being `gemma/gemma2:9b`.
+- **Exercise ID:** [B1.2] (Phase 1 — LLM foundations)
+- **What to build:** Wrap `GemmaModelProvider` with a thin logging provider (same `complete` signature) that writes the flattened `messages` array to a file before delegating. Read one real chat turn's wire input.
+- **Why it earns its place:** Makes the seam concrete — you see that the "structured" tool schema is just text inside the system message.
+- **Files to touch:** new `src/logging-provider.ts`; one-line swap in `src/session.ts:46` to wrap the Gemma provider.
+- **Done when:** a `wire-input.json` file shows the system message containing the rendered tool JSON, and the user message containing the raw question.
 - **Estimated effort:** <1hr
 
 ## Interview defense
 
-**Q: "Is an LLM a database? If I index a document, does the model now 'know' it?"**
+**Q: "Where does the model store conversation history?"**
 
-No. The model is stateless and owns no durable truth; the document lives in pgvector, and the model only ever sees it if retrieval pastes it into the prompt for that one call.
-
-```
-  index ≠ model-knows
-
-  index doc ──► pgvector (agents.chunks)   ← the doc lives HERE
-                     │
-                     │  only on a tool call, this turn
-                     ▼
-  prompt ──► gemma2:9b ──► answer          ← model sees it only now
-```
-
-*Anchor:* the model has no DB read inside it — `GemmaModelProvider.complete` (`gemma-provider.ts:52`) only does an HTTP call to Ollama; the facts come from a separate hop to `pg-vector-store.ts:67`.
-
-**Q: "Why is the same prompt able to give different answers?"**
-
-Because output is *sampled* token-by-token from a probability distribution, not computed deterministically. Each next token is a pick from a ranking, so two runs can diverge.
+Model answer: It doesn't. The model is a stateless pure function — `f(tokens) → tokens`. The weights are frozen and identical on every call. Any "memory" is reconstructed upstream of the model: in buffr, that's the profile injected into the system prompt plus retrieval via the `search_knowledge_base` tool. `RagQueryAgent.answer()` holds no history field and treats every question independently, which is exactly why retrieval-based memory exists.
 
 ```
-  sampling = non-determinism
-
-  same prompt ─► P(next token) ─► pick A ─► "the mat"
-                              └─► pick B ─► "the rug"
+the trap question, answered
+  "history?"  →  NOT in the model
+                 ┌─────────────┴─────────────┐
+            in the input string         in your DB/retrieval
+            (profile + chunks)          (assembled fresh each call)
+  ★ the weights remember NOTHING between calls
 ```
 
-*Anchor:* `stream: false` in `gemma-provider.ts:69` waits for the full sampled sequence, but it's still sampled — see `03-sampling-parameters.md` for the dials that control it.
+Anchor: *Memory lives above the seam; the model is `f(string)→string`.*
 
 ## See also
 
-- `02-tokenization.md` — what the "tokens" in "tokens-to-tokens" actually are.
-- `03-sampling-parameters.md` — the dials on the sampling step.
-- `08-provider-abstraction.md` — how buffr wraps this one function behind an interface.
-- `../04-agents-and-tool-use/01-agents-vs-chains.md` — the loop that re-prompts the forgetful function.
-- `../03-retrieval-and-rag/11-rag.md` — the retrieval that compensates for its forgetfulness.
+- `02-tokenization.md` — the input string is really a list of token integers; that list has a hard length limit.
+- `08-provider-abstraction.md` — the seam formalized: `complete()` is the port; `gemma2:9b` is one adapter.
+- `../04-agents-and-tool-use/` — what consumes the `tool_use` content block this file describes.

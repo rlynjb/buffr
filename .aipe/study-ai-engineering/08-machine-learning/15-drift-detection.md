@@ -1,230 +1,222 @@
-# Drift detection — catching when production stops matching training
+# Drift Detection
 
-*Data / feature drift detection (PSI — Population Stability Index). Industry standard. buffr monitors no drift — not yet implemented — but the data to compute PSI (embedding and trace-metric distributions) already exists.*
+### *industry: data drift / covariate shift detection · type: the production monitor that catches when the world stopped matching your training data*
 
-## Zoom out, then zoom in
+## Zoom out
 
-A model is trained on one distribution and then meets production traffic that slowly stops looking like it. Nothing throws an error — the inputs just drift, the model's assumptions quietly expire, and accuracy bleeds away with no exception to catch. Drift detection is the smoke alarm: it compares "what the world looked like at training time" against "what it looks like now" and fires before the model rots. buffr runs no such alarm, but it sits on two distributions you *could* watch.
+A trained model is a frozen snapshot of the world it was trained on. Production is a moving world. The gap between them — *drift* — is the slow failure mode no test catches, because the code is fine; it's the *input distribution* that changed. In buffr you don't have a trained model to drift yet, but you do have a stream of query embeddings landing in pgvector every day, and *that distribution* — what people ask — absolutely shifts. Drift detection is the monitor that watches a distribution over time and raises its hand when "now" stops looking like "then."
 
+**The MLOps lifecycle, with the stage drift detection lives in marked**
 ```
-  Zoom out — where drift detection would sit in buffr
-
-  ┌─ Ingest / retrieval layer ──────────────────────────────────┐
-  │  nomic-embed-text → agents.chunks.embedding (vector 768)    │
-  │  pg-vector-store search → cosine score distribution         │
-  └───────────────────────────────┬──────────────────────────────┘
-                                  │  produces distributions over time
-  ┌─ Monitoring layer ────────────▼──────────────────────────────┐
-  │  ★ DRIFT DETECTION (PSI) ★   compare train-window vs now     │ ← we are here
-  │  NOT IMPLEMENTED — no job computes PSI on any buffr signal   │
-  └───────────────────────────────┬──────────────────────────────┘
-                                  │  PSI threshold → flag
-  ┌─ Action layer ────────────────▼──────────────────────────────┐
-  │  alert / investigate / retrain  (ties to 16-retraining)     │
-  └───────────────────────────────────────────────────────────────┘
+┌────────┐ ┌──────────┐ ┌───────┐ ┌───────┐ ┌────────┐ ┌──────────┐
+│  Data  │►│ Features │►│ Split │►│ Train │►│ Deploy │►│ ★MONITOR │
+│        │ │          │ │       │ │       │ │        │ │ ★        │
+└───┬────┘ └──────────┘ └───────┘ └───────┘ └────────┘ └────┬─────┘
+    │                                                        │ ◄── this file
+    │  TRAIN distribution  ◄───── compare ─────►  PROD distribution
+    └────────────────────────────────────────────────────────┘
+              drift = the two distributions diverging over time
 ```
-
-Zoom in: **PSI (Population Stability Index)** is the standard scalar for "how far has this distribution moved." You bin a feature at training time and in production, then sum a per-bin term that's large when the bins disagree. One number, three threshold bands: stable, investigate, retrain. buffr has the raw signals — the embedding distribution in `agents.chunks.embedding`, the cosine-score distribution from `pg-vector-store` searches, the token/latency distributions in `agents.messages` — and nothing that turns any of them into a PSI.
+Drift detection closes the loop from monitor back to data: it watches production inputs against the training reference and flags divergence.
 
 ## Structure pass
 
-**Layers:** the reference window (train-time distribution) → the live window (production distribution) → the PSI computation → the threshold decision.
+One axis runs through the whole topic: **distribution distance — how far has the live input distribution moved from the reference one?** Everything reduces to comparing two histograms (reference vs current) and reducing their difference to a single number you can threshold.
 
-**Axis — "is this distribution still the one we built for?"** Trace that one question across the layers.
-
+**The one axis: reference distribution vs current distribution, reduced to one number**
 ```
-  trace "has the distribution moved?" across the layers
+   REFERENCE (training-time)         CURRENT (production, this week)
+   counts per bucket                 counts per bucket
+    █                                     █
+    ███                                  ███
+    ████  ██                          ██ ████
+    ──────────────                    ──────────────
+       buckets                            buckets
+            │                                  │
+            └──────────► PSI = Σ contributions ◄┘
+                              │
+              one scalar: 0 = identical, larger = more drift
 
-  ┌─ reference window ───┐  train-time bins (the baseline)   "this is normal"
-  ├─ live window ────────┤  production bins (now)            "this is current"
-  ├─ PSI = Σ contribution┤  per-bin divergence summed         one scalar
-  └─ threshold band ─────┘  <0.1 ok / 0.1-0.2 watch / >0.2   the decision
+   ┌──────────────────────────── THE SEAM ───────────────────────────┐
+   │ DATA drift (inputs change) ≠ CONCEPT drift (input→label relation │
+   │ changes). PSI catches the FIRST. The second needs fresh labels.  │
+   └──────────────────────────────────────────────────────────────────┘
 ```
-
-**The seam:** the boundary between **feature/covariate drift** (the *inputs* moved — what PSI measures) and **label/concept drift** (the input→output *relationship* moved). PSI lives entirely on the input side; it can't see concept drift because it never looks at labels. That seam is load-bearing: a green PSI does *not* mean the model is fine — it means the inputs haven't moved. The relationship can rot while every input distribution stays put, and PSI will say "stable" the whole time.
+The seam: PSI sees the inputs moving (covariate shift / data drift). It cannot see the *meaning* of a label changing under fixed inputs — that's concept drift, and it needs ground truth, not just a histogram.
 
 ## How it works
 
-### Move 1 — the mental model
+### Move 1 — Mental model
 
-You already compare two histograms by eye — "last month's latency bars sat left, this month they've shifted right." PSI is that comparison turned into a single number: bin both distributions the same way, and for each bin measure how much the production share diverges from the training share, weighted by the log-ratio so a bin that doubled counts more than one that nudged.
+The mental model: **bucket both distributions the same way, then sum how much each bucket's share moved.** PSI (Population Stability Index) is the workhorse: bin the reference and current data into the same buckets, and for each bucket measure how its *proportion* shifted, weighted by the log of the ratio. Small total = stable; large total = the population moved.
 
+**The pattern: same buckets, sum the per-bucket shift**
 ```
-  the kernel — bin both, sum the per-bin divergence
-
-  reference (train):  [ 40% | 35% | 25% ]   bins low / mid / high
-  production (now):   [ 20% | 30% | 50% ]   ← mass moved to "high"
-                        │     │     │
-        per-bin term:  (p−r)·ln(p/r)  for each bin
-                        ▼     ▼     ▼
-              PSI  =  Σ (prod% − train%) · ln(prod% / train%)
-
-  one scalar → which band does it fall in?
+   bucket │ ref%  │ cur% │ contribution = (cur% - ref%) * ln(cur%/ref%)
+   ───────┼───────┼──────┼──────────────────────────────────────────
+     b1   │ 0.20  │ 0.10 │  (−0.10)*ln(0.5)  = +0.069
+     b2   │ 0.50  │ 0.45 │  (−0.05)*ln(0.9)  = +0.005
+     b3   │ 0.30  │ 0.45 │  (+0.15)*ln(1.5)  = +0.061
+   ───────┴───────┴──────┴──────────────────────────────────────────
+                                  PSI = Σ = 0.135
 ```
+PSI is just that column summed — a single number standing in for "how different are these two histograms."
 
-The shape to remember: PSI is *signed-difference times log-ratio, summed over bins*. A bin contributes nothing when `prod% == train%` (difference zero) and a lot when the share both moved and moved *proportionally* far.
+### Move 2 — Walk the mechanism
 
-### Move 2 — the step-by-step walkthrough
+**Part 1 — Freeze a reference distribution.** At training (or, for buffr, at a chosen baseline week), snapshot the bucketed distribution of the feature you'll monitor. This is the "then" you compare against.
 
-**Step 1 — bin both distributions identically.** Pick bins from the *reference* distribution (commonly deciles) and apply the same edges to production. Identical edges is non-negotiable — different edges and you're comparing nothing.
-
+**The reference is frozen once, the baseline you measure drift FROM**
 ```
-  Step 1 — same bin edges for both windows
-
-  reference values ─► deciles ─► [b0|b1|b2|...|b9]   (edges fixed HERE)
-  production values ─────────────► apply SAME edges  ► [b0|b1|...|b9]
-  now each bin has a train% and a prod% you can compare
+   training data feature ──► histogram ──► FREEZE as reference%
+                                              │
+                          stored; never changes until you re-baseline
 ```
 
-**Step 2 — compute the per-bin contribution and sum.** For each bin, `(prod% − train%) · ln(prod% / train%)`. Sum across bins → PSI. Worked example with three bins:
+**Part 2 — Bucket the live data the same way.** Critically, use the *reference's* bucket edges on the current data. Re-binning current data into its own buckets makes the two incomparable.
 
+**Same bucket edges on both, or the comparison is meaningless**
 ```
-  Step 2 — a worked PSI calculation (3 bins)
-
-  bin   train%  prod%   (p−r)     ln(p/r)        term = (p−r)·ln(p/r)
-  ───   ──────  ─────   ──────    ────────       ───────────────────
-  low    0.40   0.20    −0.20     ln(0.50)=−0.69   (−0.20)(−0.69) = 0.139
-  mid    0.35   0.30    −0.05     ln(0.857)=−0.15  (−0.05)(−0.15) = 0.008
-  high   0.25   0.50    +0.25     ln(2.00)=+0.69   (+0.25)(+0.69) = 0.173
-                                                   ─────────────────────
-                                            PSI  =  0.320   → > 0.2 → RETRAIN
+   reference edges:  [.. | .. | .. | ..]   ◄── defined once
+   current data ─────apply SAME edges────► current%
+        │  using fresh edges here = comparing apples to a different fruit
 ```
 
-Pseudocode:
+**Part 3 — Compute PSI and read the threshold.** Sum the per-bucket contributions. The conventional reading is stable / moderate / significant. Illustrative pseudocode, not buffr code:
 
-```
-  // input:  reference values, production values, bin_count
-  // output: PSI scalar
-  function psi(reference, production, bin_count):
-    edges = quantile_edges(reference, bin_count)   // bins from the BASELINE
-    total = 0
-    for bin in bins(edges):
-      r = fraction_of(reference,  in=bin)          // train share
-      p = fraction_of(production, in=bin)          // prod share
-      r = max(r, epsilon)                           // guard: ln(p/0) is undefined
-      p = max(p, epsilon)
-      total += (p - r) * ln(p / r)                  // per-bin divergence
+**PSI computation + threshold bands (illustrative)**
+```python
+# ILLUSTRATIVE ONLY — not buffr code.
+def psi(ref_pct, cur_pct, eps=1e-6):
+    total = 0.0
+    for r, c in zip(ref_pct, cur_pct):
+        r, c = max(r, eps), max(c, eps)          # guard against ln(0)/div0
+        total += (c - r) * math.log(c / r)
     return total
+
+# conventional bands:
+#   PSI < 0.10  → stable, no action
+#   0.10–0.25   → moderate drift, watch
+#   PSI > 0.25  → SIGNIFICANT drift → alert + consider retrain
 ```
 
-The `epsilon` guard is the boundary condition: an empty bin makes `ln(p/r)` blow up to infinity, so you floor both shares at a tiny constant. Forget it and a single empty production bin returns PSI = ∞.
+**Part 4 — Drift fires a signal, not a retrain (yet).** A PSI breach is an *alert*, not an automatic rebuild. It says "the inputs moved" — the operator (or a downstream pipeline) decides whether that warrants action.
 
-**Step 3 — apply the threshold bands.** PSI's value only matters against the standard cutoffs. State them exactly:
-
+**Detection → alert → (maybe) retrain trigger**
 ```
-  Step 3 — the threshold bands (memorize these)
-
-  PSI < 0.10           ─►  NO significant shift     → ok, do nothing
-  0.10 ≤ PSI ≤ 0.20    ─►  MODERATE shift           → investigate
-  PSI > 0.20           ─►  SIGNIFICANT shift         → retrain
-
-  ├──── ok ────┼─── watch ───┼────── retrain ──────►
-  0          0.10          0.20                   ∞
+   PSI > 0.25 ──► ALERT ──► investigate ──► [ retrain? re-baseline? ignore? ]
+                    │
+        the monitor's job ends at the alert; file 16 wires the trigger
 ```
 
-**Step 4 — know what PSI can't see: concept drift.** PSI watches inputs. If the *meaning* of an input changes — same distribution, different correct answer — PSI stays green while the model rots.
+### Move 2.5 — Current vs future
 
+buffr has no trained model, so there's no model to drift. But there *is* a live distribution to measure today: the query embeddings flowing into pgvector. You can start measuring drift before you ever train anything.
+
+**What buffr can measure NOW vs what needs a model LATER**
 ```
-  Step 4 — feature drift vs concept drift
+   NOW (buildable, no model required):
+     query embeddings in agents.chunks/queries ──► reduce to a 1-D feature
+       (e.g. mean cosine-to-corpus, or top PCA component) ──► PSI week-over-week
+     ★ "what users ask" drifting is a REAL, measurable buffr signal
 
-  FEATURE (covariate) drift   ─►  P(X) moves      ─► PSI CATCHES IT  ✓
-    inputs look different than training
-  CONCEPT (label) drift       ─►  P(Y|X) moves    ─► PSI IS BLIND    ✗
-    same inputs, different correct output
-    → needs production ground-truth labels, not PSI
-```
-
-For buffr the realistic target is feature drift over its own distributions — embeddings and trace metrics — since it has no production labels to detect concept drift with anyway.
-
-### Move 2.5 — current state vs future state
-
-```
-  Phase A (today)                        Phase B (PSI wired up)
-  ─────────────                          ──────────────────────────────────
-  agents.chunks.embedding exists         summary-stat of embeddings binned
-  cosine scores produced per search      cosine-score distribution windowed
-  tokens_used / durationMs logged        trace-metric distributions windowed
-  NOTHING computes PSI                   PSI(reference, live) + threshold flag
+   LATER (needs a trained model):
+     model input features ──► PSI ──► retrain trigger
+     drift on the things a TRAINED model consumes
 ```
 
-The data is all there; the missing piece is a job that snapshots a reference window, bins a live window the same way, and runs the PSI sum (DRIFT-1 / DRIFT-2).
+### Move 3 — The principle
 
-### Move 3 — the principle
-
-Drift detection is the admission that a model's accuracy has an expiry date set by the world, not the code. PSI is the cheapest possible alarm — one scalar, three bands, no labels required — and its blind spot (concept drift) is the thing teams forget: a green PSI proves the *inputs* are stable, never that the *model* is still right. buffr has every input distribution it would need and watches none of them.
+The principle: **a model's accuracy can rot without a single line of code changing, because the world is the real input.** Drift detection is the smoke alarm for that silent failure: it watches the input distribution, reduces divergence to one thresholded number, and converts "something feels off" into "PSI crossed 0.25 on Tuesday." You don't need ground-truth labels to run it — which is exactly why it's the monitor you can build first.
 
 ## Primary diagram
 
+**The full picture: reference vs live, reduced to PSI, thresholded into an alert**
 ```
-  PSI drift detection over a buffr signal — full picture
-
-  ┌─ Reference window (baseline) ───────────────────────────────┐
-  │  e.g. cosine scores from week 1 searches → deciles          │
-  └───────────────────────────────┬──────────────────────────────┘
-                                  │  fix bin edges HERE
-  ┌─ Live window (now) ───────────▼──────────────────────────────┐
-  │  e.g. cosine scores from this week → SAME edges             │
-  └───────────────────────────────┬──────────────────────────────┘
-                                  │  per bin: (p−r)·ln(p/r)
-  ┌─ PSI sum ─────────────────────▼──────────────────────────────┐
-  │  PSI = Σ contributions   (guard empty bins with epsilon)    │
-  └───────────────────────────────┬──────────────────────────────┘
-                                  │
-  ┌─ Threshold band ──────────────▼──────────────────────────────┐
-  │  <0.1 ok · 0.1–0.2 investigate · >0.2 retrain → (file 16)   │
-  │  watches INPUTS only — blind to concept drift                │
-  └───────────────────────────────────────────────────────────────┘
+   TRAINING / BASELINE                      PRODUCTION (rolling window)
+   ┌────────────────────┐                   ┌────────────────────┐
+   │ feature histogram   │                  │ feature histogram   │
+   │  → FREEZE ref%      │                  │  (same bucket edges) │
+   └─────────┬───────────┘                  └─────────┬───────────┘
+             │                                         │
+             └──────────────► PSI = Σ (c−r)·ln(c/r) ◄──┘
+                                     │
+                    ┌────────────────┼─────────────────┐
+                    ▼                ▼                  ▼
+               PSI < 0.10        0.10–0.25          PSI > 0.25  ★
+               stable            watch              ALERT → retrain trigger
+                                                         │
+                              ┌──────────────────────────┘
+                              ▼
+                    buffr hook (buildable NOW):
+                    PSI over QUERY-EMBEDDING distribution, week over week
+                    — drift in what users ASK, no trained model required
 ```
+Read it left-to-right then down: two histograms collapse to one PSI number, the number falls into a band, and only the top band fires an alert — and in buffr you can run this today over the query-embedding stream.
 
 ## Elaborate
 
-PSI comes from credit-risk scorecard monitoring, where models score loan applicants for years and the applicant population shifts under them — the exact "model meets a moving world" problem. The 0.1 / 0.2 cutoffs are conventions from that domain that stuck because they're roughly right across applications: under 0.1 the shift is noise, over 0.2 it's structural. PSI is one of a family (KL divergence, Jensen-Shannon, KS-test); it's the one teams reach for because it's a single interpretable scalar with battle-tested thresholds.
-
-For buffr the genuine substrate is its *own* distributions, since it has no labeled production stream. Three candidates, all real: the embedding distribution (`agents.chunks.embedding`, vector(768) from `nomic-embed-text:v1.5`) summarized to a scalar (mean norm, a fixed dimension, etc.) and tracked over ingest windows; the cosine-score distribution from `pg-vector-store` searches (the `1 - (embedding <=> $1::vector) as score` values) over time — a slow slide here means retrieval quality is degrading; and trace metrics from `agents.messages` (`tokens_used`, `tool_results.durationMs`) — a drift in token usage or latency flags that the workload or model behavior has shifted. The data exists; nothing computes PSI on any of it.
-
-The honest caveat is the concept-drift blind spot. buffr can detect that its *inputs* moved, never that its *answers* got worse for unchanged inputs — that would need production ground-truth, which buffr doesn't collect. So PSI is the right first alarm precisely because it needs no labels. buffr's prior ML pipeline (MediaPipe pose-landmarking) faced drift too — lighting and camera changes shift the input distribution — but never monitored it, so PSI is new ground.
+- **PSI is symmetric-ish but not a true distance — and that's fine.** It's a stability index, not a metric in the mathematical sense. KL divergence is the closer theoretical cousin (PSI is essentially a symmetrized, bucketed KL). For monitoring, the thresholds matter more than the theory; 0.25 is the field-standard "significant" line.
+- **Bucket count is a real knob.** Too few buckets and you miss drift hiding inside a wide bin; too many and sparse buckets make PSI noisy and the `ln` term explode. Ten deciles is the common default. Always guard against empty buckets (the `eps` in the pseudocode) or `ln(0)` blows up.
+- **High-dimensional inputs need a projection.** A 768-dim embedding has no single histogram. You monitor *derived scalars*: distance-to-centroid, a top principal component, or per-dimension PSI averaged. Don't try to PSI a 768-vector directly — reduce first, then bucket.
+- **Data drift is not concept drift.** PSI on inputs catches "users started asking different things." It does *not* catch "the right answer to the same question changed." The latter needs labels — which is why drift detection alerts you to *look*, and a labeled canary (file 16) tells you whether quality actually dropped.
+- **Re-baselining is a decision, not an accident.** When drift is legitimate (the world genuinely moved and you've adapted), you reset the reference. Doing this silently hides future drift; doing it deliberately, logged, keeps the monitor honest.
 
 ## Project exercises
 
-> No curriculum file present; exercises derived from the codebase.
+### Exercise — PSI monitor over buffr's query-embedding distribution
 
-### Compute PSI on the cosine-score distribution between two time windows
+- **Exercise ID:** [B2C.15] Phase 2C
+- **What to build:** *Not yet implemented — buffr trains nothing* — and this exercise leans into that by monitoring an input distribution that exists *without* a trained model. Build a `ml/drift.py` that snapshots a reference distribution of query embeddings (reduced to a scalar like mean cosine-similarity-to-corpus, or the top PCA component), then computes weekly PSI of the live query stream against that reference, printing the band (stable / watch / significant).
+- **Why it earns its place:** It's the rare ML-monitoring exercise that's *fully buildable on buffr today* — no model required to start measuring drift in what users ask. It proves you can stand up a production monitor and reason about distribution shift, which is the harder half of MLOps.
+- **Files to touch:** new `ml/drift.py`, reads embeddings from `agents.chunks` / the query log (via `src/pg-vector-store.ts`'s table), writes a reference snapshot to a new `agents.drift_baseline` row.
+- **Done when:** running it weekly emits a PSI number + band, and synthetically injecting off-topic queries pushes PSI above 0.25 and prints `SIGNIFICANT`.
+- **Estimated effort:** Medium — a day. The PSI math is small; the work is the embedding-to-scalar reduction and the baseline snapshot.
 
-- **Exercise ID:** DRIFT-1 (Case B — drift detection not yet exercised). **The lead drift exercise.**
-- **What to build:** a job that pulls retrieval cosine scores (or a 768-dim embedding summary statistic) from two time windows of `agents.chunks` / search logs, bins them identically, and computes PSI — flagging when retrieval-quality distribution drifts.
-- **Why it earns its place:** a slow slide in cosine-score distribution is silent retrieval degradation with no error to catch; PSI is the alarm. The story is "I built drift detection on my own retrieval signal."
-- **Files to touch:** new `scripts/psi-drift.ts`; read the `1 - (embedding <=> ...) as score` values via the search path in `src/pg-vector-store.ts`; window by `agents.chunks` timestamps; implement the PSI sum with the epsilon guard.
-- **Done when:** the job prints a PSI for the cosine-score distribution between two windows and classifies it into the <0.1 / 0.1–0.2 / >0.2 band.
-- **Estimated effort:** 1 day.
+### Exercise — Wire the PSI breach to an alert
 
-### Compute PSI on trace metrics and wire the thresholds to a flag
-
-- **Exercise ID:** DRIFT-2 (Case B — trace-metric drift not yet exercised).
-- **What to build:** PSI over `tokens_used` and `tool_results.durationMs` from `agents.messages` between two windows, with the 0.1 / 0.2 cutoffs wired to a stable / investigate / retrain flag.
-- **Why it earns its place:** token and latency drift signals that model behavior or workload has shifted — the cheapest production health check, and the data is already logged.
-- **Files to touch:** new `scripts/psi-trace.ts` reading `agents.messages` (`tokens_used`, `tool_results.durationMs`); reuse the PSI function from DRIFT-1; emit the band as a flag.
-- **Done when:** the job returns a banded flag (ok / investigate / retrain) for token-usage and latency drift across two windows.
-- **Estimated effort:** 4–8 hr.
+- **Exercise ID:** [B2C.15b] Phase 2C
+- **What to build:** *Not yet implemented — buffr trains nothing,* so there's no retrain to trigger yet — but the *alert* half is buildable. Extend `ml/drift.py` to emit a structured alert (log line / row in a `agents.drift_events` table) when PSI > 0.25, capturing the offending feature, the PSI value, and the window — the same "capture the full signal" discipline `SupabaseTraceSink` uses.
+- **Why it earns its place:** Detection without a signal is a dashboard nobody reads. Producing a thresholded, recorded alert is what turns a metric into an operational trigger — and it's the input file 16's retraining pipeline will consume.
+- **Files to touch:** `ml/drift.py`, new `sql/003_drift_events.sql`, modeled on `agents.messages`.
+- **Done when:** a PSI breach writes one `agents.drift_events` row with feature, value, and window; a stable week writes none.
+- **Estimated effort:** Small to medium — half a day on top of the monitor.
 
 ## Interview defense
 
-**Q: Walk me through PSI and its thresholds.**
-Answer: PSI measures how far a feature's production distribution has moved from its training distribution. Bin both with the *same* edges (from the baseline), then for each bin take `(prod% − train%) · ln(prod% / train%)` and sum — large when a bin's share both moved and moved proportionally far. Thresholds: under 0.1 is stable, 0.1 to 0.2 is a moderate shift worth investigating, over 0.2 is significant and triggers retraining. One guard: floor empty-bin shares at an epsilon or `ln(p/r)` blows up to infinity.
+**Q: "How do you detect data drift in production?"**
+```
+   freeze REFERENCE histogram (training/baseline)
+   bucket LIVE data with the SAME edges
+   PSI = Σ (cur% − ref%)·ln(cur%/ref%)
+   ┌──────────────────────────────────────────┐
+   │ <0.10 stable · 0.10–0.25 watch · >0.25 act │
+   └──────────────────────────────────────────┘
+```
+Anchor: "Bucket both distributions the same way, reduce the difference to one PSI number, and threshold it at 0.25."
 
+**Q: "Drift fired. Do you retrain?"**
 ```
-  PSI = Σ (p−r)·ln(p/r)   ·   <0.1 ok | 0.1–0.2 watch | >0.2 retrain
+   PSI > 0.25 ──► ALERT (not auto-retrain)
+                   │
+        DATA drift? → investigate, maybe re-baseline
+        quality actually dropped? → labeled canary confirms → THEN retrain
 ```
+Anchor: "Drift is a reason to *look*, not an automatic rebuild — I confirm quality actually dropped on a labeled canary before spending a training run."
 
-**Q: What can't PSI catch?**
-Answer: concept drift. PSI watches the input distribution P(X); if the input→output relationship P(Y|X) changes — same inputs, different correct answer — PSI stays green while the model quietly gets things wrong. Catching that needs production ground-truth labels, which PSI never looks at. **The part people forget: a green PSI proves your *inputs* are stable, not that your *model* is still right — those are different claims, and for buffr only the first is even measurable since it collects no production labels.**
-
+**Q: "Could you measure drift without a trained model?"**
 ```
-  P(X) moves → PSI catches it    P(Y|X) moves → PSI blind (needs labels)
+   most candidates: 'drift needs a deployed model' ◄── incomplete
+   reality: PSI on ANY input distribution ◄── buffr's query embeddings, today
 ```
+Anchor: "Most candidates have only consumed pre-trained models and think drift requires one. PSI runs on any input distribution — I can measure drift in buffr's query embeddings right now, no model needed. That's [B2C.15]."
 
 ## See also
 
-- `16-retraining-pipelines.md` — the action a >0.2 PSI triggers; drift-triggered retraining.
-- `06-domain-gap.md` — train/production mismatch, the static version of what drift makes dynamic.
-- `14-training-run-logging.md` — `agents.messages` is the substrate DRIFT-2 reads its metrics from.
-- `../05-evals-and-observability/04-llm-observability.md` — the trace whose token/latency distributions DRIFT-2 monitors.
+- ./14-training-run-logging.md — the run record pins the *reference* distribution drift is measured against.
+- ./16-retraining-pipelines.md — the drift-triggered retrain that consumes this monitor's alert.
+- ./06-domain-gap.md — drift is domain gap appearing *over time* in production, not just train-vs-test.
+- ../03-retrieval-and-rag/09-stale-embeddings.md — the retrieval-side cousin: the corpus drifting under fixed embeddings.
+- ../05-evals-and-observability/04-llm-observability.md — where the drift alert surfaces alongside inference telemetry.
+- ../06-production-serving/04-rate-limiting-backpressure.md — drift monitoring as a production-health signal.
+- ../09-ml-system-design-templates — drift monitoring as a required box in a serving-system design.

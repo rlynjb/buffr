@@ -1,172 +1,196 @@
-# Shared State, Races, and Synchronization — why buffr is almost race-free
+# Shared State, Races, and Synchronization — why one thread saves you here
 
-**Industry name(s):** data races, interleaving, serialization, the busy-flag guard · **Type:** Industry standard
+**Industry name(s):** shared mutable state, race conditions, the run-to-completion guarantee, async interleaving (re-entrancy) · *Industry standard*
+
+---
 
 ## Zoom out, then zoom in
 
-Most race conditions need two things: shared mutable state, and two flows of control touching it at once. buffr has very little of either — one thread (no preemption mid-statement) and a UI that refuses to start a second turn while one is running. So this file is mostly the story of *why the races don't happen*, plus the one spot where genuine concurrency exists and how it stays safe by owning nothing.
+The headline: because Node runs one thread with run-to-completion semantics, **this repo has no data races** — no two pieces of code mutate the same variable at the literal same instant. But "single-threaded" does *not* mean "no concurrency bugs." There's one real hazard class — **async re-entrancy**, where a function yields at an `await` and gets called again before it finishes — and the repo closes it with one synchronous guard.
 
 ```
-  Zoom out — where shared state could live
+  Zoom out — where shared state lives
 
-  ┌─ UI layer (chat.tsx) ─────────────────────────────────────────┐
-  │  React state: turns[], input, busy  ← single-thread, serial   │ ← guard lives here
-  └───────────────────────────────┬───────────────────────────────┘
-                                  │  busy flag gates the next turn
-  ┌─ Session layer (session.ts) ──▼───────────────────────────────┐
-  │  one conversation, one agent — reused, not mutated concurrently│
-  └───────────────────────────────┬───────────────────────────────┘
-                                  │  the ONE concurrent spot:
-  ┌─ Trace sink (parallel inserts) ▼──────────────────────────────┐
-  │  pending[]: append-only, never read until flush — race-free   │
-  └────────────────────────────────────────────────────────────────┘
+  ┌─ Interface layer ────────────────────────────────────────┐
+  │  ★ React state: turns[], input, busy (chat.tsx) ★        │ ← we are here
+  └──────────────────────────┬───────────────────────────────┘
+  ┌─ Runtime layer ──────────▼───────────────────────────────┐
+  │  ★ pending[] (trace sink) ★  ·  session closure vars     │ ← and here
+  └──────────────────────────┬───────────────────────────────┘
+  ┌─ Storage layer ──────────▼───────────────────────────────┐
+  │  Postgres rows — the ONE place real concurrency lands    │
+  └──────────────────────────────────────────────────────────┘
 ```
 
-Zoom in: the question here is *what stops two writers from clobbering each other?* In a single-threaded I/O app the answer is usually "the runtime, for free" — but not always, and naming the two places it could go wrong is the lesson.
+Zoom in: shared mutable state is any variable more than one task reads or writes. The question for each: can two tasks touch it *interleaved* in a way that corrupts it? On one thread the answer is "only across `await` boundaries" — so that's the only place to look.
 
-## Structure pass
+---
 
-**Layers.** Three: **UI state** (React), **session state** (the held conversation/agent), **trace concurrency** (the parallel inserts).
+## The structure pass
 
-**Axis: state ownership — "who can write this, and can two writes interleave?"**
+**Layers.** UI state (`turns`, `busy` — React) → runtime state (`pending[]`, the session closure) → durable state (Postgres rows). The synchronization story changes at each layer.
+
+**Axis — trace `state` ownership + mutability: who can mutate this, and can two tasks interleave on it?**
 
 ```
-  One axis — "can two writes interleave?" — traced down
+  One axis, three altitudes: "can two tasks corrupt this concurrently?"
 
-  ┌──────────────────────────────────────────────┐
-  │ UI: setTurns / setBusy — one thread, serial   │  → NO interleave (guarded too)
-  └───────────────────────┬────────────────────────┘
-       ┌──────────────────────────────────────────┐
-       │ session: conversationId fixed; agent reused│  → NO concurrent mutation
-       └───────────────────────┬───────────────────┘
-            ┌─────────────────────────────────────┐
-            │ trace pending[]: N async inserts      │  → CONCURRENT, but append-only
-            └─────────────────────────────────────┘   so still safe
-
-  the only concurrency that exists shares nothing mutable-and-read
+  ┌─ UI state (turns, busy) ────────┐  mutated across await in onSubmit
+  │  guarded by run-to-completion + │  → safe, but needs the busy gate
+  │  the synchronous busy check     │     for re-entrancy
+  └──────────────────────────────────┘
+      ┌─ pending[] (sink) ──────────┐  pushed across await, drained once
+      │  single owner (the sink),    │  → no interleaving corruption:
+      │  array push is atomic per task│     push runs to completion
+      └──────────────────────────────┘
+          ┌─ Postgres rows ─────────┐  THE real concurrent writer surface;
+          │  many inserts in flight  │  ordering handled by created_at, not
+          │  at once via the pool    │  by app-level locks
+          └──────────────────────────┘
 ```
 
-**The seam: the `busy` flag in the chat UI.** On one side, a turn is in flight and the input box is gone; on the other, the UI is idle and accepting. That flag is the synchronization primitive that turns a UI that *could* fire overlapping `ask()` calls into one that can't.
+The answer flips at the storage layer: that's the only place where genuinely-concurrent writers (multiple in-flight inserts) hit one resource. In-process, everything is serialized by the one thread.
+
+**Seam — the `await` point inside `onSubmit`.** The load-bearing joint (`src/cli/chat.tsx:15-35`). Before the first `await`, the function runs atomically. At each `await`, the thread yields and *another* `onSubmit` could start (the user could submit again). Control re-entrancy flips across that boundary — which is exactly why the `busy` guard sits at the top, before any yield.
+
+---
 
 ## How it works
 
 ### Move 1 — the mental model
 
-You know the classic React bug where a user double-clicks "submit" and you fire two requests? The fix is a disabled/loading flag that ignores the second click until the first resolves. That *is* buffr's concurrency control. There's no mutex, no lock — just a boolean that says "a turn is running, don't start another."
+You know the classic React bug: two rapid clicks both fire a handler, both read stale state, the second clobbers the first. That's re-entrancy, and it's the *only* race shape Node hands you — not "two threads write at once" (impossible here) but "one function yields mid-flight and runs again before finishing." The fix is the same one you'd reach for in React: **a guard flag set synchronously before the first yield.**
 
 ```
-  The pattern — a busy flag serializes turns
+  Async re-entrancy — the pattern shape (and its guard)
 
-  idle ──submit──► busy=true ──run ask()──► busy=false ──► idle
-   ▲                  │
-   │            submit while busy?
-   └──────── ignored (early return) ──────────────────────────
+  user submits ──► onSubmit() ──► if (busy) return  ◄── the guard
+                                  setBusy(true)          (synchronous,
+                                  ┌──────────────┐        before any await)
+                                  │ await ask(q)  │ ◄── YIELD POINT
+                                  └──────────────┘     2nd submit lands here...
+                                  setBusy(false)        ...but hits the guard,
+                                                        returns immediately
 ```
+
+Without the guard, a second submit during the `await` would run a second turn concurrently against the same session. The guard makes turns strictly serial.
 
 ### Move 2 — the walkthrough
 
-**The busy flag is the whole synchronization story for turns.** In `chat.tsx`, `onSubmit` bails immediately if a turn is running, then sets `busy` for the duration:
+**The `busy` guard — the one synchronization primitive in the repo.** Look at the order of operations in `onSubmit`:
 
 ```ts
-// src/cli/chat.tsx:15-35
+// src/cli/chat.tsx:15-34 — the re-entrancy guard
 const onSubmit = async (value: string): Promise<void> => {
   const q = value.trim();
-  if (busy) return;                    // ← guard: refuse to overlap a running turn
-  // ...handle /exit, empty
-  setBusy(true);                       // ← claim the "lock"
+  if (busy) return;                 // ← GUARD: synchronous, runs before any await
+  // ... /exit handling ...
+  if (!q) return;
+  setInput('');
+  setTurns((t) => [...t, { role: 'you', text: q }]);
+  setBusy(true);                    // ← claim the lock (still synchronous)
   try {
-    const answer = await session.ask(q);
+    const answer = await session.ask(q);   // ← YIELD: thread is free, but busy===true
     setTurns((t) => [...t, { role: 'buffr', text: answer }]);
-  } catch (err) { /* push error turn */ }
-  finally {
-    setBusy(false);                    // ← release, always
+  } catch (err) {
+    setTurns((t) => [...t, { role: 'buffr', text: `error: ...` }]);
+  } finally {
+    setBusy(false);                 // ← release the lock
   }
 };
 ```
 
-Because there's only one thread and one user typing into one input, this guard is enough to guarantee `session.ask()` is never re-entered. The `finally { setBusy(false) }` mirrors the `finally { client.release() }` pattern from `01` — same shape, different resource: claim, use, always release. Note the render also *removes* the input box while busy (`src/cli/chat.tsx:48-56`), so there isn't even an input to submit into mid-turn — belt and suspenders.
+The critical detail: `if (busy) return` and `setBusy(true)` both run **synchronously, before the first `await`**. Run-to-completion guarantees no other task interleaves between them — so the check-then-set is atomic without any lock. By the time the thread yields at `await session.ask(q)`, `busy` is already `true`, so any second submit hits `if (busy) return` and bails. This is a mutex implemented with the loop's own serialization. (One caveat the UI sidesteps anyway: while `busy`, the `<TextInput>` is replaced by the spinner — `src/cli/chat.tsx:48-56` — so the user *can't* even submit again. The guard is belt *and* suspenders.)
 
-**The React state updates are functional, which sidesteps stale-closure races.** Every `setTurns` uses the updater form:
+**`turns[]` and `input` — React's reducer keeps them safe.** Every mutation goes through `setTurns((t) => [...t, ...])` — a functional update that reads the latest state and returns a new array, never mutating in place (`src/cli/chat.tsx:25,29,31`). Two facts make this race-free: the updater is pure, and React applies updaters in order. There's no `turns.push()` anywhere — that immutable discipline is what makes concurrent-looking updates from before/after an `await` compose correctly.
 
-```ts
-// src/cli/chat.tsx:25, 29, 31
-setTurns((t) => [...t, { role: 'you', text: q }]);
+**`pending[]` — single owner, push-only across awaits.** The sink's array (`src/supabase-trace-sink.ts:50`) is mutated by `push()` from inside synchronous `emit()` calls. Even though many `persistMessage` Promises are in flight concurrently, the *array mutation* (`this.pending.push(p)`) is synchronous and runs to completion each time — no two pushes interleave. The reads happen only in `flush()` after the run. Single writer, single reader, no overlap.
+
+```
+  pending[] — why concurrent in-flight writes don't corrupt the array
+
+  emit() ─► push(p1)  [synchronous, completes]   ┐
+  emit() ─► push(p2)  [synchronous, completes]   ├─ array never half-written:
+  emit() ─► push(p3)  [synchronous, completes]   ┘  each push runs to completion
+       │  meanwhile p1,p2,p3 RESOLVE concurrently (the I/O, not the array)
+       ▼
+  flush() ─► reads pending[]  [after run, no concurrent writer]
 ```
 
-Passing `(t) => [...t, …]` instead of `[...turns, …]` means React hands you the *latest* array, not the one captured when the closure was created. If two updates queued in the same tick (they don't here, but the pattern protects you), neither would clobber the other. This is the React-flavored version of "don't read-then-write shared state non-atomically."
+**Where real concurrency actually lands: Postgres.** The one place multiple operations genuinely hit a shared resource at once is the database — several `persistMessage` inserts in flight, plus the `upsert` transaction's `begin/commit` (`src/pg-vector-store.ts:42-58`) holding one connection. The repo doesn't synchronize these in app code; it leans on two things: transactions (the upsert is all-or-nothing within one checked-out connection) and `created_at = event.timestamp` so that *replay order* is correct even though *insert order* is whatever the pool schedules. That's the right division of labor — let the database be the concurrency-control authority, don't reimplement it in JS.
 
-**The one genuinely concurrent place owns nothing mutable-and-shared.** The trace sink fires *N* inserts that run at the same time (→ `03`). The shared object is `pending[]` — but it's only ever *appended to* during `emit()` and only ever *read* once, in `flush()`, after the agent run is done:
+### Move 2 variant — the load-bearing skeleton of the guard
 
-```ts
-// src/supabase-trace-sink.ts:87-93
-private push(p: Promise<void>): void { this.pending.push(p); }   // append only
-async flush(): Promise<void> { await Promise.all(this.pending); } // read once, at the end
-```
+The kernel of "serialize re-entrant async work":
 
-There's no read-modify-write on `pending` interleaved with the inserts, and the inserts themselves write to *different rows* in Postgres (each is a fresh `INSERT`). So even though the inserts are concurrent, there's no shared mutable cell they fight over. The one ordering concern — "will rows land out of order?" — is solved not with a lock but by stamping `created_at` from the *event* timestamp, so replay order is deterministic regardless of which insert's socket settles first:
+1. **A flag read-and-set with no `await` between.** `if (busy) return; ... setBusy(true)`. *Put an `await` between the check and the set* and the guard breaks — two submits could both pass the check before either sets the flag (the check-then-act race). The whole correctness rests on those two lines being synchronous and adjacent.
+2. **Release in `finally`.** `setBusy(false)` in `finally` (`src/cli/chat.tsx:33`). *Remove the `finally`* and a thrown error inside `ask` leaves `busy` stuck `true` forever — the UI deadlocks, no further input accepted.
 
-```ts
-// src/supabase-trace-sink.ts:55-59 — order comes from the data, not the race
-const at = event.timestamp;
-// ...createdAt: at  → persisted into created_at (src/supabase-trace-sink.ts:26-30)
-```
-
-That's the clever bit: instead of synchronizing the writers, they made the *order independent of the writers*. The comment at `src/supabase-trace-sink.ts:46-48` says exactly this — "replay order matches emit order rather than the race between concurrent flush inserts."
-
-**The boundary condition: what would actually introduce a race.** Two things, neither present today. First, removing the `busy` guard would let overlapping `ask()` calls share the one `conversationId` and interleave their trace emits into the same conversation — messy, not corrupting, but wrong. Second, if `pending[]` were ever *read and cleared* mid-flight (e.g. a `flush` that spliced the array while `emit` appended), you'd get a lost-update race on the array. The current code dodges both by construction. → `07` notes that `pending[]` is also *unbounded*, a different problem (memory/backpressure, not correctness).
+Optional hardening: hiding the input while busy (`src/cli/chat.tsx:48`) is defense-in-depth, not the guard itself. The flag is the lock; the UI swap is courtesy.
 
 ### Move 3 — the principle
 
-In a single-threaded async runtime, you don't get data races on individual statements — run-to-completion (→ `03`) guarantees no statement is interrupted mid-flight. What you *can* still get is *logical* races: two async flows touching the same state across `await` points. buffr defeats those two ways — serialize the flows (the busy flag) or make the shared state append-only and order-independent (the trace sink). Locks are the heavy tool; most app-level concurrency is solved with one of those two lighter moves.
+On a single-threaded event loop, **a race can only happen across an `await`** — that's the only place control yields. So synchronization collapses to one rule: do your check-and-claim synchronously, before the first yield, and release in `finally`. No mutexes, no atomics, no locks — the loop's run-to-completion *is* your mutex, as long as you never split a critical section across an `await`. The moment you do split one, you've reintroduced every concurrency bug single-threading was supposed to save you from.
+
+---
 
 ## Primary diagram
 
-```
-  buffr — synchronization, all three layers
+The full synchronization picture across the three layers.
 
-  ┌─ UI: chat.tsx ──────────────────────────────────────────────────────┐
-  │  busy=false ──submit──► busy=true ──► (input box hidden) ──► ask()    │
-  │      ▲                                                       │        │
-  │      └──────────── finally setBusy(false) ◄──────────────────┘        │
-  │  setTurns((t)=>...) functional updates — no stale-closure clobber     │
-  └───────────────────────────────┬──────────────────────────────────────┘
-                                  │ one ask() at a time
-  ┌─ Session: one conversationId, agent reused (no concurrent mutation) ──┐
-  └───────────────────────────────┬──────────────────────────────────────┘
-                                  │ during the run, trace emits fan out
-  ┌─ Trace sink: pending[] append-only ───────────────────────────────────┐
-  │  emit→push (append)   ×N concurrent inserts → different rows           │
-  │  flush→Promise.all (read once)   order from event.timestamp, not race  │
-  └────────────────────────────────────────────────────────────────────────┘
 ```
+  Shared state & synchronization — full recap
+
+  ┌─ UI (React, chat.tsx) ──────────────────────────────────────────┐
+  │  busy: GUARD flag    if(busy)return → setBusy(true) [atomic]     │
+  │  turns/input: functional setState, never mutated in place        │
+  │  ── critical section: setBusy(true) ... finally setBusy(false) ──│
+  └────────────────────────────┬────────────────────────────────────┘
+                               │ await session.ask (yield point)
+  ┌─ Runtime (sink, session) ──▼────────────────────────────────────┐
+  │  pending[]: single owner, push synchronous, read once in flush   │
+  │  session closure: pool/agent/conv — built once, read-only after  │
+  └────────────────────────────┬────────────────────────────────────┘
+                               │ many inserts in flight (concurrent)
+  ┌─ Storage (Postgres) ───────▼────────────────────────────────────┐
+  │  THE real concurrent surface — synchronized by:                  │
+  │   · transactions (upsert begin/commit on one connection)         │
+  │   · created_at = event.timestamp (replay order, not insert order)│
+  └──────────────────────────────────────────────────────────────────┘
+```
+
+---
 
 ## Elaborate
 
-The reason "single-threaded means no races" is a *half*-truth worth understanding precisely: it's true for shared-memory data races (the kind `Atomics`/mutexes exist to prevent), because there's no preemption — your statement finishes before any other code runs. It's *false* for logical/interleaving races across `await` boundaries, because between `await x` and the next line, arbitrary other async work can run and mutate shared state. The canonical bug is a check-then-act split by an await (`if (!cache[k]) { await fetch(); cache[k] = … }` firing twice). buffr's busy flag is precisely a check-then-act guard, but it's safe because the check and the `setBusy(true)` happen synchronously *before* any await — no window to interleave. That's the detail that makes it correct, and it's the thing to point at in an interview. `Atomics`/`SharedArrayBuffer`/worker-thread synchronization are *not yet exercised* — they only become relevant once buffr has shared memory across threads, which it doesn't.
+The "no data races, but yes re-entrancy" distinction trips up engineers coming from threaded languages — they either over-worry (reaching for locks Node doesn't need) or under-worry (forgetting that `await` is a yield point). The discipline that fixes it is the same as React's "don't read state after an await and assume it's fresh," and the same as the check-then-act rule in any concurrent system. The repo's `busy` flag is a textbook async mutex; its reliance on Postgres transactions for the one genuinely-concurrent surface is textbook "push concurrency control down to the layer built for it."
+
+`not yet exercised`: there's no in-process lock library (no `async-mutex`, no semaphore), and none is needed at this scale. If buffr ever ran multiple concurrent turns against one session (today the `busy` flag forbids it), or shared one mutable cache across turns, *that's* when an explicit async-mutex or a per-key lock would earn its place.
+
+---
 
 ## Interview defense
 
-**Q: buffr is single-threaded — so it has no race conditions, right?**
-No — that's a half-truth. Single-threaded kills *shared-memory data races* (no statement is interrupted mid-flight). But *logical* races across `await` boundaries are still possible: two async flows can interleave around an await. buffr prevents them with the `busy` flag, and crucially the check-and-set happens synchronously before any await, so there's no interleave window.
+**Q: "It's single-threaded, so there are no race conditions, right?"**
+
+> No data races — two pieces of code can't write the same variable simultaneously, because the loop runs one task to completion. But there's still *async re-entrancy*: a function can yield at an `await` and be entered again before it finishes. In the chat UI, that's two rapid submits both starting a turn. I close it with a synchronous `if (busy) return` set before the first await, released in `finally`. The check-and-claim has to be synchronous — put an await between checking and setting the flag and the guard breaks.
 
 ```
-  if (busy) return; setBusy(true);   ← both sync, no await between
-  ── await session.ask() ──          ← interleave only possible here, but
-                                        guard already claimed
-```
-Anchor: *the guard is safe because check-then-claim is atomic w.r.t. the event loop.*
+  the race that single-threading does NOT prevent
 
-**Q: The trace sink fires N concurrent inserts — how is that not a race?**
-Because the shared state (`pending[]`) is append-only and read exactly once at flush, and the inserts write different rows. Ordering is solved without synchronization: `created_at` is stamped from `event.timestamp`, so replay order is the emit order regardless of which insert's socket settles first.
+  onSubmit#1: check busy(false) ─► [await] ─► set busy(true)
+  onSubmit#2:        check busy(false) ─► ...  ← BOTH passed!
+                     (only if check and set are split by an await)
+  fix: check + set synchronous, adjacent, before any await
+```
 
-```
-  emit→append (write-only)   flush→Promise.all (read-once)
-  order from event.timestamp, NOT from insert completion order
-```
-Anchor: *make the order independent of the writers instead of synchronizing them.*
+**Anchor:** "The async mutex is the `busy` flag — check-and-claim synchronous before the await at `src/cli/chat.tsx:18,25`, released in `finally`; the loop's run-to-completion is the lock."
+
+---
 
 ## See also
 
-- `03-event-loop-and-async-io.md` — run-to-completion is why no statement interleaves
-- `07-backpressure-bounded-work-and-cancellation.md` — `pending[]` is safe but unbounded
-- `05-memory-stack-heap-gc-and-lifetimes.md` — the closures that hold this state alive across turns
+- `02-processes-threads-and-tasks.md` — the one thread that makes this safe
+- `03-event-loop-and-async-io.md` — `await` as the only yield point
+- `05-memory-stack-heap-gc-and-lifetimes.md` — the immutable `turns[]` and its growth
+- `08-runtime-systems-red-flags-audit.md` — the concurrency risks ranked

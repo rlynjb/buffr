@@ -1,147 +1,127 @@
-# Embedding-model choice — the one-way door
+# Embedding Model Choice
 
-*Industry standard (with a project-specific decision). Why `nomic-embed-text:v1.5`, and why 768 is load-bearing.*
+### *industry: embedding model selection · type: a one-way architectural decision*
 
-## Zoom out, then zoom in
+## Zoom out
 
-Before any code, see the decision as a fork in the architecture. The embedding model isn't a swappable plugin — it's a *commitment*. Pick it and you've chosen the dimension of every vector you'll ever store, the privacy posture of every query, and the cost of ever changing your mind. Here's where that commitment radiates from:
+Same stack as the last file, but now the question isn't "what is a vector" — it's "which model makes the vectors, and what does that choice lock you into forever."
+
+**buffr's retrieval stack, the choice marked**
 
 ```
-  Zoom out — one choice, four enforcement points
-
-  ┌─ Provider choice ───────────────────────────────────────────┐
-  │  ★ nomic-embed-text:v1.5 (Ollama, local, 768-dim) ★          │
-  │     vs hosted (OpenAI text-embedding-3, Cohere, ...)         │
-  └───────────────────────────┬─────────────────────────────────┘
-                              │ advertises dimension = 768
-        ┌─────────┬───────────┼───────────┬─────────────┐
-        ▼         ▼           ▼           ▼             ▼
-   (1) provider  (2) pipeline (3) per-    (4) SQL        privacy:
-   .dimension    assertWiring  vector     vector(768)    text never
-   = 768         on index+query assertDim  column type   leaves laptop
-   ───────────── ───────────── ────────── ────────────── ───────────
-   "I am 768"    "both agree?"  "this one  "the disk says
-                                is 768?"    768 too"
+┌──────────────────────────────────────────────────────────────┐
+│  RAG pipeline           answer grounded in retrieved chunks    │
+├──────────────────────────────────────────────────────────────┤
+│  PgVectorStore          vector(768) column, asserts 768        │
+├──────────────────────────────────────────────────────────────┤
+│  RetrievalPipeline      assertWiring(embedder.dim == store.dim)│
+├──────────────────────────────────────────────────────────────┤
+│  ★ MODEL CHOICE ★       nomic-embed-text:v1.5 → 768-dim        │  ◄── this file
+└──────────────────────────────────────────────────────────────┘
 ```
 
-Zoom in. You've shipped pgvector RAG, so you've felt this: the dimension is baked into the column type, and once you've indexed a corpus you can't just point at a different model. This file makes that explicit. Two questions: **why did buffr pick a local 768-dim model over a hosted one**, and **why is 768 asserted in four separate places** when one check would "work"? The answer to the second is the answer to "what kind of mistake is a dimension mismatch" — and it's a one-way door, so the answer is *defense in depth*.
+You picked an embedding model on your last RAG app too. What you maybe didn't feel was how *expensive it is to change your mind*. This file is about that — the embedding model is a one-way door, and buffr has welded it shut at four separate places on purpose.
 
 ## Structure pass
 
-Read the skeleton: the dimension constraint lives at four layers; trace one axis across them.
+The axis is **commitment**: a model on one side, the entire indexed corpus on the other. The seam is the dimension number — the one value that, once you've embedded a corpus, you cannot change without re-embedding everything.
 
-**Layers:** provider config → pipeline wiring → per-operation vector guard → SQL schema.
-
-**Axis traced — "where is the number 768 enforced, and what does a violation cost there?"**
+**The corpus is captive to the model**
 
 ```
-  one axis: where is 768 enforced, and how loud is the failure?
-
-  ┌─ provider ───────────────┐  768 is ADVERTISED (embedder.dimension)
-  │  OllamaEmbeddingProvider │  source of truth; nobody hardcodes it
-  └────────────┬─────────────┘
-               │ seam: config → wiring (both sides read .dimension)
-  ┌─ pipeline ─▼─────────────┐  768 is CONTRACTED (assertWiring)
-  │  createRetrievalPipeline │  fails at boot if embedder ≠ store
-  └────────────┬─────────────┘
-               │ seam: wiring → runtime (vectors now flow)
-  ┌─ per-vector▼─────────────┐  768 is RE-CHECKED (assertDim) on every
-  │  upsert / search guard   │  vector — catches a slipped-through bug
-  └────────────┬─────────────┘
-               │ seam: app → disk (vector becomes a typed column)
-  ┌─ SQL ──────▼─────────────┐  768 is STORED (vector(768) not null)
-  │  agents.chunks.embedding │  Postgres itself rejects the wrong width
-  └──────────────────────────┘
+   nomic-embed-text:v1.5  ──►  768-dim vectors  ──►  every row in agents.chunks
+            │                                              │
+            │  swap the model                              │  now incompatible
+            ▼                                              ▼
+   new model → different dim ──────X─────────────► old vectors unsearchable
+                                 (the seam)
+            you must RE-EMBED the whole corpus to cross it
 ```
 
-**The seam that matters:** every one of those four boundaries is a place the dimension could go wrong, and each catches a *different class* of bug at a *different time*. The provider catch is a config typo; the pipeline catch is a wiring mismatch at boot; the per-vector catch is a runtime slip; the SQL catch is the last-line database guarantee. No single check covers all four failure modes — that's why all four exist. Hold that: it's not redundancy, it's coverage.
+Before the seam: choosing a model is a free, reversible config edit. After the seam — once you've run `npm run index` over your docs — the model is baked into thousands of stored vectors. Consequence: changing the embedding model is not a config change, it's a **migration**. buffr makes that cost loud instead of letting you discover it when search silently returns garbage.
 
 ## How it works
 
-### Move 1 — the mental model
+### Move 1 — Mental model: a database column type you can't ALTER cheaply
 
-You know how a database migration is a one-way door — once data's written in the new shape, rolling back means a data migration, not a `git revert`? The embedding dimension is exactly that. Once a corpus is embedded at 768 and written into `vector(768)` columns, switching to a 1536-dim model isn't a config change — it's re-embedding the entire corpus from the original text. So the right mental model is: **the model choice is a schema decision wearing a config-file costume.**
+You know the pain of a schema migration that rewrites every row — changing a column's type on a 10M-row table isn't a flag flip, it's an outage you plan. The embedding model is exactly that, except the "column type" is the *meaning of the numbers*, and there's no `ALTER` — you have to recompute every value.
+
+**Model choice as an un-cheap migration**
 
 ```
-  the one-way door — embedding a corpus is irreversible-in-place
-
-   model A (768) ──embed──► corpus@768 ──stored──► vector(768) column
-                                                        │
-   want model B (1536)?                                 │ can't just swap
-                                                        ▼
-   must RE-EMBED every chunk from original text ──► vector(1536) column
-   (the documents.content rows are the only escape hatch)
+   config edit                       corpus migration
+   ───────────                       ────────────────
+   model: 'nomic' → 'other'          re-embed EVERY chunk
+   (one line)                        re-run index over all docs
+   reversible, free                  hours of compute, irreversible
+                                     until you do it again
+   ▲ feels like this                 ▲ actually costs this
 ```
 
-The kernel: the dimension propagates from one source (the provider) and is asserted at every layer it crosses, because the cost of getting it wrong is "re-index everything," not "fix one line."
+Frontend bridge: it's the difference between changing a CSS variable and changing the shape of your API response. One is a tweak; the other forces every consumer to update. The embedding model is the API-shape change — every stored vector is a consumer.
 
-### Move 2 — the step-by-step walkthrough
+### Move 2 — Walk the mechanism
 
-**Step 1 — the choice: local over hosted.** buffr is local-first by design. `nomic-embed-text:v1.5` runs inside Ollama on the laptop; no text ever leaves the machine to be embedded. The alternative — OpenAI's `text-embedding-3` or Cohere — is higher quality but ships every chunk and every query to a third party. For a *personal* knowledge base, that's the wrong trade. The model is named in exactly one place and read everywhere else:
+**Part A — The choice: nomic-embed-text:v1.5, served locally**
+
+buffr runs nomic through Ollama on the same machine as gemma2:9b. That's the load-bearing choice: *local*. No API key, no per-call cost, no data leaving the laptop. The dimension that comes with it is 768.
+
+**Why nomic, why local**
+
+```
+   ┌─────────────────────────────────────────────┐
+   │  nomic-embed-text:v1.5                        │
+   │  • runs in Ollama, same host as gemma2:9b     │
+   │  • 768-dim — solid mid-size, local-friendly   │
+   │  • no API key, no egress, no per-token bill    │
+   │  • good quality for a model this small         │
+   └─────────────────────────────────────────────┘
+            ▲
+        the constraint that drove it: buffr is a LAPTOP agent.
+        local-first rules out hosted embedding APIs.
+```
 
 ```ts
-// src/cli/index-cmd.ts:18  and  src/session.ts (same construction)
-const embedder = new OllamaEmbeddingProvider({ model: 'nomic-embed-text:v1.5', host: cfg.ollamaHost });
+// src/cli/index-cmd.ts:18 and src/session.ts:40 — same model, both paths
+const embedder = new OllamaEmbeddingProvider({
+  model: 'nomic-embed-text:v1.5',
+  host: cfg.ollamaHost,
+});
 ```
 
-That `OllamaEmbeddingProvider` advertises `.dimension = 768`. Nothing downstream hardcodes 768; they all read it off this object. The choice is "local model, its dimension is whatever it is, and we propagate that." Privacy is the *why*; 768 is the *consequence you must now respect everywhere*.
+The model string appears identically on the index path and the query path. That's not a coincidence you can be sloppy about — if index-time and query-time used different models, the vectors would live in different spaces and every search would be noise. Both sides naming the same model is a correctness invariant, hand-maintained here.
+
+**Part B — The 768 one-way door: four assert sites**
+
+buffr treats a dimension mismatch as a wiring bug, not a runtime input — so it fails *loudly and early* at four independent layers. This is defense-in-depth: no single line is trusted to be the guard.
+
+**The four locks on the door**
 
 ```
-  Comparison — local vs hosted embedding
-
-  LOCAL (buffr's choice)            HOSTED (rejected)
-  ┌──────────────────────┐         ┌──────────────────────┐
-  │ text ─► Ollama (lap)  │         │ text ─► HTTPS ─► API  │
-  │ never leaves machine  │         │ leaves machine ✗      │
-  │ 768-dim, free, slower │         │ 1536-dim, $, faster   │
-  │ private ✓             │         │ better recall, opaque │
-  └──────────────────────┘         └──────────────────────┘
-  personal KB → privacy wins; quality gap acceptable at this scale
+  ┌─ 1. PROVIDER ──────────────────────────────────────────┐
+  │  OllamaEmbeddingProvider.dimension = 768 (declared)     │
+  ├─ 2. WIRING ────────────────────────────────────────────┤
+  │  assertWiring: embedder.dimension === store.dimension   │
+  │  throws "dimension mismatch … re-index the corpus"      │
+  ├─ 3. PER-VECTOR ────────────────────────────────────────┤
+  │  PgVectorStore.assertDim(v): v.length !== 768 → throw   │
+  ├─ 4. SCHEMA ────────────────────────────────────────────┤
+  │  embedding vector(768) — Postgres rejects wrong width   │
+  └────────────────────────────────────────────────────────┘
+       a wrong-dim vector cannot survive ANY of these
 ```
-
-**Step 2 — check #1: the provider is the single source of 768.** The store is constructed by *reading* the provider's dimension, never by typing a literal:
 
 ```ts
-// src/cli/index-cmd.ts:19
-const store = new PgVectorStore({ pool, appId: cfg.appId, dimension: embedder.dimension });
-```
-
-If you swap to a 1024-dim model, this line picks up 1024 automatically — the store now expects 1024. The provider stays the authority. (The store *defaults* to 768 at `src/pg-vector-store.ts:29` for when nobody passes one, but the wired path always passes `embedder.dimension`.)
-
-**Step 3 — check #2: the pipeline refuses to boot on a mismatch.** When `createRetrievalPipeline` wires the embedder to the store, it asserts they agree — and it asserts again inside *both* the index and query functions, so neither path can run with a mismatched pair:
-
-```ts
-// aptkit packages/retrieval/src/pipeline.ts:22-29
+// 2. aptkit pipeline.ts:22-29 — fail at wiring time, before any index runs
 function assertWiring(wiring: RetrievalWiring): void {
   if (wiring.embedder.dimension !== wiring.store.dimension) {
-    throw new Error(
-      `dimension mismatch: embedder "${wiring.embedder.id}" is ${wiring.embedder.dimension}-dim ` +
-        `but store is ${wiring.store.dimension}-dim — re-index the corpus with a matching provider`,
-    );
+    throw new Error(`dimension mismatch: … re-index the corpus with a matching provider`);
   }
 }
 ```
 
-The error message *tells you the fix* ("re-index the corpus"). That's the one-way door speaking: it knows a mismatch means re-embedding, so it says so. This fires at construction (`:73`) and at the top of `indexDocument` (`:36`) and `queryKnowledgeBase` (`:55`).
-
-```
-  Layers-and-hops — where each check fires, and when
-
-  boot time                          runtime (per call)
-  ┌─ provider ─┐ hop: .dimension     ┌─ per-vector ─┐ hop: assertDim
-  │ = 768      │ ──────────┐         │ on each vec  │ ─► throws if ≠768
-  └────────────┘           ▼         └──────┬───────┘
-  ┌─ pipeline ─┐ assertWiring               │ hop: $1::vector
-  │ embedder vs│ ─► throws if ≠     ┌─ SQL ──▼─────┐
-  │ store dim  │                    │ vector(768)  │ ─► Postgres rejects
-  └────────────┘                    │ not null     │    wrong width
-                                    └──────────────┘
-```
-
-**Step 4 — check #3: every vector is re-checked at the operation.** Even past the wiring check, each individual vector is length-checked before it hits SQL. `upsert` checks every chunk vector; `search` checks the query vector:
-
 ```ts
-// src/pg-vector-store.ts:32-36
+// 3. src/pg-vector-store.ts:32-36 — fail per vector, on upsert AND search
 private assertDim(v: number[]): void {
   if (v.length !== this.dimension) {
     throw new Error(`dimension mismatch: got ${v.length}, store is ${this.dimension}`);
@@ -149,114 +129,110 @@ private assertDim(v: number[]): void {
 }
 ```
 
-Why bother, if the wiring already matched? Because the wiring check trusts that the embedder *always* returns its advertised length — a buggy or partial embedding (a truncated response, a model that returns variable-length output) could violate that at runtime. This catch is per-data, not per-config.
+Why four and not one? Each catches a different mistake at a different time. The wiring check catches a misconfigured pipeline *before it indexes a single doc* — the cheapest possible failure. The per-vector check catches a provider that lies about its own dimension. The schema check catches a raw SQL insert that bypassed the app entirely. The provider's declared `768` is the source of truth the other three compare against. Cheap, early, redundant — exactly how you guard an irreversible operation.
 
-**Step 5 — check #4: the database column is the last guarantee.** The schema itself pins the width:
+### Move 2.5 — Current vs. future
 
-```sql
--- sql/001_agents_schema.sql:22
-embedding vector(768) not null,
-```
-
-Even if every JS check were bypassed, Postgres rejects an insert of the wrong vector length. This is the durable, language-independent backstop — the one check that survives a rewrite of all the TypeScript above it.
-
-#### Move 2.5 — current state vs the swap you might want
-
-buffr runs 768 today. Suppose you decide hosted quality is worth it and want `text-embedding-3-small` (1536-dim). Here's what changes versus what doesn't:
+**The re-embed cost is real, and buffr has no automated path across the door.**
 
 ```
-  Comparison — switching embedding models
-
-  STAYS THE SAME                      MUST CHANGE
-  ┌────────────────────────┐         ┌────────────────────────┐
-  │ documents.content rows  │         │ provider construction   │
-  │ (source of truth — the  │         │ (model + host)          │
-  │  re-embed input)        │         │ vector(768) → (1536)    │
-  │ chunker (512/64 chars)  │         │ HNSW index (rebuilt)    │
-  │ pipeline contract       │         │ EVERY chunk re-embedded │
-  │ search SQL shape        │         │ from documents.content  │
-  └────────────────────────┘         └────────────────────────┘
-  the escape hatch: documents.content lets you re-embed without re-reading files
+  TODAY                              IF YOU CHANGE THE MODEL
+  ─────                              ───────────────────────
+  one model, 768, asserted           every chunk's vector is now wrong-space
+  search just works                  ┌────────────────────────────┐
+                                     │ 1. change model string      │
+                                     │ 2. assertWiring may throw   │
+                                     │    (update store dimension) │
+                                     │ 3. re-run npm run index over│
+                                     │    EVERY doc (upsert)       │
+                                     │ 4. old vectors overwritten  │
+                                     └────────────────────────────┘
+                                     manual, total, no delta path
 ```
 
-The takeaway is the reassuring part: because `agents.documents.content` stores the original text (written by `indexDocumentRow`, `src/runtime.ts:11-16`), a model swap is a *re-embed*, not a *re-ingest*. You don't need the original files — the database holds the source. That's why writing the documents row first matters (`10-incremental-indexing.md`).
+There is no "migrate embeddings" command. Crossing the door means re-running the index over the full corpus, by hand. For buffr's tiny laptop corpus that's seconds; at scale it's the migration you plan a maintenance window for. The honest takeaway: **pick the embedding model like you're picking a primary key — assume you live with it.**
 
-### Move 3 — the principle
+### Move 3 — The principle
 
-Some configuration is really schema. When a "setting" determines the shape of stored data, treat changing it as a migration, not a toggle — and put the guard at every layer the constraint crosses, because each layer catches a different bug at a different time. The four 768-checks aren't paranoia; they're the recognition that a dimension mismatch can originate as a config typo, a wiring error, a runtime glitch, or a raw SQL insert, and no single check sees all four.
+**The embedding model is the most expensive decision in the retrieval stack to reverse, so guard it like an invariant, not a setting.** buffr's four assert sites aren't paranoia — they're the correct response to a one-way door. The cost of a mismatch isn't an error message; it's a corpus full of vectors that *silently* return wrong answers if the guard weren't there. Loud-and-early beats silent-and-wrong every time the failure is irreversible.
 
 ## Primary diagram
 
-The whole decision and its enforcement, one frame:
+The choice, the door, and the four locks, end to end.
+
+**One model in, four guards on the way out**
 
 ```
-  embedding-model choice — one commitment, four guards, one escape hatch
-
-  CHOICE: nomic-embed-text:v1.5 (local, private, 768-dim)
-          rejected: hosted (better recall, but text leaves the laptop)
-                        │ advertises .dimension = 768 (source of truth)
-                        ▼
-   ┌──── guard 1 ───┐ store built from embedder.dimension (no literal)
-   ┌──── guard 2 ───┐ assertWiring: embedder == store, at boot + both paths
-   ┌──── guard 3 ───┐ assertDim: every vector, upsert + search
-   ┌──── guard 4 ───┐ SQL vector(768) not null: Postgres rejects wrong width
-
-  SWITCHING MODELS = re-embed entire corpus
-       │ from agents.documents.content (stored, so no file re-read)
-       ▼
-  vector(768) → vector(N)  + rebuild HNSW + re-run pipeline.index()
+  CHOICE                 ENFORCEMENT (defense-in-depth)
+  ──────                 ──────────────────────────────
+  nomic:v1.5             ① provider declares dimension = 768
+  local, 768-dim   ──►   ② assertWiring: embedder.dim == store.dim   (wiring time)
+  no egress              ③ assertDim per vector on upsert + search   (call time)
+                         ④ SQL column vector(768)                    (storage time)
+                                       │
+                                       ▼
+                         a wrong-dimension vector cannot exist anywhere
+                                       │
+                                       ▼
+                         changing the model = re-embed the whole corpus
+                         (manual, irreversible-until-redone)
 ```
+
+After the box: the four guards make the door *impossible to walk through by accident* — which is the point, because walking through it accidentally means silent wrong answers.
 
 ## Elaborate
 
-The "one-way door" framing comes from how irreversible decisions differ from reversible ones: reversible choices you make fast and cheap; one-way doors you slow down for. Embedding dimension is a one-way door because the cost of reversal scales with corpus size, not with code size. At buffr's scale (a handful of markdown files) re-embedding is minutes; at a million documents it's a budgeted batch job. Building the four-layer guard now means the failure is loud and early at every scale.
-
-Why 768 specifically? It's `nomic-embed-text`'s native output dimension — not a tunable. Bigger dimensions (1536, 3072) buy finer semantic resolution at the cost of storage and slower comparison; 768 is a strong default for a local model. The *quality* gap versus hosted models is real but small for a personal corpus, and it's swamped by buffr's bigger retrieval-quality levers (chunking, reranking) that it hasn't pulled yet — see `03`, `07`. Privacy, not recall, drove this choice, and at this scale that's correct.
+- **Quality vs. locality tradeoff.** A hosted model (OpenAI text-embedding-3, 1536-dim) would likely retrieve better than local nomic. buffr chooses local anyway — privacy and zero-cost-per-query outrank a marginal quality bump for a personal laptop agent. That's an opinion the architecture commits to, not an oversight.
+- **`:v1.5` is part of the contract.** Model *versions* can shift the vector space too. Pinning `nomic-embed-text:v1.5` (not bare `nomic-embed-text`) means an Ollama update to a v2 won't silently re-point your space. The version pin is part of the one-way-door discipline.
+- **Why not store the model name per chunk?** buffr does — `embedding_model text` on `agents.chunks` (default `'nomic-embed-text:v1.5'`). It's a record of *which* model produced each vector, so a future migration can find the stragglers. It's a paper trail, not an enforcement — nothing reads it to gate search yet.
+- **The mismatch failure is the scary one because it's quiet without guards.** Without the asserts, a 768-query against 384-vectors wouldn't crash in some databases — it'd return *some* ordering, just a meaningless one. Silent wrong answers are worse than crashes. The four guards convert a quiet failure into a loud one.
 
 ## Project exercises
 
-> No `aieng-curriculum.md` is present in this repo, so Build-item IDs are not cited. Exercises are derived directly from the codebase and the spec's concept set.
+### Add an embedding-model-mismatch guard at search read-time
 
-### Prove the one-way door fails loudly
+- **Exercise ID:** [B2A.3] (cite [C2.1], Phase 2A) — Case A: the four dimension guards exist; this adds the *model-name* guard the `embedding_model` column already enables.
+- **What to build:** On search, compare the live embedder's model string against the `embedding_model` recorded on the rows being searched; warn (or refuse) if they differ. Use the existing `embedding_model` column — today it's written but never read.
+- **Why it earns its place:** Two *different 768-dim* models would pass all four dimension guards and still return garbage — same width, different space. The model-name check closes the one gap dimension-checking can't.
+- **Files to touch:** `src/pg-vector-store.ts` (the `search` method, against `embedding_model`).
+- **Done when:** Searching a corpus indexed with model A using a pipeline wired to model B produces a loud warning or error instead of silent results.
+- **Estimated effort:** 2–4hr.
 
-- **Exercise ID:** EMC-1 (Case A — guards implemented; prove them).
-- **What to build:** a test that constructs a `PgVectorStore` with `dimension: 384`, wires it to the 768-dim `OllamaEmbeddingProvider`, and asserts `createRetrievalPipeline` throws the wiring error before any DB call — then a second test that pushes a hand-built 384-vector at `upsert` and asserts `assertDim` throws.
-- **Why it earns its place:** "I tested that the mismatch fails fast" is the difference between claiming defense-in-depth and having it.
-- **Files to touch:** new test against `src/pg-vector-store.ts:32-36` and `createRetrievalPipeline` (aptkit, consumed via `src/cli/index-cmd.ts:20`).
-- **Done when:** both mismatch paths throw readable errors and no SQL is issued, verified by the test.
-- **Estimated effort:** 1–4hr.
+### Write the re-embed migration runbook (and run it)
 
-### Make the model swap a real, scripted migration
-
-- **Exercise ID:** EMC-2 (Case A — operationalize the escape hatch).
-- **What to build:** a `npm run reembed` script that reads every `agents.documents` row, re-runs `pipeline.index()` against a (configurable) embedding model, into a parallel `vector(N)` column or fresh table — proving you can switch models from stored content with zero file access.
-- **Why it earns its place:** it turns the "one-way door" from a slogan into a measured, repeatable operation, and exercises that `documents.content` is the true source of truth.
-- **Files to touch:** new `src/cli/reembed-cmd.ts`, reading `agents.documents` (schema `sql/001_agents_schema.sql:4-12`), reusing `indexDocumentRow` (`src/runtime.ts:5-18`) and a new `vector(N)` column in `sql/`.
-- **Done when:** running it re-embeds the whole corpus from the DB and search works against the new column, with the old one untouched until cutover.
-- **Estimated effort:** half a day.
+- **Exercise ID:** [B2A.4] (cite [C2.1], Phase 2A) — Case A: indexing exists; this exercises the *cross-the-door* path that has no command today.
+- **What to build:** A documented, repeatable procedure to switch buffr's embedding model: change the string, update the store/schema dimension if needed, re-index the full corpus, verify the eval set still scores. Do it for real with a second local model.
+- **Why it earns its place:** The one-way door is asserted but never *traversed* in buffr. Doing the migration once turns "it's expensive" from a claim into measured wall-clock cost — the only honest input to a real model-swap decision.
+- **Files to touch:** `src/cli/index-cmd.ts`, `sql/001_agents_schema.sql` (dimension), `src/pg-vector-store.ts` (default dimension), `eval/queries.json` to re-verify.
+- **Done when:** buffr runs end-to-end on a different embedding model with the eval set passing, and you can state the wall-clock cost of re-embedding the corpus.
+- **Estimated effort:** 1 day.
 
 ## Interview defense
 
-**Q: Why a local embedding model, and why is the dimension asserted in four places?**
-Answer: local (`nomic-embed-text:v1.5` via Ollama) because it's a *personal* knowledge base — no chunk or query should leave the laptop, which rules out hosted APIs despite their better recall. The dimension is asserted four times because a mismatch can originate as four different bugs: a provider config typo, a wiring mismatch at boot, a runtime vector-length slip, and a raw SQL insert. Each guard catches a different class at a different time; no one check covers all four.
+**Q: "Why is the embedding model a one-way door?"**
+
+Because the model bakes its dimension and its vector space into every stored vector. Changing it doesn't reinterpret old vectors — it makes them incompatible. You must re-embed the entire corpus. So it's a migration, not a config change.
 
 ```
-  768 enforced at four altitudes
-  provider .dimension → pipeline assertWiring → per-vector assertDim → SQL vector(768)
-  config typo          wiring bug              runtime slip            last-line DB guard
+  swap model ──► old vectors wrong-space ──► re-embed everything
 ```
 
-**Q: What does it cost to switch embedding models, and why?**
-Answer: it's a one-way door — switching dimensions means re-embedding the entire corpus, because the vectors are stored in a fixed-width `vector(768)` column and a 1536-dim query can't search 768-dim data. The mitigation buffr already has: `agents.documents.content` stores the original text, so a swap is a re-embed from the database, not a re-ingest from files. The anchor: **the load-bearing fact people forget is that embedding dimension is schema, not config — change it like a migration.**
+Anchor: *"Pick the embedding model like a primary key."*
+
+**Q: "How does buffr stop a dimension mismatch?"**
+
+Four guards: the provider declares 768, `assertWiring` checks embedder-dim equals store-dim at wiring time, `assertDim` checks every vector on upsert and search, and the SQL column is `vector(768)`. Defense-in-depth — no single line is trusted.
 
 ```
-  switch model → re-embed corpus from documents.content → vector(N) + rebuild HNSW
-  (the stored source text is the escape hatch)
+  provider → wiring → per-vector → schema
+  a wrong-dim vector survives none of them
 ```
+
+Anchor: *"Guard the irreversible thing four times, loudly."*
 
 ## See also
 
-- `01-embeddings.md` — what the 768 numbers are and why dimension is fixed by the model.
-- `04-vector-databases.md` — the `vector(768)` column, HNSW, and the SQL-layer guard.
-- `10-incremental-indexing.md` — why writing `documents.content` first makes re-embedding possible.
-- `11-rag.md` — where this pipeline is wired with the dimension assertion.
+- `./01-embeddings.md` — what the 768 numbers are and why dimension is fixed per model.
+- `./09-stale-embeddings.md` — the *other* freshness problem: vectors that are right-model but out-of-date.
+- `./04-vector-databases.md` — the `vector(768)` schema lock, the fourth guard.
+- `../05-evals-and-observability/` — the eval set you re-verify after a model swap.

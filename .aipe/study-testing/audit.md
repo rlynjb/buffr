@@ -1,361 +1,163 @@
-# Pass 1 — The Testing Audit · buffr-laptop
+# Pass 1 — the 7-lens testing audit
 
-Seven lenses. Each is one x-ray of the same suite. The verdict runs through all
-of them: **the persistence layer is well-tested and honest; the product layer
-(`session.ts`, `chat.tsx`) is untested, and that's where the bugs that reach a
-user will live.**
+Each lens below is one structured read of the `buffr-laptop` suite, grounded in `file:line` or marked `not yet exercised` honestly. When a finding is big enough to earn its own deep walk, the lens cross-links to the Pass 2 pattern file rather than restating it.
 
-Suite at a glance, measured — not estimated:
-
-```
-  node --test --test-concurrency=1 dist/test/*.test.js
-
-  file                          tests   touches DB?   runs when DATABASE_URL unset
-  ────────────────────────────  ─────   ───────────   ───────────────────────────
-  config.test.ts                  2     no            RUNS (pure function)
-  migrate.test.ts                 1     yes           SKIPS
-  pg-vector-store.test.ts         2     yes           SKIPS
-  profile.test.ts                 1     yes           SKIPS
-  runtime.test.ts                 1     yes           SKIPS
-  supabase-trace-sink.test.ts     2     yes           SKIPS
-  ────────────────────────────  ─────
-  total                           9     8 of 9 gate on DATABASE_URL
-```
-
-Read that table twice. **On a machine with no `DATABASE_URL`, eight of nine
-tests skip and the suite reports green.** That single fact reframes the whole
-audit — see lens 4.
+Suite snapshot: **9 tests / 6 files / 9 pass.** Runner: `node --test --test-concurrency=1 dist/test/*.test.js` after a `tsc` build (`package.json:7`). 7 of 9 tests gate on `DATABASE_URL` and skip when unset.
 
 ---
 
-## 1. What is tested, and what isn't (the risk map)
+## Lens 1 — what is tested, and what isn't
 
-Not the percentage — the *risk*. Rank the critical paths by "what happens to a
-user if this breaks," then ask which ones a test catches.
+The coverage map is in `00-overview.md`. The structural finding: **testing went bottom-up, and stopped before it reached the trunk.**
 
-```
-  Critical path                         broken → user sees      test catches it?
-  ───────────────────────────────────   ────────────────────    ─────────────────
-  config defaults (appId/schema/host)   wrong DB / wrong app    YES  config.test
-  pgvector ranking (right chunk on top) wrong / no answer       YES  pg-vector-store
-  768-dim guard (no silent truncation)  corrupt embeddings      YES  pg-vector-store
-  schema migration (idempotent)         broken DB on deploy     YES  migrate.test
-  profile injection (system prompt)     ignores user prefs      YES  profile.test
-  document indexing (doc row + chunks)  nothing to retrieve     YES  runtime.test
-  trajectory capture (all 6 events)     blind to what happened  YES  trace-sink
-  ───────────────────────────────────   ────────────────────    ─────────────────
-  per-turn ordering (persist→answer→    lost turn / wrong       NO   ★ session.ts
-    flush→remember)                       replay order            ZERO tests
-  memory-write swallow (best-effort)    silent memory loss      NO   ★ session.ts
-  chat onSubmit (busy-gate, /exit,      frozen UI / data loss   NO   ★ chat.tsx
-    error→turn)                                                   ZERO tests
-```
+What's tested, and it's the right thing per file:
 
-The top block is the persistence substrate, and it's genuinely well-covered —
-each test plants a known input and asserts a known output. The bottom block is
-the **conversation itself**, and it has no tests at all.
+- `loadConfig` (`test/config.test.ts:5-20`) — defaults and overrides, the only test that runs with no database.
+- `runMigration` (`test/migrate.test.ts:16-27`) — idempotent schema creation → see `04-idempotent-migration-test.md`.
+- `PgVectorStore` (`test/pg-vector-store.test.ts:30-46`) — upsert-and-rank + dimension guard → see `03-contract-parity-test.md`.
+- `loadProfile` (`test/profile.test.ts:21-25`) — stored content or empty string.
+- `indexDocumentRow` (`test/runtime.test.ts:31-40`) — writes a `documents` row then its chunks, via the fake embedder → see `02-fake-embedder-injection.md`.
+- `SupabaseTraceSink` (`test/supabase-trace-sink.test.ts:23-67`) — all 6 event types + ordering → see `05-full-signal-trajectory-assertion.md`.
 
-**The red flag this lens looks for — "the most important code is the least
-tested" — is present, and it's the headline finding.** `src/session.ts:60-71`
-is the most behaviorally dense function in the repo. Its `ask()` does four
-ordered things:
+What isn't, ranked by risk:
 
-```
-  1. persistMessage(... 'user', question)   ← write the turn FIRST
-  2. answer = agent.answer(question)         ← then run the model
-  3. trace.flush()                           ← then drain queued trace writes
-  4. try { memory.remember(...) } catch {}   ← then best-effort remember
-```
-
-Three properties here are assertable and untested:
-- **Order**: the user turn is persisted *before* the agent runs, so a crash
-  mid-answer still leaves the question on disk. Nothing asserts this ordering.
-- **The swallow** (`session.ts:66-69`): a memory-write failure must not lose the
-  answer. There is no test that injects a throwing `memory.remember` and asserts
-  `ask()` still returns the answer. This is exactly the kind of error branch
-  that rots unnoticed — see lens 5.
-- **flush-before-return**: `trace.flush()` is awaited before `ask()` resolves,
-  so by the time the UI renders the answer the trajectory is durable. Untested.
-
-`src/cli/chat.tsx` is the only interface buffr has (`npm run chat`), and the
-`onSubmit` handler (`chat.tsx:15-35`) carries real logic: the `busy` re-entrancy
-gate (`if (busy) return`), the `/exit`//`/quit` branch that closes the pool, and
-the `catch` that turns an `ask()` rejection into a `buffr` turn instead of an
-unhandled rejection. None of it is tested.
-
-→ For *why* these two files resist testing, see lens 3 and `study-software-design`.
-
-## 2. Test design and levels (the pyramid as-built)
-
-buffr's pyramid is unusual and, mostly, correct for what it is:
-
-```
-  Standard pyramid (what books draw)     buffr's actual shape
-  ──────────────────────────────────     ────────────────────
-        /\   e2e (few)                    none           ← chat.tsx untested
-       /  \                               ────────────
-      /    \  integration                 ███████████    ← 8 of 9 tests
-     /      \                             real Postgres, no mocks
-    /________\ unit (many)                ██             ← config only (1 file)
-```
-
-This is an **integration-heavy, mock-free** suite, and that's the right call for
-this codebase. Here's the reasoning: the load-bearing logic in
-`pg-vector-store.ts` *is* the SQL — the cosine-distance ranking
-(`1 - (embedding <=> $1::vector)`, line 75), the `on conflict do update` upsert
-(line 50), the meta-shape rebuild (lines 80-84). Mock the database and you'd be
-asserting that your mock returns what you told it to. The test would prove
-nothing. So buffr runs the real query against real pgvector and asserts the
-*planted* chunk ranks first (`pg-vector-store.test.ts:30-40`). That's a test of
-the code, not the mock.
-
-**The one place mock-free bites:** because there are no unit-level seams, the
-moment you want to test `session.ts` without a live Postgres + Ollama you have
-nothing to inject. The `fakeEmbedder` trick (`runtime.test.ts:14-17`) proves the
-*pattern* works — swap the probabilistic dependency for a deterministic stub —
-but `session.ts` hard-constructs its own pool, embedder, store, and agent inside
-`createChatSession()` (`session.ts:39-57`), so there's no seam to reach. That's a
-design constraint, not a test-design failure → lens 3.
-
-No inverted pyramid, no flaky e2e, no over-mocking. The design smell is the
-*absence* of a layer, not a bad one.
-
-## 3. Tests as design pressure (untestable = a design smell)
-
-This is where testing and design meet. Two files are untested **because they're
-hard to test**, and the hardness is a design signal, not a testing gap.
-
-**`chat.tsx:62-63` — top-level await + immediate render.**
-
-```
-  const session = await createChatSession();   // module side-effect: opens a pool
-  render(<Chat session={session} />);          // module side-effect: mounts Ink
-```
-
-Importing this module *runs* it — it connects to Postgres and renders a TUI.
-There is no exported function, no seam, nothing a test can call. The `Chat`
-component itself takes `session` as a prop (good — that's injectable), but it's
-never exported, so a test can't mount it with a fake session.
-
-→ **The fix is a one-line design change**: export `Chat`, and move the
-`createChatSession()` + `render()` into an `if (import.meta.url === ...)` main
-guard, exactly like `migrate.ts:23` already does. Then a test mounts `<Chat
-session={fakeSession} />` with `ink-testing-library`, types a question, and
-asserts the `busy` spinner shows and the answer turn appears. **This is a
-software-design finding — deep, testable modules — cross-linked to
-`study-software-design`.** The testing guide names the smell; the design guide
-owns the refactor.
-
-**`session.ts:34-57` — `createChatSession()` constructs its own world.**
-
-It news up the pool, embedder, store, pipeline, tools, model, memory, and agent
-internally. To test `ask()`'s ordering you'd need real versions of all of them.
-There's no parameter to inject a fake agent or a throwing memory.
-
-→ The buildable target: split `createChatSession()` (the wiring) from a pure
-`runTurn({ persist, agent, trace, memory }, question)` (the ordering logic).
-Then `runTurn` is unit-testable with four stubs — assert persist-before-answer,
-assert flush-before-return, assert a throwing `memory.remember` is swallowed and
-the answer still returns. The orchestration is the riskiest code in the repo and
-it's untestable *because* the wiring and the logic are fused.
-
-The contrast that makes the point: `config.ts:9` is `loadConfig(env)` — pure,
-env-in/config-out, explicitly documented as "tests pass a fixture." It's the
-most trivial code in the repo and the easiest to test. `session.ts` is the most
-important and the hardest. **Testability tracked design quality exactly.**
-
-## 4. Determinism, isolation, and flakiness
-
-This is buffr's strongest lens. The suite is genuinely deterministic and
-well-isolated, with one structural caveat that isn't flakiness but *is* a
-correctness blind spot.
-
-**Determinism — three sources of non-determinism, all handled:**
-
-- **Network/model**: the obvious flake source in an AI repo is calling Ollama.
-  `runtime.test.ts` never does — it injects a `fakeEmbedder` returning a fixed
-  768-vector with `v[1]=1` (lines 14-17). Same input, same output, every run.
-  → `02-fake-embedder-injection.md`.
-- **Time/ordering**: the trace test could have raced — `emit()` queues writes
-  and `flush()` awaits them concurrently (`supabase-trace-sink.ts:91-93`), so
-  insert order isn't guaranteed. The test defends against this by feeding
-  explicit ISO timestamps and asserting `order by created_at` replays them in
-  emit order (`supabase-trace-sink.test.ts:41-66`). The non-determinism is
-  designed out, then asserted. → `05-full-signal-trajectory-test.md`.
-- **Shared mutable state**: every DB test cleans by `app_id = 'test'` in
-  `beforeEach` (`pg-vector-store.test.ts:19-21`, `runtime.test.ts:25-28`) or
-  `before` (`profile.test.ts:17`), so a leftover row from a previous run can't
-  flip a result.
-
-**Isolation — `--test-concurrency=1` is load-bearing, not cosmetic.** Every DB
-test runs against the *same* `reindb`/`agents` schema. Run two files in parallel
-and `runtime.test`'s `delete from agents.chunks where app_id='test'` races
-`pg-vector-store.test`'s upsert of `app_id='test'` rows. The `package.json` test
-script serializes files (`--test-concurrency=1`) so the shared database behaves
-like a single-threaded resource. **The isolation is `app_id` scoping *plus*
-serial execution — drop either and the suite goes flaky.** Worth knowing that
-`app_id='test'` is the convention but it's enforced by discipline, not by the
-schema; a test that forgets the `where` clause would wipe real data.
-
-**The caveat that isn't flakiness — green-by-skip.** `describe(..., { skip: url
-? false : 'set DATABASE_URL to run' })` (every DB test) means: no
-`DATABASE_URL`, the suite passes with eight tests skipped and one run. **This is
-not flaky — it's worse, it's silently incomplete.** A CI runner without a
-Postgres service reports green while testing ~one pure function. The honest
-status is in `01-env-gated-integration-tests.md`: the gate is the right
-*mechanism* (don't fail a contributor who has no DB), but green-on-skip is a
-false signal. The fix is a CI job that provisions Postgres and asserts the
-skipped count is zero — otherwise "tests pass" means almost nothing.
-
-## 5. Edge cases and error paths
-
-The happy path is tested; the error branches mostly aren't. Standard, but two of
-the gaps are sharp.
-
-**Covered edge cases (genuinely good ones):**
-- **Dimension mismatch throws, both directions.** `pg-vector-store.test.ts:42-46`
-  asserts a 3-element vector rejects on *both* `upsert` and `search` with
-  `/dimension/`. This directly defends the must-not-change constraint "a
-  mismatch must throw, never silently truncate" (context.md). Real boundary,
-  real assertion.
-- **Empty/absent profile.** `profile.test.ts:22` asserts `loadProfile` returns
-  `''` (not `undefined`, not a throw) when no row exists — the `?? ''` in
-  `profile.ts:7` made concrete.
-- **Idempotent re-run.** `migrate.test.ts:18` runs the migration twice; the
-  second run is the edge case (does `create table if not exists` +
-  `drop constraint if exists` actually no-op?). → `04-idempotent-migration-test.md`.
-- **Every event variant.** The trace test emits one of all six `CapabilityEvent`
-  types including `warning` and `error` (`supabase-trace-sink.test.ts:41-45`) —
-  the branches that were "previously dropped on the floor" per
-  `supabase-trace-sink.ts:48`.
-
-**Uncovered error branches — ranked worst-first:**
-
-```
-  branch                                        where                  risk
-  ────────────────────────────────────────────  ─────────────────────  ──────
-  memory.remember throws → swallowed, answer     session.ts:66-69       HIGH
-    still returned                                                       
-  agent.answer rejects → onSubmit catch →        chat.tsx:30-32         MED
-    "error: <msg>" turn, busy released                                  
-  migration mid-script failure → rollback        migrate.ts:14-16       MED
-  pgvector upsert mid-batch failure → rollback   pg-vector-store.ts:59  LOW
-```
-
-The top one is the most important untested branch in the repo. The comment at
-`session.ts:67` states the contract — *"swallow: memory is best-effort, the turn
-already succeeded"* — and **nothing proves it holds.** If a future refactor moves
-`return answer` inside the `try`, a memory failure starts eating answers and no
-test goes red. That's a one-test fix (inject a throwing memory, assert the answer
-returns) blocked only by the wiring/logic fusion from lens 3.
-
-The `migrate.ts` rollback (lines 11-19) wraps the whole script in one
-transaction and rolls back on any failure — untested, but lower risk because
-`begin`/`commit`/`rollback` is a well-worn pg idiom and the happy-path idempotent
-test exercises the commit branch.
-
-No property-based testing anywhere. For this repo that's fine — the invariants
-(dimension = 768, ranking order) are point-tested, and there's no
-combinatorial input space crying out for a generator. Not a gap, just a "not
-exercised."
-
-## 6. Testing AI features (the deterministic-harness-around-a-probabilistic-core seam)
-
-This is the lens that matters most for where Rein is headed, so read it closely.
-buffr is an AI app, and the question is: **does it put a deterministic test
-boundary around the non-deterministic core, or does it leave the AI seam
-untested?**
-
-The answer is split. buffr tests the seam in exactly one place and leaves the
-two highest-value AI seams untested.
-
-```
-  The AI feature, by testable boundary
-
-  ┌─ deterministic, testable (the harness) ──────────────────────┐
-  │  embedding INJECTION   runtime.test injects fakeEmbedder ✓    │
-  │  retrieval RANKING     pg-vector-store asserts planted top ✓  │
-  │  trajectory CAPTURE    trace-sink asserts all 6 events ✓      │
-  │  tool DISPATCH         search_knowledge_base wiring   ✗ none  │
-  │  answer ORCHESTRATION  session.ask ordering           ✗ none  │
-  └──────────────────────────────────────────────────────────────┘
-  ┌─ probabilistic, evaluated NOT tested (→ ai-engineering) ──────┐
-  │  the model's actual answer text   eval-cmd precision@k        │
-  └──────────────────────────────────────────────────────────────┘
-```
-
-**What buffr does right at the seam:** the `fakeEmbedder` in `runtime.test.ts`
-is the textbook move. The real `OllamaEmbeddingProvider` is non-deterministic and
-needs a running model; the test swaps in an `EmbeddingProvider` whose `embed()`
-returns a fixed vector (lines 14-17). Now `indexDocumentRow` → `pipeline.index`
-→ `store.upsert` is a fully deterministic chain you can assert exactly. The
-**probabilistic core (the embedding model) is replaced by a deterministic stub,
-and the deterministic plumbing around it is tested.** That is the entire pattern
-for testing AI features, and buffr exercises it. → `02-fake-embedder-injection.md`.
-
-**Where it stops short — the red flag:** "an LLM feature with no test at the
-boundary (prompt assembly, tool dispatch, output parsing) — all of which ARE
-deterministic and testable." buffr has two such boundaries, both untested:
-
-- **Tool dispatch.** `session.ts:43-44` builds a `search_knowledge_base` tool and
-  registers it in an `InMemoryToolRegistry`. Whether the registry routes a
-  `search_knowledge_base` call to the right handler with the right args is
-  *deterministic* — and untested here (it may be tested upstream in aptkit;
-  buffr doesn't assert its own wiring).
-- **Answer orchestration.** `session.ask()` is the prompt-assembly + run +
-  persist boundary. With a fake agent it's fully deterministic and fully
-  untestable today (lens 3).
-
-**The handoff to study-ai-engineering is clean and correct.** The model's actual
-answer text is non-deterministic — you can't `assert.equal` it. So buffr doesn't
-try; it measures it with `eval-cmd.ts`'s `scorePrecisionAtK` / `scoreRecallAtK`
-over the labeled `eval/queries.json` (lines 22-33). That's an *eval*, not a test,
-and it belongs in `study-ai-engineering`. buffr drew the deterministic/eval line
-in the right place — it just hasn't filled in the deterministic side around the
-orchestrator yet.
-
-## 7. Testing red-flags audit (the capstone checklist)
-
-Consolidated, marked against this repo. ✓ = clean, ✗ = present, ~ = partial.
-
-```
-  red flag                                              buffr    where
-  ───────────────────────────────────────────────────  ─────    ─────────────────
-  most important code is least tested                   ✗ PRESENT session.ts, chat.tsx
-  heavy mocking — testing the mock, not the code        ✓ clean   mock-free by design
-  inverted pyramid (all slow flaky e2e)                 ✓ clean   no e2e at all
-  tests depend on time / network / ordering             ✓ clean   timestamps + fakeEmbedder
-  tests must run in a specific order                    ~ partial --test-concurrency=1 needed
-  passes/fails on rerun, no code change (flaky)         ✓ clean   app_id cleanup + serial
-  zero tests on error/exception branches                ✗ PRESENT memory swallow, onSubmit catch
-  LLM feature untested at its deterministic boundary    ✗ PRESENT tool dispatch, orchestration
-  suite green while testing almost nothing              ✗ PRESENT green-by-skip without DB
-  no edge-case / boundary coverage                      ✓ clean   dimension, empty profile, idempotent
-```
-
-Four red flags present, and they cluster. Three of them — least-tested-most-
-important, untested error branches, untested AI boundary — are the *same finding*
-seen through three lenses: **`session.ts` and `chat.tsx` have no tests.** Close
-that one gap (via the lens-3 design split) and three of the four flags clear at
-once. The fourth — green-by-skip — is a CI fix, not a code fix: provision
-Postgres in CI and fail the build if the skipped-test count isn't zero.
-
-**The single highest-leverage move:** export `Chat` + main-guard `chat.tsx`, and
-split `runTurn` out of `createChatSession`. That one refactor makes the riskiest
-code in the repo testable, and the tests that follow (ordering, the swallow, the
-busy-gate, the error turn) retire the headline finding of this entire audit.
+- **`src/session.ts` — the orchestrator, zero tests.** `createChatSession()` wires the pool, store, pipeline, tool, model, memory, trace, and agent (`session.ts:34-57`); `ask()` runs the persist-then-answer-then-flush-then-remember sequence (`session.ts:60-71`). This is the most complex code in the repo and the least tested. **Red flag firing:** the most important code is the least covered.
+- **`src/cli/chat.tsx` — the Ink UI, zero tests.** Real branches: the `busy` re-entrancy guard (`chat.tsx:17`), `/exit` close (`chat.tsx:18-22`), the error-turn `catch` (`chat.tsx:30-32`).
+- `src/db.ts` — a 2-line `Pool` factory; too thin to earn a test.
+- `src/cli/index-cmd.ts` — a thin file-reading CLI over the tested `indexDocumentRow`.
+- `src/cli/eval-cmd.ts` — **not a unit test at all.** It's the eval/reporting script (precision@k, recall@k over `eval/queries.json`, `eval-cmd.ts:22-33`). It prints, never asserts → that's the *eval* half of the seam, cross-linked to `study-ai-engineering`.
 
 ---
 
-### Honest "not yet exercised"
+## Lens 2 — test design and levels
 
-- **CI gate** — no CI config provisions a database, so the suite is green-by-skip
-  on any machine without `DATABASE_URL`. Lens 4.
-- **End-to-end chat against live Gemma** — no test drives `npm run chat` through a
-  real turn. Lens 1, 6.
-- **Error-branch coverage** — the memory swallow, the `onSubmit` catch, the
-  migration rollback. Lens 5.
-- **Property-based testing** — none, and correctly so for this repo's invariants.
-  Lens 5.
-- **Tool-dispatch assertion in buffr** — the `search_knowledge_base` routing is
-  deterministic and untested locally. Lens 6.
+The pyramid as-built is **upside-down-but-correct for this repo**: almost everything is an integration test against a real Postgres, with one true unit test on top. Normally an integration-heavy suite is a smell (slow, flaky). Here it's the right call — the modules under test are *thin wrappers over SQL*, so a unit test that mocked the database would test the mock, not the behavior. There is nothing to unit-test in `PgVectorStore.search` except "does this SQL return the right ranking," and that question only has a real answer against pgvector.
+
+```
+  The pyramid as-built
+
+         ┌────────────────────────┐
+   unit  │ loadConfig (always run)│   1 file, pure, no DB
+         └────────────────────────┘
+       ┌──────────────────────────────┐
+  integ│ migrate · pg-vector · profile │   5 files, real Postgres,
+       │ runtime · trace-sink          │   DATABASE_URL-gated
+       └──────────────────────────────┘
+              ┌──────────────┐
+        e2e   │  none        │   no test drives chat.tsx → session →
+              └──────────────┘   live Gemma end to end
+```
+
+What the design gets right:
+
+- **No over-mocking.** The DB tests use the real database; the one place a dependency is faked is the *embedder*, and that's faked because it's a network call to Ollama, not because the code is hard to reach. That fake is a deterministic substitute, not a mock that asserts on calls → see `02-fake-embedder-injection.md`.
+- **The embedder is injected, not imported.** `createRetrievalPipeline({ embedder, store })` takes the embedder as a parameter (`runtime.test.ts:33`), so the test swaps it without touching production code. That's a clean seam.
+
+What's missing at the levels:
+
+- **No e2e.** Nothing exercises `chat.tsx → session.ask() → Gemma → answer` against a live model. Honest `not yet exercised` — and arguably correct to skip, since a live-Gemma e2e is slow and non-deterministic. The deterministic substitute (test `session.ts` with a fake agent) is the higher-value move and is also absent.
+- **The integration tests are also the unit tests for their modules.** There's no separate fast unit layer for `PgVectorStore` logic like `toVectorLiteral` (`pg-vector-store.ts:15-17`) — a pure function that could be unit-tested with no DB at all but isn't.
+
+---
+
+## Lens 3 — tests as design pressure
+
+Where is code hard to test *because* the design is tangled? One clear spot, and it's a design finding, not a testing one:
+
+**`src/cli/chat.tsx:62-63` runs `await createChatSession()` and `render(...)` at module top level.** Importing the module to test the `Chat` component fires a real session — a real pool, a real Ollama embedder, a real `loadProfile` query. The component and the bootstrap are fused. The fix is structural: separate the `Chat` component (testable with `ink-testing-library` + an injected fake session) from the `main()` that builds the real one. That's a deep-vs-shallow-module observation → **cross-link to `study-software-design`**; this guide only notes that the fusion is *why* the UI is untested.
+
+Everywhere else the design *helps* the tests:
+
+- `loadConfig(env)` takes env as a parameter (`config.ts:9`) — pure function, trivially testable, and the test passes a fixture `{}` (`config.test.ts:7`). This is the model the rest of the repo follows.
+- `PgVectorStore`, `indexDocumentRow`, `SupabaseTraceSink`, `loadProfile` all take their `pool` as a constructor/parameter dependency. None reaches for a global. That dependency-injection discipline is exactly what makes the integration tests as short as they are.
+
+So the design-pressure verdict is: **one untestable seam (`chat.tsx` bootstrap), everything else is injectable.** The repo already knows the pattern; it just didn't apply it to the UI entry point.
+
+---
+
+## Lens 4 — determinism, isolation, and flakiness
+
+This is the suite's strongest lens. Four mechanisms keep it deterministic:
+
+- **`--test-concurrency=1`** (`package.json:7`) — tests run serially. Since multiple DB tests share one Postgres and clean by `app_id`, serial execution removes cross-test interference on shared rows.
+- **Per-test cleanup keyed by `app_id = 'test'`.** `beforeEach` deletes the test rows before each test (`pg-vector-store.test.ts:19-21`, `runtime.test.ts:25-28`, `supabase-trace-sink.test.ts:18-20`). State doesn't leak between tests, and the production `app_id` (`'laptop'`) is never touched. This is the isolation backbone.
+- **The fake embedder removes the one non-deterministic dependency.** Real embeddings come from a network call to Ollama; the fake returns a fixed 768-dim vector with no I/O (`runtime.test.ts:14-17`) → see `02-fake-embedder-injection.md`.
+- **The trace-sink test pins event order with explicit timestamps.** Instead of trusting insert race order, it emits events with hand-set ISO timestamps and asserts `created_at` ordering equals emit order (`supabase-trace-sink.test.ts:41-66`). That converts a potential flake (concurrent flush inserts racing) into a deterministic assertion → see `05-full-signal-trajectory-assertion.md`.
+
+Flakiness sources checked and **not** found: no `Date.now()` / `Math.random()` in test assertions, no `setTimeout`-based waits, no dependence on test *file* order (each file owns its cleanup). The one ordering dependency that *could* bite — concurrent flush inserts — is the exact thing the timestamp assertion defends against.
+
+The honest gap: **`PgVectorStore.search` ranking is asserted as `>=`, not exact.** `assert.ok(hits[0].score >= hits[1].score)` (`pg-vector-store.test.ts:39`) tolerates the HNSW index returning approximate neighbors. That's correct — HNSW is approximate by design, so an exact-score assertion would be the flaky one. Worth knowing this is a deliberate loosening, not a sloppy one.
+
+---
+
+## Lens 5 — edge cases and error paths
+
+Thin. The happy path is covered everywhere; the error branches mostly aren't.
+
+What IS tested on the unhappy path:
+
+- **Dimension mismatch throws.** Both `upsert` and `search` reject a wrong-length vector (`pg-vector-store.test.ts:42-46`), matching the must-not-change constraint that a 768-dim mismatch must throw, never silently truncate (`assertDim`, `pg-vector-store.ts:32-36`). This is the one error branch with a real test, and it's the right one to have.
+- **Empty profile returns `''`.** `loadProfile` on a missing row returns the empty string, not `undefined` or a throw (`profile.test.ts:22`). A boundary (no rows) is checked.
+
+What ISN'T:
+
+- **The swallowed memory-write `catch` (`session.ts:64-69`).** A `try/catch` that deliberately eats the error so a memory failure doesn't lose the answer. Zero tests assert that a throwing `memory.remember()` still returns the answer — and a swallow with no test is exactly the branch that silently starts eating *real* errors. **Red flag firing:** zero tests on a deliberately-swallowed error branch.
+- **The migration rollback path (`migrate.ts:13-16`).** `runMigration` rolls back and rethrows on a bad SQL script. Only the success path is tested (`migrate.test.ts`); a malformed-SQL test would pin the rollback.
+- **The `upsert` / `search` transaction rollback (`pg-vector-store.ts:59-64`).** Same shape — the rollback-on-error branch is unexercised.
+- **`chat.tsx` error turn (`chat.tsx:30-32`).** An `ask()` rejection should render `error: <message>` as a buffr turn. No test.
+
+No property-based testing anywhere — reasonable for this repo's size, but `toVectorLiteral` round-tripping or chunk-id parsing would be natural property targets if the suite grew.
+
+---
+
+## Lens 6 — testing AI features
+
+This is the seam the whole guide is organized around, and **the repo handles it correctly.**
+
+The agent loop (`RagQueryAgent.answer()`, called in `session.ts:62`) is non-deterministic — it calls Gemma. You can't `assert.equal` on a Gemma answer. So the testable surface is everything *around* the model: prompt assembly, tool dispatch, output persistence. The repo tests the persistence boundary the right way:
+
+**The trace sink is tested by feeding it synthetic `CapabilityEvent`s, not by running the agent.** `supabase-trace-sink.test.ts:41-45` hand-constructs one event of each type (`tool_call_start`, `tool_call_end`, `model_usage`, `warning`, `error`) and asserts they all land in `agents.messages` with the full signal captured — args, `durationMs`, `error`, token sum (`123`), and emit order. That's the textbook move: **a deterministic harness wrapping a probabilistic core.** The core (Gemma) is replaced by a known event stream; everything downstream of it is asserted exactly.
+
+```
+  The AI-testing seam in this repo
+
+  ┌─ probabilistic core (NOT tested here) ─┐
+  │  RagQueryAgent.answer() → Gemma         │   → eval seam, study-ai-engineering
+  └──────────────────┬──────────────────────┘
+                     │ emits CapabilityEvent[]
+   test replaces ────┤  (the test injects synthetic events here)
+                     ▼
+  ┌─ deterministic harness (tested here) ──┐
+  │  SupabaseTraceSink.emit → persistMessage│   assert.equal on every field
+  │  → agents.messages rows                 │   ← this guide
+  └──────────────────────────────────────────┘
+```
+
+Where it hands off: the *quality* of retrieval — does the right chunk come back for a query — is measured by `eval-cmd.ts` (precision@k / recall@k over `eval/queries.json`), which **prints and never asserts**. That's correct: retrieval quality is a "good enough / didn't regress" question, which is evaluation, not testing → `study-ai-engineering`.
+
+The gap on this lens: the *other* deterministic boundaries around the model aren't tested. **Prompt assembly** — `loadProfile` feeds the system prompt (`session.ts:47,57`), but no test asserts the profile actually reaches the agent. **Tool dispatch** — `createSearchKnowledgeBaseTool` is wired (`session.ts:43-44`) but no test asserts the tool handler is registered and callable. Both are deterministic and testable; both run through the untested `session.ts`.
+
+---
+
+## Lens 7 — testing red-flags audit (capstone)
+
+The consolidated checklist, marked against this repo.
+
+| Red flag | Firing? | Evidence |
+|----------|:---:|----------|
+| Most important / most complex code is least tested | **YES** | `session.ts` orchestrator has 0 tests; leaves all have tests (lens 1). |
+| Heavy mocking that tests the mock, not the code | no | Only the embedder is faked, as a deterministic substitute, not an assertion target (lens 2). |
+| Inverted pyramid (all slow/flaky e2e) | no | Integration-heavy but deliberate; no flaky e2e (lens 2). |
+| Flaky: passes/fails on rerun, no code change | no | `--test-concurrency=1`, `app_id` cleanup, fake embedder, timestamp-pinned ordering (lens 4). |
+| Tests require a specific run order | no | Each file owns its `beforeEach` cleanup (lens 4). |
+| Zero tests on error/exception branches | **PARTIAL** | Dimension-mismatch tested; swallowed `catch` and rollback paths not (lens 5). |
+| AI feature with no test at the deterministic boundary | no | Trace-sink boundary tested with synthetic events (lens 6). |
+| Green-by-skip: suite passes while testing almost nothing | **YES** | 7/9 tests skip without `DATABASE_URL`; no CI provisions a DB (lens 1, `00-overview` gap 3). |
+
+**2 firing, 1 partial.** The two real ones are the same story from two sides: the orchestration trunk is untested, and the integration tests that *do* exist don't run in CI. Both are fixable without rearchitecting anything — one test file for `session.ts` with injected fakes, and one CI job with a pgvector service container.
+
+The honest "not yet exercised" list, stated plainly:
+
+- **CI** — green-by-skip without `DATABASE_URL`; no workflow provisions Postgres.
+- **e2e of chat against live Gemma** — no test drives the Ink UI through a real model turn.
+- **error-branch coverage** — swallowed memory-write, migration rollback, transaction rollback, the chat error turn.

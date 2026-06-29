@@ -1,70 +1,94 @@
 # Query planning and execution
 
-**Subtitle:** cost-based planner / index scan vs sequential scan / EXPLAIN — *Industry standard*
+**Industry name:** the query planner / optimizer · scan and join selection ·
+EXPLAIN — *Industry standard*
 
 ---
 
-## Zoom out, then zoom in
+## Zoom out — where this concept lives
 
-You hand Postgres a declarative SQL string; the planner turns it into a concrete
-plan — which index, which scan, in what order — and the executor runs it. The
-single decision that matters most in this repo happens here: *does the
-similarity query use the HNSW index, or does it silently fall back to a
-sequential scan?*
+The planner sits between your SQL and the access methods. You hand it a declarative
+query ("give me the nearest 5 chunks"); it decides the *physical* plan — which scan,
+which index, in what order. It's the band that turns the operator/opclass alignment
+of file `03` into an actual decision: index scan, or sequential scan.
 
 ```
-  Zoom out — planning sits between SQL and the access methods
+  where the planner sits
 
-  ┌─ Service ───────────────────────────────────────────┐
-  │  search() issues: ORDER BY embedding <=> $1 LIMIT k  │
-  └──────────────────────────┬───────────────────────────┘
-  ┌─ ★ Planner + executor ★ ─▼───────────────────────────┐ ← THIS FILE
-  │  parse → plan (cost-based) → execute                 │
-  │  CHOICE: HNSW index scan  ──or──  sequential scan    │
-  └──────────────────────────┬───────────────────────────┘
-  ┌─ Access methods / heap ──▼───────────────────────────┐
-  │  HNSW · btree · heap pages                            │
-  └──────────────────────────────────────────────────────┘
+  ┌─ Connection layer ───────────────────────────────────┐
+  │  SQL text arrives over the wire                       │
+  └───────────────────────────┬───────────────────────────┘
+                              │
+  ┌─ Query execution layer ───▼───────────────────────────┐
+  │  parse → ★ PLAN (cost-based choice) ★ → execute        │
+  │  "seq scan or index scan? which join? sort or not?"   │
+  └───────────────────────────┬───────────────────────────┘
+                              │ chosen plan
+  ┌─ Access methods ──────────▼───────────────────────────┐
+  │  HNSW / B-tree / heap scan                            │
+  └───────────────────────────────────────────────────────┘
 ```
 
-Zoom in: the planner is cost-based — it estimates the cost of each candidate
-plan and picks the cheapest. For most queries that's invisible plumbing. For the
-vector query it's the whole ballgame, because the difference between the two
-plans it might pick is sub-linear vs O(n), and **the planner picks the seq scan
-silently when the operator and opclass don't align.**
+---
+
+## Zoom in — narrow to the concept
+
+The question: *for buffr's one hot query — the vector search — does the planner pick
+the fast index path or the slow scan, and how would you ever know?* The planner is
+cost-based: it estimates the cost of each candidate plan and picks the cheapest. For
+the vector search there are exactly two candidates — walk the HNSW graph, or scan
+every row and compute distance. Which it picks depends entirely on the alignment from
+file `03`. Name the planner's decision, then walk the one query that matters and the
+`EXPLAIN` tool that makes the invisible decision visible.
 
 ---
 
 ## The structure pass
 
-**Layers.** Query execution is three nested stages:
+### Layers
 
 ```
-  ┌─ Parse ──────────────────┐  SQL text → parse tree
-  └────────────┬──────────────┘
-  ┌─ Plan ─────▼──────────────┐  parse tree → cheapest plan tree
-  │   index-or-scan decision   │  ← the load-bearing layer
-  └────────────┬──────────────┘
-  ┌─ Execute ──▼──────────────┐  plan tree → rows (pull from nodes)
-  └───────────────────────────┘
+  declarative SQL        →  WHAT you want (order by distance, limit k)
+    logical plan         →  WHICH operations (scan, sort, limit)
+      physical plan      →  HOW (index scan vs seq scan vs sort-then-limit)
+        execution        →  rows pulled through the operator tree
 ```
 
-**Axis — trace `cost` (the planner's own currency) down to the decision.** *What
-makes one plan cheaper than another?* The planner estimates pages-read and
-rows-processed. For `order by <=> limit k`:
+### Axis: trace *"who decides the physical plan?"* down the layers
 
-- If a usable HNSW index exists (operator aligns with opclass), the index-scan
-  plan is cheap — walk the graph, return k.
-- If not, the only plan is: scan every row, compute distance, sort, take k. The
-  planner *will* choose this, because it's the only correct plan available — not
-  because it's good.
+```
+  "who decides how this runs?"  — traced down
 
-**Seam — operator ↔ opclass alignment, and the planner won't warn you.** Above
-the seam the SQL looks identical (`order by embedding <something> $1`). Below it,
-whether `<something>` matches the index's opclass decides index-scan vs seq-scan.
-The guarantee that flips is *which plan you get*, and it flips silently — no
-error, no log line, just a different plan node you'd only see in `EXPLAIN`. This
-is the most dangerous seam in the repo precisely because it's invisible.
+  ┌────────────────────────────────────────────┐
+  │ your SQL: order by embedding <=> q limit 5  │  → YOU declare intent only
+  └───────────────────────┬─────────────────────┘
+      ┌───────────────────▼───────────────────┐
+      │ planner: estimate cost of each plan    │  → THE PLANNER decides, not you
+      └───────────────────┬───────────────────┘
+          ┌───────────────▼───────────────────┐
+          │ executor: pull rows through the    │  → the chosen plan just runs
+          │ operator tree                      │
+          └────────────────────────────────────┘
+
+  the answer flips at the planner: you write declarative SQL, but the ENGINE
+  picks the physical plan. you only INFLUENCE it (via indexes + alignment).
+```
+
+That flip is the lesson: you don't *tell* Postgres to use the index, you *enable* it
+to and hope the cost model agrees. `EXPLAIN` is how you check it did.
+
+### Seams
+
+```
+  seam 1  intent ↔ plan       you write WHAT; the planner picks HOW. The contract is
+                             "I gave you an aligned index; please use it." EXPLAIN
+                             verifies the planner honoured it.
+  seam 2  plan ↔ statistics   the planner's cost estimates come from table stats
+                             (collected by ANALYZE). Stale or absent stats → bad plan.
+```
+
+Hand off: you declare intent, the cost-based planner picks the physical plan, and
+EXPLAIN is the only window into which plan it chose.
 
 ---
 
@@ -72,226 +96,219 @@ is the most dangerous seam in the repo precisely because it's invisible.
 
 ### Move 1 — the mental model
 
-Think of how a React app re-renders: you describe *what* the UI should be, and
-React's reconciler decides *how* to get there — which nodes to touch, in what
-order. You don't write the DOM mutations; you write the declaration and trust
-the planner. SQL is the same split: you write `order by <=> limit k`, and
-Postgres's planner decides whether to walk an index or scan the table. The catch
-that has no React equivalent: the planner can pick a catastrophically slow plan
-and never tell you, because the slow plan is still *correct*.
+You know how React doesn't re-render the whole tree when state changes — it diffs and
+decides the minimal DOM ops, and you trust it without seeing the work? The Postgres
+planner is the same kind of black box: you write declarative SQL, it computes the
+cheapest physical plan and runs it. And just like you reach for React DevTools to see
+what actually re-rendered, you reach for `EXPLAIN` to see what plan actually ran. The
+plan is a tree of operators; rows flow up from the leaves.
 
 ```
-  Two plans for the SAME query, planner picks one
+  the plan tree for buffr's search query
 
-  ORDER BY embedding <=> $1 LIMIT 4
+         ┌─ Limit (5) ─┐                  ← top: stop after 5 rows
+         │             │
+       ┌─ Index Scan using chunks_embedding_hnsw ─┐
+       │  order by embedding <=> $1               │   ← THE good plan:
+       │  (HNSW returns rows already in order)    │      walk the graph
+       └──────────────┬──────────────────────────┘
+                      │ ctids
+       ┌─ Heap fetch (content, meta, …) ─┐         ← then pull the columns
+       └─────────────────────────────────┘            the index doesn't hold
 
-  plan A (aligned):              plan B (misaligned):
-  ┌──────────────────┐           ┌──────────────────┐
-  │ Index Scan       │           │ Seq Scan         │
-  │  chunks_embedding│           │  agents.chunks   │
-  │  _hnsw           │           │ (compute <=> for │
-  │  → walk graph,   │           │  EVERY row)      │
-  │    return 4      │           └────────┬─────────┘
-  └──────────────────┘                    ▼
-        sub-linear                 ┌──────────────┐
-                                   │ Sort + Limit │  O(n log n)
-                                   └──────────────┘
+  vs. the BAD plan (if misaligned):
+         ┌─ Limit (5) ─┐
+         └─ Sort (by <=> ) ─┐                       ← sort ALL rows by distance
+            └─ Seq Scan on chunks ─┐                ← read EVERY row first
+               (compute <=> per row)│
+               └────────────────────┘
 ```
 
-### Move 2 — walk the planner's decision on buffr's query
+The difference between those two trees is the entire performance story of the
+product.
 
-**Start with the exact query.** `pg-vector-store.ts:70-78`:
+### Move 2 — walk the execution
 
-```sql
+**The only hot query — vector search.** This is the query the RAG loop runs on every
+turn, so it's the one whose plan matters.
+
+```ts
+// src/pg-vector-store.ts:70-77
 select id, content, chunk_index, document_id, meta,
-       1 - (embedding <=> $1::vector) as score
+       1 - (embedding <=> $1::vector) as score   -- score = similarity = 1 - distance
 from agents.chunks
-where app_id = $2
-order by embedding <=> $1::vector     -- this clause decides the plan
-limit $3
+where app_id = $2                                -- low-selectivity filter
+order by embedding <=> $1::vector                -- the orderable the HNSW serves
+limit $3                                          -- top-k
 ```
 
-**Step 1 — the planner looks for an index matching the ORDER BY operator.** The
-clause is `order by embedding <=> $1`. The planner asks: *is there an index on
-`embedding` whose opclass supports `<=>`?* The HNSW index
-(`001_agents_schema.sql:29`) was built `vector_cosine_ops` — the cosine opclass —
-and `<=>` is the cosine-distance operator. **Match.** The planner generates an
-index-scan plan that walks the HNSW graph and returns the top-k in graph order.
+Walk what the planner does with it, one decision at a time:
+
+**Decision 1 — can the `order by` use an index?** Yes, *if* an HNSW index exists on
+`embedding` with an opclass matching `<=>`. It does (`vector_cosine_ops`, file `03`).
+So the planner's cheapest plan is an *index scan that returns rows already ordered by
+distance* — no separate sort needed. The HNSW walk produces near-neighbours in
+roughly increasing distance, and `limit 5` stops the walk early. **Consequence:** the
+query touches a handful of graph nodes, not the whole table.
+
+**Decision 2 — what about `where app_id = $2`?** The planner *could* use
+`chunks_app_id`, but on a single-device corpus every row matches, so filtering buys
+nothing (file `03`). The planner applies `app_id` as a cheap filter on the rows the
+HNSW scan already returned, rather than as a separate index scan. **Consequence:**
+the `app_id` filter is essentially free here and doesn't change the plan shape.
+
+**Decision 3 — `limit 5` and the `1 - distance` score.** The `limit` is what makes
+the HNSW scan stop early — without it, an HNSW "order by" would have to materialise a
+lot more of the graph walk. The `1 - (embedding <=> $1)` is computed *after* ordering,
+per returned row — it's just arithmetic on the 5 survivors, not part of the index
+decision. Note the query orders by raw `<=>` (distance, ascending = nearest first)
+but *reports* `1 - distance` (similarity, higher = better). Same ranking, two
+conventions; the index only cares about the `order by`.
+
+**The seq-scan fallback — what misalignment costs.** If the index opclass didn't
+match `<=>` (file `03`), Decision 1 flips to "no usable index," and the planner falls
+to: seq scan every chunk → compute `<=>` for each → sort all by distance → take 5.
 
 ```
-  Step 1 — the lookup that gates everything
+  the two plans, side by side — same SQL, different alignment
 
-  ORDER BY ... <=> ...            index opclass
-       │                               │
-       └──── do they name the ─────────┘
-             same distance metric?
-        YES (cosine == cosine) → Index Scan plan available
-        NO                     → no usable index → Seq Scan
+  ALIGNED (buffr today):              MISALIGNED (the trap):
+  ┌─────────────────────┐             ┌─────────────────────┐
+  │ Limit 5             │             │ Limit 5             │
+  │  └ Index Scan HNSW  │             │  └ Sort (by <=>)    │
+  │     reads ~ef nodes │             │     └ Seq Scan      │
+  └─────────────────────┘             │        reads N rows │
+   cost ~ O(log N)                    └─────────────────────┘
+                                       cost ~ O(N log N)
 ```
 
-**Step 2 — the `LIMIT` makes the index plan decisively cheaper.** This is the
-detail that seals it. Without `limit`, the planner might still scan-and-sort even
-*with* an index, because it'd have to return everything anyway. With `limit k`,
-the index-scan plan can stop after k graph hops — it never materializes the full
-result. So `order by <=> limit k` is the canonical pgvector shape *because* the
-`limit` is what lets the index pay off. **What breaks if you drop the limit:**
-the index advantage shrinks or vanishes — you've asked for all rows sorted, and
-sorting all rows is the seq-scan plan.
+Both return the *same correct rows*. The planner picks based on cost — and the cost
+flips entirely on whether the index is usable.
 
-**Step 3 — the `where app_id = $2` is a separate, secondary decision.** The
-planner can use the B-tree on `app_id` to pre-filter, or apply the filter while
-walking. With one dominant `app_id` it'll likely just filter inline. This is a
-side concern; the `order by` is what determines index-vs-scan for the expensive
-part.
-
-**Step 4 — the misalignment failure, concretely.** Suppose someone "optimizes"
-the query to use L2 distance — `order by embedding <-> $1` — without rebuilding
-the index with `vector_l2_ops`. Now Step 1 fails: no index opclass supports
-`<->` on this column. The planner falls back to the only correct plan: seq scan
-every row, compute L2, sort, limit. **No error. No warning.** The query returns
-the right rows; it just got O(n) slower, and it degrades as the corpus grows.
-The repo dodges this because the operator and opclass were chosen together — but
-nothing *enforces* it; it's a convention held in two files that must agree.
+**EXPLAIN — the tool buffr doesn't use.** Here's the honest gap. Nothing in the repo
+runs `EXPLAIN` or `EXPLAIN ANALYZE`. So *which plan actually runs is unverified.*
+The alignment is correct by inspection (file `03`), but "correct by reading the code"
+is weaker than "proven by the planner output." The one-line discipline:
 
 ```
-  Layers-and-hops — the silent fallback
+  prove the index is used — run once against a populated table
 
-  ┌─ Service ───┐  ORDER BY <-> (L2)   ┌─ Planner ──────────┐
-  │ search()    │ ──────────────────► │ no opclass match    │
-  │ (edited)    │                      │ for <-> on embedding│
-  └─────────────┘                      └─────────┬───────────┘
-        no error returned ◄──────────────────────┤ falls back
-                                                  ▼
-                                       ┌─ Executor ─────────┐
-                                       │ Seq Scan all rows  │  O(n)
-                                       └────────────────────┘
+  EXPLAIN ANALYZE
+  select id, content from agents.chunks
+  where app_id = 'laptop'
+  order by embedding <=> '[...]'::vector
+  limit 5;
+
+  look for:  "Index Scan using chunks_embedding_hnsw"   ← GOOD
+  fear:      "Seq Scan on chunks" + "Sort"              ← misaligned, or stats stale,
+                                                           or table too small to bother
 ```
 
-**Step 5 — how you'd actually see the plan.** Nothing in the repo runs
-`EXPLAIN`. To verify any of the above you'd prepend `explain (analyze, buffers)`
-to the query and read the top node: `Index Scan using chunks_embedding_hnsw`
-(aligned) vs `Seq Scan on chunks` (misaligned). That's the EXPLAIN-discipline
-gap named in `00` — the index claim in this repo is reasoned, not measured.
+One subtlety worth naming: on a *tiny* table the planner may legitimately pick a seq
+scan because scanning 20 rows is cheaper than walking a graph. So you verify on a
+*populated* table — a seq scan on 12 rows is fine; a seq scan on 50k rows is the bug.
+
+**No joins, no N+1 — by construction.** Worth stating plainly: buffr's queries are
+all single-table. `search` hits only `chunks`; `persistMessage` hits only `messages`;
+`indexDocumentRow` hits `documents` then (separately) `chunks`. There are no SQL
+joins anywhere, so there's no join-order planning to reason about. The N+1 risk lives
+one layer up in *application* code, not SQL: `upsert` loops `insert` per chunk
+(`pg-vector-store.ts:43`) and the trace sink fires one `insert` per event
+(`supabase-trace-sink.ts`). Those are row-at-a-time round trips, not joins — a
+batching opportunity that `study-performance-engineering` owns, not a planner
+problem.
 
 ### Move 3 — the principle
 
-A cost-based planner gives you the cheapest *correct* plan it can build from the
-indexes available — and "available" means an index whose opclass matches the
-operator in your query. The planner never warns you that a faster plan *could*
-have existed if your index and operator agreed; it just runs the slow correct
-one. So the discipline is: pick the operator and the opclass together, and use
-`EXPLAIN` to confirm the plan you assumed is the plan you got. The query that
-looks identical can be sub-linear or O(n) depending on a match the planner makes
-in silence.
+The planner is declarative-to-physical translation you don't control directly — you
+*influence* it by providing aligned indexes and current statistics, then *verify*
+with `EXPLAIN`. The trap that catches everyone: assuming an index is used because it
+exists. An index exists, is aligned, and is *still* skipped if the stats are stale or
+the table is small. The discipline is not "create the index" — it's "prove the plan."
 
 ---
 
 ## Primary diagram
 
-The full decision, from SQL to plan node.
+The full execution picture: declarative SQL down to the chosen plan, both branches.
 
 ```
-  search() query → plan, the full decision
+  query execution — full recap
 
-  SQL (pg-vector-store.ts:70):
-    WHERE app_id = $2  ORDER BY embedding <=> $1  LIMIT k
-                            │
-                  ┌─────────▼──────────┐
-                  │ PLANNER             │
-                  │ index on embedding  │
-                  │ with opclass that   │
-                  │ supports <=> ?       │
-                  └────┬───────────┬─────┘
-              YES ─────┘           └───── NO
-                  ▼                       ▼
-        ┌─ Index Scan ──────┐   ┌─ Seq Scan ─────────┐
-        │ chunks_embedding  │   │ compute <=> every  │
-        │ _hnsw, walk graph │   │ row → Sort → Limit │
-        │ stop after k      │   │ O(n log n), SILENT │
-        └───────────────────┘   └────────────────────┘
-              sub-linear              latency cliff
-
-   verify with: EXPLAIN (ANALYZE, BUFFERS) → read top node
+  ┌─ SQL ─────────────────────────────────────────────────────────────┐
+  │  order by embedding <=> $1  limit 5    (declarative intent)        │
+  └───────────────────────────┬───────────────────────────────────────┘
+                              │
+  ┌─ Planner (cost-based) ────▼───────────────────────────────────────┐
+  │  is there an aligned index?                                       │
+  │     YES (vector_cosine_ops ⟷ <=>)        NO (misaligned/no index) │
+  │        │                                    │                     │
+  │        ▼                                    ▼                     │
+  │  ┌─ Index Scan HNSW ─┐              ┌─ Seq Scan + Sort ─┐          │
+  │  │ walk graph, ~log N│              │ read N, sort all  │          │
+  │  └────────┬──────────┘              └────────┬──────────┘          │
+  └───────────┼──────────────────────────────────┼────────────────────┘
+              ▼ ctids                             ▼ rows
+  ┌─ Heap fetch (content, meta) ───────────────────────────────────────┐
+  │  EXPLAIN ANALYZE is the only window into which branch ran           │
+  └────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
 ## Elaborate
 
-Postgres's planner is one of the oldest cost-based optimizers in open source: it
-enumerates candidate plans, estimates each with statistics gathered by `ANALYZE`
-(row counts, value distributions in `pg_statistic`), and picks the lowest
-estimated cost. For vector queries the estimation is cruder — the planner's cost
-model for ANN indexes is approximate — which is one more reason to verify with
-`EXPLAIN ANALYZE` rather than trust the estimate. The N+1 query pattern, the
-other classic execution pitfall, doesn't appear in this repo: the trajectory
-writes in `supabase-trace-sink.ts` are one statement per event (a fan-out, not
-an N+1 over a result set), and the hot path is a single `search()` call per
-turn, not a loop of per-row lookups. → see `study-performance-engineering` for
-where per-turn cost actually accrues.
+The cost-based planner is Postgres's defining feature — it's why you write SQL
+instead of hand-coding access paths. Its estimates come from statistics gathered by
+`ANALYZE` (run automatically by autovacuum): row counts, value distributions,
+correlation. For vector indexes the cost model is newer and less battle-tested than
+for B-trees, which is another reason to verify with `EXPLAIN` rather than trust the
+estimate. After a bulk index of a fresh corpus, stats may lag reality until autovacuum
+runs `ANALYZE` — a manual `ANALYZE agents.chunks` right after bulk loading is the
+cheap insurance.
 
----
-
-## Project exercises
-
-### EX-QРY-1 — EXPLAIN the hot path and prove the seam
-
-- **What to build:** run `EXPLAIN (ANALYZE, BUFFERS)` on `search()`'s query with
-  `<=>`, then again with `<->`, and capture both plans.
-- **Why it earns its place:** converts the central claim of this guide (aligned
-  → index, misaligned → seq scan) from reasoning into a captured artifact.
-- **Files to touch:** new `src/cli/explain-cmd.ts`; optionally a `test/` case
-  asserting the plan string contains `chunks_embedding_hnsw`.
-- **Done when:** you have both plans saved and the operator swap visibly flips
-  Index Scan → Seq Scan.
-- **Estimated effort:** 1-2 hours.
+The N+1 observation connects to `study-performance-engineering` (batch the per-chunk
+and per-event inserts) and the planner's no-joins simplicity connects to
+`study-data-modeling` (the schema is denormalised enough that reads don't need
+joins — the citation `meta` is reconstructed in application code at
+`pg-vector-store.ts:80-84`, not via a SQL join to `documents`).
 
 ---
 
 ## Interview defense
 
-**Q: Two engineers write what looks like the same vector query and one is 100x
-slower. What happened?**
-
-> One of them changed the distance operator without rebuilding the index. The
-> planner needs the `order by` operator to match the index's opclass — `<=>`
-> with `vector_cosine_ops`. If the operator is `<->` (L2) but the index is
-> cosine, there's no usable index for that clause, so the planner falls back to
-> a sequential scan: compute distance for every row, sort, limit. It's still
-> correct — same rows — so there's no error. It's just O(n) now, and it gets
-> worse as the table grows. The only way to catch it is `EXPLAIN`.
+**Q: "How do you know the vector search uses the index and not a seq scan?"**
 
 ```
-  aligned   → Index Scan chunks_embedding_hnsw → sub-linear
-  misaligned→ Seq Scan + Sort + Limit          → O(n log n), silent
+  EXPLAIN is the only proof
+
+  run:  EXPLAIN ANALYZE select ... order by embedding <=> q limit 5;
+  good: "Index Scan using chunks_embedding_hnsw"
+  bad:  "Seq Scan on chunks" + "Sort"  → misaligned, stale stats, or tiny table
 ```
 
-> Anchor: the operator and opclass must name the same metric, or you get a
-> silent seq scan.
+Answer: "You don't know from the code — you prove it with `EXPLAIN ANALYZE` against a
+populated table. If the plan says `Index Scan using chunks_embedding_hnsw`, the HNSW
+index is serving the `order by`. If it says `Seq Scan` plus `Sort`, the index is
+being skipped — usually an operator/opclass mismatch, sometimes stale stats, sometimes
+the table's just too small to bother. buffr doesn't run EXPLAIN anywhere today, so
+strictly the plan is unverified — correct by inspection, not by proof." Anchor: *an
+index you can't prove the planner uses is an index you don't have.*
 
-**Q: Why does the `LIMIT` matter to whether the index gets used?**
+**Q: "Are there N+1 problems?"**
 
-> Because `limit k` is what lets the index-scan plan stop early. The HNSW walk
-> returns rows in nearest-first order, so with a `limit` the executor pulls k
-> and stops — it never touches the rest of the graph. Drop the `limit` and
-> you've asked for every row sorted by distance, which is the seq-scan-and-sort
-> plan. The pgvector idiom is `order by <=> limit k` precisely because the
-> `limit` is half of what makes the index pay off.
-
-```
-  ORDER BY <=> LIMIT k → walk graph, stop at k → cheap
-  ORDER BY <=> (no lim)→ produce + sort all     → expensive
-```
-
-> Anchor: `limit` is what turns the ordered index walk into an early stop.
+Answer: "Not in SQL — every query is single-table, no joins. But there's row-at-a-time
+behavior in application code: `upsert` inserts one chunk per round trip and the trace
+sink inserts one row per event. Those are batching opportunities, not planner
+problems." Anchor: *the N+1 risk is in the app loop, not the query plan.*
 
 ---
 
 ## See also
 
-- `03-btree-hash-and-secondary-indexes.md` — the HNSW index and the opclass it
-  must align with.
-- `02-records-pages-and-storage-layout.md` — why the seq-scan fallback is doubly
-  costly (TOASTed vectors).
-- `study-performance-engineering` — measuring the per-turn cost and the recall
-  budget.
+- `03-btree-hash-and-secondary-indexes.md` — the alignment that decides which plan
+  the planner picks.
+- `02-records-pages-and-storage-layout.md` — the heap fetch after the index scan.
+- `study-performance-engineering` — batching the per-row inserts; ANALYZE timing;
+  HNSW `ef_search` and the recall/latency curve.
+- `study-data-modeling` — why there are no joins (denormalised reads).

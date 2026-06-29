@@ -1,259 +1,173 @@
-# Per-Turn Memory and Trace Cost
+# Per-Turn Memory & Trace Cost — the write amplification of one chat turn
 
-**Industry names:** write amplification · observability overhead · full-signal trajectory
-capture · retrieval-based episodic memory. **Type:** Project-specific (the shape is general:
-fixed per-turn write cost).
+**Industry name(s):** write amplification; trace fan-out; full-signal trajectory capture. **Type:** Industry standard.
 
----
+One question from the user produces one answer — and around that answer, a fan-out of database writes: the user message, up to six trace events, and an extra embed-plus-insert for episodic memory. None of it dominates the turn. All of it is real.
 
 ## Zoom out, then zoom in
 
-Every chat turn does more writing than the answer itself requires. On top of generating the
-reply, buffr embeds-and-stores the whole exchange as episodic memory, and the trace sink
-fans the agent's trajectory out into several INSERTs — one per event type. None of it is
-free, and none of it is on the critical path of *answering*. This file measures that
-per-turn write tax and asks the only question that matters: does it cost the user anything.
+A chat turn isn't just "embed, search, generate." It's also *recording* what happened — for replay, for observability, and for the memory that resurfaces past exchanges. That recording is writes, and there are more of them than the one answer suggests.
 
 ```
-  Zoom out — the extra writes hanging off one turn
+  Zoom out — the write fan-out of one ask()
 
-  ┌─ Session layer (src/session.ts) ask() ─────────────────────────────┐
-  │  persistMessage(user)        ← 1 INSERT (the question)              │
-  │  agent.answer(question)      ← gemma2 generation (THE big cost)     │
-  │  trace.flush()               ← ★ up to 6 event types → INSERTs ★    │ ← we are here
-  │  memory.remember(exchange)   ← ★ extra EMBED + extra UPSERT ★       │
-  └──────────────────────────────────┬─────────────────────────────────┘
-            embed │ HTTP                 │ pg wire (warm pool)
-  ┌─ Ollama ─────▼──────┐   ┌─ Postgres ▼──────────────────────────────┐
-  │ nomic-embed (again) │   │ agents.messages (trace)  agents.chunks   │
-  └─────────────────────┘   │ (memory, kind=memory)                    │
-                            └───────────────────────────────────────────┘
+  ┌─ Session.ask (src/session.ts:60) ────────────────────────────┐
+  │  1. persistMessage(user)        →  1 INSERT                   │
+  │  2. agent.answer(question)      →  embed + HNSW + GENERATE    │ ◄ gemma2:9b
+  │     │                              (trace events QUEUED here) │   DOMINATES
+  │  3. trace.flush()               →  up to 6 INSERTs  ★         │ ← we are here
+  │  4. memory.remember()           →  1 embed + 1 INSERT  ★      │ ← and here
+  └───────────────────────────┬───────────────────────────────────┘
+  ┌─ Postgres + Ollama ───────▼───────────────────────────────────┐
+  │  ~8 DB writes + 1 extra embed roundtrip, per turn             │
+  └───────────────────────────────────────────────────────────────┘
 ```
 
-Zoom in: two patterns stacked on each turn — **retrieval-based episodic memory** (an extra
-embed+upsert so past exchanges resurface later) and **write-amplified trajectory capture**
-(the trace sink turns one agent run into many rows). The question: what's the per-turn tax,
-and is it visible next to gemma2.
+Zoom in: the pattern is **write amplification** — one logical event (a turn) producing many physical writes. Two sources: the trace sink fans one turn out to six event-type INSERTs, and `memory.remember` adds a second embed roundtrip plus another INSERT on top of the answer.
 
----
+## The structure pass
 
-## Structure pass
-
-**Layers.** Two write sources beyond the answer: the trace sink
-(`supabase-trace-sink.ts:53-85`) and the memory engine (`session.ts:66`). Both ride the same
-warm pool from `04`.
-
-**Axis — cost (writes incurred per turn that aren't the answer).** Hold "how many writes does
-one turn incur beyond storing the reply?":
+Axis: **cost** — physical writes (and model calls) per logical turn.
 
 ```
-  One question — "writes per turn beyond the answer itself?" —
+  axis = "writes + model calls per turn"
 
-  ┌─ the answer path ───────────────────────────────────┐
-  │  persistMessage(user) + persistMessage(assistant)    │  required
-  └──────────────────────────────────────────────────────┘
-  ┌─ trace sink (observability) ────────────────────────┐
-  │  step / tool_call_start / tool_call_end /            │  ≥1 INSERT per event type,
-  │  model_usage / warning / error  → INSERT each        │  one row per occurrence
-  └──────────────────────────────────────────────────────┘
-  ┌─ memory engine (episodic recall) ───────────────────┐
-  │  embed(exchange) [HTTP] + upsert(memory chunk) [SQL] │  an EXTRA embed + write
-  └──────────────────────────────────────────────────────┘
-
-  the answer is 1-2 writes; observability + memory multiply that into many.
+  ┌─ logical: one Q&A turn ─────────────┐   → 1 conceptually
+  └─────────────────┬────────────────────┘
+  ┌─ physical fan-out ▼──────────────────┐   ═══ THE AMPLIFICATION ═══
+  │  user INSERT            → 1           │   one turn becomes
+  │  trace: step/tool_start/tool_end/    │   ~8 DB writes
+  │         model_usage/warning/error    │   + 1 extra embed
+  │                         → up to 6     │   (a 2nd MODEL call)
+  │  memory: embed + INSERT → 1 + 1       │
+  └─────────────────┬────────────────────┘   ← seam: 1 → ~8 + 1 embed
+  ┌─ Postgres + Ollama ▼─────────────────┐
+  └───────────────────────────────────────┘
 ```
 
-**Seam — `trace.flush()` and the `try/catch` around `remember`.** Two load-bearing seams:
-the trace sink is *sync emit, async flush* (events queue during the run, all writes awaited
-after — `trace-sink.ts:53,91-93`), and `memory.remember` is wrapped best-effort
-(`session.ts:65-69`) so a memory-write failure can't lose the answer the user already has.
-Both seams keep the extra cost *off* the answer's critical path.
-
----
+**Seam:** the boundary between the answer the user sees and the record kept around it. On the answer side, one logical exchange. On the record side, it fans out to ~8 writes and a second model call. The amplification factor is the finding.
 
 ## How it works
 
 ### Move 1 — the mental model
 
-You know how adding analytics to a request — log this, increment that counter, fire an event
-— quietly multiplies the writes per request even though the user only asked for one thing?
-That's write amplification. buffr has two sources of it per turn: a trace sink that records
-*everything the agent did* (for replay), and a memory write that embeds the exchange so it
-can resurface later. The strategy: **do the extra writes, but keep them off the critical path
-— queue the trace and flush after; make memory best-effort.**
+You know how a single user action in an event-sourced system writes one row to the UI but appends *several* events to the log — created, validated, applied? Same shape. One `ask()` produces one answer for the user and a spray of audit writes behind it. The twist buffr adds: one of those behind-the-scenes steps (`memory.remember`) isn't just a write — it's a *second embedding roundtrip*, the only part of the fan-out that touches a model.
 
 ```
-  One turn — write amplification, mapped
+  one turn → fan-out of records
 
-  user asks ──► [persist user]                          1 write
-            ──► agent.answer() ──► gemma2 (the cost) ──► (trace events queue during run)
-            ──► trace.flush() ──► [step][tool_start]    ──► many writes
-                                  [tool_end][usage]...
-            ──► memory.remember ─► [embed] + [upsert]    ──► 1 extra embed + 1 write
-
-  amplification factor: 1 question → ~1 embed + several-to-many INSERTs
+  ask(question)
+     │
+     ├─ user INSERT ─────────────► messages
+     ├─ [agent runs: embed, search, GENERATE] ── the big cost
+     ├─ trace.flush ──┬─ step ───► messages
+     │                ├─ tool_call_start ─► messages
+     │                ├─ tool_call_end ───► messages
+     │                ├─ model_usage ─────► messages
+     │                └─ warning/error ───► messages   (up to 6)
+     └─ memory.remember ─ embed(Q+A) ─► INSERT ─► chunks  ← 2nd model call
 ```
 
-### Move 2 — the walkthrough
+### Move 2 — the step-by-step walkthrough
 
-**The trace sink — sync emit, queued, flushed after.** `supabase-trace-sink.ts:53-93`:
+**The turn sequence.** `src/session.ts:60-71` is the whole fan-out:
 
 ```ts
-emit(event: CapabilityEvent): void {          // ← SYNC (aptkit's contract); can't await here
-  switch (event.type) {
-    case 'step':            this.push(persistMessage(... event.content ...)); return;
-    case 'tool_call_start': this.push(persistMessage(... args ...)); return;   // the cause
-    case 'tool_call_end':   this.push(persistMessage(... result, error,
-                                       durationMs ...)); return;               // ← timing!
-    case 'model_usage':     this.push(persistMessage(... tokensUsed ...)); return; // ← tokens!
-    case 'warning':
-    case 'error':           this.push(persistMessage(... event.message ...)); return;
-  }
-}
-private push(p) { this.pending.push(p); }     // ← queue, don't await
-async flush() { await Promise.all(this.pending); }  // ← all writes awaited AFTER the run
-```
-
-Six event variants, each becoming its own `persistMessage` INSERT. A turn with one tool call
-emits roughly: step(s) + tool_call_start + tool_call_end + model_usage = four-plus rows, then
-`flush()` (`session.ts:64`) awaits them all. The design keeps emit *sync* (aptkit requires it)
-and defers the actual DB work to `flush`, so the inserts don't block the agent mid-run —
-they happen in one `Promise.all` burst after the answer is ready.
-
-**The captured-but-unread baseline — the honest gap.** Look at what `tool_call_end` and
-`model_usage` persist: `durationMs` (line 69) and `tokensUsed` (line 76). buffr writes
-per-call latency and per-call token counts to `agents.messages` *every single turn* — and
-nothing ever reads them back. There's no aggregation query, no p50/p95, no token-cost report.
-The baseline is being *generated and discarded into a table nobody selects from*. This is the
-cheapest performance win in the whole repo (see `audit.md` §2): the instrument is installed;
-the dial just isn't read.
-
-**The memory write — an extra embed + upsert, best-effort.** `session.ts:60-71`:
-
-```ts
-async ask(question) {
-  await persistMessage(pool, conversationId, 'user', question);
-  const answer = await agent.answer(question);    // ← gemma2 (the dominant cost)
-  await trace.flush();                            // ← the trace burst above
+async ask(question: string): Promise<string> {
+  await persistMessage(pool, conversationId, 'user', question);  // write 1
+  const answer = await agent.answer(question);                   // the BIG cost
+  await trace.flush();                                           // writes 2..7
   try {
-    await memory.remember({ conversationId, question, answer });  // ← EXTRA embed + upsert
-  } catch {
-    // swallow: memory is best-effort, the turn already succeeded
-  }
+    await memory.remember({ conversationId, question, answer }); // embed + write 8
+  } catch { /* best-effort: don't lose the answer */ }
   return answer;
 }
 ```
 
-`memory.remember` (aptkit's engine, buffr's store) embeds the question+answer exchange — a
-*second* Ollama HTTP call this turn, on top of the query embed — and upserts it as a
-`kind=memory` chunk into the same `agents.chunks` table. That's how past exchanges resurface
-later through the same `search_knowledge_base` tool (retrieval-based episodic memory). The
-`try/catch` is load-bearing: a memory-write failure must not lose the answer the user already
-has, so it's swallowed deliberately.
+**The trace fan-out — queued during, flushed after.** The clever part: `SupabaseTraceSink.emit()` is *synchronous* (aptkit's contract requires it) but the writes are async. So `emit()` *queues* a promise and `flush()` awaits them together (`src/supabase-trace-sink.ts:53-93`). The six `CapabilityEvent` types each map to a `persistMessage`:
 
-**The load-bearing skeleton — what breaks if you remove each part:**
-
-```
-  per-turn write tax — name each part by what breaks without it
-
-  1. trace.flush() after run    remove → trajectory lost; durationMs/tokens never persisted
-  2. sync emit / async push     make emit await → blocks the agent mid-run (breaks contract)
-  3. memory.remember            remove → no cross-turn episodic recall; agent forgets
-  4. try/catch around remember  remove → a memory-write failure throws away a good answer
-  ── the cost ──
-  5. 6-event-type fan-out       this IS the write amplification — one run → many rows
-  6. extra embed for memory     this is the per-turn second embed (HTTP + GPU)
+```ts
+switch (event.type) {
+  case 'step':            /* assistant content */    // → messages
+  case 'tool_call_start': /* tool name + args */     // → messages (the cause)
+  case 'tool_call_end':   /* result + durationMs */  // → messages (timing!)
+  case 'model_usage':     /* model + tokensUsed */   // → messages (tokens!)
+  case 'warning':
+  case 'error':           /* message */              // → messages
+}
 ```
 
-**Does it matter at laptop scale? No.** Add it up: one extra embed call and several INSERTs
-over a warm local pool. The embed is tens-to-hundreds of milliseconds; the INSERTs are
-single-digit. Next to `gemma2:9b` generation — *seconds* — the entire per-turn write tax is
-rounding error. The design *correctly* spends cheap writes to buy replay-grade observability
-and cross-session memory. The only thing left on the table isn't the write cost — it's the
-*read* cost that's never paid: nobody queries the latency/token data being written.
+Named by what breaks if removed:
+- **the queue-then-flush split** (`push` at `:87`, `Promise.all` at `:92`) — without it, every event would block the agent run serially on a DB write. With it, the writes *overlap* the run and resolve together at the end. This is the part that keeps the fan-out off the critical path — the writes race the pool rather than stalling generation. Load-bearing, and a good choice.
+- **`durationMs` (`:69`) and `tokensUsed` (`:76`)** — these are the *measurement* payload. They're captured here and, per the audit, never read back. The capture is right; the loop that aggregates them is the missing piece (audit lens 2). This is where the highest-leverage fix lives.
+
+**The memory cost — the only extra model call.** `memory.remember` (`src/session.ts:66`) embeds the question+answer into the *same* vector store tagged `kind=memory`, so future turns resurface it via the existing search tool. The performance fact: this is a *second* embedding roundtrip to Ollama on every turn, on top of the query embed inside `answer()`. It's wrapped in try/catch (`:65-69`) so a memory failure never loses the user's answer — best-effort, correct.
+
+```
+  the two model calls per turn
+
+  answer():        embed(query) ──► HNSW ──► gemma2:9b GENERATE  ◄ dominant
+  memory.remember: embed(Q + A) ──► INSERT chunks               ◄ extra, cheap
+                   ▲ second roundtrip to Ollama, but an embed,
+                     not a generate — small next to the GENERATE
+```
+
+**Does it matter at laptop scale?** No — and here's the honest accounting. The ~7 INSERTs are localhost Postgres writes, low single-digit milliseconds, overlapped via `flush()`. The one part that touches a model — `memory.remember`'s embed — is an *embedding* call, not a generation call, so it's a fraction of the `gemma2:9b` step that already dominates the turn. The whole fan-out is rounding error next to generation. It's deprioritized correctly. The reason it earns a file anyway: the `durationMs`/`tokens` capture *in* this fan-out is the instrumentation that, if read back, would turn every estimate in this guide into a number.
 
 ### Move 3 — the principle
 
-Observability and memory both buy real capability — replayable trajectories, recall across
-sessions — at the price of write amplification. The discipline is twofold: keep the extra
-writes off the critical path (queue + flush, best-effort + swallow), and *close the loop* by
-reading back what you measure. buffr does the first perfectly and skips the second — it
-instruments durationMs and tokens, then never looks at them.
-
----
+Recording a turn costs more writes than answering it — and that's usually fine, as long as the recording stays off the critical path. buffr keeps it off-path two ways: the trace queues-then-flushes so writes overlap the run, and memory is best-effort so its failure can't cost the answer. The general lesson: write amplification is acceptable when (a) the writes are cheap relative to the dominant cost and (b) they don't block the thing the user is waiting on. buffr satisfies both. The unfinished half is reading the captured timing back.
 
 ## Primary diagram
 
 ```
-  Per-turn memory and trace cost — the full write tax of one ask()
+  Per-turn write amplification — one ask(), the full fan-out
 
-  ┌─ ask() (src/session.ts) ──────────────────────────────────────────┐
-  │  persist user            → 1 INSERT                                │
-  │  agent.answer()          → gemma2 generation  (DOMINATES, seconds) │
-  │    │ during run, trace.emit() queues events (sync, no await)       │
-  │  trace.flush()           → Promise.all([                           │
-  │      step, tool_call_start, tool_call_end(durationMs←),            │
-  │      model_usage(tokensUsed←), warning?, error? ])  → many INSERTs │
-  │  memory.remember() [try] → embed exchange (HTTP) + upsert chunk    │
-  │                            (kind=memory)            → 1 embed+1 SQL │
-  └──────────────────────────────────┬────────────────────────────────┘
-       embed │ HTTP :11434              │ pg wire (warm pool, see 04)
-  ┌─ Ollama ▼──────────┐   ┌─ Postgres ▼──────────────────────────────┐
-  │ nomic-embed (2nd   │   │ agents.messages: trajectory rows         │
-  │ embed this turn)   │   │   durationMs + tokens_used ← WRITTEN,     │
-  └────────────────────┘   │   never read back (the open loop)        │
-                           │ agents.chunks: kind=memory chunk         │
-                           └───────────────────────────────────────────┘
+  ┌─ Session.ask (src/session.ts:60-71) ─────────────────────────┐
+  │  persistMessage(user) ───────────────────────► messages [1]  │
+  │  agent.answer() ── embed → HNSW → GENERATE ── gemma2:9b ◄DOMIN│
+  │     │  (trace events emit()'d sync, QUEUED as promises)       │
+  │  trace.flush() ── Promise.all(pending) ──┐                    │
+  │     ├ step ───────────────────────────────┼─► messages        │
+  │     ├ tool_call_start (args) ─────────────┤                   │
+  │     ├ tool_call_end (durationMs) ─────────┤   ← timing captured│
+  │     ├ model_usage (tokensUsed) ───────────┤   ← tokens captured│
+  │     └ warning / error ────────────────────┘   (up to 6) [2..7]│
+  │  memory.remember() ── embed(Q+A) → INSERT ─► chunks [8]       │
+  │     ▲ 2nd Ollama roundtrip (embed, not generate) · try/catch  │
+  └───────────────────────────────────────────────────────────────┘
+   total: ~8 DB writes + 1 extra embed · all dwarfed by GENERATE
 ```
-
----
 
 ## Elaborate
 
-Two general patterns meet here. Write amplification is the observability tax — every metric,
-log, and trace event you add multiplies per-request writes; the art is keeping it async and
-off the critical path, which the sync-emit/async-flush split does. Retrieval-based episodic
-memory is the cheaper alternative to stuffing full conversation history into the prompt: you
-embed each exchange and *retrieve* the relevant ones later, instead of carrying all of them
-forward. buffr uses retrieval-based memory precisely because `RagQueryAgent.answer()` treats
-each question independently (noted at `session.ts:25-27`) — relevance-based recall gives
-cross-turn memory without sequential in-prompt history.
+The full-signal trace capture is deliberate — the schema comment and the sink's docstring (`src/supabase-trace-sink.ts:39-48`) call out that tool-call args, `durationMs`, token usage, and warning/error events used to be "dropped on the floor," and capturing all six event types turns `agents.messages` into a complete, replayable trajectory. The `created_at` from the event timestamp (`:26`, `:30`) preserves emit order against the race of concurrent flush inserts — a correctness detail with a performance flavour (it's why `Promise.all` is safe to fire unordered).
 
-The captured-but-unread `durationMs`/`tokens_used` is the thread connecting this file to the
-whole guide: it's the baseline that `audit.md` §2 says is missing, sitting in the database
-waiting for a `SELECT`. Closing that loop is the natural next move.
-
----
+For the retrieval-based episodic memory shape — why `remember` writes into the same store and how recall works — see **`study-ai-engineering`** (memory / MemoRAG). For the trace-as-observability angle (what these events are *for*), see **`study-debugging-observability`**. For the unbounded `Promise.all` as a latent backpressure question, see `audit.md` lens 6. This file owns the *write-amplification cost* read.
 
 ## Interview defense
 
-**Q: What does a chat turn cost beyond generating the answer?**
+**Q: What does one chat turn actually cost in writes?**
 
-Two extra write sources. The trace sink turns the agent's run into several INSERTs — one per
-`CapabilityEvent` type (step, tool_call_start/end, model_usage, warning, error), capturing
-`durationMs` and token usage for replay. And `memory.remember` does an *extra* embed of the
-exchange plus an upsert, so past turns resurface later via the same retrieval tool.
+> More than the one answer suggests. A turn is the user INSERT, then up to six trace INSERTs — one per `CapabilityEvent` type: step, tool-call start and end, model usage, warning, error — then an embed-plus-insert for episodic memory. So roughly eight DB writes and one extra embedding roundtrip per turn. But it's all dwarfed by `gemma2:9b` generation, and I keep it off the critical path: the trace queues writes during the run and flushes them together, and memory is best-effort in a try/catch so its failure can't cost the answer.
 
 ```
-  1 question → ~1 extra embed + several INSERTs (trace) + 1 upsert (memory)
-  all of it dwarfed by gemma2 generation (seconds)
+  one turn → ~8 writes + 1 extra embed
+  trace: emit() sync → queue → flush Promise.all (overlaps the run)
+  memory: best-effort, try/catch (failure ≠ lost answer)
 ```
 
-Two things I'd point out. First, it's kept off the critical path: trace emit is sync but the
-DB writes are queued and flushed *after* the run, and the memory write is best-effort in a
-`try/catch` so it can't lose a good answer. Second — the honest gap — I *write* durationMs
-and tokens every turn and never read them back. The baseline is in the table; I just haven't
-written the `SELECT`. That's the cheapest perf win I have, and it's a read I'm not doing.
+**Q: Is any of that a problem?**
 
-**Anchor:** `supabase-trace-sink.ts:53-93` (trace fan-out), `session.ts:60-71` (memory write,
-best-effort).
+> Not at laptop scale — localhost writes are milliseconds and they overlap the run, and the one model call in the fan-out is an *embed*, not a generate, so it's small next to the generation that already dominates. The real value buried in there is the instrumentation: I capture `durationMs` and token counts per event but don't read them back yet. Closing that — one aggregation over `agents.messages` — is the highest-leverage perf move I have, because right now every "is it slow" answer is an estimate.
 
----
+> Anchor: `src/session.ts:60-71` (the fan-out), `src/supabase-trace-sink.ts:53-93` (six events, queue-then-flush, captured timing).
 
 ## See also
 
-- `02-embedding-roundtrip.md` — the memory write is a *second* embed roundtrip per turn.
-- `04-connection-pool-reuse.md` — all these extra writes run cheap over the warm pool.
-- `06-no-caching.md` — the per-turn embeds (query + memory) are recomputed, never cached.
-- `audit.md` §2 (the unread baseline), §5, §6 (unbounded flush buffer), §8 (red flags #3, #6).
-- `study-debugging-observability` — the trace/trajectory side of this same mechanism.
+- `00-overview.md` — finding #4 and finding #6 (the unread instrumentation)
+- `audit.md` — lens 2 (measurement gap), lens 5 (I/O), lens 6 (backpressure)
+- `02-embedding-roundtrip.md` — the embed `memory.remember` repeats
+- `04-connection-pool-reuse.md` — the pool all these writes share
+- **`study-ai-engineering`** — episodic memory / MemoRAG
+- **`study-debugging-observability`** — the trace as observability

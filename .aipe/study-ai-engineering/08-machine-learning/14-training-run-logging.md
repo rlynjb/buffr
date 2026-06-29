@@ -1,227 +1,225 @@
-# Training-run logging — the per-run reproducibility record
+# Training Run Logging
 
-*Training-run logging / experiment tracking (MLflow / Weights & Biases shape). Industry standard. buffr has nothing to train — but `src/supabase-trace-sink.ts` IS per-run logging, the same discipline applied to LLM runs instead of training runs.*
+### *industry: experiment tracking / training-run logging · type: the audit trail that makes a trained model reproducible instead of a lucky accident*
 
-## Zoom out, then zoom in
+## Zoom out
 
-A model you can't reproduce is a model you can't trust. Experiment trackers exist for one reason: every training run appends a row that pins *exactly* what produced this result — the data, the code, the hyperparameters, the score — so six weeks later you can answer "why was run #47 better than #52." buffr trains nothing, so it has no training runs. But it has *conversation* runs, and it logs every one of them with the same discipline.
+You already have a logging instinct in buffr — `SupabaseTraceSink` captures every inference run (the inputs, the tool calls, the model, the token counts) into `agents.messages`. That's run logging, but for *inference*. Training-run logging is the same discipline pointed at the *other* end of the lifecycle: when you train a model, you log what produced it, so that six weeks later you can answer "which data, which hyperparams, which commit made this artifact?" without guessing. Without it, every good result is a coin flip you can't re-flip.
 
+**The MLOps lifecycle, with the moment training-run logging fires marked**
 ```
-  Zoom out — where the per-run log sits in buffr
-
-  ┌─ Agent run (one conversation) ──────────────────────────────┐
-  │  agent.answer() emits CapabilityEvents as it works          │
-  └───────────────────────────────┬──────────────────────────────┘
-                                  │  emit(event)  (6 event types)
-  ┌─ Trace sink layer ────────────▼──────────────────────────────┐
-  │  ★ SupabaseTraceSink — the PER-RUN LOG ★                     │ ← we are here
-  │  switch over event type → persistMessage() → append row     │
-  └───────────────────────────────┬──────────────────────────────┘
-                                  │  insert
-  ┌─ Storage layer ───────────────▼──────────────────────────────┐
-  │  agents.messages  — the run trajectory, replayable in order  │
-  └───────────────────────────────────────────────────────────────┘
+┌────────┐ ┌──────────┐ ┌───────┐ ┌───────┐ ┌────────┐ ┌─────────┐
+│  Data  │►│ Features │►│ Split │►│ ★TRAIN│►│ Deploy │►│ Monitor │
+│        │ │          │ │       │ │ ★     │ │        │ │         │
+└────────┘ └──────────┘ └───────┘ └───┬───┘ └────────┘ └─────────┘
+                                      │   ◄── this file
+                       Every TRAIN run emits a RECORD: data version,
+                       hyperparams, seed, metrics, the artifact, the
+                       git commit — so the run can be REPRODUCED
 ```
-
-Zoom in: a **training-run log** is the append-only record of one run — what went in, what code ran, what came out. The contract it enforces is *reproducibility*: if the log is complete, you can rebuild the result. buffr's `SupabaseTraceSink` is the same shape pointed at LLM runs — it appends a complete, replayable trajectory of every conversation to `agents.messages`. It logs the model version, the cost, the per-step durations, the warnings and errors, in deterministic replay order. What it's *missing* versus a training-run log is the training-specific fields: no score row, no data-version pin, no run-level summary. Same discipline, different fields.
+Training-run logging wraps the train stage: the model isn't the only output, the *record of how it was made* is an output too.
 
 ## Structure pass
 
-**Layers:** the run (a conversation) → the events it emits → the appended rows → the table you diff later.
+One axis organizes everything you log: **does this input determine the model, or does the model determine this output?** Inputs (data version, hyperparams, seed, code commit) are what you must pin to reproduce. Outputs (metrics, confusion matrix, the artifact) are what you compare runs by. A run record is just inputs-plus-outputs, stamped and immutable.
 
-**Axis — "what does each field let you reproduce?"** Trace one question — "if this field were missing, what could I no longer rebuild?" — across the record.
-
+**The one axis: inputs you pin vs outputs you compare**
 ```
-  trace "what does this field reproduce?" across a run record
-
-  ┌─ MODEL version ──────┐  which weights ran        buffr: ✓ (model_usage event)
-  ├─ HYPERPARAMETERS ────┤  temp / top-p / seed      buffr: ✗ (not captured)
-  ├─ DATA version ───────┤  which corpus snapshot     buffr: ✗ (no hash/pin)
-  ├─ CODE version (git) ─┤  which commit ran          buffr: ✗ (no commit pin)
-  ├─ METRICS / score ────┤  val/test result           buffr: ✗ (no score row)
-  ├─ COST ───────────────┤  tokens / time             buffr: ✓ (tokens_used, durationMs)
-  └─ TRAJECTORY ─────────┘  the step-by-step path      buffr: ✓ (full, ordered)
-
-  buffr logs the run faithfully — minus the training-specific fields
+   INPUTS (pin these → reproducibility)      OUTPUTS (record these → comparison)
+   ┌──────────────────────────┐             ┌──────────────────────────┐
+   │ • data version / hash     │             │ • metrics (P@1, R@3, ...)│
+   │ • feature set             │   ──train──►│ • confusion matrix        │
+   │ • hyperparameters         │             │ • model artifact (file)   │
+   │ • random seed             │             │ • training curves         │
+   │ • git commit of the code  │             │ • timing / cost           │
+   └──────────────────────────┘             └──────────────────────────┘
+                  │                                       │
+   ┌──────────────┴───────────── THE SEAM ────────────────┴─────────────┐
+   │ Same INPUTS must yield the same OUTPUTS. If they don't, something    │
+   │ unpinned leaked in (an unlogged seed, a moving dataset). That gap    │
+   │ IS the bug reproducibility hunts.                                    │
+   └─────────────────────────────────────────────────────────────────────┘
 ```
-
-**The seam:** `agents.messages` is *message-level*, a training-run log is *run-level*. The grain flips across that boundary. buffr appends one row per event (step, tool call, model-usage); an experiment tracker appends one row per *run* with the summary baked in. To turn buffr's log into an experiment-tracker row you roll the messages up by `conversation_id` and attach the missing pins — that rollup is the seam, and it's exactly what exercise LOG-1 builds.
+The seam: reproducibility is the claim that inputs fully determine outputs. Anything you forgot to log is a hidden input — and hidden inputs are why "I can't reproduce my own best run" happens.
 
 ## How it works
 
-### Move 1 — the mental model
+### Move 1 — Mental model
 
-You already keep a git log: every commit is an append-only record pinning a code state you can check out and rebuild. A training-run log is git for *experiments* — every run is a commit pinning data + code + hyperparameters + result, so you can "check out" any past run and explain it. buffr's trace sink is the same append-only ledger, one entry per event in a conversation.
+The mental model: **a training run is a pure function, and the run record is its call site.** `model, metrics = train(data, features, hyperparams, seed, code)`. If you logged every argument and every return value, you can replay the call. If any argument was implicit (a global seed, today's dataset, uncommitted code), the function isn't pure and the result isn't reproducible.
 
+**The pattern: train() as a logged pure function**
 ```
-  the kernel — append one immutable record per run
-
-  run completes ─► capture: {data_ver, code_commit, model, hparams, metrics}
-                ─► append ONE row (never mutate)
-                ─► row is now a permanent, comparable point in history
-
-  later:  diff(run_A, run_B) → "what changed → why did the score move?"
-
-  buffr's version: append one row PER EVENT, keyed by conversation_id
-                   (model + cost + trajectory captured; data/code/score not yet)
+            ┌─────────────────────────────────────────┐
+   inputs ──►        train(data, hp, seed, code)        ──► model + metrics
+            └─────────────────────────────────────────┘
+                              │
+                     RUN RECORD = { all inputs } + { all outputs } + timestamp
+                              │
+              replay the record's inputs ──► should reproduce the outputs
 ```
+The record is the receipt that lets you re-run the function and get the same answer.
 
-The invariant: rows are immutable and complete. Mutate a row or drop a field and the run stops being reproducible — that's the one failure the whole discipline exists to prevent.
+### Move 2 — Walk the mechanism
 
-### Move 2 — the step-by-step walkthrough
+**Part 1 — Pin the inputs at run start.** Before a single gradient step, snapshot what could move: the data version, the hyperparams, the seed, and the exact code commit. Illustrative pseudocode, not buffr code:
 
-**What a training-run log captures, field by field.** A real experiment tracker row is a reproducibility contract. Each field answers "what would I be unable to rebuild without it."
-
-```
-  the run record — the row you append every run
-
-  ┌──────────────────────────────────────────────────────────┐
-  │ run_id        : 47                                        │
-  │ git_commit    : a1b2c3d        ← which CODE ran           │
-  │ data_version  : corpus@v3 (sha) ← which DATASET snapshot   │
-  │ feature_ver   : featpipe@v2     ← which FEATURE pipeline   │
-  │ model         : resnet50        ← architecture            │
-  │ hyperparams   : {lr:1e-3, seed:42, epochs:20}             │
-  │ metrics       : {val_acc:0.91, test_acc:0.89}            │
-  │ confusion_mtx : [[..],[..]]     ← per-class results       │
-  │ environment   : cuda 12.1, torch 2.3                     │
-  └──────────────────────────────────────────────────────────┘
-  drop git_commit → can't rebuild the code → run is unreproducible
+**Capture inputs before training (illustrative)**
+```python
+# ILLUSTRATIVE ONLY — not buffr code. Snapshot every input first.
+run = start_run()
+run.log_params({
+    "data_version": sha256_of(dataset),     # pins WHICH data
+    "feature_set":  "embed768+len+lang",    # pins HOW it was featurized
+    "lr": 3e-4, "epochs": 10, "batch": 32,  # hyperparameters
+    "seed": 42,                              # pins randomness
+    "git_commit": current_commit(),          # pins the CODE
+})
+set_global_seed(42)                          # actually USE the seed
 ```
 
-**How buffr's trace sink logs a run — the genuine parallel.** `SupabaseTraceSink.emit()` (`src/supabase-trace-sink.ts:53-85`) is a switch over six `CapabilityEvent` types; each case appends a row to `agents.messages`. This is the same append-per-event discipline.
+**Part 2 — Stream metrics as the run progresses.** Log per-epoch so you can see the training curve, not just the final number. A loss that diverged at epoch 7 is invisible if you only logged the end.
 
+**Metrics over time, not just the final value**
 ```
-  src/supabase-trace-sink.ts — emit() switch → persistMessage()        // L53-85
-
-  case 'step'           → role=step,       content              // the reasoning move
-  case 'tool_call_start'→ role=tool_call,  toolName + args      // the cause
-  case 'tool_call_end'  → role=tool,       result+error+durationMs  // ← COST: per-step latency
-  case 'model_usage'    → role=model_usage,
-                            model = `${provider}/${model}`       // ← MODEL VERSION
-                            tokensUsed = inputTokens+outputTokens // ← COST: tokens
-  case 'warning'|'error'→ role=type,       message              // the failures
-```
-
-Lined up against the run-record fields, the overlap is real:
-
-```
-  training-run log field        buffr's trace sink
-
-  MODEL version            ◄──  model_usage → `${provider}/${model}`   ✓
-  COST metric              ◄──  tokens_used = input+output             ✓
-  per-step DURATION        ◄──  tool_results.durationMs                ✓
-  warnings / errors        ◄──  warning / error rows                  ✓
-  deterministic ORDER      ◄──  event.timestamp → created_at          ✓
-  ───────────────────────       ───────────────────────────────────
-  METRIC / score row       ◄──  (none — no eval score persisted)      ✗
-  DATA version / commit    ◄──  (none — no corpus hash, no git sha)    ✗
-  run-level SUMMARY        ◄──  (message-level only, not rolled up)    ✗
+   loss
+    │ ●
+    │  ●●
+    │    ●●●            ◄── logging EVERY epoch shows the shape;
+    │       ●●●●●●          logging only the end hides the divergence
+    └────────────────► epoch
+        each point = run.log_metric("loss", v, step=epoch)
 ```
 
-**Deterministic replay order — the load-bearing part people skip.** The reason this is a *log* and not just scattered inserts is `event.timestamp → created_at` (`src/supabase-trace-sink.ts:55,82` and `persistMessage` L26,30). `emit()` is synchronous but the writes are queued in `pending[]` and awaited later in `flush()` — so the inserts race. Stamping `created_at` from the *event* time, not insert time, means replay order matches emit order regardless of which insert lands first. Drop that and the trajectory shuffles: you'd have the events but not the *sequence*, and a run you can't replay in order is a run you can't reproduce.
+**Part 3 — Log the evaluation outputs, including the confusion matrix.** The final metrics (your P@1/R@3 family) and the confusion matrix are first-class outputs of the run — they're how you'll compare this run to the next.
 
+**Eval outputs attach to the run record**
 ```
-  why created_at = event.timestamp (not now())
-
-  emit order:   step₁ → tool_start₂ → tool_end₃ → model_usage₄
-  flush():      Promise.all([...])  → inserts RACE, land out of order
-  if created_at = now():   rows shuffle → trajectory corrupted
-  if created_at = event.ts: order PRESERVED → replayable  ← the contract
-```
-
-### Move 2.5 — current state vs future state
-
-```
-  Phase A (today)                        Phase B (experiment-tracker shape)
-  ─────────────                          ──────────────────────────────────
-  message-level rows in agents.messages  + run-level summary row per conversation_id
-  model + cost + duration + order        + git_commit pin
-  full replayable trajectory             + eval score for the run
-  no score / no commit / no rollup       + "diff two runs" view (LOG-1, LOG-2)
+   trained model ──eval on held-out set──► P@1, R@3, F1
+                                       └─► confusion matrix (the 4-cell / KxK table)
+                                              │
+                          run.log_metrics({...}); run.log_artifact("confusion.png")
 ```
 
-What *doesn't* change: the per-event capture, the deterministic ordering, the six event types. You're adding a rollup table and two pins on top of a log that already has the hard part right.
+**Part 4 — Store the artifact and stamp it with its run id.** The model file is logged *as part of the run*, so the artifact and the conditions that produced it travel together. A model file with no run id attached is an orphan you can't trust.
 
-### Move 3 — the principle
+**Artifact + run id travel together**
+```
+   model.pkl  ──┐
+                ├─► run_id: 2026-06-29-a17f  ◄── now the artifact KNOWS its lineage
+   run record ──┘     data_version, hp, seed, commit all reachable from the id
+```
 
-A run you can't reproduce is a run you can't trust, and the log is the reproducibility contract — that holds whether the run trains weights or answers a question. The discipline ("append an immutable, complete, ordered record of every run") transfers cleanly from training to LLM serving; only the *fields* differ. buffr already practices the discipline rigorously — it just hasn't added the training-specific fields (score, data/code version, run-level rollup) that would make it a full experiment tracker.
+### Move 2.5 — Current vs future
+
+buffr already logs *inference* runs. It logs no *training* runs, because it trains nothing. The discipline transfers; the target changes.
+
+**SupabaseTraceSink (inference) vs the ml/ run logger (training) — same shape, other end**
+```
+   TODAY — INFERENCE capture (real):
+     loop emits events ──► SupabaseTraceSink ──► agents.messages
+       { role, content, tool_calls, tool_results, model, tokens_used, created_at }
+       ★ this IS run logging — inputs, outputs, model, cost — but per QUERY
+
+   FUTURE — TRAINING capture (the exercise):
+     train() ──► run logger ──► agents.training_runs (new) or MLflow
+       { data_version, hyperparams, seed, git_commit, metrics, artifact_path }
+       ★ same instinct, pointed at the train stage in ml/
+```
+
+### Move 3 — The principle
+
+The principle: **a model you can't reproduce is a model you can't trust, debug, or improve.** The run record is the unit of accountability — it turns "my best result" from an anecdote into a re-runnable fact. The cost is discipline (log before you train, not after), and the payoff is that every run becomes comparable and every artifact becomes traceable to the exact conditions that made it.
 
 ## Primary diagram
 
+**The full picture: a training run as a logged, reproducible, comparable unit**
 ```
-  buffr's trace sink as a per-run log — full picture
-
-  ┌─ Agent run ──────────────────────────────────────────────────┐
-  │  agent.answer()  →  emits 6 CapabilityEvent types            │
-  └───────────────────────────────┬──────────────────────────────┘
-                                  │  emit(event)  (sync)
-  ┌─ SupabaseTraceSink (src/supabase-trace-sink.ts) ─────────────┐
-  │  switch(event.type):                                         │
-  │    step/tool_call_start/tool_call_end/model_usage/warn/error │
-  │  push(persistMessage(...)) → pending[]                       │
-  │  flush() → Promise.all(pending)   (inserts race)            │
-  └───────────────────────────────┬──────────────────────────────┘
-                                  │  insert, created_at = event.timestamp
-  ┌─ agents.messages ─────────────▼──────────────────────────────┐
-  │  conversation_id · role · content · tool_calls · tool_results│
-  │  · model · tokens_used · created_at   (← ordered trajectory) │
-  │  HAS: model, cost, duration, order   MISSING: score, commit, │
-  │       data-version, run-level summary                        │
-  └───────────────────────────────────────────────────────────────┘
+   ┌──────────────────────── RUN START ────────────────────────┐
+   │ PIN INPUTS:  data_version · feature_set · hyperparams ·     │
+   │              seed · git_commit                              │
+   └──────────────────────────────┬─────────────────────────────┘
+                                   ▼
+                          ┌─────────────────┐
+                          │   train()       │  ◄── stream loss/metrics per epoch
+                          └────────┬────────┘
+                                   ▼
+   ┌──────────────────────── RUN OUTPUTS ───────────────────────┐
+   │ metrics (P@1/R@3/F1) · confusion matrix · model artifact     │
+   └──────────────────────────────┬─────────────────────────────┘
+                                   ▼
+                    RUN RECORD  { inputs + outputs + run_id }
+                      │                         │
+        replay inputs ─► reproduce outputs      compare run_id A vs B
+        (REPRODUCIBILITY)                       (EXPERIMENT TRACKING)
+                                   │
+              analogous to SupabaseTraceSink ►► agents.messages,
+              which already does this for INFERENCE runs in buffr
 ```
+Read it as a loop receipt: pin the inputs, train, capture the outputs, stamp them with a run id — now the run can be both reproduced and compared, exactly the discipline `SupabaseTraceSink` already applies to inference.
 
 ## Elaborate
 
-This is buffr's most genuine connection to classical ML ops, and it's worth being precise about *why* it's genuine rather than a stretch. Experiment trackers (MLflow, W&B) solve a coordination problem: a team runs hundreds of training jobs, and without a structured per-run log nobody can answer "why did this one win." The answer is always the same shape — append an immutable record pinning everything that varied. buffr's `SupabaseTraceSink` independently arrived at that exact shape for LLM runs: immutable rows, one per event, keyed by run (`conversation_id`), with model version, cost, and duration captured, in deterministic replay order. The comment block at `src/supabase-trace-sink.ts:39-48` even narrates the discipline — it was written *because* the sink previously dropped tool args and token usage, i.e. it was an *incomplete* log, which is the cardinal sin of experiment tracking.
-
-The honest gaps are the training-specific fields. There's no metric row because buffr produces no training metric (the IR eval in `src/cli/eval-cmd.ts` lives in a separate offline path, not stamped onto a run). There's no data-version or git-commit pin, so you can't tie a run to the exact corpus and code that produced it. And it's message-level, not run-level — there's no single row summarizing a conversation. Those three gaps are exactly the LOG-1/LOG-2 exercises: roll the messages up by `conversation_id`, pin the commit and an eval score, and you've converted a faithful trace into an experiment-tracker row.
-
-buffr's prior ML experience (a MediaPipe pose-landmarking pipeline) had no run logging at all — on-device inference produces no training runs to track — so this is new ground, not a refinement of something already done.
+- **Tools formalize this, they don't invent it.** MLflow and Weights & Biases are just structured run loggers: `log_param`, `log_metric`, `log_artifact`, a run id, a comparison UI. You can reach for one, or — given buffr already has Postgres and a sink pattern — log training runs to an `agents.training_runs` table and stay in your own stack.
+- **The seed is the most-forgotten input.** Without pinning *and using* the random seed, two runs with identical hyperparams diverge, and your "reproducible" claim is false. Logging the seed value while letting the global RNG run unseeded is a classic silent failure.
+- **`agents.messages` already proves you get the instinct.** The `SupabaseTraceSink` test asserts it captures `tool_calls` (the cause), `tool_results` with `durationMs`/`error`, `model`, and `tokens_used` — not just role+content. That is precisely the "log the full signal, not just the headline" discipline training-run logging demands. You've built it once, for inference.
+- **Data version is a hash, not a date.** "Trained on the June data" is not a version. A content hash (or a dataset snapshot id) is, because the June data can change under you. Reproducibility needs an immutable handle on the exact bytes.
+- **The confusion matrix is a logged artifact, not a console print.** If it scrolls past in a terminal, it's gone. Attached to the run, it's comparable across runs — you can watch a specific class's recall recover (or rot) run over run.
 
 ## Project exercises
 
-> No curriculum file present; exercises derived from the codebase.
+### Exercise — A training-run logger in ml/, mirroring SupabaseTraceSink
 
-### Add a run-level summary row to turn the trace into an experiment-tracker entry
+- **Exercise ID:** [B2C.14] Phase 2C
+- **What to build:** *Not yet implemented — buffr trains nothing.* Build the logger first, even before a serious model: a `MLRunSink` in `ml/` that, around a tiny `train()` call, pins inputs (data hash, hyperparams, seed, git commit) and records outputs (metrics, confusion matrix path, artifact path) to a new `agents.training_runs` table — deliberately echoing how `SupabaseTraceSink` writes inference runs to `agents.messages`.
+- **Why it earns its place:** It transfers a discipline you already own (inference capture) to a context you don't (training capture), and produces the reproducibility receipt. The signal is that you logged the run *before* you cared about the result — that's the habit of someone who's been burned by an unreproducible best run.
+- **Files to touch:** new `ml/run_sink.py` (or `.ts` to match the stack), new `ml/train.py` (the tiny model it wraps), new `sql/002_training_runs.sql` (the table, modeled on `agents.messages`), referencing the pattern in `src/supabase-trace-sink.ts`.
+- **Done when:** two runs with the same pinned inputs produce the same metrics, and you can query `agents.training_runs` to diff run A vs run B by hyperparams.
+- **Estimated effort:** Medium — a day to a day and a half. The table + sink is the bulk; the model is intentionally trivial.
 
-- **Exercise ID:** LOG-1 (Case B — run-level summary not yet exercised). **The lead logging exercise.**
-- **What to build:** a run-level summary keyed on `conversation_id` that pins the git commit, an eval score for the run, and total tokens — rolled up from the message-level rows. One row per conversation, the experiment-tracker grain buffr is missing.
-- **Why it earns its place:** it closes the biggest honest gap — message-level → run-level — and adds the two pins (commit + score) that make a run reproducible. The story is "I turned a message log into a reproducible experiment record."
-- **Files to touch:** `src/supabase-trace-sink.ts` (emit a summary on `flush()`, or add a `finalizeRun()`); a new `agents.runs` summary table or a summary row convention; capture `git rev-parse HEAD` and total `tokens_used` aggregated over the conversation.
-- **Done when:** every finished conversation has one summary row carrying {conversation_id, git_commit, eval_score, total_tokens}.
-- **Estimated effort:** 1 day.
+### Exercise — Prove reproducibility by replaying a run
 
-### Build a "diff two runs" view over agents.messages
-
-- **Exercise ID:** LOG-2 (Case B — run diffing not yet exercised).
-- **What to build:** a view or query that takes two `conversation_id`s and compares them — total tokens, total/per-step latency (from `tool_results.durationMs`), tool-call counts, and outcome (warning/error rows) — the "why was run A better than B" comparison an experiment tracker gives you for free.
-- **Why it earns its place:** the whole point of per-run logging is comparison; without a diff the log is just storage. This exercises the payoff field.
-- **Files to touch:** new `src/cli/diff-runs-cmd.ts` (or a SQL view) reading `agents.messages` filtered by two `conversation_id`s; aggregate `tokens_used`, `tool_results.durationMs`, and error/warning rows per run.
-- **Done when:** `diff-runs <id_a> <id_b>` prints a side-by-side of tokens, latency, tool-calls, and errors for the two runs.
-- **Estimated effort:** 4–8 hr.
+- **Exercise ID:** [B2C.14b] Phase 2C
+- **What to build:** *Not yet implemented — buffr trains nothing.* Add a `ml/replay.py` that reads a `run_id` from `agents.training_runs`, checks out the logged git commit (or asserts the current one matches), re-applies the logged seed + hyperparams + data hash, retrains, and asserts the new metrics match the recorded ones within tolerance.
+- **Why it earns its place:** Logging is a claim; replay is the proof. Most candidates log params and never verify the loop closes. A passing replay is the difference between "I track experiments" and "my experiments are reproducible."
+- **Files to touch:** new `ml/replay.py`, reads `agents.training_runs`, reuses `ml/train.py`.
+- **Done when:** `replay.py <run_id>` exits green when inputs match and red (with the offending unpinned input named) when you perturb one.
+- **Estimated effort:** Medium — half a day on top of the logger.
 
 ## Interview defense
 
-**Q: buffr trains nothing — how is its trace sink "experiment tracking"?**
-Answer: experiment tracking is a *discipline*, not a training-only tool — append an immutable, complete, ordered record of every run so you can reproduce and compare. `SupabaseTraceSink` does exactly that for conversation runs: one row per event in `agents.messages`, keyed by `conversation_id`, capturing the model version (`model_usage` → `provider/model`), cost (`tokens_used` = input+output), per-step latency (`durationMs`), and warnings/errors, in deterministic replay order. It's the same shape as an MLflow run row, minus the training-specific fields. What it lacks is a score row, a data/commit pin, and a run-level rollup — message-level, not run-level.
+**Q: "What do you log per training run, and why each?"**
+```
+   INPUTS  → data_version, features, hyperparams, seed, git_commit  (replay)
+   OUTPUTS → metrics, confusion matrix, model artifact              (compare)
+   ┌────────────────────────────────────────────────────────┐
+   │ inputs pin reproducibility · outputs enable comparison  │
+   └────────────────────────────────────────────────────────┘
+```
+Anchor: "Inputs so I can replay it, outputs so I can compare it — a run record is both."
 
+**Q: "How is this different from app logging you've already built?"**
 ```
-  MLflow run row  ≡  agents.messages rolled up by conversation_id
-  shared: model, cost, order   missing: score, commit, run-level summary
+   SupabaseTraceSink ──► agents.messages   (INFERENCE: per-query inputs/outputs)
+   ml/ run logger    ──► training_runs      (TRAINING: per-run inputs/outputs)
+        same discipline, opposite end of the lifecycle
 ```
+Anchor: "I've built run capture for inference in buffr — `SupabaseTraceSink` into `agents.messages`. Training-run logging is the same instinct aimed at the train stage."
 
-**Q: Why does buffr stamp created_at from the event timestamp instead of now()?**
-Answer: because the writes race. `emit()` is synchronous but each `persistMessage` is queued in `pending[]` and awaited together in `flush()` via `Promise.all` — so the inserts land in nondeterministic order. If `created_at` were `now()`, the rows would shuffle and the trajectory would be corrupted. Stamping `created_at` from `event.timestamp` (the emit time) preserves replay order regardless of insert race. **The part people forget: a run log isn't just the events — it's the events *in order*; lose the order and you've lost reproducibility even with every field present.**
-
+**Q: "Have you ever logged a run you could actually reproduce?"**
 ```
-  emit: step→tool→model   flush: Promise.all → inserts race
-  created_at = event.ts → order preserved → replayable (the contract)
+   logging params ◄── most candidates
+   replaying the run + asserting the metrics match ◄── the signal
 ```
+Anchor: "Most candidates have only consumed pre-trained models and never owned a training run. Having logged one *and proven it replays* is the signal — that's the [B2C.14] / [B2C.14b] pair."
 
 ## See also
 
-- `13-quantization.md` — the other serving/ops ML concern buffr touches; pairs with run logging.
-- `08-confusion-matrices.md` — the per-class metric a training-run log would store and buffr's log lacks.
-- `03-train-val-test.md` — the data-version split a run log pins; buffr pins no data version.
-- `../05-evals-and-observability/04-llm-observability.md` — the trace itself, the substrate this logging discipline reads from.
+- ./13-quantization.md — the quantized artifact and its post-quant eval are outputs you log in the run record.
+- ./08-confusion-matrices.md — the confusion matrix is a first-class logged output.
+- ./03-train-val-test.md — the split is a pinned input; logging the split makes the metric meaningful.
+- ./15-drift-detection.md — drift compares *production* distribution to the *training* distribution your run record pinned.
+- ../03-retrieval-and-rag/09-stale-embeddings.md — the embedding-version analog of "data version."
+- ../05-evals-and-observability/04-llm-observability.md — the inference-side capture (`SupabaseTraceSink`) this discipline mirrors.
+- ../06-production-serving — where a logged artifact gets promoted to serving.
+- ../09-ml-system-design-templates — experiment tracking as a required box in any training-system design.

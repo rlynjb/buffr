@@ -1,256 +1,215 @@
-# Incremental indexing — per-file upsert, not full rebuild
+# Incremental Indexing
 
-*Industry standard (partially exercised). How buffr writes to the index today, and what it doesn't yet track.*
+### *industry: incremental indexing / delta vs full rebuild · type: keeping the index current without re-embedding everything*
 
-## Zoom out, then zoom in
+## Zoom out
 
-Pull up the *write* side of RAG — the offline path nobody sees but everything depends on. Retrieval is only as fresh as the last index run. The question this file answers: when a file changes, do you rebuild the whole index, or surgically update just the affected vectors? buffr does the second, per file.
+The last file was about *noticing* a doc went stale. This one is about the *update strategy* once you know: do you rebuild the whole index, or just the deltas? And what about deletes? buffr is partway here — precisely partway, and being precise about which part matters.
+
+**buffr's retrieval stack, the update strategy marked**
 
 ```
-  Zoom out — where indexing sits (the write side)
-
-  ┌─ CLI ───────────────────────────────────────────────────────┐
-  │  npm run index -- file.md   (offline, manual, per-file)      │
-  └───────────────────────────┬─────────────────────────────────┘
-                              │ readFile + per-file loop
-  ┌─ Runtime ─────────────────▼─────────────────────────────────┐
-  │  ★ indexDocumentRow: write documents row, then pipeline.index ★│ ← here
-  └──────────────┬───────────────────────────┬──────────────────┘
-                 │ documents (source of truth) │ chunks (vectors)
-  ┌─ Storage ────▼─────────────┐  ┌─ Storage ──▼─────────────────┐
-  │ agents.documents           │  │ agents.chunks (on conflict   │
-  │ (content, source_path)     │  │  do update → idempotent)     │
-  └────────────────────────────┘  └──────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│  agents.chunks          the index being kept current           │
+├──────────────────────────────────────────────────────────────┤
+│  ★ INDEXING STRATEGY ★  per-file upsert by id                 │  ◄── this file
+│                         incremental-by-file, NO delete/change  │
+│                         detection                              │
+├──────────────────────────────────────────────────────────────┤
+│  npm run index -- <files>   re-runnable, idempotent            │
+└──────────────────────────────────────────────────────────────┘
 ```
 
-Zoom in. You've run a RAG ingest before, so you know the naive version: re-embed everything every time. buffr is past that — `npm run index -- file.md` indexes *one* file, and `on conflict do update` makes re-running it idempotent. That's genuinely incremental at the file grain. But be honest about the edge: there's **no change-detection** (it re-embeds whether or not the file changed) and **no deletion handling** (delete a file and its chunks linger). This file builds what's there and names the gap precisely — the next step is dirty-flagging and deletes, not a rewrite.
+On your last app, "re-index" probably meant "wipe and rebuild." buffr is more granular than that — but less granular than a real change-detecting pipeline. This file pins exactly what buffr does and doesn't do, because the honest answer is "incremental, but only halfway."
 
 ## Structure pass
 
-Read the skeleton: indexing crosses three layers; trace one axis to see exactly how incremental it is.
+The axis is **update granularity**: rebuild everything vs. touch only what changed. The seam is *change detection* — knowing which docs are deltas, and which were deleted.
 
-**Layers:** CLI (chooses which files) → runtime (writes the document + triggers chunking/embedding) → storage (upserts vectors).
-
-**Axis traced — "at what granularity is a change applied?"**
+**Full rebuild vs. delta, and where buffr sits**
 
 ```
-  one axis: granularity of a write
-
-  ┌─ CLI ──────────────────┐   PER FILE — argv lists the files; each is
-  │  for path of paths      │   indexed independently (not a full corpus)
-  └────────────┬───────────┘
-               │ seam: file → (document row + chunks)
-  ┌─ runtime ──▼───────────┐   PER DOCUMENT — one documents row upserted,
-  │  indexDocumentRow       │   then ALL its chunks re-embedded (no diff)
-  └────────────┬───────────┘
-               │ seam: chunks → rows
-  ┌─ storage ──▼───────────┐   PER CHUNK — on conflict (id) do update;
-  │  on conflict do update  │   same chunk id overwrites, no duplicate
-  └─────────────────────────┘
+   FULL REBUILD                      TRUE DELTA (not buffr)
+   ────────────                      ──────────────────────
+   wipe all chunks                   detect changed docs → re-embed those
+   re-embed entire corpus            detect deleted docs → remove their chunks
+   simple, wasteful                  detect new docs → add them
+   ┌──────────────┐                  ┌──────────────────────────┐
+   │ drop + index │   ──seam──►      │ change-detect ──► apply    │
+   └──────────────┘                  └──────────────────────────┘
+                 ▲ buffr is HERE: ──────┘
+   incremental-by-FILE (upsert per file you name) but NO
+   change-detection and NO delete handling
 ```
 
-**The seam that matters:** runtime → storage, the document-to-chunks boundary. This is where buffr is incremental *and* where its gap lives. Per file and per chunk it's surgical (idempotent upsert by stable id). But *within* a re-indexed document, every chunk is re-embedded unconditionally — there's no "did this chunk's text change?" check — and chunks that *disappeared* (the file got shorter) are never deleted. Hold that: the granularity is file-level, and the missing pieces are sub-document change-detection and deletion.
+The seam is change detection. Left of it: rebuild everything, no detection needed. Right of it: a pipeline that figures out adds/changes/deletes and applies only those. buffr sits *on* the seam — it upserts per file you explicitly hand it (so it's incremental-by-file), but it never *detects* what changed and never *deletes*. Consequence: buffr can cheaply re-index a file you know changed, but it cannot notice a file you forgot, and it cannot remove a doc you deleted.
 
 ## How it works
 
-### Move 1 — the mental model
+### Move 1 — Mental model: `git add <file>` with no `git status` and no `git rm`
 
-You know how a React re-render *could* rebuild the whole tree, but the reconciler instead diffs and patches only what changed — and how `key` props let it match old nodes to new ones so it doesn't throw away and recreate? Incremental indexing is that idea applied to a vector store. The chunk `id` (`"<docId>#<index>"`) is the `key`. Re-indexing a file re-uses those keys, so `on conflict do update` *patches* the matching rows instead of inserting duplicates.
+buffr's indexer is like staging files by name: `npm run index -- work.md` updates exactly work.md, idempotently. What's missing is the `git status` that tells you *which* files changed, and the `git rm` that handles deletions. You can update precisely — if you already know what to update.
+
+**Index-by-name, no status, no remove**
 
 ```
-  the incremental-index kernel — stable ids let writes patch
-
-   index file.md again:
-     chunk "file.md#0" ─► on conflict (id) ─► UPDATE row (patch)
-     chunk "file.md#1" ─► on conflict (id) ─► UPDATE row (patch)
-     chunk "file.md#2" ─► (new) no conflict ─► INSERT row
-
-   stable id = the "key" that matches old chunk → new chunk
-   missing from re-run: a chunk that USED to exist (#3) is NOT deleted
+  npm run index -- work.md stack.md     ◄── you name the files
+        │
+        ▼ each file: upsert its chunks by id (idempotent)
+  ┌──────────────────────────────────────────┐
+  │ ✓ updates files you name                  │
+  │ ✗ no detection of what changed (no status)│
+  │ ✗ no removal of deleted docs (no rm)      │
+  └──────────────────────────────────────────┘
 ```
 
-The kernel: a stable per-chunk id + an upsert keyed on it. That alone makes re-indexing one file idempotent. The two things it's missing — detecting whether a re-index is even needed, and removing vanished chunks — are hardening on top, not part of the kernel.
+Frontend bridge: it's a manual cache-bust where you type the asset paths to invalidate, with no build step diffing the manifest and no cleanup of removed assets. Precise when you're right, silent when you forget.
 
-### Move 2 — the step-by-step walkthrough
+### Move 2 — Walk the mechanism
 
-**Step 1 — the CLI loops per file.** You hand `npm run index` one or more paths; it reads each and indexes it independently. There's no "scan the whole corpus" — the unit of work is the file you named:
+**Part A — Per-file upsert by id (the incremental part that DOES exist)**
+
+You hand the indexer specific files; each is upserted by stable id, so re-indexing one file replaces only that file's chunks without touching others.
+
+**Incremental-by-file**
+
+```
+  npm run index -- coffee.md
+        │
+        ▼ readFile → indexDocumentRow(id = basename = "coffee.md")
+        ▼ documents: upsert by id ; pipeline.index → chunks upsert by "<id>#<i>"
+  ┌──────────────────────────────────────────┐
+  │ only coffee.md's rows touched              │
+  │ work.md, stack.md chunks untouched         │
+  └──────────────────────────────────────────┘
+```
 
 ```ts
-// src/cli/index-cmd.ts:22-27
+// src/cli/index-cmd.ts:22-26 — per-file, by basename id
 for (const path of paths) {
   const text = await readFile(path, 'utf8');
   await indexDocumentRow(pool, cfg.appId, pipeline, { id: basename(path), text, sourcePath: path });
-  process.stdout.write(`indexed ${path}\n`);
 }
 ```
 
-The document `id` is `basename(path)` — so `notes.md` always maps to the same documents row and the same chunk-id prefix `notes.md#…`. That stable identity is what makes a *re*-index update-in-place rather than accumulate duplicates. The boundary condition: rename the file and it's a *new* document (new id) — the old one's chunks stay behind. Identity is by filename, not by content.
+This *is* genuinely incremental at file granularity. The `basename` becomes the stable doc id, chunk ids are `"<docId>#<i>"`, and `on conflict do update` replaces in place. Re-running `index -- coffee.md` after editing coffee.md is correct and cheap — it never rebuilds work.md or stack.md. Credit where due: buffr is not a wipe-and-rebuild system.
+
+**Part B — No change detection, no delete handling (the gaps that DON'T)**
+
+Two precise omissions. buffr never *figures out* which files changed (you must name them), and it never *removes* chunks for a deleted document.
+
+**The two missing operations**
 
 ```
-  Pattern — per-file unit of work
-
-  npm run index -- a.md b.md
-     │
-     ├─► a.md ─► readFile ─► indexDocumentRow(id="a.md")  (independent)
-     └─► b.md ─► readFile ─► indexDocumentRow(id="b.md")  (independent)
-
-  no full-corpus scan; each file is its own atomic index
+  CHANGE DETECTION (missing)         DELETE HANDLING (missing)
+  ─────────────────────────         ─────────────────────────
+  edit a file, forget to             delete coffee.md from disk
+  re-index it ──► stale (file 09)    re-run index over the rest
+  buffr never scans for diffs        ──► coffee.md's chunks REMAIN
+  ┌──────────────────────┐           ┌──────────────────────────┐
+  │ no manifest diff      │          │ no DELETE for orphaned     │
+  │ no mtime/hash check    │          │ document rows or chunks    │
+  └──────────────────────┘           └──────────────────────────┘
 ```
 
-**Step 2 — write the documents row first, then index.** `indexDocumentRow` does two writes in order: the source-of-truth `documents` row, then the chunk vectors. The documents row is itself an upsert:
+There's no code to cite for these because they don't exist — which is the point. If you delete a source file, its chunks linger in `agents.chunks` forever and can still be retrieved and cited. If you edit a file but don't re-run its index, it's stale (file 09). buffr handles the *add/update-by-name* third of the delta problem and skips the *detect* and *delete* thirds.
 
-```ts
-// src/runtime.ts:11-17
-await pool.query(
-  `insert into agents.documents (id, app_id, source_type, source_path, content)
-   values ($1, $2, 'markdown', $3, $4)
-   on conflict (id) do update set content = excluded.content, source_path = excluded.source_path`,
-  [doc.id, appId, doc.sourcePath ?? null, doc.text],
-);
-await pipeline.index({ id: doc.id, text: doc.text });   // then chunk → embed → upsert chunks
-```
+### Move 2.5 — Current vs. future
 
-Order matters. The `documents.content` row is the *original text* — the thing you'd re-embed from if you ever switched models (`02-embedding-model-choice.md`). Writing it first means even if the embedding step fails, the source text is captured. The `on conflict do update` means re-indexing the same file overwrites its content, not duplicates the document. This is the same idempotency idea as the chunks, one layer up.
+**Be precise: buffr is incremental-by-file via id upsert, but has no change-detection and no delete path.**
 
 ```
-  Layers-and-hops — one index run
-
-  ┌─ runtime ────────┐ hop 1: upsert documents row    ┌─ Postgres ──────┐
-  │ indexDocumentRow │ ──────────────────────────────►│ agents.documents│
-  └────────┬─────────┘  (source of truth written 1st) │ on conflict upd │
-           │ hop 2: pipeline.index({id, text})         └─────────────────┘
-           ▼
-  ┌─ aptkit pipeline ┐ hop 3: chunk → embed → upsert   ┌─ Postgres ──────┐
-  │ indexDocument    │ ──────────────────────────────► │ agents.chunks   │
-  └──────────────────┘  ids "id#0".."id#n"             │ on conflict upd │
-                                                        └─────────────────┘
+  TODAY                              FULL DELTA PIPELINE (the gap)
+  ─────                              ─────────────────────────────
+  index -- <named files>             scan corpus ──► diff vs indexed:
+  upsert by id (incremental)           • new ──► index
+  ✓ add / update (by name)             • changed (hash/mtime) ──► re-index
+  ✗ detect changes                     • deleted ──► remove chunks
+  ✗ delete removed docs              ┌──────────────────────────────┐
+  ┌──────────────────┐               │ change-detect ──► apply deltas │
+  │ manual file list │               │ incl. tombstone/delete         │
+  └──────────────────┘               └──────────────────────────────┘
 ```
 
-**Step 3 — chunks upsert by stable id (idempotent re-index).** Inside `pipeline.index`, the text is chunked, every chunk embedded, and each upserted under id `"<docId>#<i>"`. The store's `on conflict (id) do update` makes re-running a file overwrite each chunk:
+The missing pieces are *detection* (hash/mtime diff against what's indexed — shares the content-hash with file 09) and *deletion* (remove a doc's chunks when its source is gone). Both are bounded additions on top of the working upsert.
 
-```ts
-// aptkit packages/retrieval/src/pipeline.ts:37-46
-const texts = chunkText(doc.text);
-if (texts.length === 0) return;
-const vectors = await wiring.embedder.embed(texts);
-const chunks = texts.map((text, i) => ({
-  id: `${doc.id}#${i}`,                  // ← stable: "notes.md#0", "notes.md#1", ...
-  vector: vectors[i]!,
-  meta: { ...(doc.meta ?? {}), docId: doc.id, chunkIndex: i, text },
-}));
-await wiring.store.upsert(chunks);       // store does INSERT ... ON CONFLICT DO UPDATE
-```
+### Move 3 — The principle
 
-```ts
-// src/pg-vector-store.ts:50-54  (the conflict clause that makes it idempotent)
-on conflict (id) do update set
-  document_id = excluded.document_id, app_id = excluded.app_id,
-  chunk_index = excluded.chunk_index, content = excluded.content,
-  embedding = excluded.embedding, ...
-```
-
-Re-index `notes.md` after editing it: chunk `notes.md#0` already exists, so it's *updated* with the new content and embedding — no duplicate. That's real incremental behavior at the file grain.
-
-**Step 4 — here's the honest gap.** Two things this does NOT do, and you should be able to name them cold:
-
-*No change-detection.* Re-indexing always re-chunks and re-embeds the entire file, even if a single word changed or nothing changed. There's no hash/`mtime` check that says "skip this file, it's unchanged" — embedding is the expensive step, and buffr pays it every run. (This is the same gap `09-stale-embeddings.md` covers from the freshness side: no `embedding_stale_at`, no dirty flag.)
-
-*No deletion handling.* If you edit `notes.md` to be *shorter* — say it now produces 3 chunks where it used to produce 5 — chunks `notes.md#3` and `notes.md#4` are never touched. The upsert overwrites `#0`–`#2`, but `#3`/`#4` are *orphans*: stale vectors that still match queries. And deleting the file entirely leaves *all* its chunks behind, because nothing issues a `delete`.
-
-```
-  Comparison — what's incremental vs what's missing
-
-  EXERCISED (works today)            MISSING (Case-A next step)
-  ┌──────────────────────────┐       ┌──────────────────────────┐
-  │ per-file unit of work     │       │ change-detection          │
-  │ stable chunk ids          │       │  (re-embeds even if same) │
-  │ on conflict do update     │       │ shrink → orphan chunks    │
-  │  (idempotent re-index)    │       │  (#3,#4 never deleted)    │
-  │ documents row first       │       │ delete file → chunks stay │
-  └──────────────────────────┘       └──────────────────────────┘
-   surgical at file grain            no dirty-flag, no delete sweep
-```
-
-### Move 3 — the principle
-
-Incremental indexing is a reconciliation problem: you have an old set of vectors and a new set of chunks, and you must compute the *delta* — what to update, what to insert, **and what to remove**. buffr nails the first two with stable ids and upsert, which is the hard 80%. The remaining 20% — detecting that a re-index is even needed, and deleting vectors whose source is gone — is the part that bites in production, because a vector store silently accumulates stale, query-able garbage when only upserts ever run. The lesson: an index that only ever upserts is half a reconciler. The deletes are the other half.
+**Incremental indexing is three operations — add, change, delete — and "we have upsert" only covers one and a half.** The honest framing matters: buffr *is* incremental in the cheap, correct sense (id-based upsert per named file), so don't oversell it as wipe-and-rebuild *or* undersell it as a real delta pipeline. The gaps are specific and nameable: no change detection, no delete handling. A full-rebuild is simpler but wasteful; a true delta pipeline is the goal; buffr is a defensible waypoint that you must describe precisely or you'll mislead in an interview.
 
 ## Primary diagram
 
-The index path as it runs today, with the gap marked:
+What buffr does, against the full delta picture.
+
+**Three delta operations, buffr's coverage marked**
 
 ```
-  buffr incremental indexing — per-file upsert (and what it misses)
-
-  npm run index -- notes.md
-     │ readFile, id = "notes.md"
-     ▼
-  ┌─ indexDocumentRow (src/runtime.ts) ───────────────────────────┐
-  │  1. upsert agents.documents (content = source of truth)       │
-  │  2. pipeline.index({id, text})                                │
-  └───────────────────────────┬───────────────────────────────────┘
-                              │ chunk(512/64) → embed(768)
-                              ▼
-  chunks: notes.md#0  notes.md#1  notes.md#2
-     │ on conflict (id) do update  (idempotent — patch in place)
-     ▼
-  ┌─ agents.chunks ───────────────────────────────────────────────┐
-  │  #0 patched   #1 patched   #2 patched                          │
-  │  ⚠ #3 #4 from a longer prior version → ORPHANED (no delete)    │
-  │  ⚠ no hash check → re-embeds even when text is unchanged       │
-  └────────────────────────────────────────────────────────────────┘
+  source files ──────────────► agents.chunks
+        │
+        ├─ ADD new doc        ──► ✓ index -- newfile.md  (upsert)
+        ├─ CHANGE existing    ──► ✓ index -- edited.md   (upsert by id)
+        │                         ✗ but only if YOU remember (no detection)
+        └─ DELETE removed doc ──► ✗ chunks linger forever (no delete path)
+  ──────────────────────────────────────────────────────────────────────
+  buffr = incremental-by-FILE upsert
+  gaps  = change-detection (which files?) + delete (remove orphans)
 ```
+
+After the box: the upsert engine is sound; the missing parts are the *decisions around it* — what to touch, and what to remove.
 
 ## Elaborate
 
-The full-rebuild-vs-incremental tension is ancient — it's the same as a build system choosing between rebuilding everything and tracking dependencies to rebuild only what changed. Full rebuild is dead simple and always correct (drop all chunks, re-embed the corpus), but it's O(corpus) on every change and re-pays the embedding cost for unchanged files. Incremental is O(delta) but demands you track identity (which chunk is which — buffr's stable ids) *and* lifecycle (which chunks died — buffr's gap).
-
-The deletion gap connects straight to the dropped FK in `04-vector-databases.md`: because there's no `on delete cascade` from documents to chunks (there's no FK at all), deleting a documents row would *not* clean up its chunks even if you added document-deletion. So a complete fix is two moves: detect-and-skip-unchanged (a content hash on the documents row), and delete-orphans (either a post-index sweep that removes `id`s beyond the new chunk count, or an explicit delete-by-`document_id`). Both are small, both are real product gaps, and naming them precisely is the senior move.
+- **Full rebuild is the honest fallback.** When in doubt, `npm run index` over every file rebuilds correctly (upsert overwrites). It's wasteful but never wrong — a fine operational escape hatch while the delta pipeline doesn't exist. The cost is re-embedding unchanged docs.
+- **Delete is the sharpest gap.** A stale *edit* eventually gets re-indexed; a *deleted* doc's chunks never leave on their own. That's an unbounded accumulation of retrievable, citable ghosts. Of the two gaps, delete-handling is the more dangerous because nothing ever cleans it up.
+- **Detection shares machinery with staleness.** The content-hash from file 09's exercise *is* the change-detection signal — diff source hashes against indexed hashes to find the changed set. Build it once, use it for both freshness reporting and delta indexing.
+- **`source_path` and `created_at` are seeds for a manifest.** `documents` already stores `source_path` and `created_at`. A change-detector can scan those paths' mtimes/hashes against the indexed set — the raw material for a real delta scan is already in the schema.
 
 ## Project exercises
 
-> No `aieng-curriculum.md` is present in this repo, so Build-item IDs are not cited. Exercises are derived directly from the codebase and the spec's concept set.
+### Add delete handling (remove chunks for vanished source docs)
 
-### Delete orphaned chunks on re-index
+- **Exercise ID:** [B2B.12] (cite [C2.9], Phase 2B) — Case B: buffr has **no delete handling**. This is the primary target — the sharpest gap.
+- **What to build:** A pass that, given the current set of source files, deletes `documents` rows and their `agents.chunks` whose `source_path` no longer exists on disk. Make it safe (dry-run first, then apply).
+- **Why it earns its place:** Deleted docs' chunks linger forever and stay retrievable/citable — an unbounded correctness leak nothing else cleans up. This is the most dangerous of the two named gaps.
+- **Files to touch:** a new CLI command using `documents.source_path` (`sql/001_agents_schema.sql` shape), deleting from both tables; reuse `src/db.ts`.
+- **Done when:** Deleting a source file and running the pass removes exactly that doc's rows and chunks, verified by a search no longer returning it.
+- **Estimated effort:** 1 day.
 
-- **Exercise ID:** INC-1 (Case A — close the deletion gap).
-- **What to build:** after `pipeline.index()` writes N chunks for a document, delete any `agents.chunks` rows for that `document_id` whose `chunk_index >= N` — removing the orphans left when a file shrinks. Same for an explicit `npm run index:rm -- file.md` that deletes the documents row *and* all its chunks.
-- **Why it earns its place:** "my index handles deletes, not just upserts" is the difference between a toy ingest and a reconciler; the orphan bug is a real, demonstrable correctness failure.
-- **Files to touch:** `src/runtime.ts` (add a delete-orphans query after `pipeline.index`, scoped by `document_id` and `chunk_index`), new `src/cli/index-rm-cmd.ts`; chunks schema at `sql/001_agents_schema.sql:14-25`.
-- **Done when:** re-indexing a shortened file leaves zero orphan chunks, proven by a test that indexes a long doc then a short one and counts rows.
-- **Estimated effort:** half a day.
+### Add change-detection (delta indexing by content hash)
 
-### Skip unchanged files with a content hash
-
-- **Exercise ID:** INC-2 (Case A — add change-detection).
-- **What to build:** store a content hash on the `agents.documents` row; on re-index, compute the new file's hash and skip chunking/embedding entirely when it matches — so unchanged files cost one cheap hash, not a full re-embed.
-- **Why it earns its place:** embedding is the expensive step; re-embedding unchanged files is wasted compute, and skipping it is the first lever any real ingest pulls.
-- **Files to touch:** add a `content_hash` column in `sql/`, compute it in `indexDocumentRow` (`src/runtime.ts:11-17`), short-circuit before `pipeline.index` when unchanged.
-- **Done when:** re-indexing an untouched file performs no embedding calls (verified by a spy/log), and an edited file still re-indexes.
-- **Estimated effort:** 1–4hr.
+- **Exercise ID:** [B2B.13] (cite [C2.9], Phase 2B) — Case B: buffr has **no change detection** (depends on / shares [B2B.10]'s hash).
+- **What to build:** A scan that diffs each source file's content hash against the indexed hash and re-indexes only the changed/new files — so `index` over a directory touches only deltas instead of everything.
+- **Why it earns its place:** It removes the "you must name the changed files" footgun and the wasteful full rebuild, turning buffr into a true add/change/delete delta pipeline alongside [B2B.12].
+- **Files to touch:** `src/cli/index-cmd.ts` (scan + diff before upserting), reusing the `content_hash` column from [B2B.10].
+- **Done when:** Running index over a directory re-embeds only files whose hash changed, skipping unchanged ones, with the skip count reported.
+- **Estimated effort:** 1 day (after [B2B.10]).
 
 ## Interview defense
 
-**Q: Is buffr's indexing incremental or a full rebuild — and where's the catch?**
-Answer: incremental at the file grain. `npm run index -- file.md` indexes one named file, and every chunk upserts under a stable id `"<docId>#<i>"` with `on conflict do update`, so re-running a file patches its rows instead of duplicating them. The catch is two missing pieces: no change-detection (it re-embeds even when the file is unchanged) and no deletion handling (shrink a file and chunks `#3`,`#4` orphan; delete a file and all its chunks linger). An index that only upserts is half a reconciler.
+**Q: "Is buffr's indexing incremental or full-rebuild?"**
+
+Incremental — but precisely, incremental-by-file. You name files, each is upserted by stable id (`"<docId>#<i>"`), so re-indexing one file replaces only its chunks. It's not wipe-and-rebuild. But it has no change detection and no delete handling.
 
 ```
-  re-index notes.md (now 3 chunks, was 5)
-  #0 #1 #2 → on conflict update ✓
-  #3 #4    → never touched → ORPHANED stale vectors ✗
+  index -- file.md ──► upsert by id ──► only that file's chunks change
 ```
 
-**Q: Why write the documents row before the chunks?**
-Answer: `agents.documents.content` is the source of truth — the original text. Writing it first means even if embedding fails, the text is captured, and it's the input you'd re-embed from if you ever switched embedding models. It's the same idempotent `on conflict do update` as the chunks, one layer up. The anchor: **the load-bearing ordering people skip is persisting the source text before the derived vectors — derived data should never be the only copy.**
+Anchor: *"Incremental at file granularity, by id upsert."*
+
+**Q: "What breaks at the edges?"**
+
+Two precise gaps. No change-detection — edit a file and forget to re-index it, and it's silently stale. No delete-handling — delete a source file and its chunks linger forever, still retrievable and citable. Delete is the worse one; nothing ever cleans it up.
 
 ```
-  documents row (source text) ──first──► chunks (derived vectors)
-  embedding fails? source still saved → re-embed later, no file re-read
+  forgot to re-index ──► stale (no detection)
+  deleted source ──► orphan chunks remain (no delete)
 ```
+
+Anchor: *"Add/update by name works; detect and delete don't."*
 
 ## See also
 
-- `02-embedding-model-choice.md` — why `documents.content` (written here first) is the re-embed escape hatch.
-- `04-vector-databases.md` — the idempotent upsert and the dropped FK that complicates cascade-delete.
-- `09-stale-embeddings.md` — the freshness side of the same change-detection gap.
-- `11-rag.md` — the query path that reads what this write path produces.
+- `./09-stale-embeddings.md` — the freshness side; shares the content-hash that powers change detection.
+- `./04-vector-databases.md` — the idempotent `on conflict` upsert that makes per-file re-index safe.
+- `./11-rag.md` — orphan chunks from missing deletes can still surface as cited answers.
+- `../../study-database-systems/` — change-data-capture, tombstones, manifest diffing.

@@ -1,259 +1,203 @@
-# Eval-Numbers-As-Quality-Signal
+# Eval-Numbers-as-Quality-Signal
 
-**Industry names:** offline retrieval eval · precision@k / recall@k ·
-information-retrieval metrics. **Type:** Industry standard (IR evaluation),
-applied here as the repo's only numeric quality signal.
+**Industry name(s):** offline retrieval evaluation / ranking metrics as a health signal — precision@k and recall@k (`P@1`, `R@3`) — *Industry-standard* metrics, *Project-specific* use as the repo's only retrieval observability.
+
+The repo's entire "is retrieval healthy?" instrument is one hand-run CLI that scores a labeled query set and prints the numbers. No metric is stored, no objective is set, no alert fires — but the numbers themselves are real, comparable signal. This file treats the eval output as what it actually is: the only quality observability buffr has for its core function.
 
 ---
 
 ## Zoom out, then zoom in
 
-You know how a test suite gives you a green/red bit — pass or fail? Retrieval
-quality isn't a bit; it's a *score*. "Did the right documents come back in the top
-k?" is a number between 0 and 1, and this repo computes two of them: precision@1
-and recall@3 over a labeled set of queries. That's the only place in the whole
-repo where behavior is measured as a number rather than recorded as an event or
-printed as a line.
-
-Where it sits — and note it's *offline*, off to the side of the live path:
+Here's where this sits. buffr's whole reason to exist is retrieval — pull the right chunks for a question. The only thing that tells you whether retrieval is *working* is this eval CLI.
 
 ```
-  Zoom out — the eval loop is off the hot path
+  Zoom out — where the quality signal is produced
 
-  ┌─ Live path (chat) ────────────────────────────────────────┐
-  │  chat.tsx → session.ask → agent → pipeline.query (top-k)  │
-  └────────────────────────────────────────────────────────────┘
-            (same retrieval pipeline, different caller)
-  ┌─ Offline eval path ═══════════════════════════════════════┐
-  │ ║ eval-cmd.ts → pipeline.query(query, K)                  ║│ ← we are here
-  │ ║ → scorePrecisionAtK / scoreRecallAtK → print P@1 / R@3  ║│
-  │ ║   over eval/queries.json (labeled set)                  ║│
-  └────────────────────────────────────────────────────────────┘
+  ┌─ CLI layer (src/cli/eval-cmd.ts) ───────────────────────────┐
+  │  for each labeled query → pipeline.query() → score → print  │ ← we are here
+  └────────────────────────────────┬─────────────────────────────┘
+            P@1 / R@3 per query     │  (printed, not stored)
+  ┌─ Retrieval (createRetrievalPipeline) ──▼────────────────────┐
+  │  embed query → ANN search over chunks → ranked hits          │
+  └────────────────────────────────┬─────────────────────────────┘
+  ┌─ Storage (agents.chunks, HNSW) ▼────────────────────────────┐
+  │  the vectors whose ranking quality the eval measures         │
+  └──────────────────────────────────────────────────────────────┘
 ```
 
-Zoom in: the pattern is **offline IR evaluation as a quality signal** — run a
-fixed set of labeled queries through the *real* retrieval pipeline, score how many
-relevant docs land in the top k, average it. The question it answers: *is
-retrieval good enough, as a number I can compare run to run?* The catch this file
-keeps honest: it's a *batch you run by hand*, not a *live SLI* — it tells you
-about a snapshot of the corpus + a fixed query set, not about production traffic.
+Zoom in. The question: *is retrieval returning the right documents, and would I notice if a change made it worse?* The pattern is **score a fixed labeled set with ranking metrics**: a frozen `eval/queries.json` maps each query to its known-relevant doc ids; `P@1` asks "was the top hit relevant?", `R@3` asks "how many of the relevant docs showed up in the top 3?". The numbers are the signal.
 
-## Structure pass
+## The structure pass
 
-Two layers, one axis: **what does this number actually measure — the system, or a
-sample of it?** Tracing that axis is what separates an SLI from an offline eval.
+**Layers:** the labeled query set (ground truth) → the pipeline query (the thing under test) → the scorers (the measurement) → stdout (the readout).
+
+**Axis — "where does ground truth come from?"** Trace it:
 
 ```
-  Axis — "measures live behavior or a fixed sample?" — across the seam
+  One question down the layers: who holds the ground truth?
 
-  ┌─ the metric (P@k, R@k) ─────┐  seam: the input set  ┌─ the inputs ───────────┐
-  │ score in [0,1], per query   │ ════════╪════════════►│ eval/queries.json:     │
-  │ averaged across the set     │ (fixed, hand-curated, │ {query, relevant[]}    │
-  │                             │  not production)      │ labeled by a human     │
-  └─────────────────────────────┘                       └────────────────────────┘
-  axis answer: a SAMPLE, not live traffic → it's an offline eval, not an SLI
+  ┌──────────────────────────────────────────────┐
+  │ eval/queries.json                             │  → HUMAN-LABELED
+  │   { query, relevant: [docId, …] }             │    (the source of truth)
+  └───────────────────────┬───────────────────────┘
+       seam: scorePrecision/Recall  ═══ truth meets prediction ═══
+  ┌───────────────────────▼───────────────────────┐
+  │ pipeline.query(query, K) → docIds             │  → MODEL-PREDICTED
+  │   embed + ANN search                           │    (the thing measured)
+  └───────────────────────┬───────────────────────┘
+       seam: process.stdout.write  ═══ signal meets the void ═══
+  ┌───────────────────────▼───────────────────────┐
+  │ printed P@1 / R@3                             │  → EPHEMERAL
+  │   not stored, not trended, not alerted          │    (the readout dies)
+  └────────────────────────────────────────────────┘
 ```
 
-The load-bearing seam is `eval/queries.json` — the labeled set. The metric is
-only as honest as that file is representative. Change the corpus or the queries
-and the number moves for reasons unrelated to production behavior. That's the line
-between this and a real SLI (which would sample *live* queries and have an
-objective + alert — none of which exist here; see audit lens 4).
+**Two seams.** The first — where labeled truth meets model prediction — is where the *signal is created*; that's good. The second — where the score hits stdout — is where the *signal dies*; that's the gap. The metrics are sound; the observability around them is `03-stdout-as-only-log.md` all over again.
 
 ## How it works
 
-### Move 1 — the mental model
+#### Move 1 — the mental model
 
-You've scored a search before, even informally: "I searched, did the thing I
-wanted show up near the top?" Precision@k and recall@k make that precise.
-Precision@1: of the *top 1* doc returned, was it relevant? Recall@k: of *all* the
-relevant docs, how many showed up in the top k? Run that over a labeled set,
-average, and you have a quality number.
+You've graded a multiple-choice test against an answer key. `P@1` is "did they get the first question right?" averaged over students; `R@3` is "of the answers that should've been on their top-3 list, how many were?" The query set is the answer key, `pipeline.query()` is the student, the scorers are you with a red pen.
 
 ```
-  The pattern — score retrieval against a labeled answer key
+  The shape — score prediction against a frozen answer key
 
-  for each query in the labeled set:
-     hits      = pipeline.query(query, K)        ← real retrieval
-     returned  = unique docIds from hits
-     relevant  = the human-labeled answer set
-     P@1 = (returned[0] ∈ relevant) ? 1 : 0      ← top-1 correct?
-     R@K = |returned[:K] ∩ relevant| / |relevant| ← how much of the truth found?
-  mean over all queries = the run's score
+  eval/queries.json (the key)        pipeline.query (the student)
+  ──────────────────────────         ────────────────────────────
+  query: "how does sync work"        hits → docIds: [d2, d7, d1]
+  relevant: { d2, d9 }                        │
+                  │                            │
+                  └────────► score ◄───────────┘
+                       P@1 = (d2 ∈ relevant?) = 1.00   ← top hit was right
+                       R@3 = |{d2} ∩ relevant| / |relevant|
+                           = 1/2 = 0.50               ← caught 1 of 2 relevant
+
+         mean across all queries → the one health number
 ```
 
-The kernel: **a labeled set + the real pipeline + a scoring function, averaged.**
-Drop the labeled set and you have nothing to score against; use a *fake* pipeline
-and you're measuring the mock, not the system.
+The diagram is the mechanism: per query you get two numbers, you mean them across the set, and that mean is buffr's retrieval-health readout.
 
-### Move 2 — the step-by-step walkthrough
+#### Move 2 — the step-by-step walkthrough
 
-**The use case.** Catching retrieval regressions before they reach the chat. You
-re-index, run `npm run eval`, and compare the mean P@1 / R@3 to last time. A drop
-means retrieval got worse — the seam this shares with study-testing.
-
-**Part 1 — load the labeled answer key.** The eval's honesty lives in this file.
-
-```ts
-// src/cli/eval-cmd.ts:18-21
-const queries: { query: string; relevant: string[] }[] = JSON.parse(
-  await readFile(new URL('../../../eval/queries.json', import.meta.url), 'utf8'));
-```
-
-Each entry is `{ query, relevant }` — a question and the doc ids a human says
-*should* come back. That's the ground truth. Boundary condition: if `relevant` is
-mislabeled or the set is unrepresentative, the score is precise but meaningless —
-garbage-in on the answer key.
-
-**Part 2 — run each query through the REAL pipeline.** This is what makes it an
-eval and not a unit test: same `createRetrievalPipeline` the chat uses
-(`src/session.ts:42`, `src/cli/eval-cmd.ts:16`), same embedder, same store.
-
-```ts
-// src/cli/eval-cmd.ts:22-31
-const K = 3;
-let p1 = 0, rk = 0;
-for (const { query, relevant } of queries) {
-  const hits = await pipeline.query(query, K);                 // ← real retrieval
-  const docs = [...new Set(hits.map((h) => String(h.meta.docId)))];  // dedupe to docs
-  const p = scorePrecisionAtK(docs, new Set(relevant), 1).score;
-  const r = scoreRecallAtK(docs, new Set(relevant), K).score;
-  p1 += p; rk += r;
-  process.stdout.write(`${query.padEnd(44)} P@1 ${p.toFixed(2)}  R@${K} ${r.toFixed(2)}\n`);
-}
-```
-
-Note the `[...new Set(...)]` — hits are *chunks*, but relevance is judged at the
-*document* level, so chunk ids are collapsed to `docId` before scoring. That's a
-real modeling decision: you're asking "did the right *document* surface," not "the
-right chunk." `scorePrecisionAtK` / `scoreRecallAtK` come from aptkit
-(`@rlynjb/aptkit-core`) — buffr supplies the labeled set and the pipeline; aptkit
-supplies the math.
-
-**Part 3 — average and report.** The run's headline is the mean across queries.
-
-```ts
-// src/cli/eval-cmd.ts:33
-process.stdout.write(`\nmean P@1 ${(p1 / queries.length).toFixed(2)}  mean R@${K} ${(rk / queries.length).toFixed(2)}\n`);
-```
+**Load the frozen ground truth.** The labeled set is read once (`src/cli/eval-cmd.ts:19-20`):
 
 ```
-  Layers-and-hops — labeled set in, score out, over the live pipeline
-
-  ┌─ eval/queries.json ─┐ {query,relevant}  ┌─ pipeline.query ────┐ top-K chunks
-  │  labeled answer key │ ────────────────► │ embed → ANN search  │ ──────────┐
-  └─────────────────────┘                   │ (same as chat)      │           │
-                                            └─────────────────────┘           ▼
-  ┌─ score + mean ──────┐ ◄──── P@1 / R@K ──── dedupe chunks→docs ◄── hits ────┘
-  │ stdout: per-query   │      scorePrecisionAtK / scoreRecallAtK
-  │ + mean P@1 / R@3    │
-  └─────────────────────┘
+  src/cli/eval-cmd.ts:19   const queries: { query: string; relevant: string[] }[] =
+  :20     JSON.parse(await readFile(new URL('../../../eval/queries.json', …), 'utf8'));
 ```
 
-#### Move 2.5 — what this number is, and what it is NOT
+Each entry is a query plus the doc ids a human deemed relevant. This file *is* the source of truth — the whole eval is only as honest as these labels. The boundary condition: if `relevant` is stale (a doc was re-indexed under a new id), the scores drop for a reason that has nothing to do with retrieval quality. The ground truth has to track the corpus.
 
-This is the honest line, and it's why this file exists instead of just a footnote.
+**Run the thing under test and score it.** The loop queries the pipeline at K=3, dedups to doc ids, and scores (`src/cli/eval-cmd.ts:22-30`):
 
 ```
-  Offline eval (what the repo has)   vs   Live SLI (what it doesn't)
-  ──────────────────────────────────     ─────────────────────────────
-  fixed labeled query set                samples real production queries
-  run by hand (npm run eval)             computed continuously
-  one snapshot per run                   a rate / percentile over time
-  no objective, no alert                 SLO + alert threshold
-  measures: retrieval on THIS set        measures: retrieval on REAL traffic
+  src/cli/eval-cmd.ts:24   for (const { query, relevant } of queries) {
+  :25     const hits = await pipeline.query(query, K);
+  :26     const docs = [...new Set(hits.map((h) => String(h.meta.docId)))];
+  :27     const p = scorePrecisionAtK(docs, new Set(relevant), 1).score;   // P@1
+  :28     const r = scoreRecallAtK(docs, new Set(relevant), K).score;       // R@3
+  :29     p1 += p; rk += r;
 ```
 
-So: it's a strong *regression gate* (re-run, compare, catch a drop) and a weak
-*production signal* (it never sees a real user's query, never trends over time,
-never alerts). Calling P@1/R@3 an "SLI" would overclaim — it's an offline eval
-that *could become* the basis of one if you sampled live queries and set an
-objective. Audit lens 4 names that gap; this is where it's grounded.
+Read the two metric choices. `scorePrecisionAtK(…, 1)` measures *only the top hit* — for a RAG agent that synthesizes from the first chunk, "is rank 1 relevant?" is the metric that matters most. `scoreRecallAtK(…, K)` at K=3 measures coverage — did the relevant docs make the shortlist the agent actually sees? The dedup on `docId` (`:26`) is load-bearing: multiple chunks from one doc collapse to one, so the metric is per-*document*, matching how `relevant` is labeled.
+
+**Print and aggregate — where the signal dies.** Per-query and mean both go to stdout (`src/cli/eval-cmd.ts:31-33`):
+
+```
+  src/cli/eval-cmd.ts:31   process.stdout.write(`${query.padEnd(44)} P@1 ${p.toFixed(2)} …\n`);
+  :33   process.stdout.write(`\nmean P@1 …  mean R@3 …\n`);
+```
+
+The boundary condition is the whole gap: this is the *only* place the number exists. Nothing writes the run to a table, so there's no baseline to diff against. You compare "is retrieval worse than last week" by eyeballing two terminal windows. → this is `03-stdout-as-only-log.md` applied to the one metric that matters most.
+
+#### Move 2 variant — the load-bearing skeleton
+
+The kernel of an offline eval, named by what breaks without each part:
+
+1. **A frozen labeled set** — the answer key. Drop it and there's no ground truth; the scores measure nothing. (`eval/queries.json`)
+2. **A deterministic run of the thing under test** — `pipeline.query()` over the same corpus. If the corpus shifts between runs, score deltas conflate "model changed" with "data changed." (`eval-cmd.ts:25`)
+3. **Ranking metrics that match how the output is used** — `P@1` because the agent leans on the top hit; `R@3` because it sees the top 3. Pick the wrong k and you measure a quality the agent never experiences. (`:27-28`)
+4. **An aggregate** — the mean, the single number you actually track. (`:33`)
+
+What's *missing*, and is the observability gap: **a stored run with a timestamp**. Without it there's no trend, no regression alert, no before/after. The metrics are present and correct; the *observability* — storage, trend, threshold — is absent. That absence is exactly why this is a debugging-observability finding and not just a testing one.
+
+#### Move 2.5 — current state vs future state
+
+This is a built-but-thin instrument, so the Phase A / Phase B comparison earns its place.
+
+```
+  Phase A (now)                      Phase B (when unattended)
+  ───────────────────────────        ──────────────────────────────
+  hand-run: npm run eval             scheduled / CI run
+  P@1 / R@3 → stdout                 P@1 / R@3 → stored row + timestamp
+  compared by eyeball                trended; alert if mean drops > X
+  one corpus snapshot                versioned corpus + label set
+  no baseline                        last-good baseline to diff against
+
+  what DOESN'T change: the metrics (P@1, R@3), the scorers, the
+  labeled-set format. Phase B is pure observability plumbing around
+  an already-correct measurement.
+```
+
+The takeaway: buffr already did the *hard* part (a real labeled set, the right metrics). What's deferred is the *plumbing* — storing the number and watching it move. That's a small, additive change, not a redesign.
 
 #### Move 3 — the principle
 
-When quality is a score, not a bit, measure it with a labeled set run through the
-real system — and be precise about what the set represents. The same metric is an
-honest regression gate *and* a misleading production signal depending on whether
-its inputs are a fixed sample or live traffic. The number doesn't tell you which;
-you have to.
+**A metric you print is a measurement; a metric you store and trend is an instrument.** The number `mean P@1 0.82` tells you retrieval is decent *today*; only a stored series tells you a change made it worse. The general rule for quality observability: the value of an eval is in the *delta over time*, and you can't see a delta you didn't record. `study-testing` owns the eval as a correctness guard; this guide owns it as a signal you should be *trending*, not eyeballing.
 
 ## Primary diagram
 
-The whole eval as a quality signal, with its boundary marked.
-
 ```
-  Eval-numbers-as-quality-signal — offline, over the real pipeline
+  Eval as quality signal — the full path, and where it stops
 
-  ┌─ INPUTS ──────────────────────────────────────────────────────────┐
-  │  eval/queries.json — [{ query, relevant: docId[] }]  (human-labeled)│
-  └───────────────────────────────┬───────────────────────────────────┘
-  ┌─ REAL PIPELINE (same as chat) ▼───────────────────────────────────┐
-  │  pipeline.query(query, K=3) → embed → ANN (pgvector HNSW) → chunks │
-  │  → dedupe to docIds                                                │
-  └───────────────────────────────┬───────────────────────────────────┘
-  ┌─ SCORING (aptkit) ────────────▼───────────────────────────────────┐
-  │  scorePrecisionAtK(docs, relevant, 1) · scoreRecallAtK(docs, ., 3) │
-  │  accumulate → mean P@1 / mean R@3 → stdout                         │
-  └───────────────────────────────┬───────────────────────────────────┘
-  ┌─ BOUNDARY (the honest line) ──▼───────────────────────────────────┐
-  │  offline regression gate ✓   |   live production SLI ✗ (no alert,  │
-  │  run by hand, fixed set      |    no trend, never sees real query) │
-  └───────────────────────────────────────────────────────────────────┘
+  GROUND TRUTH                    UNDER TEST                MEASURE
+  ────────────                    ──────────                ───────
+  eval/queries.json   ──────────► pipeline.query(q, 3)  ──► dedup docIds
+   {query, relevant}              (embed + HNSW ANN)            │
+        │                                                       ▼
+        └──────────────────────────────────────────► scorePrecisionAtK(…,1) → P@1
+                                                       scoreRecallAtK(…,3)   → R@3
+                                                              │
+                                                       sum / mean
+                                                              │
+                                                              ▼
+                                       process.stdout.write(P@1 / R@3)
+                                                              │
+                                              ✗ STOPS HERE — not stored,
+                                                not trended, not alerted
 ```
 
 ## Elaborate
 
-Precision@k and recall@k are the workhorse metrics of information retrieval —
-they predate RAG by decades and carry straight over to "did the right chunks feed
-the LLM." The offline-eval-over-labeled-set discipline is how you keep retrieval
-honest without production traffic: a golden set, the real pipeline, a score you
-compare run to run. The gap between this and a production SLI is exactly the gap
-between a test fixture and live telemetry — same metric, different inputs, very
-different claims.
+These metrics come from information retrieval, decades older than RAG. `P@k` and `R@k` are the canonical way to score a ranked result list against relevance judgments — the same math behind search-engine quality scoring. buffr applies them to the RAG retrieval step, which is exactly right: RAG *is* retrieval-then-generate, and the retrieval half is a ranking problem with a measurable answer key.
 
-This is the sharpest seam with **study-testing**: that guide owns
-`eval/queries.json` as a *regression gate* (does the score hold?); this guide owns
-it as an *observability signal* (what does the score tell you about behavior?).
-Same file, two lenses — cross-link, don't duplicate. The metric's raw cousins —
-`durationMs`, `tokens_used` captured in the trace (file 01) — belong to
-study-performance-engineering when turned into latency/cost metrics.
+The choice of `P@1` specifically is worth defending: for a generation agent that grounds its answer in the retrieved chunks, the rank-1 hit disproportionately shapes the output, so "is the top hit relevant" is the highest-signal single number. `R@3` complements it — precision alone could hide that you're missing half the relevant docs. The pair is a deliberate, sound choice (`eval-cmd.ts:27-28`).
+
+Where it connects: `study-testing` treats this CLI as a regression guard (does a change drop the score below a bar). This guide treats the same numbers as a *signal to observe over time*. The seam between the two guides is `eval/queries.json` — testing owns the labels' correctness; observability owns whether anyone's watching the trend.
 
 ## Interview defense
 
-**Q: You call P@1/R@3 a quality signal — is it an SLI?** No, and the distinction
-is the answer. It's an *offline* eval: a fixed, human-labeled query set run
-through the real retrieval pipeline by hand. An SLI samples *live* traffic,
-trends over time, and has an objective with an alert — none of which exist here.
-It's a strong regression gate and a weak production signal. Calling it an SLI
-would overclaim.
+**Q: How do you know your retrieval is good, and would you catch a regression?**
 
 ```
-  fixed labeled set + run by hand → regression gate (not a live SLI)
+  P@1 answers "good"; the missing trend answers "regression"
+
+  npm run eval ──► mean P@1 0.82  ← good TODAY (a measurement)
+                          │
+                   not stored ──► no series ──► no regression seen
+                          │
+                   FIX: store {ts, meanP1, meanR3} → diff vs last-good
 ```
 
-**Q: Why score at the document level when retrieval returns chunks?** Because
-relevance is labeled per document — `eval/queries.json` lists relevant *doc ids*.
-So I dedupe chunk hits to their `docId` (`[...new Set(...)]`) before scoring,
-asking "did the right document surface in the top k," not "the right chunk." If I
-scored per chunk against doc-level labels, the metric would be incoherent.
+Today, by hand: `npm run eval` scores a labeled set and prints `P@1` / `R@3` (`eval-cmd.ts:27-33`). `P@1` is the right headline because the agent leans on the top hit. Would I catch a regression? Not reliably — the number isn't stored, so there's no baseline to diff (`:31`). The fix is small and additive: persist each run with a timestamp and alert on a drop. **Anchor:** the print-and-forget at `eval-cmd.ts:33` — a measurement, not yet an instrument.
 
-```
-  hits (chunks) → unique docIds → score against doc-level labels
-```
+**Q: Why `P@1` and not `P@3`?**
 
-**Q: What makes this eval trustworthy — or not?** It runs the *same* pipeline the
-chat uses (same embedder, store, ANN index), so it measures the real system, not
-a mock — that's the trustworthy part. The fragile part is the labeled set: the
-score is only as representative as `eval/queries.json`. Change the corpus or the
-queries and the number moves for reasons unrelated to production. The honest
-framing is: precise about the sample, silent about live traffic.
+Because the agent's answer is grounded most in the rank-1 chunk, so the top hit's relevance is the highest-signal number; `R@3` covers whether the relevant set made the shortlist the agent actually sees. Matching the metric's k to how the output is consumed is the load-bearing call. **Anchor:** `scorePrecisionAtK(docs, …, 1)` vs `scoreRecallAtK(docs, …, K)` at `eval-cmd.ts:27-28`.
 
 ## See also
 
-- `03-stdout-as-only-log.md` — the stdout transport these numbers are printed over.
-- `01-full-signal-trajectory-capture.md` — `durationMs` / `tokens_used`, the
-  other captured numbers (performance, not quality).
-- `audit.md` lens 4 (metrics-slis-slos) — where the "not a live SLI" gap is named.
-- Cross-guide: study-testing (the same `eval/queries.json` as a regression gate),
-  study-performance-engineering (turning captured timing/tokens into metrics).
+- `03-stdout-as-only-log.md` — the print-and-forget surface this metric shares.
+- `audit.md` lens 2 (controlled experiment), lens 4 (the SLI that isn't), lens 7 (regression guard).
+- Cross-guide: `study-testing` (the eval as a correctness/regression guard), `study-performance-engineering` (retrieval latency as the other half of "healthy retrieval").

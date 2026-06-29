@@ -1,168 +1,207 @@
-# Reflexion / self-critique — the agent grades its own draft and retries
+# Reflexion / Self-Critique
 
-**Industry name(s):** Reflexion · self-critique loop · self-refine ·
-critic-revise. **Type label:** Industry standard.
-
-**In this codebase: Not yet implemented.** buffr answers in one ReAct
-pass with no self-critique step. It hasn't hit a measured
-answer-quality ceiling that a second pass would close — and a second
-pass costs 2-5x tokens, which matters on a local Gemma. (Note: aptkit
-*has* a rubric-judge and a separate rubric-improvement agent in the
-bundle, but `RagQueryAgent` does not wire them in.)
+*Industry names: **Reflexion** / **self-critique** / **self-refine** / **critic loop**. Type label: Industry standard. In this codebase: **Not yet implemented.** (buffr has no critic loop — one ReAct pass produces the answer, nothing grades it.)*
 
 ## Zoom out, then zoom in
 
-Reflexion sits on top of a base reasoning pattern — it doesn't replace
-ReAct, it wraps it with a critic.
+This is the second rung above buffr's ReAct floor. It wraps a *critic* around the existing
+loop. Here is where it would sit.
 
 ```
-  Zoom out — reflexion wraps a base pattern
+  Where the critic loop would slot in (dashed = NOT YET)
 
-  ┌─ Reasoning patterns (SECTION A) ─────────────────────────┐
-  │   ReAct produces a draft answer                          │
-  │      │ escalate when QUALITY has a measured gap           │
-  │      ▼                                                    │
-  │   ★ reflexion: critic step → revise → loop (capped) ★     │ ← we are here
-  └──────────────────────────────────────────────────────────┘
+  ┌─ Session (chain) ──────────────────────────────────────────┐
+  └──────────────────────────┬─────────────────────────────────┘
+  ┌╌ ★ CRITIC LOOP (this file — NOT YET) ╌▼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┐
+  ╎  draft = reactLoop(q)                                      ╎
+  ╎  critique = model.grade(draft)                             ╎
+  ╎  if bad: draft = reactLoop(q + critique)   ← retry         ╎
+  └╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┬╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┘
+  ┌─ ReAct kernel buffr already has ─▼────────────────────────┐
+  │  runAgentLoop — run-agent-loop.ts:98-190                  │
+  └────────────────────────────────────────────────────────────┘
 ```
 
-Zoom in: the agent produces a draft, then a critic step asks "is this
-correct and complete?" If flawed, it revises and loops — capped, so it
-can't spin. The point is a reliability step bolted onto an existing
-pattern, not a new way of thinking.
+The honest sentence first: **buffr has no critic.** `answer()` returns the first loop's
+output directly — `finalText.trim() || FALLBACK_ANSWER` — with no second model pass to grade
+or revise it. This file teaches the pattern, its cost, and its one real limit.
 
 ## Structure pass
 
-**Layers.** Two: the producer (the base ReAct loop) and the critic (an
-added evaluation step). The critic is a layer above the draft.
+One axis: **trust** — do we trust the first answer, or do we make the model check itself?
 
-**Axis — "where does quality get checked?"** In buffr today, nowhere —
-the first draft is the answer. Reflexion adds an explicit check
-between draft and return. That added checkpoint is the pattern.
+```
+  Axis = TRUST · who validates the answer before the user sees it
 
-**Seam.** The producer→critic boundary. The critical property of this
-seam: a model critiquing *its own* output shares the blind spots that
-produced it. That's why the seam is load-bearing and also why the
-pattern has a known failure mode.
+  ReAct (buffr today)     trust the first pass — return finalText directly
+  ─────────── ★ SEAM: a second model pass JUDGES the first ★ ───────────
+  reflexion               distrust → model critiques + retries (2-5x tokens)
+```
+
+The seam is the introduction of a *second model role*: a critic that reads the draft and
+decides if it's good enough. buffr trusts the first pass (with retrieval grounding as its
+only quality guard). Reflexion withholds that trust and pays 2-5x the tokens to have the
+model grade and revise its own work. That multiplier is the whole reason this is a rung you
+climb reluctantly.
 
 ## How it works
 
-#### Move 1 — the mental model
+### Move 1 — mental model
 
-You know the "are you sure?" follow-up that sometimes makes a model
-fix its own mistake? Reflexion automates that into a loop: draft →
-critique → revise, until the critique passes or you hit the retry cap.
-
-```
-  Pattern — the critique-revise loop
-
-  ┌─────────────────────────────────────────────┐
-  │  base pattern (ReAct) produces a draft answer │
-  └────────────────────┬─────────────────────────┘
-                       ▼
-  ┌─────────────────────────────────────────────┐
-  │  Critic: "is this correct / complete /        │
-  │           grounded in the retrieved chunks?"  │
-  └──────────┬───────────────────────┬────────────┘
-             ▼ good                   ▼ flawed
-         return                  revise + loop
-                                 (cap the retries)
-```
-
-#### Move 2 — the walkthrough (what it would take in buffr)
-
-To add reflexion, you'd insert a critic call after `runAgentLoop`
-returns `finalText` (`rag-query-agent.js:50`) and before
-`answer.trim()`. The critic would re-read the retrieved chunks and the
-draft and judge groundedness — buffr already *says* "ground every
-answer in the retrieved chunks and cite their sources"
-(`rag-query-agent.js:16-17`), but nothing *verifies* it. A reflexion
-loop would close that: if the draft cites a source the retrieval
-didn't return, revise.
-
-**The hard limit that decides whether it's worth it.** A model
-critiquing its own output shares its blind spots. Self-critique catches
-*format* failures (missing citation, wrong shape) and *obvious* errors
-well; it catches *subtle reasoning* failures poorly — the same model
-that got the reasoning wrong is unlikely to catch it. For a local
-Gemma2:9b, that ceiling is real: the critic isn't a sharper model, it's
-the same model asked twice. The mitigation, when stakes justify it, is
-a *different* model family for the critic — the asymmetric verifier in
-`03-multi-agent-orchestration/05-debate-verifier-critic.md`.
-
-**The cost is concrete.** Each revision round is a full extra model
-turn — 2-5x tokens for one reliability step. On a cloud model that's a
-latency line item; on local Gemma it's wall-clock the user waits
-through. buffr hasn't measured a quality gap that justifies it, so it
-doesn't pay it.
+Two roles played by the same model: an **actor** that drafts, a **critic** that grades, in a
+loop that retries until the critic is satisfied (or a cap is hit). Bridge from frontend:
+it's form validation where the *validator and the submitter are the same component* — submit,
+read your own error, fix, resubmit.
 
 ```
-  Comparison — buffr today vs reflexion-wrapped
+  THE SHAPE — draft, critique, retry
 
-  buffr today:                      reflexion-wrapped:
-    ReAct → draft → return            ReAct → draft
-    (citation claimed, unverified)      → critic: grounded? cited?
-                                          ├ yes → return
-                                          └ no  → revise (cap 2)
+  ┌─ DRAFT ──────────────┐
+  │ answer = reactLoop(q) │◀──────────────┐
+  └─────────┬────────────┘               │
+            ▼                            │ retry with the critique
+  ┌─ CRITIQUE ───────────┐               │ appended to the prompt
+  │ verdict = grade(answer)│             │
+  └─────────┬────────────┘               │
+       good │  │ bad ─────────────────────┘
+            ▼
+  ┌─ RETURN answer ──────┐   (cap retries — same budget discipline as file 02)
+  └──────────────────────┘
 ```
 
-#### Move 3 — the principle
+### Pseudocode first — the language-agnostic logic
 
-Reflexion is a reliability tax you pay only where you've measured the
-unreliability. It's strongest for catchable failure classes (format,
-groundedness) and weakest for the subtle-reasoning failures that share
-the producer's blind spots. Adding it without a measured gap buys cost,
-not quality.
+```
+draft = reactLoop(question)               # buffr's current behavior stops HERE
+for attempt in 0..maxRevisions:
+    critique = model.grade(question, draft)   # 2nd model pass: "is this grounded? complete?"
+    if critique.ok: break
+    draft = reactLoop(question + critique)     # 3rd+ pass: revise using the critique
+return draft
+```
+
+Annotation: the cost is in the loop body — `grade` is one extra model call per attempt, and
+each failed grade triggers *another* full `reactLoop`. Two revisions can mean five model
+calls for one answer. That's the 2-5x.
+
+### What buffr does instead — one pass, no critic
+
+```ts
+// rag-query-agent.ts:62-83 (condensed) — the first loop's output IS the answer. No grading.
+async answer(question: string): Promise<string> {
+  ...
+  const { finalText } = await runAgentLoop({ /* maxTurns:6, maxToolCalls:4 */ });
+  return finalText.trim() || FALLBACK_ANSWER;   // ← returned raw. No critic pass. No retry on quality.
+}
+```
+
+```
+  buffr (today)          vs    reflexion (the refactor)
+
+  q ──▶ [ReAct] ──▶ answer      q ──▶ [ReAct] ──▶ draft
+                                          │
+                                          ▼
+                                     [CRITIC] ──bad──▶ [ReAct again]
+                                          │ good
+                                          ▼
+                                       answer
+```
+
+Annotation: buffr's only quality guard is retrieval grounding — the prompt says "ground
+every answer in the retrieved chunks" (`rag-query-agent.ts:24-26`) and `FALLBACK_ANSWER`
+catches the empty case. There is no model *grading* the draft. You'd add reflexion when you
+log **confidently-wrong** answers that retrieval grounding didn't catch.
+
+### The limit you must name — shared blind spot
+
+The critic is the same model as the actor. If the model is wrong *and confident* about
+something — a misread of a retrieved chunk, a reasoning gap — it will grade its own wrong
+answer as fine. Self-critique cannot catch errors that live in the model's own blind spot;
+it catches *sloppiness* (missed steps, ungrounded claims it can re-check against retrieval),
+not *blind spots*.
+
+```
+  Shared blind spot — why self-critique has a ceiling
+
+  actor says X (wrong, confident)
+        │
+        ▼
+  critic = SAME model ──▶ "X looks right"   ← cannot see its own blind spot
+  → catches: forgot to cite, skipped a sub-question, ungrounded claim
+  → misses:  anything the model is confidently wrong about
+```
+
+### Move 3 — the principle
+
+**Reflexion buys quality by paying 2-5x tokens for a second model pass — and it only buys
+the quality the model can already see.** It fixes sloppiness, not blind spots. Adopt it only
+when you've logged confident-but-wrong answers *and* you have a critique signal (like
+retrieval grounding) the critic can check against — otherwise you're paying 2-5x for the
+model to rubber-stamp itself.
 
 ## Primary diagram
 
-```
-  Reflexion (would-be shape in buffr)
+Full recap: the critic loop, its cost, its limit, the verdict.
 
-  question → ReAct loop → draft answer
-                            │
-                            ▼
-                  ┌─ critic step ──────────────┐
-                  │  grounded? cited? complete? │
-                  └───────┬───────────┬─────────┘
-                          ▼ pass      ▼ fail
-                      return      revise → loop (cap 2)
 ```
+  Reflexion — the rung buffr hasn't climbed
+
+  ┌╌ NOT YET in buffr ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┐
+  ╎ draft → CRITIQUE → retry      cost: 2-5x tokens          ╎
+  ╎ trigger: logged confident-wrong answers grounding missed ╎
+  ╎ limit:   SHARED BLIND SPOT — critic = actor              ╎
+  └╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┬╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┘
+  ┌─ executor = buffr's kernel, reused ──▼────────────────────┐
+  │ runAgentLoop   run-agent-loop.ts:98-190                   │
+  └────────────────────────────────────────────────────────────┘
+  buffr today: ONE pass, grounding-only guard   rag-query:24-26,82
+```
+
+Verdict in one line: **a critic loop on top of the existing kernel — 2-5x tokens, catches
+sloppiness not blind spots, unjustified until confident-wrong is logged. Not yet.**
 
 ## Elaborate
 
-Reflexion (Shinn et al., 2023) framed self-critique as verbal
-reinforcement — the agent writes a reflection on its failure and
-retries with it in context. The prompt-level mechanics of writing a
-good critique prompt live in the prompt-engineering guide
-(`.aipe/study-prompt-engineering/`); this file covers reflexion as a
-*loop structure* layered on a reasoning pattern. The strongest version
-uses a different model family for the critic — which is the bridge to
-the verifier-critic topology in SECTION C.
+Reflexion (Shinn et al., 2023) and Self-Refine (Madaan et al., 2023) showed iterative
+self-critique improving results on reasoning and coding tasks — but the gains depend on a
+*verifiable* signal the critic can check against (test pass/fail, retrieval grounding). With
+no external signal, self-critique mostly reshuffles. The shared-blind-spot limit is why
+production "critic" setups increasingly use a *different* model or an external verifier as
+the judge — which then overlaps with multi-agent (Section C, the debate topology) and
+LLM-as-judge evaluation (Section D). The self-critique *prompt* mechanics — how you phrase
+the grading instruction — live in `study-prompt-engineering`; this file is about the loop
+shape and when to pay for it.
+
+Read next: `06-tree-of-thoughts.md` — the most expensive rung, and why buffr correctly skips
+it entirely.
 
 ## Interview defense
 
-**Q: Would self-critique improve buffr's answers?**
-Only for catchable failure classes. buffr claims grounding and
-citations but never verifies them — a critic that re-checks the draft
-against the retrieved chunks would catch ungrounded answers. But a
-Gemma critiquing Gemma shares blind spots, so it wouldn't catch subtle
-reasoning errors, and it costs 2-5x tokens. I'd add it only after
-measuring an ungroundedness rate that justified the cost.
+**Q: "Should buffr self-critique its answers?"**
+
+Model answer: "Not yet. buffr returns the first ReAct pass directly
+(`rag-query-agent.ts:82`) with retrieval grounding as the only quality guard
+(`:24-26`). A reflexion loop would add a critic pass — draft, grade, retry — at 2-5x the
+tokens. I'd adopt it only if I logged *confidently-wrong* answers that grounding missed, and
+even then I'd note the limit: the critic is the same model, so it shares the actor's blind
+spots — it catches sloppiness, not things the model is confidently wrong about. If I needed
+to catch blind spots I'd reach for a *different*-model judge, which is Section C territory,
+not self-critique."
 
 ```
-  draft → critic(grounded?) → revise|return   (cap the loop)
+  The defense in one picture
+
+  one pass + grounding (buffr)  ──confident-wrong logged?──▶  add critic (2-5x)
+                                                              limit: shared blind spot
 ```
 
-**Anchor:** "Self-critique catches format and groundedness well,
-subtle reasoning poorly — same model, same blind spots."
+Anchor: *Reflexion pays 2-5x for the model to grade itself — and can't see its own blind
+spots; buffr hasn't logged the failure that justifies it.*
 
 ## See also
 
-- `03-react.md` — the base pattern reflexion would wrap
-- `03-multi-agent-orchestration/05-debate-verifier-critic.md` — the
-  asymmetric, different-model version
-- `04-agent-infrastructure/04-agent-evaluation.md` — measuring the gap
-  before paying the tax
-- LLM-as-judge bias would be covered in
-  `study-ai-engineering/.../llm-as-judge.md`
+- `03-react.md` — the floor and the escalation discipline this rung obeys.
+- `04-plan-and-execute.md` — the sibling rung that adds a planner instead of a critic.
+- `06-tree-of-thoughts.md` — the next, most expensive rung.
+- `study-prompt-engineering` → self-critique *prompt* mechanics (deliberately not re-taught here).
+- `../04-agent-infrastructure/` → agent evaluation / LLM-as-judge (a *separate*-model judge).

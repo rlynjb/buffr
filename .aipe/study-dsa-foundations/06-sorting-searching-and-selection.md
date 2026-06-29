@@ -1,68 +1,71 @@
-# Sorting, Searching, and Selection
+# Sorting, Searching & Selection
 
-**Industry names:** comparison sort · binary search · top-k selection · partial
-sort · quickselect · partitioning. **Type:** Language-agnostic.
+**Industry name(s):** comparison sort (merge / quicksort) · binary search ·
+top-k selection · quickselect / partial selection — *Industry standard*
 
----
-
-## Zoom out, then zoom in
-
-This file is the kernel of the whole guide, because retrieval *is* a selection
-problem: out of N chunks, return the k with the highest similarity. The repo
-solves it two ways behind one contract — `sort+slice` (exact, in-memory) and
-`order by <=> limit k` (approximate, over the HNSW graph). You've implemented
-five sorts with visualizers in reincodes; this is where that lands in production
-code.
-
-```
-  Zoom out — where selection lives
-
-  ┌─ buffr TS / aptkit retrieval ─────────────────────────────┐
-  │  search(vector, k) → the k highest-scoring chunks          │ ← we are here
-  │   ┌ in-memory: score all → SORT → SLICE k  (exact)         │
-  │   └ pgvector:  order by <=> LIMIT k         (approx, graph) │
-  └──────────────────────────┬─────────────────────────────────┘
-                             │  k feeds
-  ┌─ eval ───────────────────▼─────────────────────────────────┐
-  │  P@k / R@k over the selected k  (eval-cmd.ts)               │
-  └─────────────────────────────────────────────────────────────┘
-```
-
-Zoom in: **sorting** puts all n in order — O(n log n) for comparison sorts.
-**Searching** finds one element — O(log n) with binary search on sorted data.
-**Selection** asks for the top/bottom k *without fully sorting* — the problem
-retrieval actually has. The repo's in-memory path over-solves it (full sort);
-the pgvector path under-visits (graph walk). Both return the same shape.
+The leading nouns: **sorting** (total order, O(n log n)), **binary search**
+(O(log n) lookup in *sorted* data), **top-k selection** (the k best without
+fully sorting). buffr's whole retrieval reduces to **top-k selection**
+(`order by ... limit k`), so this file is where the sorting fundamentals you
+visualized meet the one operation buffr actually performs.
 
 ---
 
-## The structure pass
+## Zoom out — where ordering and selection live
 
-**Layers** — three ways to get "the top k", by how much work they do:
+buffr's hot path is one selection operation. The zoom-out marks it and the
+three ways to do it.
 
 ```
-  top-k — three strategies, descending work
+  Zoom out — selection across the stack
 
-  ┌─ full sort + slice ───────────────────┐  O(n log n)  sorts all, keeps k
-  │  in-memory-vector-store.ts:31-32        │  ← buffr's exact path
-  └──────────────────────┬──────────────────┘
-       ┌─────────────────▼────────────────┐  O(n log k)  size-k heap (file 03)
-       │  partial sort (heap / quickselect) │  ← buffr uses neither
-       └─────────────────┬────────────────┘  O(n) avg (quickselect)
-            ┌────────────▼───────────────┐   ~O(log n) ← buffr's prod path
-            │ ANN graph walk (visits few) │   doesn't even score all n
-            └─────────────────────────────┘   pg-vector-store.ts:74
+  ┌─ buffr source ─────────────────────────────────────────────┐
+  │  search(vector, k) → "give me the k closest"               │ ← we are here
+  │  pg-vector-store.ts:74-77  order by distance limit k        │
+  └───────────────────────────┬────────────────────────────────┘
+                              │ three ways to satisfy this:
+  ┌─ implementations ─────────▼────────────────────────────────┐
+  │  (a) sort + slice   O(n log n)   ← aptkit in-memory store   │
+  │  (b) size-k heap    O(n log k)   ← textbook, used by no one │
+  │  (c) HNSW walk      O(log n)~    ← buffr's actual path      │
+  └────────────────────────────────────────────────────────────┘
 ```
 
-**Axis — cost (how many elements does it touch?).** Trace it: full sort touches
-all n and orders all n; quickselect/heap touch all n but order only k; the ANN
-walk doesn't even touch all n. The cost drops as you do less unnecessary
-ordering.
+Zoom in: the question is **"to get the k best out of n, must you sort all n —
+and if not, what's cheaper?"** You built five sorts with animated bar swaps,
+so you own the sorting half cold. This file's job is to show that buffr almost
+never needs a *full* sort — it needs *selection*, a strictly easier problem —
+and to rank the three ways it gets done.
 
-**Seam — the "do I need all n sorted?" boundary.** Selection is the realization
-that you almost never do. The in-memory store sits on the expensive side (sorts
-all n it discards); pgvector sits past the cheap side (skips n entirely). The
-seam is the insight that turns a sort into a select.
+---
+
+## Structure pass — layers, axis, seams
+
+**Axis: how much order do you actually produce?** Sorting produces total order;
+selection produces only "the k best, in no particular order among the rest."
+Producing less order is the seam where cost drops.
+
+```
+  Axis: "how much of the input do you fully order?" — traced
+
+  ┌─ full sort (your merge/quick sorts) ──┐
+  │  ALL n in total order   O(n log n)     │   → most order, most cost
+  └───────────────┬───────────────────────┘
+      seam: do you need ALL of it ordered? (usually no)
+      ┌───────────▼───────────────────────┐
+      │ top-k selection: only the k best    │   → partial order, less cost
+      │  sort+slice O(n log n) | heap O(n log k) | quickselect O(n) avg
+      └───────────────┬────────────────────┘
+      seam: do you even need to SEE all n? (with an index, no)
+          ┌──────────▼──────────────────────┐
+          │ HNSW: examine ~log n nodes        │   → least work, approximate
+          └───────────────────────────────────┘
+```
+
+The load-bearing seam: **selection is cheaper than sorting because it produces
+less order.** And indexing is cheaper than selection because it lets you skip
+most of the input entirely. Each step down the stack produces *less* ordering
+and pays *less*. That progression is the lesson.
 
 ---
 
@@ -70,184 +73,194 @@ seam is the insight that turns a sort into a select.
 
 ### Move 1 — the mental model
 
-You animated all five sorts — you know the bars. The mental model here is one
-step past sorting: **you rarely need the whole array ordered.** Retrieval wants
-the top 3; sorting all N to take 3 is doing 99% wasted work at scale. Selection
-is "stop sorting once you have the k you need."
+You animated this. Your merge sort splits-and-merges, your quicksort
+partitions around a pivot — both produce a fully ordered array, O(n log n).
+Now relax the requirement: you don't need *all* of it sorted, just the smallest
+k distances. That's **selection**, and the key realisation is that partitioning
+(the quicksort move) already half-solves it.
 
 ```
-  sort vs select — the wasted work
+  Sort vs select — produce only the order you need
 
-  full sort:    [unsorted N] ──► [fully sorted N] ──► take first k
-                              all N ordered          (N-k of it discarded)
-
-  selection:    [unsorted N] ──► [k best, rest unordered] ──► done
-                              only k ordered          (no wasted ordering)
-
-  k=3, N=10000 → full sort orders 9997 elements nobody reads
+  FULL SORT (you built this)        TOP-K SELECTION (what buffr needs)
+  [3 1 4 1 5 9 2 6] ─sort─►          [3 1 4 1 5 9 2 6], k=3
+  [1 1 2 3 4 5 6 9]                  ─partition around pivot─►
+   ▲ all n ordered, O(n log n)       [1 1 2 | 3 ... rest unsorted]
+                                      ▲ smallest 3 found, rest untouched
+                                      quickselect: O(n) average
 ```
 
-### Move 2 — the three operations in the repo
+One sentence: **selection finds the k best without ordering the rest, so it
+beats a full sort — and an index (HNSW) beats selection by not examining the
+rest at all.**
 
-**Sorting — the exact in-memory path uses a full comparison sort.** This is the
-literal "score everything, sort, take k" you'd animate:
+### Move 2 — the three ways buffr's top-k gets done
+
+**The operation, stated.** Every `search` returns the k smallest cosine
+distances (`src/pg-vector-store.ts:74-77`):
 
 ```ts
-// in-memory-vector-store.ts:27-32 — sort+slice top-k
-const hits: VectorHit[] = [];
-for (const chunk of this.chunks.values()) {                  // O(N): score all
-  hits.push({ id: chunk.id, score: cosineSimilarity(...), meta: chunk.meta });
-}
-hits.sort((a, b) => b.score - a.score);                      // O(N log N): full sort
-return hits.slice(0, Math.max(0, k));                        // O(k): slice the top
+order by embedding <=> $1::vector   // ← order by distance
+limit $3                            // ← take k → this is top-k selection
 ```
 
-Annotation: `.sort()` is V8's comparison sort (Timsort — a merge/insertion
-hybrid, two of your five). It orders all N by descending score; line 32 then
-keeps k. Correct, dead simple, and the *right* call for a small corpus — the
-full sort's O(N log N) is nothing when N is small. The `b.score - a.score`
-comparator is descending (highest first), the one detail that flips it from
-nearest-last to nearest-first.
+`order by ... limit k` is the SQL spelling of top-k selection. The three
+implementations behind it:
 
-**Selection — the operation the repo *doesn't* hand-roll but its prod path
-embodies.** Quickselect (the selection algorithm) is partitioning — Lomuto/Hoare
-partition from quicksort, but recursing into only the side that holds the k-th
-element — O(n) average. buffr never writes quickselect; `order by <=> limit k`
-hands selection to Postgres, which over the HNSW index does something *better
-than* quickselect: it doesn't even score all n (file 05). So the selection
-"algorithm" in production is the graph walk.
+**(a) Sort + slice — what aptkit's in-memory store does.** Sort all n by
+distance, take the first k. Uses your merge/quicksort knowledge directly:
 
 ```
-  selection strategies and which the repo uses
+  sort + slice — O(n log n)
 
-  quickselect  partition, recurse one side   O(n) avg   ── repo: not built
-  size-k heap  keep k best in a heap          O(n log k) ── repo: not built (file 03)
-  full sort    sort all, slice k              O(n log n) ── repo: in-memory ✓
-  ANN walk     skip most of n                 ~O(log n)  ── repo: pgvector ✓ ★
+  all n distances ──full sort──► [d1 ≤ d2 ≤ ... ≤ dn] ──slice(0,k)──► first k
+                    ▲ orders ALL n, even the n−k discarded (wasteful but simple)
 ```
 
-**Searching — binary search, the BST idea without the tree.** This is `not yet
-exercised` in buffr and, honestly, you haven't shipped an explicit binary-search
-implementation either — though it's the engine inside your `BinarySearchTree.ts`
-navigation. Binary search needs *sorted* data and halves the space each step:
+Honest read: it's the simplest correct thing, and aptkit picks it because its
+in-memory n is small enough that O(n log n) doesn't hurt. Simplicity over
+optimality, correctly.
+
+**(b) Size-k heap — the textbook answer nobody here uses.** Covered in depth in
+file `03`: keep a max-heap of size k, O(n log k). Better than sort+slice when
+k ≪ n because it never orders the discards. Not used in buffr because the layer
+that *could* use it (aptkit in-memory) chose simplicity, and the layer that
+matters (buffr) uses an index instead.
+
+**(c) Quickselect — partition-based selection, the array answer.** This is the
+one your quicksort already contains. Quicksort partitions around a pivot, then
+recurses on *both* sides. Quickselect partitions, then recurses on **only the
+side containing the k-th element** — throwing half the work away each step:
 
 ```
-  binary search — O(log n) on SORTED data
+  Quickselect — quicksort that recurses on ONE side (execution trace, find k=3 smallest)
 
-  find 7 in [1,3,5,7,9,11]:
-   lo=0 hi=5 mid=2 (val 5) → 7>5 → search right half
-   lo=3 hi=5 mid=4 (val 9) → 7<9 → search left half
-   lo=3 hi=3 mid=3 (val 7) → found, 3 probes not 6
-
-  precondition: data MUST be sorted — else the halving logic is wrong
+  [3 1 4 1 5 9 2 6]  pivot=4 → partition → [3 1 1 2 | 4 | 5 9 6]
+                                            └─ 4 elements ≤ pivot ─┘
+   want 3 smallest, left side has 4 ≥ 3 → recurse LEFT only:
+  [3 1 1 2]          pivot=2 → [1 1 | 2 | 3]
+                               └ 2 elements, need 1 more → take 2, recurse left
+   → smallest 3 = {1, 1, 2}, right side NEVER touched
+   average O(n): n + n/2 + n/4 + ... = 2n
 ```
 
-Where it'd matter in this repo: it doesn't, directly — vector nearest-neighbor
-isn't a 1-D sorted search (that's the whole reason HNSW exists, file 05). Binary
-search shows up only inside structures buffr delegates (the B-tree index, file
-04, *is* binary search on disk). So: foundational, exercised *under* the repo via
-the B-tree, never written *in* it.
+Why O(n) average vs the heap's O(n log k): quickselect discards a *constant
+fraction* each step instead of doing a log-k operation per element. (Worst case
+O(n²) on bad pivots — the same caveat as quicksort, fixed by random pivots.)
 
-**The boundary condition that bites:** binary search silently returns wrong
-answers on unsorted data — it doesn't error, it just halves into the wrong half.
-The sortedness precondition is invisible and load-bearing. Same energy as file
-04's degenerate BST: the structure assumes an invariant the type can't enforce.
+**Binary search — present, but not in buffr's vector path.** Binary search
+needs *sorted* data and gives O(log n) lookup. buffr's vector distances aren't
+pre-sorted (the whole point is to find the smallest at query time), so binary
+search doesn't apply to retrieval. Where it *does* live: inside Postgres's
+B-tree index walk (file `04`) — each node-level decision is a binary-search-like
+narrowing. And it's the algorithm behind `on conflict (id)`
+(`src/pg-vector-store.ts:50`) finding the existing row via the primary-key
+B-tree. So binary search is here, just not in the part you'd first look.
+
+**Why buffr's actual answer is none of (a)/(b)/(c).** The honest punchline:
+buffr's path is the HNSW walk (file `05`), O(log n) approximate, which beats
+all three exact selections by *not examining all n*. Sort+slice, heap, and
+quickselect all require touching every element at least once (O(n) floor); the
+index doesn't. That's why "use an index" is the senior answer to "find the k
+nearest among millions," and the three exact methods are what you'd reach for
+only *without* a pre-built index.
 
 ### Move 3 — the principle
 
-Most "give me the top k" problems are *selection*, not sorting — and you almost
-never need all n ordered. The repo's two paths bracket the lesson: the in-memory
-store over-solves with a full sort (fine when n is small), pgvector under-solves
-with a graph walk (necessary when n is large). The size-k heap and quickselect
-are the middle rungs neither uses but you should know exist.
+**Produce exactly the order the problem needs, and no more.** Full sort →
+selection → indexed approximate search is a ladder of producing progressively
+*less* total order for progressively *less* cost. The mistake is sorting when
+you need top-k, or selecting when you have an index. The skill is reading the
+requirement precisely — "k best" is not "all sorted," and "k best among
+millions" is not "k best among a handful" — and picking the cheapest method
+that meets exactly that requirement.
 
 ---
 
 ## Primary diagram
 
-Selection across the repo, with the work each strategy does.
+The selection ladder, with buffr's choice marked.
 
 ```
-  top-k selection — the repo's two paths + the rungs between
+  Top-k selection ladder — buffr-laptop recap
 
-  query → score chunks → SELECT top k → return
+  PROBLEM: k smallest cosine distances out of n   (pg-vector-store.ts:74-77)
 
-  ┌─ in-memory (exact, small N) ──────────────────────────┐
-  │ score all N → sort N (O(N log N)) → slice k            │  ← built
-  │ in-memory-vector-store.ts:27-32                        │
-  └────────────────────────────────────────────────────────┘
-  ┌─ rungs the repo skips ────────────────────────────────┐
-  │ quickselect O(N) · size-k heap O(N log k) (file 03)    │  ← know these
-  └────────────────────────────────────────────────────────┘
-  ┌─ pgvector (approx, large N) ──────────────────────────┐
-  │ order by <=> limit k → HNSW walk (~O(log N))           │  ← prod path
-  │ pg-vector-store.ts:74-77                               │
-  └────────────────────────────────────────────────────────┘
+  full sort      O(n log n)  │ your merge/quicksort — orders everything
+       ↓ relax: need only k
+  sort + slice   O(n log n)  │ aptkit in-memory store (simple, n small)
+  size-k heap    O(n log k)  │ textbook, file 03 (k ≪ n win)
+  quickselect    O(n) avg    │ quicksort-with-one-recursion (your sort, halved)
+       ↓ relax: don't examine all n
+  ★ HNSW walk    O(log n)~   │ buffr's ACTUAL path — approximate, file 05 ★
 
-  binary search: not in buffr's code; lives inside the B-tree index (file 04)
+  binary search  O(log n)    │ NOT in vector path — lives in B-tree index (file 04)
 ```
 
 ---
 
 ## Elaborate
 
-The sort→select progression is one of the highest-leverage ideas in applied DSA:
-the moment you realize "top k" doesn't need a full sort, a whole class of
-problems (leaderboards, k-nearest, k-largest, median) gets cheaper. Quickselect
-(Hoare, 1961 — the same Hoare as quicksort) is the canonical exact-selection
-algorithm: O(n) average by partitioning and recursing one side. The size-k heap
-(file 03) is the streaming version. ANN (file 05) is the "I don't even need to
-look at all n" version for high-dimensional data. Binary search is the searching
-primitive underneath sorted structures — invisible in buffr's source but running
-in every B-tree probe. Your five-sort portfolio is the foundation all of this
-sits on; the production lesson is that you rarely run a full sort when selection
-will do.
+The chain sort → selection → indexed search is one of the cleanest "weaken the
+requirement, drop the cost" stories in all of DSA. Quickselect (Hoare, 1961 —
+same author as quicksort) is the canonical partial-selection algorithm and the
+direct answer to "k-th smallest" interview questions; the size-k heap is its
+streaming cousin (works when you can't hold all n). Both are exact; HNSW is the
+approximate index that makes the exact methods unnecessary at scale.
+
+Where this connects: file `03` owns the heap mechanics, file `05` owns the
+HNSW walk, file `01` owns the cost models that let you rank all of these on one
+ruler. The through-line of the whole guide lands here: *the less of the input
+you must fully order, the cheaper the answer* — and buffr, by using an index,
+orders almost none of it.
 
 ---
 
 ## Interview defense
 
-**Q: The in-memory store sorts all N to return k=3. What's wrong with that at
-scale, and what are the fixes in order?**
+**Q: Find the k nearest vectors among a million. Walk your options.**
 
 ```
-  problem:  O(N log N) — orders N-3 elements nobody reads
-  fix 1:    size-k min-heap  → O(N log k)   (still scores all N)
-  fix 2:    quickselect      → O(N) avg     (still scores all N)
-  fix 3:    ANN graph index  → ~O(log N)    (doesn't score all N) ★ buffr's prod
+  sort + slice  O(n log n)  │ orders all 1M, slices k — wasteful
+  size-k heap   O(n log k)  │ better, but still touches all 1M
+  quickselect   O(n) avg    │ partition, recurse one side — but still O(n) floor
+  HNSW index    O(log n)~   │ examines ~log(1M) ≈ 20 nodes — the answer at scale
 ```
 
-Sorting all N wastes the ordering of the N−k you discard. The progression: a
-size-k heap (O(N log k)), then quickselect (O(N)), then — the real answer for
-this repo — don't score all N at all, use the HNSW index (`pg-vector-store.ts:74`).
-The first two still touch every chunk; only ANN escapes that. Naming the full
-ladder shows you see selection as distinct from sorting.
+Answer: the exact methods all have an O(n) floor — you must look at every
+vector at least once. At a million vectors per query that's too slow, so you
+pre-build an HNSW index and accept approximate results: O(log n), ~20 node
+visits instead of a million distance computations. That's buffr's path.
 
-**Q: Why isn't nearest-neighbor just a binary search on the scores?**
+Anchor: *"Exact selection has an O(n) floor; the only way under it is to index
+ahead of time and approximate — which is exactly what `order by <=> limit k`
+over HNSW does."*
+
+**Q: Difference between quicksort and quickselect?**
 
 ```
-  binary search needs a 1-D total order on the data
-  768-d vectors have NO single sort order → can't binary-search "nearest"
-  you'd have to score all N first (O(N)) to even get scores to search →
-  defeats the purpose → that's exactly why HNSW (a graph, not a sort) exists
+  quicksort:    partition → recurse on BOTH sides   → O(n log n), full order
+  quickselect:  partition → recurse on ONE side     → O(n) avg, k-th element
+                          (the side holding the k-th)
 ```
 
-Binary search needs sorted data on one dimension. Vectors are 768-dimensional
-with no natural order, and you'd have to compute all N scores to sort them
-anyway. So nearest-neighbor isn't a search-on-sorted problem; it's a graph
-problem (file 05). Naming why the obvious O(log n) tool *doesn't* apply is the
-signal.
+Answer: same partition step; quicksort recurses on both halves to fully sort,
+quickselect recurses on only the half containing the target, discarding the
+other — turning O(n log n) into O(n) average. The part people miss: worst case
+is O(n²) on adversarial pivots, fixed with randomized pivot selection, same as
+quicksort.
 
-**Anchor:** "Top-k is selection, not sorting — and the ladder is heap →
-quickselect → ANN, each touching less of n than the last. The repo's in-memory
-path is the naive top of that ladder; pgvector is the bottom."
+Anchor: *"Quickselect is quicksort that only chases the side it needs — that
+single dropped recursion is the whole speedup."*
 
 ---
 
 ## See also
 
-- `03-stacks-queues-deques-and-heaps.md` — the size-k heap, the rung between full
-  sort and ANN
-- `05-graphs-and-traversals.md` — why selection over vectors is a graph walk
-- `04-trees-tries-and-balanced-indexes.md` — binary search as the B-tree's engine
-- `01-complexity-and-cost-models.md` — the O(n log n) vs O(n) vs O(log n) math
+- `01-complexity-and-cost-models.md` — the ruler that ranks these costs.
+- `03-stacks-queues-deques-and-heaps.md` — the size-k heap, the streaming
+  selection method.
+- `04-trees-tries-and-balanced-indexes.md` — where binary search actually
+  lives in buffr (the B-tree index walk).
+- `05-graphs-and-traversals.md` — the HNSW walk that makes exact selection
+  unnecessary at scale.

@@ -1,72 +1,75 @@
-# Complexity and Cost Models
+# Complexity & Cost Models
 
-**Industry names:** asymptotic analysis · Big-O / Big-Θ · amortized analysis ·
-the cost model. **Type:** Language-agnostic.
+**Industry name(s):** asymptotic analysis · Big-O / time & space complexity ·
+amortized analysis — *Industry standard*
+
+The leading terms below are the transferable ones: **time complexity**,
+**space complexity**, **amortized cost**, **input size (n)**. The repo's local
+shapes (the eval loop, the top-k query, the upsert batch) are the parens.
 
 ---
 
-## Zoom out, then zoom in
+## Zoom out — where cost models live
 
-Every other file in this guide is going to make a cost claim — "sort+slice is
-O(n log n)", "the HNSW walk is roughly O(log n)", "Set lookup is O(1)". This
-file is the lens those claims are read through. It sits *underneath* every data
-structure, not beside them.
+Complexity isn't a layer in the system; it's the **ruler** you hold against
+every other layer. Every concept file after this one makes a cost claim, and
+this is where you calibrate the ruler.
 
 ```
-  Zoom out — where the cost lens lives
+  Zoom out — the cost ruler measures every layer
 
-  ┌─ The structures (files 02–07) ───────────────────────────┐
-  │  vectors   heaps   graphs   sorts   trees   DP            │
-  └──────────────────────────┬────────────────────────────────┘
-                             │  each one makes a cost claim
-  ┌─ ★ THIS FILE: the cost model ★ ──▼────────────────────────┐
-  │  how do we count work as input n grows?                    │ ← we are here
-  │  time · space · amortized · which n actually matters       │
-  └──────────────────────────┬────────────────────────────────┘
-                             │  grounds
-  ┌─ The repo's real numbers ─▼───────────────────────────────┐
-  │  768-dim vectors · k=3 · corpus size N · HNSW over N rows  │
+  ┌─ buffr source ─────────────────────────────────────────────┐
+  │  eval loop over Q queries   → ★ measured: O(Q · ...) ★      │ ← we are here
+  │  Set dedup, Set membership  → O(1) avg per op               │
+  └───────────────────────────┬────────────────────────────────┘
+                              │ each query calls retrieval
+  ┌─ retrieval ───────────────▼────────────────────────────────┐
+  │  embed query  → O(d) vector   |  search → O(?) depends on   │
+  │                                  store implementation        │
+  └───────────────────────────┬────────────────────────────────┘
+                              │ store = Postgres + HNSW
+  ┌─ pgvector ────────────────▼────────────────────────────────┐
+  │  exact scan: O(n·d)   vs   HNSW: ~O(log n · d)              │
+  │  the cost model is the WHOLE reason HNSW exists             │
   └────────────────────────────────────────────────────────────┘
 ```
 
-Zoom in: complexity analysis answers one question — **as the input grows, how
-fast does the work grow?** Not "how many milliseconds" (that's a benchmark);
-"how does the millisecond count *scale* when the corpus goes from 100 chunks to
-100,000". You already lived this: your sorting visualizers make the *shape* of
-O(n²) vs O(n log n) literal — bubble sort's bars crawl while merge sort's
-collapse fast. That visual is the cost model.
+Zoom in: the question this file answers is **"when I say one option is faster
+than another, faster in what units, and at what input size does the
+difference start to bite?"** You can't argue sort+slice vs heap vs ANN
+(files `03`, `05`, `06`) until the ruler is shared.
 
 ---
 
-## The structure pass
+## Structure pass — layers, axis, seams
 
-**Layers** — three altitudes the cost lens reads across in this repo:
+**Axis: cost.** Hold one question constant down the stack: *what grows when
+the corpus grows?* The answer flips at each layer, and those flips are the
+seams worth studying.
 
 ```
-  one question held constant: "what grows with n?"
+  One axis — "what does cost scale with?" — traced down
 
-  ┌─ buffr TS layer ───────────────────────┐
-  │  dedup k hits, score k hits             │  → grows with k (=3, tiny)
-  └────────────────────┬────────────────────┘
-       ┌───────────────▼──────────────────┐
-       │ pgvector layer: HNSW search       │  → grows with N (corpus), but
-       └───────────────┬───────────────────┘    sub-linearly (~log N)
-            ┌──────────▼───────────────────┐
-            │ exact baseline: in-memory     │  → grows linearly with N
-            │ store sort+slice              │    (scan every chunk)
-            └───────────────────────────────┘
+  ┌─ eval harness ────────────────┐
+  │  cost ∝ Q (number of queries) │   → linear in your eval set
+  └───────────────┬───────────────┘
+      seam: each query → one search   (cost per query is the unknown)
+      ┌───────────▼───────────────────┐
+      │ exact search: cost ∝ n · d     │   → linear in CORPUS size
+      └───────────────┬────────────────┘
+      seam: swap exact → HNSW   (THIS is the load-bearing flip)
+          ┌──────────▼──────────────────┐
+          │ HNSW: cost ∝ log n · d       │   → sublinear in corpus
+          └──────────────────────────────┘
+
+  the seam that matters: exact O(n) → approximate O(log n).
+  everything else in this repo is incidental cost.
 ```
 
-**Axis — cost.** Trace "what's the dominant `n`?" down the stack and the answer
-*flips*: at the top it's `k` (the number of hits, fixed at 3), at the bottom
-it's `N` (the corpus size, unbounded). That flip is the whole reason HNSW
-exists — see the seam.
-
-**Seam — the index boundary.** Between "scan every chunk" (in-memory store,
-O(N) per query) and "walk a graph index" (pgvector HNSW, ~O(log N) per query)
-the cost contract flips from linear to logarithmic. The same `search(vector,
-k)` signature, two cost models. That seam is where this repo's scalability
-lives.
+The seam where the cost axis flips hardest is the `VectorStore` swap:
+aptkit's in-memory store is O(n·d) exact; buffr's `PgVectorStore` over HNSW
+is roughly O(log n · d) approximate. That single boundary is why this whole
+repo exists. Mechanics hang off it.
 
 ---
 
@@ -74,155 +77,183 @@ lives.
 
 ### Move 1 — the mental model
 
-Big-O is a **growth rate with the constants thrown away**. You don't care that
-sort+slice does `3N` comparisons and the heap does `N + k log k`; you care that
-one is "linear-ish" and the other is "linear plus a tiny term". The mental
-model is a ladder — each rung grows faster than the one below as `n` climbs.
+You already have the right instinct from your sorting visualizers: bubble
+sort *looks* slow because the bars swap O(n²) times, and the picture makes
+the cost real. Big-O is that picture generalised — **strip the constants and
+the lower-order terms, keep the term that dominates as n grows.**
 
 ```
-  the growth ladder — work vs input size n
+  Big-O — keep only the dominant term as n → ∞
 
-  O(1)        ────────────────────  flat        Set.has(id)
-  O(log n)    ──┐                    bends early  HNSW walk (approx)
-  O(n)         ─┴──┐                 straight     scan every chunk
-  O(n log n)      ─┴───┐             gentle curve sort+slice top-k
-  O(n²)               ─┴────────┐    steep        bubble sort (reincodes)
-  O(2ⁿ)                        ─┴──  cliff        naive recursion (file 07)
+  actual cost:   3n² + 50n + 200
+                  │     │     │
+                  │     │     └─ constant   → drop (irrelevant at scale)
+                  │     └─ lower order       → drop (n² swamps it)
+                  └─ dominant term           → KEEP
 
-  read it as: at n=10 they're close; at n=10,000 they're worlds apart
+  Big-O = O(n²)        the only term that matters when n is large
 ```
 
-The skill is reading *which rung* a piece of code sits on by looking at its
-loops and recursion, not by timing it.
+One sentence: **complexity is the growth rate of cost as input size grows,
+with constants and small terms discarded.** The discarding is the point — at
+n = 10 the constants matter; at n = 1,000,000 (a real corpus) only the
+dominant term does.
 
-### Move 2 — the three things you actually count
+### Move 2 — the cost models that show up in this repo
 
-**Time complexity — count the dominant operation as n grows.** Walk the loop
-nesting: one loop over n is O(n); a loop inside a loop is O(n²); halving the
-search space each step is O(log n). In `eval-cmd.ts:26` the dedup
-`[...new Set(hits.map(...))]` is O(k) — it touches each of the `k` hits once.
-Trivial, because `k=3`. But the *same* operation over the whole corpus would be
-O(N), and that's the line you'd watch.
+**Time complexity — count the operations, as a function of n.** The eval
+loop (`src/cli/eval-cmd.ts:24-32`) runs once per query. Inside, for each
+query it does one retrieval, one dedup, two scoring passes. Annotated:
 
-```
-  reading loop nesting → cost  (the buffr eval loop)
-
-  for each query in queries:            ── outer: Q queries
-      pipeline.query(query, K)          ── one ANN search: ~O(log N)
-      [...new Set(hits.map docId)]      ── O(k), k=3
-      scorePrecisionAtK(...)            ── O(k)
-  ────────────────────────────────────
-  total ≈ Q · (log N + k)    ── Q and k tiny; the log N term is the cost story
+```ts
+for (const { query, relevant } of queries) {        // ← runs Q times
+  const hits = await pipeline.query(query, K);       // ← search: O(search) each
+  const docs = [...new Set(hits.map(...))];          // ← dedup: O(K)
+  const p = scorePrecisionAtK(docs, new Set(relevant), 1).score;  // O(K)
+  const r = scoreRecallAtK(docs, new Set(relevant), K).score;     // O(K)
+}
 ```
 
-**Space complexity — count the memory that grows with n.** The in-memory store
-holds every chunk in a `Map` (`in-memory-vector-store.ts:12`) — O(N) space,
-fine for a demo, a wall at scale. pgvector keeps the vectors on disk and the
-HNSW graph as an on-disk index, so buffr's *process* memory stays flat as the
-corpus grows. That's a space-complexity decision disguised as a deployment
-choice.
+Total time is `O(Q · (search + K))`. `K` is fixed at 3, so the `Set` work is
+constant per query — the loop is **linear in Q**, and the real cost is hidden
+inside `search`. That's the honest read: buffr's eval harness is cheap; the
+expensive term is delegated to the store.
 
-**Amortized analysis — average cost per op across a sequence, when one op is
-occasionally expensive.** You met this building `BinaryHeap.ts`: most `insert`s
-are cheap, but `heapifyUp` occasionally bubbles to the root — O(log n) worst
-case, O(1) typical, and *amortized* it stays O(log n) because the expensive
-case is rare. A dynamic array (JS array growth) is the canonical example: most
-pushes are O(1), the occasional resize copies everything (O(n)), but spread
-across all pushes it amortizes to O(1). buffr doesn't implement either, but the
-HNSW *insert* (every `upsert` at `pg-vector-store.ts:38`) has exactly this
-amortized character inside Postgres.
+**Space complexity — count what you hold in memory at once.** `[...new
+Set(hits.map(...))]` (`:26`) materialises a fresh array of deduped doc ids —
+O(K) extra space. Trivial here. The space cost that *would* matter is the one
+buffr deliberately doesn't pay: aptkit's in-memory store holds all n vectors
+in RAM, O(n·d). buffr pushes that into Postgres, so buffr's *process* stays
+O(1) in corpus size. That's a space-cost decision baked into the architecture.
 
-**The boundary condition everyone forgets:** Big-O hides the constant, and the
-constant sometimes wins. For `k=3` and a 100-chunk demo corpus, the O(N)
-in-memory scan *beats* HNSW — the graph walk's overhead isn't worth it until N
-is large. Naming "the asymptotic loser wins at small n" is the senior move.
+**Amortized analysis — average cost over a sequence, not worst case per op.**
+This is the one your `BinaryHeap` already taught you, even if the comment
+didn't name it. `upsert` (`src/pg-vector-store.ts:38-65`) inserts chunks one
+at a time inside a transaction. Each insert into the HNSW index is *usually*
+cheap, but occasionally the index does more work to keep the graph navigable.
+Amortized cost spreads those rare expensive inserts across the cheap ones:
+
+```
+  Amortized — rare expensive ops spread over many cheap ones
+
+  inserts:  c  c  c  c  EXPENSIVE  c  c  c  c  c  EXPENSIVE  c ...
+            └──── cheap O(log n) ────┘          └─ cheap ─┘
+                          ▲                          ▲
+                  occasional restructure      occasional restructure
+
+  per-op worst case:  high
+  amortized (averaged): O(log n)   ← the number you actually budget with
+```
+
+The dynamic-array `push` you use every day (`[...arr, x]` grows the backing
+buffer occasionally) is the canonical example: O(1) amortized, O(n) on the
+rare resize. Same shape.
+
+**Choosing the right cost model — input size is a choice.** The trap is
+measuring against the wrong n. The eval loop is O(Q) where Q is your *labeled
+query set* (`eval/queries.json`) — small, fixed. The search inside is O(f(n))
+where n is the *corpus size* — large, growing. Two different n's in one loop.
+Naming which n you mean is half of getting the analysis right.
 
 ### Move 3 — the principle
 
-Pick the cost model that matches the input that actually grows. In this repo
-the growing input is `N` (corpus size), not `k` (fixed at 3) — so every cost
-question collapses to "how does this scale in N?", and the answer is the whole
-reason the HNSW graph exists instead of a flat scan.
+**Complexity is a claim about scale, not speed.** It says nothing about
+whether something is fast at n = 10; it predicts what happens at n =
+10,000,000. Every "X is faster than Y" in the next seven files is really
+"X has a better dominant term," and the only honest way to compare is to fix
+the same n for both. That discipline — same ruler, same input size — is the
+thing this file installs.
 
 ---
 
 ## Primary diagram
 
-The full picture — the cost lens applied across buffr's retrieval path.
+The cost models, one frame, mapped to where each shows up in buffr.
 
 ```
-  cost model across the retrieval path
+  Cost models in buffr-laptop — one recap
 
-  ┌─ buffr TS ─────────────────────────────────────────────┐
-  │ embed query        O(d)   d=768, one pass               │
-  │ dedup k hits       O(k)   k=3   eval-cmd.ts:26          │
-  │ score k hits       O(k)   k=3                           │
-  └───────────────────────┬─────────────────────────────────┘
-                          │  the search call
-  ┌─ pgvector (chosen) ───▼─────────────────────────────────┐
-  │ HNSW graph walk    ~O(log N · d)   approx, sql/001:30    │ ← scales
-  └─────────────────────────────────────────────────────────┘
-  ┌─ in-memory (baseline, not in prod) ─────────────────────┐
-  │ scan + sort        O(N·d + N log N) in-memory:28-31      │ ← doesn't
-  └─────────────────────────────────────────────────────────┘
-
-  the d (=768) factor rides every distance computation — never free
+  TIME        ┌─ eval loop O(Q·(search+K)) ──┐  cli/eval-cmd.ts:24
+              │  search = the unknown term   │
+              └──────────────┬───────────────┘
+  AMORTIZED   ┌──────────────▼───────────────┐  pg-vector-store.ts:38
+              │  HNSW insert ~O(log n) avg,   │
+              │  occasional restructure       │
+              └──────────────┬───────────────┘
+  SPACE       ┌──────────────▼───────────────┐  architecture decision
+              │  buffr process O(1) in corpus │
+              │  (Postgres holds the n·d data)│
+              └──────────────┬───────────────┘
+  THE FLIP    ┌──────────────▼───────────────┐  sql/001:28
+              │  exact O(n·d) → HNSW O(log n·d)│
+              │  the cost model that justifies │
+              │  the whole repo                │
+              └───────────────────────────────┘
 ```
 
 ---
 
 ## Elaborate
 
-Big-O came from Bachmann and Landau (number theory, 1890s), pulled into
-algorithm analysis by Knuth. The reason it dominates interviews is that it's the
-one cost claim that survives hardware changes — a faster CPU shifts the
-constant, not the exponent. The thing it *hides* is exactly what bites in
-production: cache behavior, the `d=768` constant on every distance op, and
-disk-vs-memory. For this repo, the honest full cost of a query is
-`O(log N)` graph hops, each costing `O(d)` to compute a distance, each hop
-possibly a disk page read — three different cost models stacked. The
-database-systems guide owns that disk-page layer.
+Big-O came out of a need to compare algorithms independent of the machine
+they run on — a 1970s constant-factor difference between two computers could
+swamp a real algorithmic improvement, so the field agreed to throw constants
+away and compare growth rates only. That same discipline is why "the HNSW
+index is faster" is a meaningful, machine-independent claim: it's O(log n)
+vs O(n), and that holds whether you run it on a laptop or a data-center node.
+
+Where this connects next: `06` (sorting/searching/selection) is the file
+where these cost models get teeth — sort+slice is O(n log n), a size-k heap
+is O(n log k), ANN is O(log n) approximate, and only the shared ruler lets
+you rank them. For the *storage-engine* cost of the HNSW build (page reads,
+`ef_construction`), see **`study-database-systems`**.
 
 ---
 
 ## Interview defense
 
-**Q: What's the time complexity of the retrieval in this repo, and what's the
-dominant term?**
+**Q: The eval loop calls `pipeline.query` Q times. What's the complexity?**
 
 ```
-  per query:  embed O(d) → ANN walk ~O(log N · d) → dedup/score O(k)
-              d=768 (const-ish), k=3 (const), N = corpus (the variable)
-  verdict:    O(log N) in the corpus — the d factor is the hidden constant
+  O(Q · search_cost) + O(Q · K) for scoring
+
+  ┌─ Q queries ─┐   each: ┌─ search: O(f(n)) ─┐ + ┌─ Set work: O(K) ─┐
+  └─────────────┘         └───────────────────┘   └──────────────────┘
+                  n = corpus size, K = 3 (fixed)
 ```
 
-It's logarithmic in the corpus because the HNSW graph lets the search skip most
-chunks. The hidden cost is the `d=768` factor on every distance computation —
-that's a constant in N but it's not small, and it's why embedding dimension is a
-real performance lever, not a detail.
+Answer: linear in Q, with the real cost in `search`, which is O(n·d) exact or
+~O(log n·d) over the HNSW index. The two n's — query-set size and corpus size
+— are different; name both.
 
-**Q: When would the O(N) in-memory scan beat the O(log N) graph index?**
+Anchor: *"The loop is O(Q); the corpus term is delegated to the store, so the
+honest complexity statement names which n you mean."*
+
+**Q: Why is amortized analysis the right model for HNSW inserts, not
+worst-case?**
 
 ```
-  small N:  flat scan = N·d distance ops, no graph overhead   → wins
-  large N:  graph walk = log N · d ops, skips the rest          → wins
-  crossover ≈ when log N's constant overhead < N's scan cost
+  per-op worst case overcounts:  rare restructure ≠ every insert
+  amortized spreads it:          total work / number of ops
 ```
 
-At a 100-chunk demo corpus the in-memory scan wins — the graph index's
-bookkeeping isn't worth it until N is in the thousands. Asymptotics describe the
-limit, not every n. Naming the crossover is the signal you understand the model
-rather than reciting it.
+Answer: most inserts are O(log n); the occasional graph restructure is rare,
+so averaging over the insert sequence gives O(log n) amortized — the number
+you actually capacity-plan with. Same as dynamic-array `push`: O(1) amortized
+despite O(n) resizes. The part people forget: amortized is a *worst-case
+average over a sequence*, not an expected value over random input — it holds
+even adversarially.
 
-**Anchor:** "The variable is N, everything else is a constant — so every cost
-question here is really *how does it scale in corpus size*."
+Anchor: *"Amortized is sequence-averaged worst case — that's why it's a
+budget, not an optimism."*
 
 ---
 
 ## See also
 
-- `06-sorting-searching-and-selection.md` — where O(n log n) sort+slice vs the
-  O(log n) HNSW walk gets walked in full
-- `02-arrays-strings-and-hash-maps.md` — the O(1) Set/Map operations
-- Cross-link: `.aipe/study-database-systems/` — the disk-page cost layer under
-  every distance op
+- `06-sorting-searching-and-selection.md` — where these cost models decide
+  sort+slice vs heap vs ANN.
+- `05-graphs-and-traversals.md` — the O(log n) HNSW walk this file keeps
+  pointing at.
+- **`study-database-systems`** — the storage-engine cost of building and
+  querying the HNSW index.

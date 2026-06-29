@@ -1,196 +1,207 @@
-# Dense vs sparse retrieval — buffr is dense-only
+# Dense vs Sparse Retrieval
 
-*Industry standard (NOT yet exercised). The exact-match blind spot of embedding search.*
+### *industry: dense (embedding) vs sparse (lexical/BM25) retrieval · type: the two ways to score relevance*
 
-## Zoom out, then zoom in
+## Zoom out
 
-Pull up buffr's retrieval and notice what's *not* there. Every match is by embedding similarity — semantic, fuzzy, meaning-based. There is no second path that matches *exact words*. That second path is sparse retrieval (BM25), and buffr doesn't have it.
+Same store, same query path — but now we question the *scoring function itself*. buffr ranks by cosine over embeddings (dense). There's a whole other family — keyword/lexical scoring (sparse, BM25) — that buffr doesn't use at all. This file is about what that costs.
+
+**buffr's retrieval stack, the scoring choice marked**
 
 ```
-  Zoom out — buffr's retrieval has one lane, not two
-
-  ┌─ Retrieval layer ──────────────────────────────────────────┐
-  │  ┌─ DENSE (buffr HAS this) ─────────────────────────────┐   │
-  │  │ ★ embed query → cosine ANN over agents.chunks ★      │   │ ← here
-  │  └──────────────────────────────────────────────────────┘   │
-  │  ┌─ SPARSE (buffr does NOT have this) ───────────────────┐   │
-  │  │   BM25 / tsvector keyword match — MISSING             │   │
-  │  └──────────────────────────────────────────────────────┘   │
-  └─────────────────────────────────────────────────────────────┘
-  ┌─ Storage ───────────────────────────────────────────────────┐
-  │  agents.chunks.embedding (768)  ·  content text (NOT indexed │
-  │                                     for full-text search)    │
-  └─────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│  search_knowledge_base  ranked hits                            │
+├──────────────────────────────────────────────────────────────┤
+│  ★ SCORING ★            PURE DENSE — cosine over 768-dim only  │  ◄── this file
+│                         (no BM25, no keyword scoring)          │
+├──────────────────────────────────────────────────────────────┤
+│  PgVectorStore          order by embedding <=> query           │
+└──────────────────────────────────────────────────────────────┘
 ```
 
-Zoom in. You've shipped dense RAG, so dense is the familiar lane. The concept here is its *complement*: **sparse retrieval** matches on literal term overlap (like a search engine), and it's strong exactly where dense is weak — exact identifiers, rare terms, codes, names the embedding model barely saw. buffr is dense-only, so it inherits dense's blind spot. This file builds what sparse is, why the gap bites, and the Case-B move to add a Postgres `tsvector` lane.
+You built a dense RAG app, so dense is your default instinct. Good — but it has a specific blind spot, and the fix (sparse) is the thing you've probably never wired. This file names the blind spot precisely and shows where sparse would slot in.
 
 ## Structure pass
 
-Read the skeleton: two retrieval families, traced on one axis.
+The axis is **what "match" means**: shared meaning vs. shared tokens. The seam is the moment a query's intent diverges from its exact words.
 
-**Layers:** query → matcher → ranked results — but there are two *kinds* of matcher, and buffr only has one.
-
-**Axis traced — "what does a match mean?"**
+**Two definitions of relevance**
 
 ```
-  one axis: what counts as relevant?
-
-  ┌─ DENSE (buffr has) ─────┐   MEANING — "renew passport" matches
-  │  cosine over embeddings  │   "travel document expiry" (no shared word)
-  └────────────┬────────────┘
-               │ seam: the two families disagree on rare/exact terms
-  ┌─ SPARSE (buffr lacks) ──┐   WORDS — "E4017" matches a chunk containing
-  │  BM25 / tsvector         │   literally "E4017"; rare exact terms shine
-  └─────────────────────────┘
+   DENSE (buffr)                     SPARSE (BM25, not in buffr)
+   ────────────                      ───────────────────────────
+   match = similar MEANING           match = shared exact TERMS
+   "coffee" ≈ "espresso, oat milk"   "PG_a1b2" == "PG_a1b2"
+   cosine over embeddings            term-frequency / inverse-doc-freq
+   great on paraphrase               great on exact strings, ids, codes
+   ┌──────────────────┐              ┌──────────────────┐
+   │ embedding <=> q  │   ──seam──►  │ tsvector @@ tsq  │  (Postgres FTS)
+   └──────────────────┘              └──────────────────┘
+        the seam: does the query mean it, or does it say it literally?
 ```
 
-**The seam that matters:** the boundary between *meaning-match* and *word-match*. Dense wins on paraphrase and synonyms; sparse wins on exact tokens the embedder smears together. buffr lives entirely on the dense side, so any query that hinges on an exact rare string — an error code, a product SKU, an unusual surname — is at the mercy of a model that probably never learned a sharp vector for it. Hold that: the gap isn't "dense is bad," it's "dense alone is half the toolkit."
+Left of the seam: dense shines when the query *means* what a doc says without sharing words — paraphrase, synonyms, intent. Right of the seam: sparse shines when the query contains an *exact token that must match* — an error code, a function name, a SKU, a rare proper noun. Consequence: a pure-dense system like buffr can fumble exact-string queries that a one-line keyword index would nail.
 
 ## How it works
 
-### Move 1 — the mental model
+### Move 1 — Mental model: a semantic search bar vs. Ctrl-F
 
-You know the difference between a fuzzy autocomplete that guesses what you *meant* and `Ctrl-F` that finds the *exact string*? Dense is the fuzzy guess; sparse is `Ctrl-F` with relevance ranking. Sparse retrieval (BM25 is the classic algorithm) scores a chunk by how many query terms it contains, weighted so rare terms count more and long documents don't win just by being long.
+Dense retrieval is a search box that understands intent — type "how I caffeinate" and it finds the coffee doc. Sparse retrieval is Ctrl-F with smarts — type the exact token `nomic-embed-text:v1.5` and it finds every doc containing that literal string, ranked by how distinctive the term is. You want both, because users do both.
+
+**When each wins**
 
 ```
-  the sparse kernel — score by weighted term overlap
+  query: "how does the author take coffee"   ──► DENSE wins
+          (intent, no rare exact token)           paraphrase-friendly
 
-  query: "passport E4017 renewal"
-            │ split into terms
-            ▼
-  for each chunk: score = Σ over query terms of
-                          (term frequency in chunk)
-                        × (how RARE the term is overall)   ← IDF
-                        ÷ (length normalization)
-  → "E4017" is rare ⇒ a chunk containing it scores HIGH
-    (dense would smear "E4017" ≈ "E4018" ≈ "E4019")
+  query: "PgVectorStore.assertDim"            ──► SPARSE wins
+          (exact identifier, must match)           dense may blur it into
+                                                   "vector store error checks"
 ```
 
-The kernel: term-frequency × inverse-document-frequency, length-normalized. The load-bearing piece is IDF — it's *why* sparse beats dense on rare exact terms: a term almost no document contains is a strong signal when it matches.
+Frontend bridge: it's fuzzy search vs. exact filter in a command palette. Fuzzy gets you "settings" from "stngs"; exact gets you the file literally named `config.ts`. A good palette does both; buffr currently does only fuzzy.
 
-### Move 2 — the step-by-step walkthrough
+### Move 2 — Walk the mechanism
 
-**Step 1 — what buffr does today: dense only.** The query path embeds and runs cosine ANN. There is no keyword branch:
+**Part A — buffr is pure dense (the honest state)**
+
+There is exactly one scoring path. The store orders by cosine distance, full stop. No `tsvector`, no BM25, no keyword column.
+
+**The single scoring path**
+
+```
+  query ──► embed (768) ──► order by embedding <=> $1 ──► top-k
+                            ▲
+                  the ONLY relevance signal buffr has
+                  (no lexical channel exists)
+```
 
 ```ts
-// aptkit packages/retrieval/src/pipeline.ts:55-58 (queryKnowledgeBase)
-const [vector] = await wiring.embedder.embed([query]);
-if (!vector) return [];
-return wiring.store.search(vector, topK);     // ONLY a vector search — no BM25 lane
+// src/pg-vector-store.ts:74-76 — cosine is the whole ranking
+`order by embedding <=> $1::vector
+ limit $3`
 ```
 
-```ts
-// src/pg-vector-store.ts:70-78 — the one and only matcher
-order by embedding <=> $1::vector    -- cosine distance; meaning-match only
-```
+That `order by` is buffr's entire relevance model. There is no second clause that would say "and also boost rows containing the query's literal terms." A query whose key signal is an exact token has to survive on whatever *semantic* echo that token leaves in the embedding — which for a rare identifier is often weak.
 
-There's no `to_tsvector`/`to_tsquery`, no `ts_rank`, no full-text index on `content`. The `content` column is stored but never matched against by words. That's the whole gap in one observation: the text is *there*, just not *searchable by term*.
+**Part B — Where dense quietly fails**
 
-**Step 2 — where it bites, concretely.** Take a query like *"what's error E4017?"* over a corpus where exactly one chunk mentions `E4017`. Dense retrieval embeds `E4017` into a vector the model never learned sharply (rare token → mushy embedding), so the right chunk may not land in the top-k. A sparse matcher would rank that chunk first *because* `E4017` is rare and matches exactly.
+Embeddings smear exact tokens into nearby meaning. A 768-dim vector for `"PG_ERR_4012"` doesn't preserve that exact string — it lands somewhere near "Postgres error code," close to *other* error codes too. Dense retrieval can therefore rank a *different* error code above the exact one you asked for.
 
-```
-  Comparison — same query, two families
-
-  query: "error E4017"
-  ┌─ DENSE (buffr) ──────────┐    ┌─ SPARSE (missing) ────────┐
-  │ E4017 → mushy vector      │    │ E4017 → exact term match   │
-  │ may miss the right chunk  │    │ rare term (high IDF) → top1│
-  │ great for paraphrase      │    │ great for codes/ids/names  │
-  └───────────────────────────┘    └────────────────────────────┘
-  buffr only has the left box → rare exact terms are a blind spot
-```
-
-**Step 3 — the Case-B lane: a Postgres tsvector path.** The fix lives entirely in buffr's storage (Postgres already has full-text search built in). Add a `tsvector` column and a GIN index, then a second search method that ranks by `ts_rank` — a sibling to `search`, not a replacement:
+**The exact-token blind spot**
 
 ```
-  Layers-and-hops — adding the sparse lane (Case B)
-
-  ┌─ query ──────┐ hop A: embed → cosine (existing)  ┌─ agents.chunks ──┐
-  │ "error E4017"│ ─────────────────────────────────►│ embedding(768)    │
-  └──────┬───────┘ hop B: to_tsquery → ts_rank (NEW)  │ content_tsv  ◄NEW │
-         │        ─────────────────────────────────► │ (GIN index)       │
-         ▼                                            └──────────────────┘
-   two ranked lists → (combine later: see 06-hybrid-retrieval-rrf.md)
+  query: "PG_ERR_4012"
+        │ embed
+        ▼
+  vector ≈ "postgres error code" region
+        │ cosine
+        ▼
+  ranks:  PG_ERR_4015  (0.91)   ◄── wrong code, but semantically nearby
+          PG_ERR_4012  (0.90)   ◄── the right one, NOT on top
+          PG_ERR_4009  (0.89)
+   sparse would put 4012 first: exact term match dominates
 ```
 
-This file stops at "add the sparse lane." *Combining* the two ranked lists is reciprocal-rank fusion — that's `06-hybrid-retrieval-rrf.md`, the natural next file.
+This isn't hypothetical hand-waving — it's the structural reason dense-only systems add a lexical channel. The embedding is a lossy compression of meaning (file 01), and exact strings are precisely the information that compression throws away.
 
-### Move 3 — the principle
+### Move 2.5 — Current vs. future
 
-Dense and sparse fail in opposite directions, which is exactly why mature retrieval runs both. Dense embeds *meaning* and goes blind on rare exact tokens; sparse matches *words* and goes blind on paraphrase. Choosing only one means accepting its specific blind spot forever. buffr chose dense — correct for a meaning-heavy personal corpus — but "dense-only" is a position to *hold consciously*, not a default to forget. The general lesson: when two methods have complementary failure modes, the question isn't "which one," it's "can I afford both."
+**Case B: buffr has no sparse retrieval. Postgres can do it natively; nothing wires it.**
+
+```
+  TODAY                              ADD SPARSE (this is the gap)
+  ─────                              ────────────────────────────
+  dense only:                        keep dense, ADD a lexical channel:
+  order by embedding <=> q           Postgres FTS: to_tsvector(content)
+                                     query: tsvector @@ plainto_tsquery
+  ┌──────────────────┐               ┌──────────────────────────────┐
+  │ one signal:      │               │ two signals: cosine + BM25-ish │
+  │ cosine           │   ──gap──►    │ then FUSE (see 06-hybrid)      │
+  └──────────────────┘               └──────────────────────────────┘
+   exact tokens ──► weak             exact tokens ──► strong
+```
+
+Postgres already ships full-text search (`to_tsvector` / `ts_rank`) — buffr just doesn't use it. Adding a lexical channel is a column + a GIN index + a second `order by`, *not* a new datastore. The remaining question is how to combine the two rankings, which is the next file (06, RRF). Sparse alone is the missing channel; fusing it is the next step.
+
+### Move 3 — The principle
+
+**Dense and sparse fail in opposite directions, so the strong systems run both.** Dense forgives wording and forgets exact tokens; sparse demands exact tokens and ignores intent. buffr being pure dense is fine for its current corpus — personal markdown notes, mostly paraphrase-shaped queries — but it has a named, structural weakness on exact identifiers. Knowing *which* failures are dense-shaped is the skill; the fix is to add the channel that doesn't share the weakness.
 
 ## Primary diagram
 
-The gap, one frame:
+The single channel buffr has, and the second one it's missing.
+
+**One scoring channel, where the second belongs**
 
 ```
-  buffr retrieval — dense lane present, sparse lane absent
-
   query
     │
-    ├─► DENSE  (HAS)  embed → cosine ANN over embedding(768)
-    │                 strong: paraphrase, synonyms, meaning
-    │                 weak:   rare exact terms (E4017, SKUs, names)
+    ├──► DENSE (buffr has this) ──► embed ──► cosine over agents.chunks ──► ranking A
     │
-    └─► SPARSE (MISSING)  BM25 / tsvector over content
-                      strong: exact rare terms (high IDF)
-                      weak:   paraphrase
-  ───────────────────────────────────────────────────────────
-  today: only the dense lane runs → exact-rare-term blind spot
-  Case B: add tsvector + GIN + ts_rank lane (then fuse via RRF, see 06)
+    └──► SPARSE (buffr lacks this) ─► tsvector @@ tsquery ──► ts_rank ──► ranking B
+                                       (Postgres FTS, not wired)
+    ──────────────────────────────────────────────────────────────────
+    today: only ranking A reaches the model
+    next:  fuse A + B (06-hybrid-retrieval-rrf) so exact tokens survive
 ```
+
+After the box: buffr ships ranking A alone. The exact-token failure mode is the price, and the fix is a lexical ranking B that Postgres can produce natively.
 
 ## Elaborate
 
-BM25 ("Best Matching 25") is the workhorse of classical IR — it's what Elasticsearch and Lucene rank with by default, a refinement of TF-IDF that adds term-frequency saturation and document-length normalization. "Sparse" refers to the representation: a document becomes a sparse vector over the whole vocabulary (mostly zeros, nonzero only for terms it contains), versus a "dense" embedding where all 768 dimensions are nonzero. Postgres ships sparse retrieval natively via `tsvector`/`tsquery` and `ts_rank`, so buffr needs *no new dependency* to add the lane — just a column, a GIN index, and a query.
-
-The reason this matters more than it looks: real user queries are bimodal. Some are conceptual ("how do I think about X") where dense shines; others are lookup ("find the doc that says E4017") where sparse shines. A dense-only system quietly fails the second kind, and you won't notice without an eval that includes exact-term queries — which connects to the eval gap in `../05-evals-and-observability/`.
+- **Why BM25 is called "sparse."** A lexical representation is a giant vector with one slot per vocabulary term, almost all zeros — sparse. A dense embedding is 768 mostly-nonzero floats. The names describe the vectors' density, and the densities reflect what they encode: terms vs. meaning.
+- **buffr's corpus hides the weakness.** work.md/stack.md/coffee.md are prose with paraphrase-friendly queries — dense's home turf. Point buffr at a codebase or a log corpus full of identifiers and the exact-token gap would bite immediately.
+- **Sparse is also cheaper and more debuggable.** A BM25 hit is explainable ("matched because it contains `assertDim` 4×"); a cosine hit is opaque. For exact-match queries, sparse is both better *and* more legible.
+- **You rarely choose one — you weight them.** The mature move isn't dense-or-sparse, it's dense-and-sparse with a fusion rule. That's why this file's gap leads directly into hybrid retrieval rather than "swap to BM25."
 
 ## Project exercises
 
-> No `aieng-curriculum.md` is present in this repo, so Build-item IDs are not cited. Exercises are derived directly from the codebase and the spec's concept set.
+### Add a Postgres full-text (sparse) channel alongside cosine
 
-### Add a Postgres tsvector sparse lane
+- **Exercise ID:** [B2B.2] (cite [C2.4], Phase 2B) — Case B: buffr is pure dense. Sparse retrieval is **not implemented**; this is the primary target.
+- **What to build:** Add a `tsvector` column (or expression index) over `chunks.content`, a GIN index, and a `searchLexical(query, k)` method on `PgVectorStore` that ranks by `ts_rank`. Return the same `Hit` shape so it's drop-in.
+- **Why it earns its place:** It's the missing channel, and Postgres does it natively — no new infrastructure. It directly closes the exact-token blind spot this file names.
+- **Files to touch:** `sql/001_agents_schema.sql` (tsvector + GIN index), `src/pg-vector-store.ts` (a lexical search method).
+- **Done when:** A query for an exact identifier in the corpus ranks the exact-match chunk first via the lexical channel, where dense ranked it lower.
+- **Estimated effort:** 1 day.
 
-- **Exercise ID:** SPR-1 (Case B — buffr is dense-only; add sparse).
-- **What to build:** add a `content_tsv tsvector` column (generated from `content`) and a GIN index to `agents.chunks`, then a `searchSparse(query, k)` method on `PgVectorStore` that ranks by `ts_rank(content_tsv, plainto_tsquery($1))`. Keep it a *sibling* to the existing dense `search`.
-- **Why it earns its place:** it closes the exact-rare-term blind spot using Postgres's built-in FTS — no new dependency — and sets up hybrid fusion (`06`).
-- **Files to touch:** `sql/001_agents_schema.sql:14-30` (add column + GIN index), `src/pg-vector-store.ts` (new `searchSparse` beside `search` at `:67-85`).
-- **Done when:** a query for a rare exact term (e.g. an error code) returns the containing chunk via the sparse lane, proven by a test, while the dense lane misses it.
-- **Estimated effort:** half a day.
+### Build an exact-token eval to expose the dense gap
 
-### Build a dense-vs-sparse eval set
-
-- **Exercise ID:** SPR-2 (Case B — measure the gap before fusing).
-- **What to build:** a small labelled eval with two query buckets — paraphrase queries and exact-rare-term queries — and run precision@k for the dense lane vs the new sparse lane, demonstrating each wins its own bucket.
-- **Why it earns its place:** it makes "dense and sparse fail in opposite directions" a measured fact, and justifies hybrid (`06`) with numbers.
-- **Files to touch:** the eval path (`src/cli/eval-cmd.ts`), running both `search` and `searchSparse` from `src/pg-vector-store.ts`.
-- **Done when:** the report shows dense winning paraphrase queries and sparse winning exact-term queries.
-- **Estimated effort:** half a day. Cross-link `../05-evals-and-observability/`.
+- **Exercise ID:** [B2B.3] (cite [C2.4], Phase 2B) — Case B prerequisite that justifies adding sparse.
+- **What to build:** Extend `eval/queries.json` with queries that hinge on exact tokens (an identifier, a version string) and measure dense P@1 on them. Quantify how often pure-dense misses the exact match.
+- **Why it earns its place:** The dense weakness is asserted here, not measured in buffr. You need the miss-rate on *your* corpus before sparse earns its place.
+- **Files to touch:** `eval/queries.json`, `src/cli/eval-cmd.ts`.
+- **Done when:** The eval shows a measurable dense P@1 drop on exact-token queries vs. paraphrase queries.
+- **Estimated effort:** 1–4hr.
 
 ## Interview defense
 
-**Q: Is buffr dense or sparse retrieval, and what does that cost you?**
-Answer: dense-only — every match is cosine similarity over `nomic` embeddings; there's no BM25 or `tsvector` lane. The cost is the exact-rare-term blind spot: an error code or unusual name embeds to a mushy vector the model never learned sharply, so the right chunk can fall out of the top-k. Sparse retrieval would rank that chunk first because the term is rare (high IDF) and matches exactly. Dense and sparse fail in opposite directions, so dense-only accepts dense's specific failure forever.
+**Q: "buffr is dense-only — when does that hurt?"**
+
+On exact-token queries — identifiers, error codes, version strings. Embeddings compress meaning and lose exact strings, so cosine can rank a semantically-nearby-but-wrong token above the literal match. Sparse/BM25 would nail it because it scores exact term overlap.
 
 ```
-  dense: meaning-match  → great paraphrase, blind on "E4017"
-  sparse: word-match    → great "E4017", blind on paraphrase
-  buffr has only the first lane
+  dense ──► great on paraphrase, blurs exact tokens
+  sparse ──► great on exact tokens, ignores intent
 ```
 
-**Q: How would you add sparse without a new dependency?**
-Answer: Postgres already does it. Add a `content_tsv tsvector` column with a GIN index on `agents.chunks`, and a `searchSparse` method ranking by `ts_rank(content_tsv, plainto_tsquery(query))` — a sibling to the existing cosine `search`. Then fuse the two ranked lists with reciprocal-rank fusion. The anchor: **the load-bearing IR fact people forget is IDF — sparse beats dense on rare exact terms precisely because a term almost no document contains is a strong match signal.**
+Anchor: *"Dense forgets the exact word; sparse demands it."*
+
+**Q: "Why not just switch to sparse then?"**
+
+Because sparse loses intent — it can't match "how I caffeinate" to a coffee doc with no shared words, which is most of buffr's queries. The answer isn't dense-or-sparse, it's both, fused. Postgres can produce the lexical channel natively.
 
 ```
-  add column content_tsv + GIN index → searchSparse via ts_rank
-  (no new dependency; Postgres FTS is built in) → fuse with RRF (06)
+  switch to sparse ──► lose paraphrase matching
+  add sparse + fuse ──► keep both strengths
 ```
+
+Anchor: *"Don't switch channels — add one."*
 
 ## See also
 
-- `01-embeddings.md` — why rare exact tokens embed to weak vectors (the root of the blind spot).
-- `06-hybrid-retrieval-rrf.md` — combining the dense and sparse lanes (the natural next step).
-- `04-vector-databases.md` — the `agents.chunks` table where a `tsvector` column would live.
-- `../05-evals-and-observability/` — the eval that surfaces the exact-term failure.
+- `./06-hybrid-retrieval-rrf.md` — how to fuse the dense and sparse rankings (the natural next step).
+- `./01-embeddings.md` — why the embedding is lossy on exact strings in the first place.
+- `./04-vector-databases.md` — Postgres already hosts the FTS this gap needs.
+- `../../study-database-systems/` — full-text search, tsvector, GIN indexes.

@@ -1,216 +1,197 @@
 # Streaming
 
-*Token streaming / incremental decoding — Industry standard.*
+*Industry name: token streaming / server-sent generation. Type: **Industry standard.***
 
 ## Zoom out, then zoom in
 
-The model generates tokens one at a time (`01-what-an-llm-is.md`). You get a choice about *when* the application sees them: stream each token as it's produced, or wait and hand over the whole string at the end. buffr waits. Here's the path that waits.
+Generation is slow — `gemma2:9b` produces tokens one at a time over seconds. *Streaming* is whether you show them as they arrive or wait for the whole answer. Here's the chain, with every "wait for it all" gate marked ★.
 
 ```
-  Zoom out — where the answer is delivered in buffr
-
-  ┌─ TUI layer (Ink) ───────────────────────────────────┐
-  │  chat.tsx: setBusy(true) → await session.ask(q)      │ ← ★ awaits the WHOLE answer ★
-  │            → setTurns([...t, {text: answer}])        │   one setState, one render
-  └──────────────────────────┬───────────────────────────┘
-                             │  Promise<string>
-  ┌─ Session / Agent ────────▼───────────────────────────┐
-  │  agent.answer(question): Promise<string>             │   returns a finished string
-  └──────────────────────────┬───────────────────────────┘
-                             │  HTTP /api/chat
-  ┌─ Provider / Ollama ──────▼───────────────────────────┐
-  │  GemmaModelProvider: stream: false → wait for all    │   no token-by-token
-  └──────────────────────────────────────────────────────┘
+buffr stack — the latency chain (all blocking today)
+┌───────────────────────────────────────────────────────────┐
+│ ★ chat.tsx   await session.ask() → Spinner "thinking…"      │ UI: spinner, no tokens
+├───────────────────────────────────────────────────────────┤
+│ ★ session.ask()   await agent.answer() (whole string)       │ awaits full answer
+├───────────────────────────────────────────────────────────┤
+│ ★ GemmaModelProvider   payload stream:false                 │ THE GATE
+├───────────────────────────────────────────────────────────┤
+│ Ollama /api/chat   buffers all tokens, returns one body     │ no SSE
+├───────────────────────────────────────────────────────────┤
+│ gemma2:9b   generates token by token (internally)           │ the only place tokens flow
+└───────────────────────────────────────────────────────────┘
 ```
 
-Zoom in: buffr is **non-streaming end to end**. `agent.answer()` returns `Promise<string>`, the provider sends `stream: false`, and the Ink TUI shows a spinner until the full answer lands, then renders it in one shot. There's no token-by-token UI. That's a deliberate-but-not-required choice, and it's the honest gap this file covers: streaming would make `gemma2:9b` (which is slow on a laptop) *feel* far faster, and it isn't wired yet.
+The model *does* produce tokens incrementally — that's how transformers work. But buffr throws that incrementality away: `stream:false` tells Ollama to buffer the whole answer, the agent awaits the full string, and the TUI shows a spinner until it's done. **This is Case B: streaming isn't wired.** This file teaches the pattern and the exact three gates you'd open.
 
-## Structure pass
+## Structure pass — trace *time-to-first-visible-output* across the stack
 
-Every layer agrees on "wait for the whole thing." Trace the axis **when is the first byte visible to the user?** down the stack.
+Pick one axis: **how long until the user sees the first character of the answer?** Trace it.
 
 ```
-  Axis: "when does the user see the first token?" — non-streaming
+time-to-first-token (TTFT) vs time-to-full-answer
+  NON-STREAMING (buffr today)
+  t=0 ──── generate all N tokens ──── t=full │ user sees: spinner ……… ANSWER
+                                             ▲ first char and last char arrive together
 
-  ┌─ TUI (chat.tsx) ─────────────────────┐
-  │  await ask() → render once           │  first byte = AT THE END
-  └─────────────────────┬─────────────────┘
-                        │  seam: would flip to streaming HERE (callback/async-iterator)
-  ┌─ Provider (gemma) ──▼─────────────────┐
-  │  stream: false → await full response  │  first byte = AT THE END
-  └───────────────────────────────────────┘
+  STREAMING (the goal)
+  t=0 ─ tok ─ tok ─ tok ─ … ─ tok ─ t=full   │ user sees: A…n…s…w…e…r as it forms
+        ▲ first char arrives early
 ```
 
-The axis answer is the same at every layer — "at the end" — which tells you the seam isn't *active* anywhere. The interesting thing is *where it would flip*: the provider's `stream: false` is the source. Flip that to `stream: true` and you'd need every layer above it to change shape too — `complete` returns one `ModelResponse`, `answer()` returns one `string`, `ask()` returns one `Promise<string>`, and the TUI does one `setState`. Streaming would replace each "one" with "many," all the way up. That cascade is why it's not a one-line change.
+The seam is `stream:false`. With it set, TTFT equals time-to-full-answer — the user stares at a spinner for the entire generation, then the whole block appears. Open the gate and TTFT drops to the first token, which for a multi-second answer is the difference between "frozen?" and "it's working." Same total time; wildly different *felt* latency.
 
 ## How it works
 
-#### Move 1 — the mental model
+### Move 1 — the mental model: a Promise vs an async iterator
 
-You know the difference between `await response.json()` (you get the whole body at once) and `for await (const chunk of response.body)` (you process bytes as they arrive)? That's exactly non-streaming vs streaming. The strategy buffr uses: **block until the full generation finishes, then return one string.**
-
-```
-  Pattern — non-streaming (buffr) vs streaming (the alternative)
-
-  NON-STREAMING (buffr today)
-  send ──► [········ model generates all tokens ········] ──► whole string
-           user sees: spinner ............................. then full answer
-
-  STREAMING (not wired)
-  send ──► tok─tok─tok─tok─tok─tok─tok─tok─tok─tok─► done
-           user sees: "The"  "The capital"  "The capital is"  ... live
-```
-
-Same total time; wildly different *perceived* latency. Streaming shows the first token in ~one token's time; non-streaming shows nothing until the last.
-
-#### Move 2 — the step-by-step walkthrough
-
-**The provider asks Ollama not to stream.** The single source of buffr's non-streaming behavior is one literal in the chat payload.
+You know both shapes from frontend. `await fetch().then(r => r.json())` resolves once, with everything. `for await (const chunk of response.body)` yields pieces as they arrive (think reading a `ReadableStream`). Non-streaming generation is the first; streaming is the second. Buffr is fully in the first.
 
 ```
-  GemmaModelProvider.complete — gemma-provider.ts:69-75 (annotated)
-
-  lastResponse = await this.chat({
-    model: this.defaultModel,
-    messages,
-    stream: false,                      // ← THE choice: wait for the entire response
-    ...
-  });
-  raw = lastResponse.message?.content ?? '';   // ← one complete string, all at once
+two return shapes
+  Promise<string>          │ resolves once, full answer │ buffr: agent.answer()
+  AsyncIterable<token>     │ yields token, token, token │ goal: stream into UI
+  ───────────────────────────────────────────────────────────────────────
+  same bytes, different arrival schedule
 ```
 
-`stream: false`. Ollama buffers the whole generation and returns it as one JSON object. `raw` is the finished answer; there is no per-token callback to hand upward.
+### Move 2 — the moving parts
 
-**The agent returns one string, not a stream.** `RagQueryAgent.answer` is typed `Promise<string>` — it has no streaming surface to expose even if the provider had one.
+#### Gate 1: the provider hard-codes `stream:false`
 
-```
-  RagQueryAgent.answer — rag-query-agent.ts:62-83 (signature)
+This is the root gate. The Gemma transport's payload type *only allows* `stream: false` — it's not even a variable. From `gemma-provider.ts:19–25` and the call at `:69–74`:
 
-  async answer(question: string, ...): Promise<string> {   // ← Promise<string>, not a stream
-    const { finalText } = await runAgentLoop({ ... });
-    return finalText.trim() || FALLBACK_ANSWER;            // ← one resolved string
-  }
-```
+```ts
+export type GemmaChatTransport = (payload: {
+  model: string;
+  messages: { role: string; content: string }[];
+  stream: false;                          // ← literally typed as false; streaming not an option
+  options?: Record<string, unknown>;
+  signal?: AbortSignal;
+}) => Promise<OllamaChatResponse>;        // ← returns ONE response, not a stream
 
-So even before the TUI, the contract is "one string when done." buffr's `session.ask` (`src/session.ts:60`) inherits this: it `await`s `agent.answer` and returns the string.
-
-**The TUI renders once, after the await.** The Ink component shows a spinner while `busy`, then drops the whole answer in with a single `setState`.
-
-```
-  Layers-and-hops — chat.tsx awaits, then renders once
-
-  ┌─ chat.tsx onSubmit — chat.tsx:26-34 ─────────────────────────────┐
-  │  setBusy(true)                                                   │
-  │  const answer = await session.ask(q);   ← blocks for the WHOLE   │
-  │  setTurns(t => [...t, {role:'buffr', text: answer}])  ← once      │
-  │  setBusy(false)                                                  │
-  └───────────────────────┬──────────────────────────────────────────┘
-                          │ while awaiting:
-                          ▼
-  <Spinner/> "thinking…"   chat.tsx:48-51   ← all the user sees until the end
+lastResponse = await this.chat({ model: this.defaultModel, messages, stream: false, ... });
 ```
 
-This is the exact analogue of a React component that shows a loading spinner during `await fetch()` and only renders content on success — no progressive reveal. For a fast endpoint that's fine; for a 9B model on a laptop, the spinner can sit for many seconds.
+Annotation that matters: `complete()` returns `Promise<ModelResponse>` — a single resolved value. There's no streaming surface on the provider at all. Opening streaming means a new method (e.g. `completeStream`) returning an async iterable, because the type system forbids the current one from streaming.
 
-#### Move 2.5 — current state vs future state
+#### Gate 2: the agent awaits the full string
 
-This is built-but-not-streaming; here's the migration shape.
+`RagQueryAgent.answer()` (`rag-query-agent.ts:62–83`) returns `Promise<string>` — `finalText.trim()`. It runs the whole agent loop (retrieval, synthesis) and hands back one complete answer. Nothing partial escapes it.
 
 ```
-  Phase A (now) vs Phase B (Case B) — answer delivery
-
-  Phase A — NON-STREAMING                Phase B — STREAMING
-  ┌────────────────────────────┐         ┌─────────────────────────────────┐
-  │ stream: false [gemma:71]   │         │ stream: true + token callback   │
-  │ answer(): Promise<string>  │  ──►     │ answer(onToken): AsyncIterable  │
-  │ chat.tsx: 1 setState       │         │ chat.tsx: setState per token    │
-  └────────────────────────────┘         └─────────────────────────────────┘
-  must change: provider stream flag + response shape (aptkit), answer()
-  signature (aptkit), chat.tsx render loop (buffr). What does NOT change:
-  retrieval, the agent loop logic, the token ledger.
+gate 2: the agent's return contract
+  answer(q): Promise<string>
+        │  runAgentLoop → ... → finalText
+        ▼
+  return finalText.trim()   ← one string, fully formed, or nothing
 ```
 
-The honest cost: the provider and `answer()` shape changes live in *aptkit*, which buffr never edits. So a pure-buffr Case-B can only stream the *final synthesis* if aptkit grows a streaming surface — otherwise buffr's exercise is to simulate progressive rendering (e.g. reveal the answer chunked) and write the spec for the aptkit change.
+#### Gate 3: the TUI shows a spinner, not tokens
 
-#### Move 3 — the principle
+`session.ask()` awaits the whole answer, then `chat.tsx` appends it as one turn. While waiting, `busy` is true and an Ink `<Spinner>` shows "thinking…". From `chat.tsx:27–34` and `:48–51`:
 
-Streaming doesn't make generation faster — it makes it *feel* faster by moving the first visible token from "the end" to "almost the start." For a slow local model that's the cheapest UX win available. The architectural cost is that streaming turns every "return one value" into "yield many," cascading up through provider → agent → UI. buffr accepts the non-streaming simplicity today; the gap is real and the win would be felt immediately on a laptop running a 9B model.
+```tsx
+const answer = await session.ask(q);                 // ← blocks until full answer
+setTurns((t) => [...t, { role: 'buffr', text: answer }]);  // ← appended all at once
+// ...
+{busy ? (<Text color="yellow"><Spinner type="dots" /> thinking…</Text>) : (/* input */)}
+```
+
+Annotation that matters: the user gets a binary "thinking → done." There is no place in this component that receives partial text — `setTurns` is called exactly once per answer, with the complete string.
+
+```
+gate 3: the UI's two states
+  busy=true  → <Spinner/> "thinking…"   ← no token visible
+  busy=false → full turn appended       ← everything at once
+  (no third state for "streaming in")
+```
+
+### Move 2.5 — current vs future state
+
+**Current:** three gates, all closed. `stream:false` → `Promise<string>` → spinner. Felt latency = full generation time.
+
+**Future (the exercise):** open all three. Provider gains a `completeStream` yielding tokens (Ollama supports `stream:true` with NDJSON chunks). Agent (or a thinner path that skips synthesis re-runs) forwards tokens. `chat.tsx` adds a partial-text state and appends chunks as they arrive. **Caveat from file 04:** streaming and the tool-call structured path conflict — you can't parse `{"tool":...}` until it's fully arrived, so streaming is for the *final synthesized answer*, not the tool-decision step.
+
+```
+current → future
+  CURRENT: stream:false → Promise<string> → spinner
+  FUTURE:  completeStream → AsyncIterable<token> → partial-text state
+           ⚠ stream the ANSWER, not the tool-call JSON (must be whole to parse)
+```
+
+### Move 3 — the principle that generalizes
+
+> **Streaming changes perceived latency, not actual latency. It's a UX lever, and it costs you the ability to parse the output until it's done — so you stream prose, never the structured decision.**
+
+The total compute is identical whether you stream or not. What changes is whether the user watches a spinner or watches words form. The cost: any step that needs the *whole* output to make a decision (parsing a tool call, validating JSON) can't be streamed — it has to buffer. That's why even fully-streaming production systems stream the answer but buffer the function-call. Buffr buffers everything, which is *simpler* and *correct*, just less responsive.
 
 ## Primary diagram
 
-```
-  Streaming in buffr — non-streaming, end to end (and where it would flip)
+The three closed gates and what opening them costs.
 
-  ┌─ TUI chat.tsx ─────────────────────────────────────────────────┐
-  │  await session.ask(q)  →  <Spinner> until done  →  setState ×1  │  [chat.tsx:28,48]
-  └───────────────────────────────┬─────────────────────────────────┘
-                                  │ Promise<string>
-  ┌─ Agent rag-query-agent.ts ────▼─────────────────────────────────┐
-  │  answer(): Promise<string>  →  one finalText                    │  [rag:62]
-  └───────────────────────────────┬─────────────────────────────────┘
-                                  │ ModelResponse (whole)
-  ┌─ Provider gemma-provider.ts ──▼─────────────────────────────────┐
-  │  chat({ stream: false })  →  raw = full content                 │  [gemma:71] ← source
-  └─────────────────────────────────────────────────────────────────┘
-   to stream: flip the flag, then re-shape every layer above it
+```
+streaming in buffr — three gates
+  gemma2:9b (tokens flow here internally)
+        │
+  ┌─ GATE 1: stream:false ──────────────┐  open → completeStream (async iterable)
+  │  Ollama buffers, returns one body    │
+  └──────────────────────────────────────┘
+        │
+  ┌─ GATE 2: answer():Promise<string> ──┐  open → forward tokens (skip synthesis re-run)
+  │  agent awaits full finalText         │
+  └──────────────────────────────────────┘
+        │
+  ┌─ GATE 3: <Spinner/> "thinking…" ────┐  open → partial-text state, append chunks
+  │  TUI binary busy/done                │
+  └──────────────────────────────────────┘
+  consequence today: TTFT = full generation time
+  caveat: stream the answer, NOT the tool-call JSON (file 04)
 ```
 
 ## Elaborate
 
-Streaming exists because autoregressive generation is inherently sequential and slow — you can't produce the last token before the first — so the only lever on perceived latency is *showing work in progress*. Server-Sent Events and chunked-transfer HTTP are the usual transports; Ollama supports `stream: true`, returning newline-delimited JSON chunks. The reason streaming is near-universal in chat UIs is purely psychological: total time is identical, but a stream that starts in 200ms reads as "responsive" where a 6-second blank-then-dump reads as "broken."
-
-The tension with buffr's other concerns: streaming complicates the token ledger (`06-token-economics.md` — you only get the final `eval_count` at the end of the stream anyway) and the trace sink (you'd trace the completed message, not each token). So streaming is mostly a *UI* concern that the backend can largely ignore until the final-usage event. That's why it's a clean, isolated Case-B rather than an entangled rewrite.
+- **Origin.** Streaming token generation became standard UX with ChatGPT (2022); the transport is usually Server-Sent Events or chunked NDJSON. Ollama supports it via `stream:true`, emitting one JSON object per token chunk.
+- **Adjacent concepts.** *Structured output* (04) — the hard conflict; streamed JSON can't be parsed mid-flight. *Token economics* (06) — streaming doesn't change token count, only arrival timing, so the bill is identical. *Agents* (sub-section 04) — only the final synthesis step is safely streamable.
+- **Honest gap.** Streaming is **not wired** — and the provider type literally forbids it (`stream: false` as a type, not a value). This isn't a flag flip; it's a new streaming method plus UI state. Don't undersell the work.
+- **What to read next.** File 06 — token economics, where you'll see streaming changes *when* tokens arrive but not *how many* you pay for.
 
 ## Project exercises
 
-No curriculum file present; exercises derived from the codebase. This concept is **not yet exercised** — Case B (stream tokens to chat.tsx).
+### Stream tokens into the chat TUI
 
-### EX-05-1 — Progressive answer reveal in the TUI
+- **Exercise ID:** [B1.9] (Phase 1 — LLM foundations) — **Not yet implemented** (Case B; all three gates closed).
+- **What to build:** Add a `completeStream` path: a buffr-side provider method (or wrapper) that calls Ollama with `stream:true` and yields tokens; have the session expose an async-iterable `askStream`; render incoming chunks into a live `buffr` turn in `chat.tsx` (new partial-text state). Stream **only the final synthesized answer** — keep the tool-decision step buffered so file 04's parser still works.
+- **Why it earns its place:** This is the single biggest felt-latency win in the app, and it forces you to confront the streaming-vs-structured-output conflict directly.
+- **Files to touch:** new `src/streaming-provider.ts` (Ollama `stream:true`); `src/session.ts` (an `askStream`); `src/cli/chat.tsx` (partial-text turn state). aptkit's `GemmaModelProvider` is consumed — wrap, don't edit.
+- **Done when:** typing a question shows the answer forming token-by-token instead of a spinner-then-block, and tool calls still parse correctly.
+- **Estimated effort:** 1–2 days
 
-- **Exercise ID:** EX-05-1
-- **What to build:** Without changing aptkit, make `chat.tsx` reveal the (already-complete) answer progressively — chunk the final string and `setState` it in pieces on a timer — so the UX prototypes streaming and you feel the perceived-latency difference. Document where the *real* token stream would plug in.
-- **Why it earns its place:** Delivers the perceived-latency win and the render-loop change that a true stream needs, entirely on buffr's side; proves you understand the UI cascade.
-- **Files to touch:** `src/cli/chat.tsx:26-34,48-51` (the onSubmit await + spinner/render).
-- **Done when:** the answer types out progressively instead of appearing all at once, behind the same spinner-then-content flow.
-- **Estimated effort:** 1-4hr
+### Measure TTFT before vs after
 
-### EX-05-2 — Write the aptkit streaming-provider spec
-
-- **Exercise ID:** EX-05-2
-- **What to build:** A short design note (in buffr's docs, not aptkit) specifying the aptkit changes a real stream needs: `GemmaModelProvider` `stream: true` + token callback, `answer()` returning an async iterable, and how the final `eval_count` still reaches `SupabaseTraceSink`.
-- **Why it earns its place:** Streaming's hard part is the cross-package contract; naming it precisely is the senior-engineer move, and it respects the "never edit aptkit here" rule.
-- **Files to touch:** a new doc under buffr's repo; reference `gemma-provider.ts:71`, `rag-query-agent.ts:62`, `supabase-trace-sink.ts:73`.
-- **Done when:** the note lists each signature change and the one place token usage is still captured.
+- **Exercise ID:** [B1.10] (Phase 1 — LLM foundations)
+- **What to build:** Log time-to-first-visible-token and time-to-full-answer for the same question, non-streaming vs streaming.
+- **Why it earns its place:** Proves the "same actual latency, lower felt latency" claim with two numbers instead of vibes.
+- **Files to touch:** instrumentation in `src/session.ts`; depends on [B1.9].
+- **Done when:** the log shows streaming TTFT << non-streaming TTFT while time-to-full-answer is roughly equal.
 - **Estimated effort:** <1hr
 
 ## Interview defense
 
-**Q: "Does buffr stream tokens? Why not?"**
+**Q: "Does buffr stream, and what would it take to add it?"**
 
-No — it's non-streaming end to end. The provider sends `stream: false`, `answer()` returns `Promise<string>`, and the Ink TUI shows a spinner then renders the whole answer in one `setState`. It's a simplicity choice; for a slow local 9B model, streaming would be a big perceived-latency win.
-
-```
-  buffr: spinner ............... full answer  (no progressive reveal)
-```
-
-*Anchor:* `stream: false` at `gemma-provider.ts:71`; single `setState` after `await` at `chat.tsx:28-29`.
-
-**Q: "Streaming doesn't make it faster — so why bother?"**
-
-Total generation time is identical; streaming moves the *first visible token* from the end to the start, so it *feels* responsive instead of broken. On a laptop where `gemma2:9b` takes seconds, that perception is the whole point.
+Model answer: No — it's `stream:false` end to end. Three gates: the Gemma provider types `stream` as the literal `false` and returns `Promise<ModelResponse>`; the agent returns `Promise<string>`; the Ink TUI shows a spinner with no partial-text state. Adding streaming is a new `completeStream` yielding tokens from Ollama's `stream:true`, a session method that forwards them, and a UI state that appends chunks. The catch — and this is the important part — you stream the *final answer*, not the tool-call JSON, because you can't parse `{"tool":...}` until it's fully arrived. Streaming lowers perceived latency, not actual; the token count and bill are unchanged.
 
 ```
-  same total time, different first-byte
-
-  non-stream: |———————————————| answer   (first byte: end)
-  stream:     |t·t·t·t·t·t·t·t·| done     (first byte: ~start)
+the answer in one frame
+  buffr: stream:false → Promise<string> → spinner   (3 closed gates)
+  to add: completeStream + session forward + UI partial state
+  ★ stream the ANSWER, buffer the tool-call (can't parse a half JSON)
 ```
 
-*Anchor:* the cascade flips at one flag — `gemma-provider.ts:71` — but re-shapes every layer above.
+Anchor: *Three closed gates; streaming is felt-latency only, and never for the structured decision.*
 
 ## See also
 
-- `01-what-an-llm-is.md` — why generation is sequential (the next-token loop).
-- `06-token-economics.md` — why the token ledger is mostly unaffected by streaming.
-- `08-provider-abstraction.md` — the provider that owns the `stream` flag.
-- `../06-production-serving/` — latency as the real local budget.
+- `01-what-an-llm-is.md` — the `complete()` contract that streaming would extend.
+- `04-structured-outputs.md` — why the tool-call JSON can't be streamed.
+- `06-token-economics.md` — streaming changes timing, not token count.

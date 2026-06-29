@@ -1,267 +1,189 @@
-# Stdout-As-Only-Log
+# stdout-as-Only-Log
 
-**Industry names:** print-debugging · console logging · unstructured stdout.
-**Type:** Project-specific (the deliberate *absence* of a logging layer — a
-pattern worth naming because what's missing is the lesson).
+**Industry name(s):** unstructured stdout logging / `print`-debugging-as-logging, the absence of structured logging — *Project-specific* observation of an *Industry anti-pattern* (named honestly because the repo earns it at its current scope).
+
+Outside the trace table, buffr's entire logging surface is `process.stdout.write`. The CLIs print human sentences — "indexed X", the answer, the eval numbers — and that's it. No log levels, no structured fields, no correlation IDs, no durable error trail. This file names what that costs you and exactly where it bites.
 
 ---
 
 ## Zoom out, then zoom in
 
-You know the difference between `console.log('here', x)` and a real logger with
-levels, JSON, and a request id? This repo is firmly on the `console.log` side —
-and on purpose, for now. Outside the trace sink, every signal the repo produces is
-a plain line written to `process.stdout`. No level, no structure, no correlation
-id. For a single-user laptop tool you run by hand, that's the right amount of
-machinery. The pattern is worth a file because knowing *why* it's enough — and the
-exact moment it stops being enough — is the actual skill.
-
-Where it sits:
+Here's the honest picture. Structured logging (absent — `process.stdout.write`) means the only thing standing between you and a production mystery is whatever sentence a CLI happened to print to the terminal.
 
 ```
-  Zoom out — the two logging worlds in this repo
+  Zoom out — the logging surface (or lack of one)
 
-  ┌─ UI / CLI layer ──────────────────────────────────────────┐
-  │  index-cmd.ts → stdout "indexed X"   ◄─┐                   │
-  │  eval-cmd.ts  → stdout "P@1 / R@3"   ◄─┤ ★ THIS CONCEPT ★  │ ← we are here
-  │  chat.tsx     → Ink renders error   ◄─┘  (ephemeral lines) │
-  └──────────────────────────┬─────────────────────────────────┘
-                             │  (no shared sink, no correlation)
-  ┌─ Trace sink ────────────▼─────────────────────────────────┐
-  │  SupabaseTraceSink → agents.messages  (the OTHER world:    │
-  │  typed, durable, correlated — see file 01)                │
-  └────────────────────────────────────────────────────────────┘
+  ┌─ CLI layer (src/cli/) ──────────────────────────────────────┐
+  │  index-cmd.ts → process.stdout.write("indexed X\n")  ★ here ★│
+  │  eval-cmd.ts  → process.stdout.write(P@1 / R@3)      ★ here ★│
+  │  chat.tsx     → Ink render; catch → render "error:…" inline  │
+  └────────────────────────────────┬─────────────────────────────┘
+            no level / field / id   │
+  ┌─ Session / Sink layer ─────────▼─────────────────────────────┐
+  │  (the trace table lives here — the ONE structured surface)   │
+  │  but session.ts:66-68 swallows memory errors with NO log     │
+  └────────────────────────────────┬─────────────────────────────┘
+  ┌─ Storage ──────────────────────▼─────────────────────────────┐
+  │  agents.messages (structured) — but stdout reaches it never  │
+  └──────────────────────────────────────────────────────────────┘
 ```
 
-Zoom in: the pattern is **stdout as the only log** — diagnostic output is human-
-readable text on the terminal, gone when the terminal scrolls. The question it
-answers (and where it falls short): *when something goes wrong in a CLI run, what
-can I filter, query, or correlate?* Answer today: nothing — you read what scrolled
-by.
+Zoom in. The question: *when something outside a turn goes wrong — indexing, an eval, a pool error, a swallowed memory write — what evidence is left behind?* The answer for buffr is "a line in the terminal, if you were watching, and nothing if you weren't." The pattern (anti-pattern) is **stdout is the log**: no severity to filter on, no fields to query, no sink that outlives the scrollback.
 
-## Structure pass
+## The structure pass
 
-Three call sites, one axis: **can this output be filtered or correlated later?**
-The answer is "no" at every site, but the *kind* of no differs.
+**Layers:** the CLI (writes sentences) → the process stdout stream (ephemeral) → wherever the terminal was pointed (usually nowhere durable).
+
+**Axis — "what survives the process exiting?"** Trace it:
 
 ```
-  Axis — "queryable / correlatable later?" — across the three sites
+  One question down the layers: what survives process exit?
 
-  ┌─ index-cmd ──────┐  ┌─ eval-cmd ───────┐  ┌─ chat.tsx (Ink) ──┐
-  │ "indexed <path>" │  │ "P@1 .. R@3 .."  │  │ "error: <msg>"    │
-  │ stdout.write     │  │ stdout.write     │  │ React state → frame│
-  └──────┬───────────┘  └──────┬───────────┘  └──────┬────────────┘
-         │ no level            │ no level            │ no level
-         │ no structure        │ structured numbers  │ caught per-turn
-         │ no corr id          │ but printed, not    │ NOT sent to sink
-         ▼                     ▼ stored              ▼
-       lost on scroll        lost on scroll        lost on next render
+  ┌──────────────────────────────────────────────┐
+  │ CLI command (index-cmd / eval-cmd)            │  → in-memory string
+  │   process.stdout.write("indexed X")           │
+  └───────────────────────┬───────────────────────┘
+       seam: write()       │  ═══ structure is LOST here ═══
+  ┌───────────────────────▼───────────────────────┐
+  │ stdout stream                                 │  → bytes, no fields
+  │   no level, no JSON, no timestamp, no id       │    (can't filter/query)
+  └───────────────────────┬───────────────────────┘
+       seam: terminal      │  ═══ durability decided here ═══
+  ┌───────────────────────▼───────────────────────┐
+  │ terminal scrollback (usually)                 │  → GONE on exit
+  └────────────────────────────────────────────────┘
 ```
 
-The seam that *doesn't exist* is the load-bearing observation: there's no logger
-abstraction between these call sites and the terminal. Compare file 01, where the
-`CapabilityTraceSink` seam turns events into durable rows. Here the "sink" is
-`process.stdout` directly — no contract, no place to add levels or a correlation
-id without touching every call site.
+**The load-bearing seam is `write()`** — the moment a structured fact ("indexed the file at this path, producing N chunks") collapses into an unstructured sentence ("indexed X"). Everything observable about the operation that *isn't* in that sentence is gone at that seam. Contrast this with `01-`'s trace table, which crosses the same kind of boundary but keeps the structure. The two patterns are the same boundary handled opposite ways.
 
 ## How it works
 
-### Move 1 — the mental model
+#### Move 1 — the mental model
 
-It's `console.log`, formalized as `process.stdout.write` (which doesn't append a
-newline, so each site adds `\n` itself). The shape: compute something, write a
-line, move on. Nothing accumulates, nothing is addressable.
+You know the difference between `console.log("loading…")` scattered through a component and a proper logger with `logger.info({ event: 'fetch_start', url })`. The first is print-debugging — fine while you're staring at it, useless an hour later. The second is structured logging — every line is a queryable record. buffr's CLI surface is entirely the first kind.
 
 ```
-  The pattern — fire-and-forget lines
+  The shape — what stdout drops vs what a structured log keeps
 
-  do work ──► format a line ──► process.stdout.write(line + '\n') ──► gone on scroll
-              │                                                       │
-              └── no level tag, no key=value, no conversation_id ─────┘
+  the event:  "indexed /docs/me.md → 12 chunks in 340ms, app_id=laptop"
+
+  stdout (buffr):           process.stdout.write("indexed /docs/me.md\n")
+                            └─ keeps: the path
+                            └─ drops: chunk count, duration, app_id,
+                                      level, timestamp, correlation id
+
+  structured (absent):      { level:'info', event:'index', path:…, chunks:12,
+                              ms:340, app_id:'laptop', ts:… }
+                            └─ every field queryable, filterable, alertable
 ```
 
-The kernel: **a string and a write call.** That's it — which is the point. There's
-no level filter to drop, no formatter to swap, no correlation id to thread. The
-absence *is* the structure.
+The diagram is the whole lesson: the operation *knows* its chunk count and `app_id` (`indexDocumentRow` has them), but the log line throws them away.
 
-### Move 2 — the step-by-step walkthrough
+#### Move 2 — the step-by-step walkthrough
 
-**The use case.** Two one-shot CLIs you run by hand, plus the chat's error path.
-
-**Part 1 — `index-cmd` prints progress, one line per file.** You run
-`npm run index -- a.md b.md` and watch lines appear.
-
-```ts
-// src/cli/index-cmd.ts:22-26
-for (const path of paths) {
-  const text = await readFile(path, 'utf8');
-  await indexDocumentRow(pool, cfg.appId, pipeline, { id: basename(path), text, sourcePath: path });
-  process.stdout.write(`indexed ${path}\n`);   // ← the only signal this loop emits
-}
-```
-
-What this gives you: live "it's making progress." What it doesn't: no count, no
-duration, no level, and if `indexDocumentRow` throws, the error is an *unhandled
-rejection* that crashes the script — there's no `catch` writing an error line.
-Boundary condition: a partial run (3 of 5 files indexed, then a throw) leaves you
-reading stdout to figure out where it stopped.
-
-**Part 2 — `eval-cmd` prints the only numbers in the repo.** Structured numbers,
-but printed, not stored.
-
-```ts
-// src/cli/eval-cmd.ts:24-33
-for (const { query, relevant } of queries) {
-  const hits = await pipeline.query(query, K);
-  const docs = [...new Set(hits.map((h) => String(h.meta.docId)))];
-  const p = scorePrecisionAtK(docs, new Set(relevant), 1).score;
-  const r = scoreRecallAtK(docs, new Set(relevant), K).score;
-  p1 += p; rk += r;
-  process.stdout.write(`${query.padEnd(44)} P@1 ${p.toFixed(2)}  R@${K} ${r.toFixed(2)}\n`);
-}
-process.stdout.write(`\nmean P@1 ${(p1 / queries.length).toFixed(2)}  mean R@${K} ...\n`);
-```
-
-These are real metrics (precision/recall) — but they land on the terminal, not in
-a table, so there's no run-over-run trend. file 04 takes this up as a *quality
-signal*; here the point is only that the *transport* is stdout, so the number
-exists for exactly as long as the terminal scrollback.
-
-**Part 3 — Ink catches per-turn errors and renders them as a turn.** The chat
-doesn't crash on an error; it shows it and keeps going.
-
-```ts
-// src/cli/chat.tsx:27-34
-try {
-  const answer = await session.ask(q);
-  setTurns((t) => [...t, { role: 'buffr', text: answer }]);
-} catch (err) {
-  setTurns((t) => [...t, { role: 'buffr', text: `error: ${(err as Error).message}` }]);
-} finally {
-  setBusy(false);
-}
-```
+**The index CLI's log line.** One sentence per file, no fields (`src/cli/index-cmd.ts:22-26`):
 
 ```
-  Layers-and-hops — an error's two possible fates, neither correlated
-
-  ┌─ Ink turn ──┐  throws   ┌─ catch ──────────┐  setTurns  ┌─ screen ─────┐
-  │ session.ask │ ────────► │ "error: <msg>"   │ ─────────► │ one red turn │
-  └─────┬───────┘           └──────────────────┘            └──────────────┘
-        │ if the error happened INSIDE the agent run, the sink
-        │ already wrote an `error` row (file 01) — but the Ink
-        ▼ message and that row share NO id; you can't join them
-  (uncorrelated: screen text ≠ the messages row)
+  src/cli/index-cmd.ts:22   for (const path of paths) {
+  :23     const text = await readFile(path, 'utf8');
+  :24     await indexDocumentRow(pool, cfg.appId, pipeline, { id: basename(path), … });
+  :25     process.stdout.write(`indexed ${path}\n`);   // ← the entire log
+  :26   }
 ```
 
-The boundary condition worth naming: an error *inside* the agent run gets written
-to `agents.messages` as an `error` row by the sink (file 01) *and* surfaces on
-screen here — but the two are uncorrelated. The screen shows `err.message`; the
-row has its own. There's no shared id to join "what the user saw" to "what the
-trace recorded."
+`indexDocumentRow` just ran an INSERT and a full chunk-indexing pass — it knows how many chunks it produced and which `app_id` it wrote under. None of that reaches the log line. If indexing silently produced zero chunks (an embedding-dimension mismatch caught upstream, say), stdout still cheerfully prints "indexed X." The boundary condition: **the success line fires on completion, not on correctness** — there's no signal distinguishing "indexed well" from "indexed badly but didn't throw."
 
-#### Move 2.5 — current state vs what it grows into
-
-What stdout-only is missing, and the trigger that makes each one matter:
+**The eval CLI's numbers.** Same shape, but here the numbers are the *point* — so this line is doing more work (`src/cli/eval-cmd.ts:31-33`):
 
 ```
-  Now (stdout-only)            →   When you'd add it
-  ─────────────────────────────────────────────────────────
-  no level (info/warn/error)   →   output collected by a tool
-                                   that filters by severity
-  no structure (free text)     →   you need to query logs, not eyeball them
-  no correlation id            →   a failure spans CLI + sink and you
-                                   must join "what I saw" to "what's stored"
-  no aggregation               →   "is it failing MORE lately?" (→ metrics, file 04)
+  src/cli/eval-cmd.ts:31   process.stdout.write(`${query.padEnd(44)} P@1 ${p.toFixed(2)} …\n`);
+  :33   process.stdout.write(`\nmean P@1 …  mean R@3 …\n`);
 ```
 
-Note the irony: the repo already *has* the richer world (typed, durable,
-correlated events in `agents.messages`, file 01) — but only the agent run feeds
-it. The CLIs and Ink errors never reach that sink. The cheapest upgrade isn't a
-logging library; it's routing CLI signals into the same `messages`/events store so
-they share the `conversation_id` correlation key.
+These P@1 / R@3 numbers are real retrieval-quality signal — but they're *printed*, not *recorded*. No run is stored, so you can't diff today's mean against last week's without copy-pasting terminal output. → `04-eval-numbers-as-quality-signal.md` treats this as its own pattern.
+
+**The chat UI's caught error — rendered, not logged.** `chat.tsx` catches per-turn errors so one bad turn doesn't kill the session (`src/cli/chat.tsx:30-31`):
+
+```
+  src/cli/chat.tsx:30   } catch (err) {
+  :31     setTurns((t) => […, { role: 'buffr', text: `error: ${(err as Error).message}` }]);
+```
+
+Good resilience UX. But notice what's *not* here: no `console.error`, no persist, no stack. The error message lands in the Ink render and the terminal scrollback; the moment the user scrolls or exits, it's gone. If the throw happened before `trace.flush()`, the trace table has no record either — so a failed turn can leave **zero durable evidence**.
+
+**The silent memory swallow — not even a sentence.** `session.ask()` wraps the episodic-memory write in an empty catch (`src/session.ts:64-69`):
+
+```
+  src/session.ts:64   try {
+  :65     await memory.remember({ conversationId, question, answer });
+  :66   } catch {
+  :67     // swallow: memory is best-effort, the turn already succeeded
+  :68   }
+```
+
+This is the *opposite* end of the spectrum from stdout — not even an unstructured line. The decision is correct (a memory failure must not lose the user's answer), but the observability cost is total: episodic memory can silently stop working and nothing — not stdout, not the trace, nothing — records that it did.
+
+#### Move 2 variant — the load-bearing skeleton
+
+What's *missing* that a structured-logging layer would add, named by what its absence breaks:
+
+1. **Severity levels** — without `info`/`warn`/`error`, you can't filter noise from signal; every line is equal weight. (absent everywhere)
+2. **Structured fields** — without `{ path, chunks, app_id }`, you can't query "all indexing runs for app_id=laptop"; you'd grep prose. (`index-cmd.ts:25`)
+3. **A durable sink** — without shipping logs somewhere, they die with the terminal; the swallowed memory error (`session.ts:66`) is the proof.
+4. **A correlation id in the log line** — the trace table *has* `conversation_id`, but the stdout surface doesn't carry it, so you can't tie a printed line back to a turn.
+
+The honest framing: at buffr's scope — single-device, a human at the terminal — stdout is a *defensible* choice, not negligence. The human watching the terminal *is* the log sink. The pattern earns a file because the moment buffr runs unattended, every item above flips from "fine" to "blind spot," and the swallowed memory error is already a blind spot today.
 
 #### Move 3 — the principle
 
-Match the logging machinery to who reads it. A human watching a terminal needs a
-readable line; a machine collecting logs across runs needs levels, structure, and
-a correlation id. This repo's reader is a human at a terminal, so stdout is
-correct — and naming the trigger that flips that ("the moment a machine, not a
-person, reads the output") is more useful than reflexively reaching for a logger.
+**A log line is only as useful as the fields it carries and the sink it survives in.** Printing a sentence to stdout answers "is it running" for a human watching live; it answers nothing for a human debugging after the fact. The general rule: if an operation knows a fact worth acting on (chunk count, error cause, `app_id`), the log should carry it as a *field*, not bury it in prose or drop it entirely.
 
 ## Primary diagram
 
-The whole logging picture — the thin world and the rich world side by side.
-
 ```
-  Stdout-as-only-log vs the trace sink — two worlds, one repo
+  stdout-as-only-log — the four surfaces, ranked by evidence left
 
-  ┌─ THIN world: stdout (this file) ──────────────────────────────────┐
-  │  index-cmd.ts:25  → "indexed <path>\n"                             │
-  │  eval-cmd.ts:31   → "<query> P@1 .. R@3 ..\n"                      │
-  │  chat.tsx:31      → Ink turn "error: <msg>"                        │
-  │  properties: no level · no structure · no corr id · scroll-gone    │
-  └───────────────────────────────────────────────────────────────────┘
-                       (no shared sink, no join key)
-  ┌─ RICH world: trace sink (file 01) ────────────────────────────────┐
-  │  SupabaseTraceSink → agents.messages                              │
-  │  properties: typed events · durable rows · conversation_id corr ·  │
-  │  ordered replay (file 02)                                          │
-  └───────────────────────────────────────────────────────────────────┘
-   upgrade path: route the THIN signals into the RICH store → one key
+  surface                  on success        on failure          durable?
+  ───────────────────────  ────────────────  ──────────────────  ────────
+  index-cmd.ts:25          "indexed X"       (throws, uncaught)  no
+  eval-cmd.ts:31-33        P@1 / R@3 lines   (throws, uncaught)  no
+  chat.tsx:30-31           (trace row)       render "error:…"    no (scroll)
+  session.ts:66-68 memory  (trace row)       SILENT — nothing    no — none
+
+       ▲                                          ▲
+   the ONE good surface is elsewhere:         the worst case:
+   agents.messages (01-, 02-)                 a swallowed error
+   — structured, durable, queryable           with zero evidence
 ```
 
 ## Elaborate
 
-"Print debugging" is the oldest observability tool and still the right one when a
-human is the consumer and the run is short. The structured-logging discipline
-(levels, JSON lines, correlation ids — the twelve-factor "logs as event streams"
-idea) earns its weight when logs are *collected* and *queried* by something other
-than a person. This repo sits before that line deliberately: single user, single
-device, runs you start by hand.
+The reason this is worth a file rather than a one-line audit note: it's the exact inverse of buffr's *good* observability. `01-full-signal-trajectory-capture.md` shows the repo at its best — typed events, durable rows, a correlation key, queryable fields. The stdout surface shows the same team's *other* default — prose to a stream that dies on exit. The contrast is the lesson: buffr knows how to do structured logging (it built the trace table) but only applied it to the agent trajectory, leaving the CLI and the error paths on print-debugging.
 
-Connects to: `01-full-signal-trajectory-capture.md` (the rich world this contrasts
-with — the repo already has structured logging *for the agent run*, just not for
-the CLIs), `04-eval-numbers-as-quality-signal.md` (the eval numbers that flow
-through this stdout transport), and the audit's lens 3 (structured-logs-and-
-correlation) for the full verdict including the redaction gap.
+The constructive move, in order of leverage: (1) persist the chat UI's caught error and the swallowed memory failure to *something* durable — even a row in `agents.messages` with `role='error'`, which the sink already supports (`src/supabase-trace-sink.ts:80-83`); (2) give the index/eval CLIs structured output (JSON lines with fields) behind a flag so they stay human-readable by default; (3) only then reach for a logging library and levels. The first move costs almost nothing and closes the worst blind spot — the silent failures.
 
 ## Interview defense
 
-**Q: Your CLIs just `process.stdout.write` — no logger. Defend it.** The consumer
-is a human at a terminal running a one-shot command. Levels, JSON, and correlation
-ids earn their weight when a *machine* collects and queries logs across runs —
-that's not this. Adding a logging library here would be machinery with no reader.
-What I'd watch for is the trigger to flip: the moment output is collected by
-something that filters or joins it, stdout stops being enough.
+**Q: Your CLI prints "indexed X" and exits 0. The retrieval is broken. How would you have caught it?**
 
 ```
-  human reads terminal → stdout is right
-  machine collects logs → need level + structure + corr id
+  the success line fires on completion, not correctness
+
+  indexDocumentRow() ──► (returns) ──► "indexed X"  ✓ printed
+        │
+        └─ knew: chunk count, app_id, dimension — none logged
+           a 0-chunk index prints the same "indexed X"
 ```
 
-**Q: An error happens during a chat turn — where does it go?** Two places that
-don't talk to each other. Ink catches it and renders `error: <msg>` as a turn
-(`chat.tsx:31`), so the chat survives. If the error was *inside* the agent run, the
-trace sink also wrote an `error` row to `agents.messages` (file 01). But the screen
-message and the row share no id — I can't join "what the user saw" to "what the
-trace stored." The cheapest fix isn't a logger, it's routing the CLI/UI signals
-into the same store so they inherit the `conversation_id` correlation key.
+You wouldn't, from stdout — the print fires on completion, not correctness (`index-cmd.ts:25`). The fix is a structured line carrying the chunk count and `app_id` the operation already has, so "indexed X → 0 chunks" is visibly wrong. **Anchor:** the field-less `process.stdout.write` at `index-cmd.ts:25` — completion is not correctness.
 
-```
-  screen "error: X"   ⟂   messages row {error}   ← no shared id today
-```
+**Q: What's the single worst observability hole in the repo?**
 
-**Q: What's the one upgrade you'd make first?** Correlation, not levels. The repo
-already has a durable, typed, correlated store for agent events. The gap is that
-the CLIs and Ink errors bypass it. Route them through it and you get the
-correlation id for free — that's higher leverage than bolting a logging library
-onto stdout.
+The empty catch on the memory write (`session.ts:66-68`). It's the only place a real state-change failure leaves *zero* evidence — not a stdout line, not a trace row, nothing. The decision to swallow is right (don't lose the user's answer), but the *silence* is the bug: it should persist an `error` row, which the trace sink already handles. **Anchor:** `catch { // swallow }` at `session.ts:66`.
 
 ## See also
 
-- `01-full-signal-trajectory-capture.md` — the structured, durable, correlated
-  world this file contrasts against.
-- `04-eval-numbers-as-quality-signal.md` — the eval numbers carried over this
-  stdout transport.
-- `audit.md` lens 3 (structured-logs-and-correlation), incl. the redaction gap.
+- `01-full-signal-trajectory-capture.md` — the structured surface this one is the inverse of.
+- `04-eval-numbers-as-quality-signal.md` — the eval stdout, treated as its own signal.
+- `audit.md` lens 3 (structured logs), lens 6 (debugging boundaries), lens 8 (red-flag rank 3 & 5).
+- Cross-guide: `study-testing` (the eval as a regression guard, not a log).

@@ -1,260 +1,194 @@
-# hooks-state-in-a-cli
+# Hooks state in a CLI — the useState triad
 
-*The `useState` triad + controlled input · React local state · Industry standard*
+**Industry name(s):** local component state · `useState` · client state (vs server state). **Type:** Industry-standard pattern (React hooks), project-specific shape (three hooks, one component).
+
+---
 
 ## Zoom out, then zoom in
 
-This is the most home-turf file in the guide. `<Chat>` holds three `useState` hooks and a
-controlled text input — you have written this exact shape a thousand times in a browser
-form. The only thing to recalibrate is that the input is a terminal `<TextInput>`, not an
-`<input>`, and the "form" is a chat loop. Everything else is the React you already own.
+The entire client-side state graph of buffr is three `useState` calls in one component. No store, no context, no reducer. Here's where those three live in the larger picture — and the one split that's actually interesting: two of them are pure UI state, but the conversation's source of truth is *not* in React at all.
 
 ```
-  Zoom out — where the state lives in the whole surface
+  Zoom out — where client state sits
 
-  ┌─ UI layer (terminal) ───────────────────────────────────────┐
-  │  <Chat>  src/cli/chat.tsx:9                                  │
-  │   ┌───────────────────────────────────────────────────────┐ │
-  │   │ ★ THREE useState HOOKS ★                               │ │ ← we are here
-  │   │   turns  Turn[]   :11   input  string  :12  busy  :13  │ │
-  │   └───────────────────────────────────────────────────────┘ │
-  │   <TextInput value={input} onChange={setInput} … >  :55     │
-  └───────────────────────────────┬──────────────────────────────┘
-                                  │  session.ask(q)
-  ┌─ Data layer ──────────────────▼──────────────────────────────┐
-  │  ChatSession  src/session.ts                                 │
-  └──────────────────────────────────────────────────────────────┘
-```
-
-**Zoom in.** Two patterns share this file because they are inseparable here: the **state
-triad** (three independent `useState` slices, one per concern) and the **controlled input**
-(the input's value lives in state, not in the widget). The question both answer: *where
-does the truth about "what's on screen right now" live?* Answer: in `<Chat>`'s hooks, and
-nowhere else.
-
-## Structure pass
-
-Three state slices, one axis: **who owns each transition, and when does it fire?**
-
-```
-  One axis — "who flips this state, and when?" — across the three slices
-
-  ┌─ input  string ───────────────────────────────────────┐
-  │  owner: <TextInput> onChange      when: every keystroke│  → fast, per-key
+  ┌─ UI layer ───────────────────────────────────────────┐
+  │  <Chat>   ★ useState: turns · input · busy ★          │ ← we are here
+  │           (display projection + ephemeral UI state)   │
+  └───────────────────────────┬──────────────────────────┘
+                  session.ask()│
+  ┌─ Data layer ──────────────▼──────────────────────────┐
+  │  ChatSession: the in-process conversation             │
+  └───────────────────────────┬──────────────────────────┘
+                  pg writes    │
+  ┌─ Storage ─────────────────▼──────────────────────────┐
+  │  conversations / messages  ← the CANONICAL record     │
   └───────────────────────────────────────────────────────┘
-  ┌─ turns  Turn[] ───────────────────────────────────────┐
-  │  owner: onSubmit                  when: submit + answer│  → append-only
-  └───────────────────────────────────────────────────────┘
-  ┌─ busy   boolean ──────────────────────────────────────┐
-  │  owner: onSubmit try/finally      when: around ask()   │  → brackets the await
-  └───────────────────────────────────────────────────────┘
-
-  three slices, three different transition owners — that's why they're three hooks
 ```
 
-- **Layers:** the widget (`<TextInput>`) → the handler (`onSubmit`) → the render output.
-- **Axis:** "who owns the transition?" `input` is owned by the widget's `onChange` and
-  fires per keystroke. `turns` is owned by `onSubmit` and only appends. `busy` is owned by
-  `onSubmit`'s `try/finally` and brackets the async call.
-- **The seam that matters:** `input` flips on a *different clock* than `turns`/`busy`.
-  `input` changes on every key; `turns`/`busy` change once per submitted question. Splitting
-  them into separate hooks means a keystroke re-renders without touching the transcript, and
-  a submit doesn't fight the keystroke clock. That clock-split is *why this is three hooks
-  and not one state object* — the load-bearing reason.
+**Zoom in:** the concept is **client state vs server state**, the single most important distinction in frontend state architecture. `input` and `busy` are pure client state — they exist only to drive the UI and die with the process. `turns` is a **display projection of server state** — a local copy of what the DB durably holds, rebuilt empty each launch (`useState<Turn[]>([])`, `src/cli/chat.tsx:11`). Knowing which of your state is canonical and which is a disposable view is the question this lens answers.
+
+---
+
+## The structure pass
+
+One axis: **"if the process dies right now, is this state lost?"** Trace it across the three hooks and the answer flips — and where it flips is the seam between client and server state.
+
+```
+  Axis — "survives a crash?" — across the three hooks
+
+  ┌─ client state (in React) ─────────────────┐
+  │  input  → NO  (cleared every submit)       │   ephemeral
+  │  busy   → NO  (resets to false)            │   ephemeral
+  │  turns  → NO  (display copy only)          │   projection
+  └───────────────────────┬────────────────────┘
+        ════════════════════╪═══  ◄── seam: persist boundary (session.ask)
+  ┌─ server state (in Postgres) ▼─────────────┐
+  │  messages rows → YES  (durable)            │   canonical
+  └────────────────────────────────────────────┘
+```
+
+- **Layers:** ephemeral UI state (`input`, `busy`) → display projection (`turns`) → durable record (DB rows).
+- **Axis (durability):** all three React hooks answer "lost on crash: yes." The DB answers "no." The boundary where that flips is `session.ask()` writing to `messages` (`src/session.ts:62`).
+- **The seam:** the persist boundary. It tells you `turns` is *not* your source of truth — it's a cache of the durable log you happen never to read back. That's a deliberate choice (see `audit.md` red flag #2), and naming it is the lesson.
+
+---
 
 ## How it works
 
 ### Move 1 — the mental model
 
-The state triad is the same instinct you use when you decide a form needs `email`,
-`password`, and `submitting` as three separate `useState`s rather than one
-`useState({email, password, submitting})`: **one slice per independent concern, so a
-change to one doesn't force you to spread the other two.** The shape:
+You know the rule: state that two parts of the UI must agree on gets lifted; state only one part needs stays local. Here there's only one component, so *everything* is local by default — the interesting move isn't lifting, it's classifying each piece by **lifecycle and ownership**.
 
 ```
-  The pattern — one hook per independent concern
+  Pattern — three hooks, three lifecycles
 
-   ┌───────────────────────────────────────────────┐
-   │  concern              state slice              │
-   ├───────────────────────────────────────────────┤
-   │  "what's typed"   →   input  : string          │  changes per keystroke
-   │  "what's said"    →   turns  : Turn[]          │  changes per turn
-   │  "is it working"  →   busy   : boolean         │  changes per request
-   └───────────────────────────────────────────────┘
-       each slice has its own setter; updating one
-       leaves the other two untouched
+   input  ●───keystroke───●───keystroke───● submit→clear   (per-character)
+   busy   ○────────────────████████████████──────────○      (per-turn span)
+   turns  ▷──append you──────────────────append buffr──▷     (append-only log)
+          │                                          │
+          render reads all three every frame ────────┘
 ```
 
-The controlled input is the other half: `<TextInput>`'s displayed value *is* `input`
-state, and the only way it changes is by calling `setInput`. The widget never holds its own
-truth — React does. Same contract as a controlled `<input value={x} onChange={…}>`.
+The strategy: **co-locate each piece of state at the lowest level that needs it, and tag it by lifecycle — keystroke, turn-span, or append-only history.**
 
 ### Move 2 — the walkthrough
 
-#### The three hooks — declared once at the top, typed
+#### `input` — controlled value, per-keystroke lifecycle
 
 ```tsx
-// src/cli/chat.tsx:11-13
-const [turns, setTurns] = useState<Turn[]>([]);   // transcript, starts empty
-const [input, setInput] = useState('');           // controlled buffer, starts ''
-const [busy, setBusy]   = useState(false);         // in-flight flag, starts false
+// src/cli/chat.tsx:12, 24, 55
+const [input, setInput] = useState('');
+// ...
+setInput('');                                          // cleared on submit (chat.tsx:24)
+<TextInput value={input} onChange={setInput} … />      // React owns the value (chat.tsx:55)
 ```
 
-`Turn` is `{ role: 'you' | 'buffr'; text: string }` (`chat.tsx:7`) — a discriminated union
-on `role`, which is what drives the color choice later (`chat.tsx:44`). Three hooks, three
-initial values, three setters. Nothing here is terminal-specific; paste it into a browser
-component and it compiles unchanged. The boundary condition: because these are independent
-hooks, a stale-closure bug in one (reading an old `turns` inside an async callback) wouldn't
-corrupt `busy` — but `onSubmit` sidesteps that risk entirely by using the *functional*
-setter form, covered next.
+`input` is the controlled value of the text field — React holds the string, the field renders it, `onChange` writes every keystroke back. Bridge from the browser: this is `<input value={x} onChange={e => setX(e.target.value)}>` verbatim; `ink-text-input` hands you the new string directly instead of an event. Lifecycle: born empty, mutated per keystroke, reset to `''` on submit. It never persists. (Full controlled-input mechanics: `05-controlled-text-input.md`.)
 
-#### The functional updater — append without reading stale state
-
-Every transcript append uses `setTurns(t => [...t, …])`, never `setTurns([...turns, …])`:
+#### `busy` — boolean loading flag, per-turn lifecycle
 
 ```tsx
-// src/cli/chat.tsx:25  (on submit)
-setTurns((t) => [...t, { role: 'you', text: q }]);
-// src/cli/chat.tsx:29  (on answer, AFTER an await)
-setTurns((t) => [...t, { role: 'buffr', text: answer }]);
+// src/cli/chat.tsx:13, 17, 26, 32
+const [busy, setBusy] = useState(false);
+if (busy) return;            // re-entrancy guard (chat.tsx:17)
+setBusy(true);               // before the await (chat.tsx:26)
+// ... finally:
+setBusy(false);              // after, guaranteed (chat.tsx:32)
 ```
 
-This is the bug you have caught in code review a hundred times: line 29 runs *after*
-`await session.ask(q)` (`chat.tsx:28`), so the `turns` variable captured in the closure is
-stale — it is whatever `turns` was when `onSubmit` started, missing the `'you'` turn that
-line 25 just added. The functional updater `(t) => …` receives the *latest* committed
-state, not the closed-over one, so the `'buffr'` turn appends onto the real current array.
-**This is the single most load-bearing line-level decision in the component.** Drop the
-functional form and use `setTurns([...turns, …])` on line 29 and the user's question would
-vanish from the transcript the moment the answer arrives.
+`busy` spans exactly one turn — true from just-before `await session.ask()` to the `finally`. It does two jobs: gates re-entry (`if (busy) return`, so a second submit while thinking is dropped) and drives the render branch (spinner vs input, `chat.tsx:48`). Boundary condition: `setBusy(false)` lives in `finally`, so it resets even when `ask()` throws — drop the `finally` and one error strands the UI on the spinner forever. (Full loading-state walk: `03-async-ui-with-a-busy-flag.md`.)
 
-```
-  Execution trace — why the functional updater is required
-
-  onSubmit starts:   turns = []           (closure captures this [])
-  line 25 setTurns:  turns → [you:q]      (functional, fine either way)
-  ── await ask() ──  (turns commits to [you:q], but closure var still [])
-  line 29 options:
-    stale [...turns]:   [] + buffr  = [buffr]        ✗ lost the question
-    functional (t=>):   [you:q] + buffr = [you:q, buffr]  ✓ correct
-```
-
-#### The controlled input — value in state, cleared by hand
+#### `turns` — append-only transcript, projection of server state
 
 ```tsx
-// src/cli/chat.tsx:55
-<TextInput value={input} onChange={setInput} onSubmit={onSubmit} placeholder="ask buffr" />
+// src/cli/chat.tsx:11, 25, 29, 31
+const [turns, setTurns] = useState<Turn[]>([]);
+setTurns((t) => [...t, { role: 'you',   text: q }]);       // your turn, immediately (chat.tsx:25)
+setTurns((t) => [...t, { role: 'buffr', text: answer }]);  // answer, after await (chat.tsx:29)
+setTurns((t) => [...t, { role: 'buffr', text: `error: …` }]); // or error (chat.tsx:31)
 ```
 
-`value={input}` + `onChange={setInput}` is the controlled-component contract: the widget
-shows what state says, and every keystroke routes through `setInput` to update state, which
-re-renders the widget with the new value. Because state is the source of truth, clearing the
-field is just `setInput('')` (`chat.tsx:24`) — done immediately on submit, *before* the
-await, so the field empties the instant you hit enter rather than after the model responds.
-The boundary condition you know: if you forgot `value={input}` and only kept `onChange`, the
-input would be *uncontrolled* and `setInput('')` wouldn't clear it — the widget would hold
-its own buffer. Same trap as a browser `<input>`.
+`turns` is the transcript. Two things to name. First, the **functional updater** `t => [...t, …]`: it reads the latest array and appends a new one (immutable update — never `t.push`). This matters because the answer append (`chat.tsx:29`) happens *after* an `await`, by which point `turns` may have changed; the functional form guarantees you append to the current value, not a stale closure capture. Your React instinct here is exactly right and load-bearing. Second, `turns` is a **display projection** — `useState<Turn[]>([])` starts empty every launch and is never hydrated from the persisted `messages`. The canonical conversation is the DB (`session.ts:62`); `turns` is a disposable view of it.
 
-#### The render reads state, switches on `busy`
+### Move 2 variant — the load-bearing skeleton
 
-```tsx
-// src/cli/chat.tsx:42-57
-{turns.map((t, i) => (                                  // turns drives the transcript
-  <Box key={i} flexDirection="column" marginBottom={1}>
-    <Text bold color={t.role === 'you' ? 'cyan' : 'green'}>{t.role}</Text>
-    <Text>{t.text}</Text>
-  </Box>
-))}
-{busy ? (<Text…><Spinner/> thinking…</Text>)          // busy switches footer
-      : (<Box>…<TextInput value={input} …/></Box>)}    // input feeds the field
-```
+Strip this to the irreducible core: **three independent `useState` cells + one render that reads all three + functional updates for the append-only one.** Name each by what breaks if removed:
 
-All three slices feed the render: `turns` is mapped (`chat.tsx:42`), `busy` picks the footer
-(`chat.tsx:48`), `input` is the field's value (`chat.tsx:55`). The `key={i}` on line 43 is
-the array index — *safe here* because `turns` is strictly append-only and never reordered or
-removed, but it is exactly the pattern that breaks if anyone ever splices the array. (Flagged
-in `audit.md` red-flag 2.)
+- Drop `busy` → no re-entrancy guard; a fast double-submit fires two overlapping `ask()` calls into one conversation, and the UI never shows a thinking state.
+- Drop the **functional updater** on `turns` → the post-`await` append (`chat.tsx:29`) closes over a stale `turns`, and a rapid sequence can drop a turn off the transcript.
+- Drop `input` as controlled state → the field becomes uncontrolled; you can't clear it on submit (`chat.tsx:24`) and React no longer owns the value.
+
+Optional hardening (not in the skeleton): the DB persistence behind `turns`, the error-turn branch. The skeleton is just the three cells and disciplined updates.
 
 ### Move 3 — the principle
 
-**Split state by transition clock, not by data shape.** `input` changes per keystroke;
-`turns` and `busy` change per request. Bundling them into one object would couple the fast
-clock to the slow one and invite stale-closure bugs across concerns. The functional updater
-is the partner rule: any setter that runs after an `await` must take the latest state as an
-argument, never close over it. Both rules are framework-agnostic — they hold in Vue's
-`ref`s, in a `useReducer`, in any reactive system where a transition can outlive the closure
-that scheduled it.
+Frontend state architecture is mostly **classification, not machinery**. Before reaching for a store, ask of each piece: who needs it, how long does it live, and is it the source of truth or a view of one held elsewhere. Buffr needs no Redux because the answer for all three is "one component, short-lived, and the real record is in Postgres." The discipline that scales isn't "add a store" — it's keeping that classification honest as components multiply.
+
+---
 
 ## Primary diagram
 
-The full state-and-render loop in one frame.
+The three cells, their lifecycles, and the canonical record they sit above.
 
 ```
-  hooks-state-in-a-cli — the complete loop
+  buffr client state — the full picture
 
-  ┌─ <Chat> state (src/cli/chat.tsx) ───────────────────────────┐
-  │   turns Turn[] :11      input string :12      busy bool :13  │
-  └───┬───────────────────────┬───────────────────────┬─────────┘
-      │ map :42               │ value :55             │ switch :48
-      ▼                       ▼                       ▼
-  ┌─ render ─────────────────────────────────────────────────────┐
-  │  transcript rows   ·   <TextInput> | <Spinner>   (footer)     │
-  └──────────────────────────────────────────────────────────────┘
-                              │ keystroke → onChange=setInput :55
-                              │ enter     → onSubmit          :55
-                              ▼
-  ┌─ onSubmit  src/cli/chat.tsx:15 ──────────────────────────────┐
-  │  setInput('') :24                                            │
-  │  setTurns(t=>[…you]) :25     setBusy(true) :26               │
-  │  await session.ask(q) :28                                    │
-  │  setTurns(t=>[…buffr]) :29   (functional → latest state)     │
-  │  setBusy(false) :33  (finally)                               │
-  └──────────────────────────────────────────────────────────────┘
+  ┌─ <Chat> (UI layer, src/cli/chat.tsx:11–13) ─────────────┐
+  │                                                         │
+  │  input ─keystroke→ setInput ─submit→ ''                 │  ephemeral
+  │  busy  ─submit→ true ─finally→ false                    │  ephemeral
+  │  turns ─append you→ … ─append buffr→ …  (functional)    │  projection
+  │           │                                             │
+  │     render reads all three → reconcile → terminal       │
+  └───────────┼─────────────────────────────────────────────┘
+              │ session.ask() persists below
+  ┌─ Storage ▼──────────────────────────────────────────────┐
+  │  agents.messages  ← canonical conversation (durable)     │
+  └──────────────────────────────────────────────────────────┘
 ```
+
+---
 
 ## Elaborate
 
-`useState` is the reducer primitive in disguise — `useState` is `useReducer` with a trivial
-"replace" reducer. The functional-updater form (`setTurns(t => …)`) is the seam where that
-shows: you are handing React a reducer function `(prev) => next`, and React applies it
-against the latest committed state. This component never needs `useReducer` proper because
-the three slices don't share a transition; the moment two of them had to change atomically
-together (say, "set busy *and* clear an error in one commit"), promoting to `useReducer`
-would be the move. For now, three `useState`s is the honest minimum. Next:
-`03-async-ui-with-a-busy-flag.md` walks the `try/finally` that drives `busy`.
+The client-state / server-state split is the idea react-query and SWR institutionalized: server state is owned elsewhere (the server), cached on the client, and needs invalidation; client state is yours and ephemeral. Buffr hand-rolls the cheapest version — `turns` is a write-through display copy with no read-back and no invalidation, because for a single-user local CLI the cost of staleness is "restart shows an empty transcript," which is acceptable. The day buffr wants to show history on launch, the move is to hydrate `turns` from `messages` on mount — and *that's* when a fetch-cache library would start earning its place.
+
+Read next: `03-async-ui-with-a-busy-flag.md` (the `busy` lifecycle in full) and `04-session-as-the-data-layer.md` (where the canonical state lives). System-level ownership of the conversation is `study-system-design`.
+
+---
 
 ## Interview defense
 
-**Q: Why three separate `useState`s instead of one state object?**
+**Q: "Three `useState` hooks and no store — is that a smell?"**
+
+No — it's correctly scoped. There's one component and the conversation's source of truth is the database, not React. A store earns its place when state must be shared across distant components or survive navigation; neither exists here.
 
 ```
-  one object                          three slices
-  ──────────                          ────────────
-  setState({...s, input: v})          setInput(v)
-  every change spreads all three      each change touches one
-  input keystroke re-creates the      input keystroke leaves turns/busy
-  whole object                        objects untouched
+  when does a store earn its place?
+  shared across components?  NO  → local state
+  survives navigation?       NO  → local state
+  IS the source of truth?    NO (DB is) → just a projection
+  ⇒ three useState cells is right
 ```
 
-Because the three change on different clocks — `input` per keystroke, `turns`/`busy` per
-request — and bundling them couples the fast clock to the slow one and forces a spread on
-every keystroke. Separate hooks keep each transition independent and sidestep a whole class
-of stale-spread bugs. Anchor: *"split state by transition frequency, not by data shape."*
+Anchor: *"input and busy are ephemeral client state; turns is a display projection of the durable messages rows (chat.tsx:11 vs session.ts:62)."*
 
-**Q: There's an `await` between two `setTurns` calls. What's the trap, and how does the code
-avoid it?**
+**Q: "Why functional updaters instead of `setTurns([...turns, x])`?"**
 
-The trap is the stale closure: the second `setTurns` (`chat.tsx:29`) runs after the await,
-so a `[...turns, …]` form would read the `turns` value from *before* the user's turn was
-added and silently drop it. The code uses the functional updater `setTurns(t => [...t, …])`
-so React passes the latest committed array, not the closed-over one. Naming this — that the
-post-await setter must take state as an argument — is the signal you have debugged this for
-real. Anchor: *"any setter after an await uses the functional form, because the closure's
-copy is stale."*
+Because the answer append happens *after* an `await` (`chat.tsx:29`), so the closed-over `turns` may be stale. `t => [...t, x]` reads the latest committed value. The load-bearing point people miss: it's not style — under concurrent appends the plain form can **drop a turn**. Naming that you'd hit this specifically across the `await` boundary is the signal.
+
+```
+  why functional update across an await
+  setTurns([...turns, x])   ← turns captured BEFORE await → stale → lost turn
+  setTurns(t => [...t, x])  ← reads latest → safe
+```
+
+---
 
 ## See also
 
-- `01-react-without-the-dom.md` — what repaints when these setters fire.
-- `03-async-ui-with-a-busy-flag.md` — the `try/finally` that owns the `busy` slice.
-- `04-session-as-the-data-layer.md` — where `turns` (display) and the DB (canonical) split.
-- Cross-link: `study-software-design` — when the mapped transcript earns a `<Message>` component.
+- `03-async-ui-with-a-busy-flag.md` — the `busy` lifecycle and `try/finally`
+- `04-session-as-the-data-layer.md` — where canonical state lives
+- `05-controlled-text-input.md` — `input` as a controlled value
+- `audit.md` lens 2 (state-architecture), red flag #2 (display/canonical drift)
+- cross-link: `study-system-design` (system-level state ownership)

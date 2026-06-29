@@ -1,176 +1,276 @@
-# Per-tool circuit breaking — a dead tool shouldn't burn the budget
+# Per-Tool Circuit Breaking
 
-**Industry name(s):** per-tool circuit breaker · tool health gating ·
-feed-the-breaker-state-to-the-agent. **Type label:** Industry standard.
-
-**In this codebase: Not yet implemented.** buffr has no circuit breaker
-on its one tool. If `search_knowledge_base` started failing (pgvector
-down, Ollama embedder unreachable), buffr's loop would retry it on every
-turn until the budget runs out. The `maxToolCalls: 4` cap *bounds* that
-damage, but doesn't *route around* it.
+*Industry names: **circuit breaker** (the state machine) / **error-as-observation** (the
+substrate). Type label: Industry standard. In buffr: the error-observation substrate is
+IMPLEMENTED (a tool throw is caught and fed back to the model as an observation); the
+open/half-open state machine is NOT YET wired. buffr's `maxToolCalls:4` caps the blast today.*
 
 ## Zoom out, then zoom in
 
 ```
-  Zoom out — the breaker scoped to a tool, inside the loop
+  buffr's serving stack — a breaker would scope to the ONE tool
 
-  ┌─ Agent loop ─────────────────────────────────────────────┐
-  │  Agent calls tool X                                       │
-  │       ▼                                                   │
-  │  ┌─ Circuit breaker (per tool) ─────────────────┐         │ ← we are here
-  │  │  closed: pass · N fails → OPEN: fail fast      │        │
-  │  │  after T: half-open, try one                   │        │
-  │  └────────────────────┬───────────────────────────┘        │
-  │       ▼ open?                                              │
-  │  agent OBSERVES "tool X unavailable" and routes around it  │
-  └──────────────────────────────────────────────────────────┘
+  ┌─ THE LOOP ─ run-agent-loop.ts:76-202 ─ N turns, re-hits the tool ──┐
+  │ ┌─ ★ PER-TOOL CIRCUIT BREAKER ★ ─ the state machine ────────────┐ │  NOT YET
+  │ │  CLOSED → (failures) → OPEN → (cooldown) → HALF-OPEN → probe   │ │
+  │ │ ┌─ ERROR-AS-OBSERVATION ─ run-agent-loop.ts:163-187 ─────────┐ │ │  IMPLEMENTED
+  │ │ │  try/catch wraps the throw into a tool_result {isError}    │ │ │
+  │ │ │  fed back next turn → the agent SEES the failure           │ │ │
+  │ │ │ ┌─ THE TOOL ─ search_knowledge_base → local pgvector ────┐ │ │ │
+  │ │ │ │  the one (possibly flaky) dependency                   │ │ │ │
+  │ │ │ └─────────────────────────────────────────────────────────┘ │ │ │
+  │ │ └─────────────────────────────────────────────────────────────┘ │ │
+  │ └─────────────────────────────────────────────────────────────────┘ │
+  └─────────────────────────────────────────────────────────────────────┘
 ```
 
-Zoom in: single-call retry handles one flaky request. An agent loop can
-call the *same flaky tool every turn* — retrying a dead tool inside a
-loop multiplies the failure by the iteration count and burns the whole
-budget on a tool that isn't coming back. A per-tool breaker fails fast
-*and* feeds that state back to the agent so it can route around the dead
-tool.
+A circuit breaker stops sending requests to a dependency that's already failing, so you fail
+fast instead of hammering a dead service. In an *agent* the twist is the loop: the same tool is
+re-hit every turn, so a dead dependency doesn't fail once — it fails N times until the budget
+burns. buffr has the **substrate** (★'s inner box: it catches a tool error and shows it to the
+model) but not the **state machine** (★'s outer box: open/half-open). The error-observation is
+real; the breaker is not yet.
 
 ## Structure pass
 
-**Layers.** The breaker sits between the loop's execute step and the tool
-handler — a gate on `callTool`.
+Two layers, traced along ONE axis: **what reacts to the failure**.
 
-**Axis — "what happens when a tool keeps failing?"** Without a breaker:
-retry every turn until the budget dies. With a breaker: fail fast after N
-failures, and tell the agent. The difference is budget-ending vs
-routed-around.
+```
+  Axis = WHO REACTS · trace the failure from the dependency up to the loop
 
-**Seam.** The `tools.callTool` boundary (`run-agent-loop.js:76`). That's
-where a breaker would intercept — and crucially, where the open-circuit
-state would be turned into an *observation* the agent reasons over.
+  ERROR-AS-OBSERVATION   reactor = the MODEL    failure becomes a tool_result {isError}
+    try/catch → wrap throw → feed back next turn → agent can route around   :163-187  IMPLEMENTED
+  ──────────────── ★ SEAM: the model reacts vs the harness reacts ★ ──────────────────────
+  CIRCUIT BREAKER        reactor = the HARNESS  failure count → OPEN → short-circuit the call
+    state machine: CLOSED/OPEN/HALF-OPEN, cooldown, probe                   NOT YET
+```
+
+The seam is *who decides to stop calling*. Below it, the **model** decides — it sees an
+`isError` observation and *may* choose to stop using that tool or rephrase. Above it, the
+**harness** decides — after K failures it opens the circuit and refuses to make the call at all,
+regardless of what the model asks. buffr has the lower layer (the model can see and react) but
+not the upper (the harness will still dutifully re-call a dead pgvector every turn until the
+tool budget is spent).
 
 ## How it works
 
-#### Move 1 — the mental model
+### Move 1 — mental model
 
-You've wrapped a flaky dependency in a breaker so your service stops
-hammering it after N failures and fails fast. The agent twist: the
-breaker doesn't just fail fast — it *tells the agent* the tool is down,
-so the agent's reasoning can route around it instead of looping on it.
+A circuit breaker is a wrapper around a flaky dependency that counts failures and, past a
+threshold, *stops calling it* — returning a fast failure instead — then periodically probes to
+see if it recovered. The frontend reflex: wrapping a flaky third-party `fetch` so that after N
+consecutive 500s you stop hitting it for 30 seconds, serve a fallback, then try one request to
+see if it's back. Three states: **CLOSED** (calls pass), **OPEN** (calls short-circuit),
+**HALF-OPEN** (one probe decides).
 
 ```
-  Pattern — per-tool breaker that feeds back to the agent
+  THE SHAPE — the breaker around a flaky dependency (fetch you stopped hammering)
 
-  agent calls tool X
-       │
-       ▼ breaker(X)
-   closed → run    |   open → return "tool X unavailable"
-       │                          │
-       │                          ▼
-       │              agent observes it, routes around
-       │              (different tool / degrade / "I can't reach my notes")
-       ▼
-   N failures → OPEN
+  CLOSED ──(K failures)──▶ OPEN ──(cooldown elapsed)──▶ HALF-OPEN ──probe──┐
+     ▲  calls pass through      calls short-circuit         one trial call  │
+     │                          (fail fast, no dependency)                  │
+     └──────────────── probe succeeds ───────────────────────────────◀─────┘
+                       probe fails → back to OPEN
 ```
 
-#### Move 2 — the walkthrough (buffr's gap and its existing bound)
+### Move 2 — the substrate, then the missing machine
 
-**buffr would retry a dead tool every turn — up to the cap.** Look at
-the loop: on each turn the model may emit a `search_knowledge_base` call,
-and `runAgentLoop` runs it, catching errors into the result
-(`run-agent-loop.js:75-86`):
+**Error-as-observation: the substrate buffr DOES have.**
 
-```js
+When the one tool throws — pgvector is down, the query errors — the loop doesn't crash. It
+catches the throw, wraps it into a `tool_result` marked `isError`, and feeds it back into the
+`messages` array as the next observation. So the model *sees* the failure on the following turn
+and can reason about it.
+
+```
+  ERROR-AS-OBSERVATION — a tool throw becomes an observation the model sees
+
+  callTool(search_knowledge_base) ──throws──▶ catch
+                                                │ wrap: {error: message}, isError: true
+                                                ▼
+                            messages.push(tool_result {isError})  ──next turn──▶ MODEL sees it
+                                                                                  may route around
+```
+
+```ts
+// @aptkit/runtime — run-agent-loop.ts:163-187 — the throw is caught and turned into an observation.
 try {
   const { result, durationMs } = await tools.callTool(toolUse.name, toolUse.input, { signal });
-  ...
-} catch (error) {
+  resultContent = truncate(JSON.stringify(result));
+} catch (error) {                                          // :163 — pgvector down → throw lands HERE
   isError = true;
-  resultContent = truncate(JSON.stringify({ error: message }));
+  const message = error instanceof Error ? error.message : String(error);
+  toolCall.error = message;
+  resultContent = truncate(JSON.stringify({ error: message }));   // :167 — the error becomes content
+}
+// ...:181-186 — the error is pushed back as a tool_result the model reads next turn:
+toolResults.push({
+  type: 'tool_result',
+  toolUseId: toolUse.id,
+  content: resultContent,
+  ...(isError ? { isError: true } : {}),                   // ← flagged so the model knows it FAILED
+});
+// :189 — appended to messages → becomes the next turn's observation
+messages.push({ role: 'user', content: toolResults });
+```
+
+Annotation: this is the **substrate a breaker builds on**. The loop already converts a tool
+failure into something the agent observes (`:163-187`) rather than a crash. That's the
+agent-specific half — in a non-agent system you'd just propagate the error; here the *model* is a
+potential reactor, so the failure is handed to it as data. This is implemented and load-bearing.
+
+**The circuit-breaker state machine: the part that's NOT YET wired.**
+
+What buffr lacks is the harness-side machine: a per-tool failure counter that, past a threshold,
+**opens** the circuit and short-circuits the call without touching pgvector — then probes after
+a cooldown.
+
+```
+  PER-TOOL BREAKER (sketch, not in buffr) — the harness stops calling a dead tool
+
+  before callTool(search_knowledge_base):
+        breaker[tool].state == OPEN ?
+            ├── yes ──▶ short-circuit: return {error:"circuit open"} WITHOUT calling pgvector
+            └── no  ──▶ call it → on throw, failures++ → failures ≥ K → state = OPEN (start cooldown)
+        cooldown elapsed → state = HALF-OPEN → next call is a single probe → success closes, fail re-opens
+```
+
+```text
+// SKETCH — not in buffr. A breaker scoped to ONE tool, wrapping the callTool above.
+if (breaker.isOpen("search_knowledge_base")) {
+  resultContent = JSON.stringify({ error: "search temporarily unavailable (circuit open)" });
+  isError = true;                                  // STILL fed back as an observation — substrate reused
+} else {
+  try { /* the existing callTool */ breaker.recordSuccess("search_knowledge_base"); }
+  catch (e) { breaker.recordFailure("search_knowledge_base"); /* K failures → open */ throw e; }
 }
 ```
 
-The error is fed back as a `tool_result` with `isError: true`. So buffr
-*does* surface the failure to the model — but there's no breaker, so the
-model can just try search again next turn, and again, up to
-`maxToolCalls: 4`. The cap is buffr's only protection: it bounds the
-damage at 4 failed calls, then forces synthesis. That's a budget bound,
-not a route-around.
+Annotation: note the breaker would **reuse** the error-observation substrate — an open circuit
+still feeds an `isError` observation back to the model, just without hitting the dead dependency.
+The missing piece is purely the state machine (the counter, the OPEN/HALF-OPEN transitions, the
+cooldown). **buffr's would-need: a flaky shared dependency the loop re-hits enough that
+fail-fast beats re-call.** Today pgvector is local and the failure mode is "down or up," not
+"flaky under load," so the machine hasn't earned its keep.
 
-**Why the cap isn't enough at scale.** Four failed embed-and-search
-attempts is four round-trips to a dead pgvector/Ollama before the loop
-gives up — wasted latency and tokens producing nothing, the worst kind
-of cost blowup. A breaker would fail the 2nd call instantly (circuit
-open) and feed "search unavailable" to the model, so it answers from
-what it has — or says "I can't reach your notes right now" — instead of
-burning the budget retrying.
+**Why the loop makes this matter: one dead tool burns the whole budget.**
 
-**The buffr-specific subtlety: one tool means routing around is
-"degrade."** With multiple tools, "route around" means pick a different
-tool. buffr has *one* tool — so routing around a dead
-`search_knowledge_base` means degrading gracefully: answer from the
-profile/prompt alone, or tell the user retrieval is down. The breaker's
-value here is turning a 4-call budget burn into an instant, honest
-degradation.
+In a single call, a dead dependency fails once. In a *loop*, the agent re-issues the tool every
+turn — so without a breaker, one dead tool + a loop = the entire iteration budget spent retrying
+a corpse.
 
 ```
-  Comparison — buffr today vs with a per-tool breaker
+  WHY THE LOOP RAISES THE STAKES — re-hit every turn until the budget burns
 
-  buffr today:                      with breaker (would-be):
-    search fails → retry next turn    search fails → breaker opens
-    → fails again → ... up to 4        → 2nd call fails INSTANTLY
-    → forced synth (4 wasted calls)    → agent degrades / honest "down"
+  no breaker:  turn1 search→FAIL  turn2 search→FAIL  turn3 search→FAIL  turn4 search→FAIL
+               └──────────── all 4 tool calls wasted on a dead pgvector ───────────────┘
+  buffr today: maxToolCalls:4 CAPS the bleed at 4 — the budget is the crude backstop
+  with breaker: turn1 FAIL→open  turn2+ short-circuit fast → budget spent on SYNTHESIS, not retries
 ```
 
-#### Move 3 — the principle
+Annotation: buffr's `maxToolCalls:4` is the crude backstop that bounds the blast *today* — a
+dead tool can waste at most four calls, not infinity. A breaker would do better: open after the
+first failure so the remaining budget goes to *answering with what it has* rather than retrying
+a dead dependency. The budget caps the damage; the breaker would avoid most of it.
 
-A breaker scoped to a tool, *feeding its state back to the agent*, turns
-the tool-call cascade from a budget-ending event into a routed-around
-inconvenience. The shift from single-call breakers: it doesn't just
-protect your service from a dead dependency, it gives the agent's
-reasoning the information to stop looping on the dead path. buffr's
-`maxToolCalls` cap *bounds* a dead-tool cascade; a breaker would *short-
-circuit* it — instant degradation instead of four wasted round-trips.
+### Move 3 — the principle
+
+**Feed tool failures back to the agent as observations (so it can route around them), and put a
+harness-side breaker around any flaky tool the loop will re-hit (so a dead dependency doesn't
+burn the whole iteration budget).** The two layers are complementary, not redundant: the
+observation lets the *model* adapt; the breaker lets the *harness* refuse to call a known-dead
+tool regardless of what the model asks. buffr ships the first and bounds the second with a
+budget. The staff-engineer read: in a single call a dead dependency is one failure, but in a
+loop it's a *multiplied* failure, so the breaker's value scales with the iteration count — which
+is exactly why it's an agent-serving concern and not just a call-level one.
 
 ## Primary diagram
 
-```
-  Per-tool circuit breaking (would-be in buffr)
+Both layers, with buffr's status and the budget backstop.
 
-  agent → search_knowledge_base
-       │ breaker(search)
-       ▼
-   closed → run pipeline      |   open → "search unavailable" (instant)
-       │ N fails                          │
-       ▼ OPEN                             ▼
-   (no more real calls)        agent: ONE tool, so DEGRADE
-   half-open after cooldown    → answer from profile / "I can't reach notes"
-
-  buffr today: no breaker → maxToolCalls:4 bounds it (4 wasted calls)
 ```
+  Per-tool circuit breaking in buffr — substrate yes, state machine no
+
+  CIRCUIT BREAKER (harness reacts)   CLOSED→OPEN→HALF-OPEN, cooldown, probe      NOT YET
+        │ would short-circuit a dead tool, reusing the observation below
+        ▼
+  ERROR-AS-OBSERVATION (model reacts) try/catch → tool_result {isError} :163-187  IMPLEMENTED
+        │ the model SEES the failure next turn and may route around it
+        ▼
+  THE TOOL  search_knowledge_base → local pgvector  (the dependency)
+
+  Backstop today: maxToolCalls:4 caps a dead tool's bleed at 4 calls (crude, but bounded).
+```
+
+The agent already observes tool failure; what's missing is the harness refusing to re-call a
+known-dead tool. The budget caps the cost in the meantime.
+
+## Elaborate
+
+The two layers fail differently and you want both. Error-as-observation makes the agent
+*adaptive* — a model that sees `isError` can rephrase its query, try a different angle, or
+synthesize from what it has. But it's only as reliable as the model's judgment; a stubborn local
+9B might re-issue the same failing query, which is exactly where the harness-side breaker earns
+its keep by *removing the option*. Conversely, a breaker with no observation would short-circuit
+silently and leave the model guessing why its tool "returned nothing." buffr has the
+observation; the breaker's absence is currently masked by `maxToolCalls:4`, which is why it
+hasn't hurt — the budget is a blunt instrument that happens to cap the same blast radius.
+
+The fleet shape is where the breaker becomes mandatory. Many agents hammering one shared flaky
+dependency is the classic cascading-failure setup: without per-tool breakers, every agent
+re-hits the dying service every turn, and the retries themselves keep it down. A breaker per
+(agent, tool) lets the fleet fail fast and shed load, which is also a *form* of backpressure
+(file 02) — stop sending to a dead consumer. buffr is single-agent against a local dependency,
+so the cascade can't form; the breaker is a design target named against the day a tool calls out
+to a shared or remote service that can be flaky under load rather than simply up-or-down.
+
+Cross-ref `study-ai-engineering/06-production-serving/` for the call-level circuit-breaker state
+machine (the CLOSED/OPEN/HALF-OPEN mechanics, thresholds, cooldown tuning); this file is the
+*agent* view — where that breaker is scoped per-tool and its output is fed back as an
+observation the loop reasons over.
 
 ## Interview defense
 
-**Q: What happens if buffr's search tool goes down mid-run?**
-Today, buffr retries it every turn up to `maxToolCalls: 4`, then forces
-synthesis — so a dead pgvector or embedder costs four wasted
-embed-and-search round-trips before the loop gives up. The error *is*
-surfaced to the model (`isError: true`), but nothing stops it retrying.
-A per-tool circuit breaker would fail the 2nd call instantly and feed
-"search unavailable" to the agent, so it degrades immediately —
-answering from the profile or honestly saying retrieval is down.
+**Q: "What happens when a tool fails mid-loop? Do you have a circuit breaker?"**
+
+Model answer: "Two layers, and I'm precise about which I have. The substrate is implemented: when
+my one tool throws — say local pgvector is down — the loop catches it and wraps it into a
+`tool_result` flagged `isError` (`run-agent-loop.ts:163-187`), pushed back into the `messages`
+array as the next observation. So the *model sees the failure* and can route around it — rephrase,
+or synthesize from what it has — rather than the run crashing. What I don't have yet is the
+harness-side state machine: a per-tool breaker that counts failures, opens after K, short-circuits
+the call without touching the dead dependency, and probes after a cooldown (CLOSED/OPEN/HALF-OPEN).
+Why it matters more in a loop than a single call: the agent re-hits the same tool every turn, so
+one dead tool without a breaker burns the *whole* iteration budget on retries. Today `maxToolCalls:4`
+is my crude backstop — a dead tool wastes at most four calls, not infinity. A breaker would do
+better: open on the first failure so the remaining budget goes to answering, not retrying a corpse.
+It's not wired because pgvector is local and either up or down, not flaky under load — the breaker
+earns its keep against a shared or remote dependency, which I'd name as the trigger to add it."
 
 ```
-  no breaker → 4 wasted retries | breaker → instant degrade + honest answer
+  The defense in one picture
+
+  tool throws?     caught → tool_result {isError} fed back :163-187  → MODEL sees it (substrate YES)
+  breaker?         NO state machine (CLOSED/OPEN/HALF-OPEN) — NOT YET
+  why it matters?  loop re-hits the tool every turn → one dead tool burns the whole budget
+  backstop today?  maxToolCalls:4 caps the bleed at 4 calls (crude but bounded)
 ```
 
-**Anchor:** "A breaker turns a tool-call cascade from a budget-ending
-event into a routed-around inconvenience — and with one tool, routing
-around means degrading honestly."
+Anchor: *Error-as-observation is implemented — a tool throw is caught and fed back as a
+`tool_result {isError}` the model sees next turn (`run-agent-loop.ts:163-187`), the substrate a
+breaker builds on; the open/half-open state machine is NOT YET wired, so a dead tool is re-hit
+every turn and only `maxToolCalls:4` caps the bleed (at 4 calls) — the breaker earns its keep
+against a flaky shared/remote dependency, which buffr's local pgvector isn't yet.*
 
 ## See also
 
-- `03-multi-agent-orchestration/09-coordination-failure-modes.md` — the
-  tool-call-cascade failure this controls
-- `01-reasoning-patterns/02-agent-loop-skeleton.md` — the budget cap that
-  bounds (but doesn't short-circuit) the cascade
-- `01-cross-turn-caching.md` · `02-fan-out-backpressure.md` — the sibling
-  serving concerns
+- `02-fan-out-backpressure.md` — an open breaker is a *form* of backpressure (stop sending to a
+  dead consumer), scoped to one tool instead of the whole fan-out.
+- `01-cross-turn-caching.md` — the other per-loop serving control; a cache hit means the call
+  never reaches the dependency the breaker guards.
+- `../04-agent-infrastructure/03-tool-calling-and-mcp.md` — the tool-calling path the breaker
+  would wrap; `callTool` is the seam.
+- `../04-agent-infrastructure/05-guardrails-and-control.md` — `maxToolCalls:4` lives there as a
+  termination bound; here it's read as the crude backstop a breaker would refine.
+- `study-ai-engineering/06-production-serving/` — the call-level circuit-breaker state machine
+  (CLOSED/OPEN/HALF-OPEN mechanics) this file points back to.

@@ -1,80 +1,88 @@
-# 08 — Machine Learning (classical, taught as new ground)
+# 08 · Machine Learning
 
-**Anchor:** classical supervised ML — the contrl-mo shape (one prior pipeline: MediaPipe pose-landmarking → on-device rep counter). **Curriculum:** Phase 2C / 3 / 5.
+> Classical, model-training ML — the one sub-section where buffr is *not* the worked example, because **buffr trains nothing.**
 
-Read this first, because it changes how you read every file below:
+State it plainly, up front, with no hedging: **buffr does not train, fine-tune, or fit a single model.** It *consumes* two pre-trained models served by Ollama — `gemma2:9b` for generation and `nomic-embed-text:v1.5` for 768-dim embeddings — and wires them into a retrieval pipeline. That is AI-*application* engineering. It is not classical supervised machine learning, and pretending otherwise would teach you the wrong instincts.
 
-**buffr trains no model.** It is a pure LLM application. It *consumes* two pre-trained models served by Ollama — `gemma2:9b` for generation, `nomic-embed-text:v1.5` for embeddings — and it never trains, fine-tunes, or evaluates a classical supervised model. There is no labeled training set (the 3-row `eval/queries.json` is an information-retrieval eval, not a model-training set), no feature engineering, no train/val/test split, no confusion matrix, no on-device classifier, no recommender, no quantization-of-a-trained-model step.
-
-So this entire section is **study material taught as new ground**, plus **Case-B project exercises** that identify the ML features buffr *could* add. Every file's "in this codebase" reality is **Not yet implemented** — and the Project exercises become the primary buildable target. The concept teaching inside *How it works* is real ML, taught properly: features, splits, confusion matrices, calibration, drift PSI, quantization, all with diagrams.
+So this sub-section is **all new ground.** Every concept here is **Case B** — "Not yet implemented; buffr trains nothing" — and the **Project exercises are the primary buildable target**, not an afterthought. You've shipped exactly one ML pipeline before (contrl pose-landmarking — a supervised vision model). That gives you the *shape* of "data in, fit, predict out." It does **not** give you the classical-ML toolkit: feature engineering, split discipline, class imbalance, calibration, drift. Those are the gaps these sixteen files fill, taught as study material that's correct on its own terms.
 
 ```
-  what this section is — and isn't
+08-machine-learning/                  ALL CASE B — buffr trains nothing
+│
+│  THE PIPELINE ──► QUALITY LEVERS ──► EVALUATION ──► PRODUCTION ──► SERVING
+│
+├── 01-supervised-pipeline.md     ◇ Data→Features→Split→Train→Deploy (the spine)
+├── 02-feature-engineering.md     ◇ raw → numeric features (60–80% of quality)
+├── 03-train-val-test.md          ◇ split discipline; leakage at the unit boundary
+├── 04-model-selection.md         ◇ LR vs GBT; pick the simpler if comparable
+│
+├── 05-class-imbalance.md         ◇ accuracy lies; macro-F1, recall, class weights
+├── 06-domain-gap.md              ◇ train vs inference distribution mismatch
+├── 07-transfer-learning.md       ◇ pretrain → fine-tune  ◄ HONEST HOOK (gemma)
+│
+├── 08-confusion-matrices.md      ◇ read one; derive per-class P/R/F1
+├── 09-calibration.md             ◇ predicted prob vs actual frequency
+│
+├── 10-recommender-systems.md     ◇ content vs collaborative vs hybrid
+├── 11-cold-start.md              ◇ new user / new item / new system
+│
+├── 12-on-device-inference.md     ◇ server vs on-device  ◄ HONEST HOOK (Ollama-local)
+├── 13-quantization.md            ◇ FP32→INT4  ◄ HONEST HOOK (gemma is quantized GGUF)
+│
+├── 14-training-run-logging.md    ◇ what to log per run  ◄ HONEST HOOK (SupabaseTraceSink)
+├── 15-drift-detection.md         ◇ PSI; train vs prod distribution
+└── 16-retraining-pipelines.md    ◇ scheduled / drift / performance triggers
 
-  ┌─ buffr (the only subject repo) ──────────────────────────────┐
-  │  LLM app: Ollama (gemma2:9b gen, nomic-embed-text embeds)     │
-  │  trains NO model · NO train/val/test · NO confusion matrix    │
-  └───────────────────────────────┬───────────────────────────────┘
-                                  │ this section teaches ↓
-  ┌─ classical ML — NEW GROUND ──▼────────────────────────────────┐
-  │  pipeline · features · splits · selection · imbalance ·       │
-  │  domain gap · transfer · confusion · calibration · recsys ·   │
-  │  cold-start · on-device · quantization · run-logging ·        │
-  │  drift · retraining                                           │
-  │  → every file: "Not yet implemented" + Case-B exercise        │
-  └───────────────────────────────────────────────────────────────┘
+  ◇ = named gap, primary build target (Case B).  There is no ★ in this section.
 ```
 
-## The one genuinely ML-relevant fact about buffr
+## The four honest hooks (real, named, not invented)
 
-`agents.messages` captures the **full-signal trajectory** of every conversation — all six `CapabilityEvent` types (step, tool_call_start, tool_call_end, model_usage, warning, error), with deterministic replay order via `event.timestamp` (`src/supabase-trace-sink.ts`). That trajectory corpus is two things at once: the **fine-tuning corpus** a future trained model would learn from, and the **drift-monitoring substrate** a monitor would watch. The data exists; no model is trained on it. **Fine-tuning is buffr's ceiling — not done.**
+buffr trains no classifier — but four *adjacent* facts are real, and each file that touches one names it honestly instead of overclaiming:
 
-The other attach points the exercises lean on:
-- `agents.chunks.embedding` — `vector(768)` from nomic-embed-text (drift, re-embed cadence, the recsys content vectors).
-- `src/cli/eval-cmd.ts` — the offline IR eval, the only labeled-pair file in the repo and the natural home for any scoring harness.
+- **Transfer learning** (`07`) — the embeddings buffr serves *are the output of a transfer-learned model*. `nomic-embed-text` was pretrained on the open web, then contrastively tuned. The realistic ceiling for buffr is **fine-tuning gemma on captured trajectories** — `agent-layer-plan.md` already states the thesis: "capture every conversation as a trajectory now so fine-tuning is *answerable* later." That corpus lives in `agents.messages`. It is a fine-tuning dataset that does not yet train anything.
+- **Local inference** (`12`) — buffr **already runs its models locally** via Ollama. That's on-machine inference, with the privacy/offline/latency profile this file teaches — but it is a 9B LLM, *not* a sub-50MB on-device classifier. The file draws that distinction sharply.
+- **Quantization** (`13`) — `gemma2:9b` as Ollama serves it is **already quantized** (GGUF, typically 4-bit). You're running a quantized model right now. The file names exactly what that buys and costs.
+- **Run logging** (`14`) — `SupabaseTraceSink` writing to `agents.messages` is the **analogous capture pattern** for LLM runs. It logs the same *category* of artifact a training-run logger would (inputs, outputs, the trace), so it's the closest thing buffr has to MLflow — for inference, not training.
 
-## Where buffr genuinely rhymes (the honest connections)
+And one reused-metrics fact: the **precision/recall** numbers buffr's eval harness computes over `eval/queries.json` (P@1, R@3) **are ML evaluation metrics already in the repo.** `08-confusion-matrices.md` and `05-class-imbalance.md` reuse that exact vocabulary — you're not learning precision/recall from scratch, you're connecting a metric you already compute to the matrix it comes from.
 
-Four files carry a real connection, not a forced one. Read these for the strongest "this actually touches buffr" moment:
+The example *category* for "what a trained classical-ML pipeline looks like" is contrl pose-landmarking — that's the SHAPE to hold in mind throughout. We anchor the shape, not the code.
 
-```
-  the four genuine rhymes (still: nothing is trained)
+## Reading order
 
-  07 transfer-learning   → buffr's FT ceiling: agents.messages is the
-                           small target set a future fine-tune would use
-  12 on-device-inference → buffr IS local-first; Ollama's privacy/offline/
-                           no-network-in-hot-path properties already apply
-  13 quantization        → gemma2:9b ships as quantized GGUF via Ollama;
-                           buffr benefits from quantization without doing it
-  14 run-logging         → the trace sink is per-run trajectory logging —
-                           the same DISCIPLINE applied to LLM runs
-```
+Read in number order. The arc is: build the pipeline (`01`–`04`), the levers that decide quality (`05`–`09`), the two recommendation/coldstart files that are the most buffr-plausible new feature (`10`–`11`), then how a trained model ships and stays healthy (`12`–`16`).
 
-## Files
+1. **`01-supervised-pipeline.md`** — the five-stage spine. Read first; every other file is one stage of it. "Most ML bugs in classical ML are data/feature bugs, not model bugs."
+2. **`02-feature-engineering.md`** — raw signal → numeric features. The 60–80% of model quality that lives *before* the model.
+3. **`03-train-val-test.md`** — split discipline and leakage. Split at the unit the model meets *new* at inference, or your metrics lie.
+4. **`04-model-selection.md`** — logistic regression vs gradient-boosted trees; the bias toward the simpler model when scores tie.
+5. **`05-class-imbalance.md`** — why accuracy lies, and the macro-F1 / per-class-recall / confusion-matrix / class-weight toolkit.
+6. **`06-domain-gap.md`** — train-vs-inference distribution mismatch; the silent killer of "great in the notebook, bad in prod."
+7. **`07-transfer-learning.md`** — pretrain → fine-tune. **The fine-tuning hook for gemma lives here.**
+8. **`08-confusion-matrices.md`** — read the matrix, derive every per-class metric. Connects to buffr's existing P@1/R@3.
+9. **`09-calibration.md`** — when the *probability* must be trustworthy, not just the label.
+10. **`10`–`11` (recommenders → cold start)** — the single-user, content+rules recommender is the most realistic *new* ML feature buffr could grow.
+11. **`12`–`13` (on-device → quantization)** — how a trained model gets small and fast enough to serve. Both name buffr's real Ollama-local, quantized-gemma reality.
+12. **`14`–`16` (run logging → drift → retraining)** — production hygiene: log every run, watch the distribution, decide when to retrain.
 
-1. `01-supervised-pipeline.md` — Data → Features → Split → Train → Deploy; what each of the 5 stages owns. *Most classical-ML bugs are data/feature bugs.*
-2. `02-feature-engineering.md` — raw signal → engineered features; features contribute 60–80% of result, the model ~10%.
-3. `03-train-val-test.md` — split discipline and leakage; split at the unit the model sees as new at inference (session-level, not row-level).
-4. `04-model-selection.md` — logistic regression vs gradient-boosted trees; train both, compare on val, pick the simpler if comparable.
-5. `05-class-imbalance.md` — why accuracy lies; macro-F1, per-class recall, confusion matrix; class weights / oversampling / SMOTE / focal loss / threshold move.
-6. `06-domain-gap.md` — train/inference distribution mismatch; domain adaptation, normalization, augmentation.
-7. `07-transfer-learning.md` — pretrain on big set, fine-tune on small target set. **buffr's FT-ceiling rhyme.**
-8. `08-confusion-matrices.md` — read one; per-class precision/recall/F1 derived; diagonal = correct.
-9. `09-calibration.md` — predicted probability vs actual frequency; reliability diagram; Platt / isotonic; matters when downstream code uses the probability. buffr's cosine scores are uncalibrated similarity, not probabilities.
-10. `10-recommender-systems.md` — content vs collaborative vs hybrid; single-user buffr = content + rules only (collaborative needs a population).
-11. `11-cold-start.md` — new user / new item / new system; mitigations.
-12. `12-on-device-inference.md` — server vs on-device tradeoffs. **buffr IS local-first — privacy/offline already apply.**
-13. `13-quantization.md` — FP32 / FP16 / INT8 / INT4 size–speed–quality tradeoff. **gemma2:9b is already quantized GGUF via Ollama.**
-14. `14-training-run-logging.md` — what to log per run (data/feature/model version, metrics, confusion matrix, git commit). **The trace sink is the same discipline for LLM runs.**
-15. `15-drift-detection.md` — PSI over feature distributions; PSI < 0.1 ok / < 0.2 investigate / > 0.2 retrain. Case B: PSI over buffr's embedding distribution.
-16. `16-retraining-pipelines.md` — scheduled vs drift-triggered vs performance-triggered. Case B: re-embed cadence / fine-tune trigger on trajectory volume.
+If you read only one file, read **`01-supervised-pipeline.md`** — it's the spine, and it makes the honest gap concrete: buffr has the *deploy* and *inference* end (Ollama) but none of the data/feature/split/train end, which is exactly the half you've never built.
 
-## How to read this section
+## Phase anchor
 
-You've built exactly one ML pipeline before (contrl: MediaPipe pose-landmarking → on-device rep counter). That gives you the *shape* of "signal in → features → decision out, on-device." These files teach classical ML **beyond** that as new ground — they'll occasionally note where a concept rhymes with that pose pipeline, but buffr is the only subject. Read `01` first (the spine every other file hangs off), then `02`/`03` (where the bugs actually live), then sweep the rest. The four rhyme files (`07`, `12`, `13`, `14`) are where you'll feel buffr in the room.
+The driving exercises span the back half of the curriculum, because they build the thing buffr lacks:
 
-## See also
+> **Phase 2C — stand up a real classical-ML pipeline** ([B2C.x])
+> Build one supervised pipeline end-to-end in a new `ml/` dir, against a labeled set you control — turning `eval/queries.json` and/or `agents.messages` into a training problem (e.g. a retrieval-quality or query-intent classifier). Feature engineering, split discipline, model selection, imbalance handling, a confusion matrix, calibration, and a logged run.
 
-- `../ml-features-in-this-codebase.md` — the section-level honesty statement and the candidate-ML-surface table.
-- `../09-ml-system-design-templates/` — the "reframe buffr as an ML system" interview prompts, every "applies?" bullet answered honestly.
-- `../05-evals-and-observability/04-llm-observability.md` — the trajectory trace that is the FT corpus and drift substrate.
+> **Phase 3 / Phase 5 — productionize and serve** ([B2C.x], later phases)
+> Quantize a small model for on-device serving, log every run, detect drift against the prod distribution, and wire a retraining trigger. The fine-tuning-gemma-on-trajectories exercise is the ceiling, gated on Phase-3 trajectory volume — exactly as `agent-layer-plan.md` frames it.
+
+**The honest state, stated plainly:** buffr *serves* pre-trained models and *captures* the data that could one day train one. It has the deploy/inference end and a latent labeled corpus. It has **no** training code, **no** feature pipeline, **no** model selection, **no** evaluation-of-a-trained-model, **no** drift detection. Those aren't failures — they're the clean Case B seams this sub-section exists to teach, and every exercise here builds a piece you could honestly add.
+
+## Cross-links
+
+- **`../03-retrieval-and-rag/`** — `01-embeddings.md`: the 768-dim vectors buffr retrieves over **are the output of a learned model.** Embeddings ARE applied ML; this section is where you learn what producing such a model entails. `07-transfer-learning.md` here is the upstream of that embedding model.
+- **`../05-evals-and-observability/`** — `eval/queries.json` is a **labeled set**; P@1 and R@3 are **ML evaluation metrics already computed.** `08-confusion-matrices.md` and `05-class-imbalance.md` reuse that exact vocabulary. `14-training-run-logging.md` extends `04-llm-observability.md`'s SupabaseTraceSink capture pattern from inference to training.
+- **`../09-ml-system-design-templates/`** — the system-design framing of everything here: how a training pipeline, a feature store, a serving path, and a retraining loop fit into an architecture. Read that *after* these concepts so the boxes have content.
+- **`../../study-data-modeling/`** — `agents.messages` as a fine-tuning corpus is a data-modeling question first: what schema captures a trajectory cleanly enough to train on.

@@ -1,166 +1,198 @@
-# Plan-and-execute — separate the strategy from the grunt work
+# Plan-and-Execute
 
-**Industry name(s):** plan-and-execute · plan-and-solve · planner/executor
-split. **Type label:** Industry standard.
-
-**In this codebase: Not yet implemented.** buffr runs single-tool
-ReAct — it re-decides whether to search on every turn rather than
-building a plan up front. It hasn't hit the ceiling where a plan would
-pay off, because its tasks are single-step retrievals, not structured
-multi-step ones. The `06-...templates/03-agentic-coding-system.md`
-template names the refactor.
+*Industry names: **plan-and-execute** / **planner-executor** / **plan-then-act**. Type label: Industry standard. In this codebase: **Not yet implemented.** (buffr is plain ReAct — no autonomous re-planning, because the single-agent loop hasn't hit its quality ceiling.)*
 
 ## Zoom out, then zoom in
 
-Plan-and-execute is the first escalation target past ReAct. Where it
-sits in the family:
+This is the first rung above buffr's ReAct floor. Here is where it *would* sit — as a layer
+that wraps the existing kernel, not a replacement for it.
 
 ```
-  Zoom out — plan-and-execute vs ReAct
+  Where plan-and-execute would slot in (dashed = NOT YET)
 
-  ┌─ Reasoning patterns (SECTION A) ─────────────────────────┐
-  │   ReAct: think → act → think → act  (decide every turn)  │
-  │      │ escalate when the task is STRUCTURED               │
-  │      ▼                                                    │
-  │   ★ plan-and-execute ★  plan once, then run the steps     │ ← we are here
-  └──────────────────────────────────────────────────────────┘
+  ┌─ Session (chain) ──────────────────────────────────────────┐
+  └──────────────────────────┬─────────────────────────────────┘
+  ┌╌ ★ PLANNER (this file — NOT YET) ╌╌▼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┐
+  ╎  model writes a step list ONCE, up front                  ╎
+  ╎     [1 search X] [2 search Y] [3 synthesize]              ╎
+  └╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┬╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┘
+  ┌─ EXECUTOR = the ReAct kernel buffr already has ─▼──────────┐
+  │  runAgentLoop runs each step — run-agent-loop.ts:98-190    │
+  └────────────────────────────────────────────────────────────┘
 ```
 
-Zoom in: ReAct re-decides the whole approach on every loop. For a task
-whose steps you *can* know up front, that's wasteful — you pay an
-expensive model to re-strategize each turn. Plan-and-execute splits
-the two: one expensive planning call builds the step list, then cheap
-calls run each step with no re-planning.
+The honest sentence first: **buffr does not do this.** Its model decides one step at a time
+inside the ReAct loop; it never writes a multi-step plan up front, and it never re-plans.
+This file teaches the pattern so you can name it and point at the refactor.
 
 ## Structure pass
 
-**Layers.** Two distinct phases — plan (outer, expensive) and execute
-(inner, cheap) — where ReAct has one undifferentiated loop.
+One axis: **control** — *when* is the sequence of steps decided?
 
-**Axis — "cost per step."** In ReAct every step pays the full reasoning
-cost. In plan-and-execute the reasoning cost is paid once (the plan);
-execution steps are cheap. That cost asymmetry is the whole reason the
-pattern exists.
+```
+  Axis = CONTROL · when the step sequence is fixed
 
-**Seam.** The plan→execute handoff. The plan is a frozen artifact the
-executor consumes; the seam is where strategy stops and grunt work
-starts. The failure mode lives exactly here: if a step fails and the
-plan has no branch for it, the executor is stuck.
+  ReAct (buffr today)       decided step-by-step, at runtime, each turn
+  ──────────── ★ SEAM: the decision moves EARLIER ★ ────────────
+  plan-and-execute          decided ALL AT ONCE, before any tool runs
+```
+
+In ReAct the model never commits to a plan — it picks the next move with full knowledge of
+the last observation. Plan-and-execute moves that decision *earlier*: the model commits to
+the whole step list before it has seen any results. That's the seam — the same axis
+(control) flips from "decide as you go" to "decide up front." The trade is less drift
+(the plan keeps the model on task) for less adaptivity (the plan is blind to what the first
+search actually returns, unless you add re-planning).
 
 ## How it works
 
-#### Move 1 — the mental model
+### Move 1 — mental model
 
-You build a multi-step form by deciding the steps first (the schema),
-then filling each field — you don't re-derive the form's structure on
-every keystroke. Plan-and-execute is that: decide the steps once, then
-execute them.
-
-```
-  Pattern — the plan/execute split
-
-  ┌─ Plan phase ─────────────────────────────────┐
-  │  expensive model builds the full plan up front│
-  └───────────────────┬───────────────────────────┘
-                      │  plan: [step1, step2, step3]
-                      ▼
-  ┌─ Execute phase ──────────────────────────────┐
-  │  cheap/fast model runs each step              │
-  │  (no re-planning per step)                    │
-  └───────────────────────────────────────────────┘
-```
-
-#### Move 2 — the walkthrough (what it would take in buffr)
-
-buffr has no planner. Its loop re-decides search-or-answer every turn
-(`run-agent-loop.js:25-57`). To make this pattern apply, you'd add a
-planning call before the loop that decomposes the question into
-sub-queries, then run the existing `search_knowledge_base` tool once
-per sub-query without re-planning.
-
-**Why it would beat buffr's ReAct on structured questions.** A
-question like "compare what my notes say about X across the last three
-months" is genuinely multi-step: retrieve X for month 1, month 2,
-month 3, then synthesize. ReAct re-decides "should I search again?"
-each turn and can stall or wander. A plan — `[search X@m1, search
-X@m2, search X@m3, synthesize]` — runs deterministically.
-
-**The tradeoff you'd take on.** Plans are brittle when assumptions
-break mid-execution: a step fails and the plan has no branch. The
-mitigation is a re-plan trigger when execution diverges — which
-re-introduces some of ReAct's adaptivity. That's why you only reach
-for plan-and-execute when the task is structured *enough* that a fixed
-plan usually holds.
+Two roles: a **planner** that writes the recipe once, and an **executor** that cooks each
+step. Bridge from frontend: it's `Promise.all` over a list you *computed first* — except the
+list itself comes from a model call, and the executor for each item is buffr's existing
+ReAct loop.
 
 ```
-  Comparison — ReAct vs plan-and-execute on a 3-part question
+  THE SHAPE — plan once, then execute each step
 
-  ReAct (buffr today):                 Plan-and-execute (would-be):
-    turn 1: decide → search m1           plan: [m1, m2, m3, synth]
-    turn 2: decide → search m2           exec: search m1 (cheap)
-    turn 3: decide → search m3           exec: search m2 (cheap)
-    turn 4: forced synth                 exec: search m3 (cheap)
-    (re-decides 4x, capped)              exec: synth
-                                         (decides ONCE)
+  ┌─ PLAN (one model call) ─────────────────────────┐
+  │ "To answer, I will: 1) search auth docs         │
+  │  2) search rate-limit docs  3) synthesize"      │
+  └───────────────┬─────────────────────────────────┘
+                  ▼
+  ┌─ EXECUTE (loop over the plan) ──────────────────┐
+  │ for step in plan:                               │
+  │   runAgentLoop(step)  ← buffr's kernel, reused   │
+  │ ...then synthesize across all step results       │
+  └─────────────────────────────────────────────────┘
+       (optional re-plan if a step's result surprises)
 ```
 
-#### Move 3 — the principle
+### Pseudocode first — the language-agnostic logic
 
-Decouple strategy from grunt work when the strategy is stable. ReAct
-for dynamic/exploratory tasks where the path can't be predicted;
-plan-and-execute for structured tasks where it can. buffr's tasks are
-single-step retrievals, so the split would add machinery without
-buying anything — which is exactly why it stays ReAct.
+```
+plan      = model.plan(question)          # ONE call: returns ["search A", "search B", "synth"]
+results   = []
+for step in plan:
+    results.append( reactLoop(step) )      # each step is a small bounded ReAct run
+answer    = model.synthesize(question, results)
+# re-planning (the "autonomous" variant): if a result invalidates the plan,
+# call model.plan() again with the new evidence. buffr does NEITHER step.
+```
+
+Annotation: the load-bearing difference from buffr is line 1 — a dedicated planning call
+that produces a *list* before any execution. buffr has no equivalent; its model is handed
+the question and immediately enters the per-turn loop.
+
+### What buffr does instead — and why that's fine for now
+
+buffr collapses planning into execution: the model's "plan" is implicit and one-step-deep,
+re-decided every turn.
+
+```ts
+// rag-query-agent.ts:66-80 — no planner. The loop IS the executor, deciding step-by-step.
+const { finalText } = await runAgentLoop({
+  model, tools, toolSchemas,
+  maxTurns: 6,
+  maxToolCalls: 4,
+  // there is NO `plan` field, NO planner model call, NO step list.
+  synthesisInstruction: buildSynthesisInstruction(
+    'Now answer the question directly and concisely, citing the sources you retrieved.',
+  ),
+});
+```
+
+```
+  buffr (today)            vs    plan-and-execute (the refactor)
+
+  question                       question
+     │                              │
+     ▼                              ▼  ← extra model call appears HERE
+  [ReAct loop decides              [PLANNER writes step list]
+   each step live]                    │
+     │                              ▼
+  answer                          [executor runs each step via the SAME loop]
+                                     │
+                                  [synthesize]
+```
+
+Annotation: buffr has a single moving part; plan-and-execute adds a planner box *on top of*
+the same kernel. The executor is buffr's current loop, unchanged — which is exactly why this
+is a clean refactor, not a rewrite. You would adopt it when you measure **task drift**: the
+model wandering off a multi-part question because it forgot part of it mid-loop. buffr's
+questions are single-intent enough that this hasn't shown up.
+
+### Move 3 — the principle
+
+**Plan-and-execute trades adaptivity for focus by deciding the step sequence earlier.** It
+pays off when a task has several distinct sub-goals the model tends to forget or conflate.
+The refactor is additive: keep the ReAct kernel as the executor, prepend a planner call.
+Don't reach for it until drift is logged — an up-front plan that the first observation
+invalidates is *worse* than ReAct unless you also pay for re-planning.
 
 ## Primary diagram
 
-```
-  Plan-and-execute (would-be shape in buffr)
+Full recap: the pattern, the refactor seam, the honest verdict.
 
-  question
-     │
-     ▼
-  ┌─ PLAN (expensive) ─┐  plan = [q1, q2, q3, synth]
-  │  decompose         │
-  └─────────┬──────────┘
-            ▼
-  ┌─ EXECUTE (cheap, no re-plan) ───────────────────┐
-  │  search_knowledge_base(q1)                       │
-  │  search_knowledge_base(q2)                       │
-  │  search_knowledge_base(q3)  → re-plan if diverges │
-  │  synthesize → answer                             │
-  └──────────────────────────────────────────────────┘
 ```
+  Plan-and-execute — the rung buffr hasn't climbed
+
+  ┌╌ NOT YET in buffr ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┐
+  ╎ PLANNER: model writes [step1, step2, ...] once, up front ╎
+  ╎   trigger to adopt: measured TASK DRIFT on multi-part Qs  ╎
+  └╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┬╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┘
+  ┌─ EXECUTOR (REUSE buffr's kernel, unchanged) ──▼───────────┐
+  │ for step in plan: runAgentLoop(step)   run-agent-loop:98-190│
+  └────────────────────────────────────────────────────────────┘
+  Refactor template: SECTION F → agentic-coding template
+```
+
+Verdict in one line: **a clean additive refactor (planner on top of the existing executor),
+but unjustified until task drift is measured — so: not yet.**
 
 ## Elaborate
 
-Plan-and-execute (the "Plan-and-Solve" line of work) emerged from the
-observation that ReAct's per-step reasoning is redundant for tasks
-with knowable structure. It's the planner inside agentic coding
-systems (plan the edits, then execute per file) — see
-`06-...templates/03-agentic-coding-system.md`. The next escalation,
-when even the *plan* needs quality-checking, is layering reflexion on
-top (`05-reflexion-self-critique.md`).
+Plan-and-execute was popularized by BabyAGI / "Plan-and-Solve" prompting (2023) and
+formalized in LangChain's PlanAndExecute agents. The autonomous-re-planning variant (re-plan
+after each step) is what people mean by "agentic planning." The known failure mode is the
+opposite of ReAct's: a confidently-wrong up-front plan that the executor follows off a cliff
+because no observation can change it — which is why production systems either keep plans
+short or add re-planning, paying more tokens. For buffr's single-intent personal-knowledge
+queries, the ReAct floor's per-turn adaptivity is the better default.
+
+To actually adopt it, see SECTION F's agentic-coding template for the refactor shape — it
+keeps `runAgentLoop` as the per-step executor and adds the planner as a new capability.
+
+Read next: `05-reflexion-self-critique.md` — the next rung, which adds a *critic* instead of
+a *planner*.
 
 ## Interview defense
 
-**Q: Why doesn't buffr use plan-and-execute?**
-Because its tasks aren't structured enough to plan. A buffr question is
-usually a single retrieval; ReAct's "decide whether to search" is the
-right granularity. Plan-and-execute pays off when a task is genuinely
-multi-step with a stable structure — then you plan once instead of
-re-deciding the approach every turn.
+**Q: "Would plan-and-execute help buffr?"**
+
+Model answer: "Not yet, and I can say why precisely. Plan-and-execute moves the step
+decision *earlier* — the model commits to a step list up front instead of deciding per turn
+like buffr's ReAct loop (`run-agent-loop.ts:98-190`). It pays off against *task drift* on
+multi-part questions. buffr's questions are single-intent, and I haven't logged drift, so the
+up-front plan would just add a model call and risk a stale plan. When I do adopt it, it's
+additive: keep the current loop as the executor, prepend a planner. I don't escalate on
+spec."
 
 ```
-  ReAct: decide every turn   |   plan-and-execute: decide once
+  The defense in one picture
+
+  ReAct: decide per turn (adaptive)   ──drift logged?──▶  plan up front (focused)
+  buffr is here, no drift logged                          not taken
 ```
 
-**Anchor:** "Plan-and-execute trades adaptivity for cost — worth it
-only when the plan usually holds."
+Anchor: *Plan-and-execute decides the steps earlier; adopt it only when task drift is
+measured — buffr hasn't, so it stays plain ReAct.*
 
 ## See also
 
-- `03-react.md` — the baseline this escalates from
-- `05-reflexion-self-critique.md` — layered on top for quality
-- `06-orchestration-system-design-templates/03-agentic-coding-system.md`
-  — where plan-and-execute is the standard architecture
+- `03-react.md` — the floor this rung sits above; the escalation discipline.
+- `02-agent-loop-skeleton.md` — the kernel that becomes the *executor* under this pattern.
+- `05-reflexion-self-critique.md` — the sibling rung that adds a critic, not a planner.
+- `../06-orchestration-system-design-templates/` (SECTION F) — the agentic-coding template
+  that shows the refactor.

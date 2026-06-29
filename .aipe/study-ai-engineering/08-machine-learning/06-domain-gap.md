@@ -1,245 +1,240 @@
-# Domain gap — train-serve distribution shift
+# Domain Gap
 
-*Industry standard (covariate / distribution shift). buffr trains nothing, so it has no train-serve gap of its own — Not yet implemented. (One real nuance below: nomic-embed-text was pretrained off-domain from buffr's personal markdown.)*
+### *industry: domain gap (covariate shift) · type: the failure mode where train and inference distributions disagree*
 
-## Zoom out, then zoom in
+## Zoom out
 
-Every trained model carries a hidden assumption: that the data it sees at serving time looks like the data it learned from. When that assumption breaks — the inputs drift away from the training distribution — the model doesn't error out. It stays confident and goes quietly wrong. buffr trains no model, so it owns no train-serve gap. But it *consumes* a pretrained embedder (`nomic-embed-text:v1.5`) that learned on a broad general corpus and is now asked to embed your personal markdown — a mild, real domain gap between the encoder's home turf and buffr's content.
+"Great in the notebook, terrible in prod." Every engineer who ships a model meets this sentence eventually, and it almost never means the model is broken. It means the data the model *meets* at inference doesn't look like the data it *learned from*. Before any definition, see where the gap opens in the pipeline you're studying:
 
+**The supervised pipeline, with the seam where the domain gap opens marked**
 ```
-  Zoom out — where a domain gap WOULD live (and the one mild real one)
-
-  ┌─ Encoder (pretrained, off-domain) ──────────────────────────┐
-  │  nomic-embed-text:v1.5 — trained on a GENERAL web corpus    │
-  │  ★ mild real domain gap ★ vs buffr's personal markdown      │ ← we are here
-  └───────────────────────────────┬─────────────────────────────┘
-                                  │ embeds buffr's content
-  ┌─ Vector store (exists) ──────▼──────────────────────────────┐
-  │  agents.chunks.embedding vector(768) · cosine search        │
-  └───────────────────────────────┬─────────────────────────────┘
-                                  │ a FUTURE trained model would face ↓
-  ┌─ ML layer (no model — WOULD attach) ─▼──────────────────────┐
-  │  any classifier trained on yesterday's runs, served today   │
-  │  → covariate / label / concept shift bites here             │
-  └──────────────────────────────────────────────────────────────┘
+   TRAIN-TIME world                                  INFERENCE-TIME world
+┌────────┐  ┌──────────┐  ┌───────┐  ┌───────┐   ║  ┌────────────────────────────┐
+│ Data   │─►│ Features │─►│ Split │─►│ Train │   ║  │ ★ DEPLOY / PREDICT ★       │ ◄── this file
+│ (P_tr) │  │          │  │       │  │  fit  │   ║  │ new data (P_inf) ≠ P_tr    │
+└────────┘  └──────────┘  └───────┘  └───────┘   ║  └────────────────────────────┘
+                                                  ║
+                                  the GAP lives ──╨── here: a distribution wall
+                                  between the world you fit and the world you serve
 ```
-
-Zoom in: a **domain gap** (train-serve distribution shift) is the mismatch between the distribution a model was trained on and the distribution it actually sees in production. The dangerous part isn't that the model is wrong — it's that it's *confidently* wrong off-distribution, because nothing in its training taught it to be uncertain about inputs it never saw. This file names the three kinds of shift, shows why confidence and correctness decouple off-domain, and points at the fixes that close the gap.
+The model is fine. The two worlds on either side of that wall are different, and nobody measured the difference.
 
 ## Structure pass
 
-**Layers:** the training distribution → the model's learned decision surface → the serving distribution it's actually fed.
+One axis organizes this entire topic: **what part of the joint distribution shifted.** P(x, y) = P(y | x) · P(x), and the gap lands in one of those two factors.
 
-**Axis — "does this layer assume train and serve look the same?"**
-
+**The one axis: which factor of P(x,y) drifted**
 ```
-  trace "is the same-distribution assumption holding?" down the layers
+   P(x, y)  =  P(y | x)  ·  P(x)
+                  │            │
+                  │            └──► COVARIATE SHIFT — inputs look different,
+                  │                  the rule still holds. (most common; the
+                  │                  "web text → personal markdown" case)
+                  │
+                  └──► CONCEPT DRIFT — same inputs, the LABEL RULE changed.
+                       (the harder, sneakier case)
 
-  ┌─ training distribution ─┐   defines what "normal" means
-  │  P_train(x)             │   the model's entire worldview
-  └─────────────────────────┘
-  ┌─ decision surface ──────┐   ASSUMES serve looks like train
-  │  learned boundary       │   confident everywhere, even off-domain
-  └─────────────────────────┘
-  ┌─ serving distribution ──┐   may have DRIFTED — P_serve ≠ P_train
-  │  P_serve(x)             │   model still confident → quietly wrong
-  └─────────────────────────┘
-
-  the assumption is invisible until the serving distribution moves
+   ┌───────────────────────────── THE SEAM ─────────────────────────────┐
+   │ detection differs: covariate shift you can see in P(x) alone (no    │
+   │ labels needed). Concept drift needs fresh LABELS to detect at all.  │
+   └─────────────────────────────────────────────────────────────────────┘
 ```
-
-**The seam:** the boundary between *training* and *serving* is where the axis flips — on the training side the same-distribution assumption is trivially true; on the serving side it can silently become false. That seam carries no exception, no log line, no alert. It's the most dangerous kind of boundary precisely because crossing it wrong produces a confident answer, not a crash. (Drift detection, `15-drift-detection.md`, is the instrument you bolt onto this seam.)
+The seam: covariate shift is detectable with unlabeled production data; concept drift is not — you need new ground truth, which is exactly what production rarely hands you for free.
 
 ## How it works
 
-### Move 1 — the mental model
+### Move 1 — Mental model
 
-You know this from a regex you wrote against last month's log format. It worked perfectly — until the upstream service changed its timestamp format and your regex started silently matching the wrong field, returning plausible garbage with no error. A model off-distribution behaves exactly like that regex: the *shape* of the input changed, the model has no idea, and it keeps producing confident output against inputs it was never built for. The strategy is to either make serving look like training (normalize inputs) or make training cover serving (augment, collect in-domain data).
+The mental model: **a model interpolates confidently inside the region it saw and hallucinates outside it.** Training data carves out a region of input space; inside that region the model is interpolating and trustworthy, outside it the model is extrapolating and arbitrary. The domain gap is how much of your *inference* traffic lands outside the trained region. Hold contrl pose-landmarking in mind: a pose model trained on studio-lit adults degrades on dim phone video of kids — same task, unseen region.
 
+**Inside the trained region vs outside it**
 ```
-  the pattern — two distributions drifting apart
-
-  P_train(x)                 P_serve(x)  (later)
-     ╱╲                          ╱╲
-    ╱  ╲                        ╱  ╲
-   ╱    ╲                      ╱    ╲
-  ╱  ●●  ╲                    ╱      ╲  ●●  ← serving mass moved
- ─┴──────┴──────────────────┴────────┴──────── feature axis
-        ▲                           ▲
-   model trained here          model SERVED here
-   (confident & right)         (confident & WRONG — same surface)
+        feature space (2-D shadow of many dims)
+   ┌───────────────────────────────────────────────┐
+   │        ┌───────────────────────┐               │
+   │        │   TRAINED REGION      │   ● ● ●        │
+   │        │   ● ● ● ● ●            │  inference     │
+   │        │   ● model interpolates │  points OUT    │
+   │        │   ● — trustworthy      │  here ─► model │
+   │        │   ● ● ● ● ●            │  extrapolates  │
+   │        └───────────────────────┘  — arbitrary   │
+   └───────────────────────────────────────────────┘
+            ●  = training points        ● (right) = prod traffic the gap
 ```
+Accuracy on held-out test data only measures the inside of that box; the gap is everything your production traffic does outside it.
 
-### Move 2 — the step-by-step walkthrough
+### Move 2 — Walk the mechanism
 
-**The three shifts — name which one moved.** "Distribution shift" is three distinct failures wearing one coat. You diagnose the gap by asking *what* moved: the inputs, the label balance, or the relationship between them.
+**Part 1 — The deployment exposes the model to a new input distribution.** Nothing announces this. The model returns confident outputs on data it has no business being confident about.
 
+**The silent onset: confidence stays high, correctness quietly drops**
 ```
-  three shifts — what moved between train and serve
-
-  ┌─ covariate shift ───────────────────────────────────────────┐
-  │  P(x) changed, P(y|x) same                                  │
-  │  inputs look different; the rule still holds                │
-  │  e.g. new users write longer notes than training notes      │
-  └──────────────────────────────────────────────────────────────┘
-  ┌─ label shift ───────────────────────────────────────────────┐
-  │  P(y) changed, P(x|y) same                                  │
-  │  the class balance moved (failures got rarer/commoner)      │
-  └──────────────────────────────────────────────────────────────┘
-  ┌─ concept shift ─────────────────────────────────────────────┐
-  │  P(y|x) changed — the RULE ITSELF moved                     │
-  │  the same input now means a different outcome (worst case)  │
-  └──────────────────────────────────────────────────────────────┘
+   week 1 (in-domain)        week 6 (drifted-in traffic)
+   conf 0.91  acc 0.89       conf 0.90  acc 0.61   ◄── confidence DIDN'T fall
+        │                          │                    (that's why it's silent)
+        └──────────────────────────┴──► you only notice via downstream KPIs,
+                                         not the model's own self-report
 ```
 
-Covariate shift is the common one and the focus here: the inputs drift but the underlying rule is intact. Label shift is the class-balance moving (it links straight to imbalance, `05-class-imbalance.md`). Concept shift is the nasty one — the world changed its mind about what an input means, and no amount of input normalization saves you; you have to relearn.
+**Part 2 — Detect it by comparing P(x), not by waiting for labels.** You don't need ground truth to see that the *inputs* moved. Compare the feature distribution of a recent production sample against the training sample. This is illustrative pseudocode, not buffr code:
 
-**Why confidence and correctness decouple off-domain.** A trained model partitions feature space into regions and assigns a confident label to each. Inside the training cloud, that confidence is earned — it saw examples there. *Outside* the cloud, the decision surface still extends (the model has to answer *something*), but there's no data backing it. So the model reports high confidence in a region it never learned. This is the single most important fact about domain gap: **off-distribution, confidence stops being evidence.**
+**Detection by distribution comparison (illustrative)**
+```python
+# ILLUSTRATIVE ONLY — not buffr code. Standard covariate-shift detection.
 
-```
-  confidence ≠ correctness off-domain
+# (A) Population Stability Index per feature: train hist vs prod hist
+psi = sum((p_prod - p_train) * log(p_prod / p_train) for each bin)
+#   PSI < 0.1  stable | 0.1–0.25 watch | > 0.25 significant shift
 
-  feature space:
-
-   ┌──────── training cloud (data-backed) ────────┐
-   │   ● ● ●   region A    │   region B   ● ● ●    │
-   │   ● ● ●  (confident,   │  (confident, ● ● ●    │
-   │           CORRECT)     │   CORRECT)            │
-   └───────────────────────┼───────────────────────┘
-                           │
-        decision surface extends OUT here ↓ (NO data)
-        ✦ new serving point lands here →  confident, label = A
-          but nothing was ever learned about this region → WRONG
+# (B) Classifier two-sample test: can a model tell train from prod apart?
+clf.fit(X=concat(X_train, X_prod), y=[0]*n_train + [1]*n_prod)
+#   AUC ≈ 0.5  indistinguishable (no gap) | AUC → 1.0  the two are separable (gap)
 ```
 
-In pseudocode, the gap is something you can *detect* without labels, by watching the inputs alone:
+**Part 3 — The gap shows up per-feature, so localize it.** Aggregate "the data drifted" is useless; you need *which* feature drifted to act.
 
+**Per-feature drift table localizes the gap**
 ```
-  // INPUT: training feature stats (mean, std per feature) saved at train time
-  //        live serving feature vector x
-  for each feature f:
-    z[f] = (x[f] - train_mean[f]) / train_std[f]   // how many train-stds out?
-  drift_score = mean(abs(z[f]) for all f)           // big = far off-domain
-  if drift_score > threshold:
-    flag("off-distribution input — model confidence is NOT evidence here")
-  // OUTPUT: a warning BEFORE you trust the prediction
-  // note: this needs no labels — it watches P(x), so it catches covariate shift
-```
-
-**The fixes — close the gap from one side or the other.** You can move serving toward training, or move training toward serving. Four tools, two directions.
-
-```
-  four fixes, by which distribution they move
-
-  ┌─ make SERVING look like TRAINING ───────────────────────────┐
-  │  input normalization — scale serving inputs to TRAIN's      │
-  │    mean/std (reuse train stats, never recompute on serve)   │
-  │  domain adaptation   — fine-tune/align the model toward the │
-  │    target domain (the embedder rhyme below)                 │
-  └──────────────────────────────────────────────────────────────┘
-  ┌─ make TRAINING cover SERVING ───────────────────────────────┐
-  │  data augmentation   — widen P_train: typos, paraphrases,   │
-  │    crops, noise → the model sees the variety up front       │
-  │  collect in-domain   — gather real serving-domain data and  │
-  │    retrain on it (the durable fix; ties to 16-retraining)   │
-  └──────────────────────────────────────────────────────────────┘
+   feature        PSI     verdict
+   ─────────────  ─────   ─────────────────────────
+   doc_length     0.04    stable
+   vocab_overlap  0.31    ★ SHIFTED — prod text uses
+                          terms train never saw
+   embedding_norm 0.08    stable
+                          ▲
+                 act on the ★ row, not on a global average
 ```
 
-*Input normalization* is the cheap, load-bearing one: you save the training feature statistics and apply them to serving inputs — and the classic bug is recomputing stats on the serving batch instead of reusing the training ones, which *hides* the very gap you're trying to expose. *Domain adaptation* nudges the model itself toward the target domain. *Augmentation* widens the training distribution so serving variety falls inside it. *Collecting in-domain data* is the durable fix and the most expensive: get real examples from the serving domain and retrain.
+**Part 4 — Mitigate, in order of cost.** The honest first answer is almost always "get in-domain data," not a clever algorithm.
 
-**The buffr nuance — the embedder's mild, real domain gap.** Here's the one honest connection. `nomic-embed-text:v1.5` was pretrained on a broad general corpus (web text, generic documents). buffr asks it to embed *your* personal markdown — your notes, your stack, how you take your coffee. The encoder's training domain and buffr's content domain don't perfectly overlap, so the embeddings are slightly less discriminative for buffr's idioms than an in-domain embedder would be. This is mild — nomic generalizes well, and cosine retrieval still works (the 3-row eval passes) — but it's a *real* domain gap, and a fine-tuned or in-domain embedder would close it. Don't overstate it: nothing is broken, the gap is a quality ceiling, not a failure.
-
+**Mitigation ladder, cheapest-honest-fix first**
 ```
-  the buffr embedder gap — mild and real (not a failure)
-
-  ┌─ nomic-embed-text training domain ──┐   broad general web text
-  │  generic prose, docs, Q&A           │
-  └──────────────────┬───────────────────┘
-        partial overlap ▽ (gap = the non-overlap)
-  ┌─ buffr's content domain ────────────┐   personal markdown, your idioms
-  │  your notes / stack / coffee.md     │   → agents.chunks.embedding vector(768)
-  └──────────────────────────────────────┘
-        an in-domain embedder would shrink the gap → better separation
+   1. COLLECT in-domain data ──► retrain on what prod actually looks like
+      (boring, correct, usually the real fix)            │
+   2. RE-WEIGHT training rows ──► importance weighting:   │ lower
+      upweight train rows that resemble prod              │ effort
+   3. DOMAIN ADAPTATION ───────► learn features invariant │ but
+      across source/target domains                        │ riskier
+   4. FINE-TUNE / continued training on a small labeled   ▼
+      in-domain set  (bridges to 07-transfer-learning.md)
 ```
 
-### Move 3 — the principle
+### Move 2.5 — current vs future
 
-A model's competence is bounded by its training distribution, and the boundary is invisible from the inside. The failure mode that costs the most isn't a model that's wrong — it's a model that's *confidently* wrong on inputs it never saw, because off-distribution, confidence is no longer evidence. The discipline is to watch the inputs, not just the outputs: distribution shift is detectable on `P(x)` alone, before a single label arrives. buffr's only real instance is the gentle embedder gap, and it's the right size to teach with — real enough to matter, mild enough not to be alarming.
+**buffr's one real, honest domain-gap risk — named, not invented**
+```
+   nomic-embed-text was PRETRAINED on:        buffr feeds it:
+   ┌──────────────────────────────┐           ┌──────────────────────────────┐
+   │ broad open WEB TEXT           │           │ personal MARKDOWN notes       │
+   │ (articles, forums, code, …)   │  ──gap?──►│ (terse, idiosyncratic, your   │
+   │                               │           │  own vocabulary & shorthand)  │
+   └──────────────────────────────┘           └──────────────────────────────┘
+        SOURCE domain (where it learned)            TARGET domain (where it serves)
+
+   ┌────────────────────────────────────────────────────────────────────────┐
+   │ HONEST STATUS: buffr trains nothing. This is a real adjacent RISK in    │
+   │ the embedding model buffr CONSUMES — not a trained model buffr owns.    │
+   │ If retrieval P@1/R@3 is weak on your notes, this gap is a prime suspect.│
+   └────────────────────────────────────────────────────────────────────────┘
+```
+This is the file's honest hook: the domain gap is real and adjacent, living inside the *pretrained* embedding model — buffr neither trained it nor can retrain it today.
+
+### Move 3 — The principle
+
+The principle: **a held-out test set only certifies the model against its own past; it says nothing about the future the model will actually see.** Your test set is drawn from P_train. Production is drawn from P_inf. The domain gap is the unmeasured distance between them, and the only defense is to measure that distance continuously, not to trust a one-time test number.
 
 ## Primary diagram
 
+**The whole picture: two worlds, one wall, and the three ways across it**
 ```
-  Domain gap — the assumption, the three shifts, the fixes (full recap)
-
-  ┌─ TRAINING distribution P_train(x) ──────────────────────────┐
-  │  nomic-embed-text's general corpus · or yesterday's runs    │
-  └───────────────────────────────┬─────────────────────────────┘
-                                  │ model assumes serve == train
-  ┌─ DECISION SURFACE ───────────▼──────────────────────────────┐
-  │  confident everywhere — even where it has NO data           │
-  └───────────────────────────────┬─────────────────────────────┘
-                                  │ but serving drifts ↓
-  ┌─ SERVING distribution P_serve(x) ───────────────────────────┐
-  │  three shifts: covariate P(x) · label P(y) · concept P(y|x) │
-  │  off-domain points → confident & WRONG (no error thrown)    │
-  └───────────────────────────────┬─────────────────────────────┘
-                                  │ close the gap ↓
-  ┌─ FIXES ──────────────────────▼──────────────────────────────┐
-  │  serve→train: input normalization · domain adaptation       │
-  │  train→serve: augmentation · collect in-domain + retrain    │
-  │  detect: z-score on P(x), no labels needed (→ 15-drift)     │
-  │  buffr's real one: nomic's general domain vs your markdown  │
-  └──────────────────────────────────────────────────────────────┘
+   SOURCE world (training)              ║              TARGET world (inference)
+   ┌──────────────────────┐            ║            ┌──────────────────────────┐
+   │  P_train(x, y)        │            ║            │  P_inf(x, y)              │
+   │  what the model LEARNED│           ║            │  what the model MEETS     │
+   └──────────────────────┘            ║            └──────────────────────────┘
+            │                          ║                        ▲
+            │         ┌────────────────╨────────────────┐       │
+            │         │   DETECT: compare P(x) only       │      │
+            │         │   (PSI / two-sample classifier)   │      │
+            │         └──────────────┬────────────────────┘      │
+            │                        │                            │
+            └────────────────────────┼────────────────────────────┘
+                                     ▼
+              MITIGATE: ① collect in-domain  ② re-weight  ③ adapt/fine-tune
+              ──────────────────────────────────────────────────────────────
+              concept drift (P(y|x) changed) hides here too — needs FRESH LABELS
 ```
+You cross the wall by measuring P(x) without labels first, then reaching for the cheapest mitigation that closes the measured gap.
 
 ## Elaborate
 
-Distribution shift is one of the oldest problems in applied ML and one of the least respected — models are validated on held-out data drawn from the *same* distribution as training, which by construction can't reveal a serving gap. The taxonomy (covariate / label / concept shift) comes from the dataset-shift literature (Quiñonero-Candela et al., 2009); the key insight is that they demand different fixes, so naming which one moved is half the work. Covariate shift is correctable by reweighting or normalization; concept shift requires relearning because the target function itself moved. Domain adaptation grew into its own subfield — unsupervised domain adaptation, adversarial feature alignment — driven by exactly buffr's situation: a model pretrained on a big general domain, applied to a narrow target domain with little labeled data (which is also the bridge to transfer learning, `07-transfer-learning.md`: fine-tuning *is* domain adaptation). The detection side connects to drift (`15-drift-detection.md`): PSI over feature distributions is the productionized version of the z-score check above. This rhymes with your contrl pose pipeline — MediaPipe was trained on a broad population of bodies and lighting; point it at a dark room or an unusual camera angle and the landmarks degrade confidently, the same off-distribution failure in a different medium.
+The sharp edges:
+
+- **Covariate shift is detectable label-free; concept drift is not.** You can spot inputs drifting with unlabeled prod data alone. But if the *rule* P(y|x) changed — same inputs, different correct answer — no amount of staring at inputs reveals it. You need new ground truth, which is the expensive part. Don't claim you've "ruled out drift" if you only checked P(x).
+- **High confidence is not evidence against a gap.** A model extrapolating outside its trained region is often *more* confident, not less. Confidence is computed from the same warped function that's failing. Trust an external KPI or fresh labels, never the model's self-report.
+- **PSI thresholds are conventions, not laws.** 0.1 / 0.25 are industry rules of thumb. Calibrate them to your own false-alarm tolerance; a noisy feature can trip 0.25 without anything real moving.
+- **The cheapest fix is almost always boring.** "Collect in-domain data and retrain" beats clever domain-adaptation algorithms most of the time. Reach for adaptation when in-domain labels are genuinely unobtainable, not as a first move.
+- **buffr's honest line.** The embedding-model domain gap (web text → personal markdown) is a real risk buffr *inherits* by consuming `nomic-embed-text`. buffr cannot retrain that model today, and it does not. The honest mitigation available now is corpus-side (better chunking, richer context), not model-side — see `06-production-serving` and `03-retrieval-and-rag`.
 
 ## Project exercises
 
-> No curriculum file present; exercises derived from the codebase.
+### Measure the embedding domain gap on your own corpus
 
-### Quantify the embedding-space coverage of buffr's corpus vs generic queries
-
-- **Exercise ID:** GAP-1 (Case B — no trained model; measures the real embedder gap). **The "show me the gap is real" exercise.**
-- **What to build:** a script that embeds buffr's corpus chunks and a set of *generic* queries (off-domain web-style questions), then compares the cosine-similarity distributions — in-domain query→chunk scores versus generic query→chunk scores. Report whether buffr's personal-markdown chunks cluster tightly (in-domain separation good) and how far generic content sits from that cluster.
-- **Why it earns its place:** it turns the "mild domain gap" claim from a sentence into a measured distribution. You see, on buffr's own vectors, how the general-corpus encoder represents your content versus generic content — the honest, non-overstated version of the gap.
-- **Files to touch:** new `scripts/embedding-coverage.ts`; read embeddings via the cosine search in `src/pg-vector-store.ts` (`1 - (embedding <=> $1::vector) as score`); embed queries with the same `OllamaEmbeddingProvider` setup as `src/cli/eval-cmd.ts`.
-- **Done when:** the script prints the in-domain vs generic similarity distributions and a one-line read on how distinct buffr's content cluster is.
+- **Exercise ID:** [B2C.6] Phase 2C
+- **What to build:** Not yet implemented — buffr trains nothing. Build a detection harness in `ml/` that quantifies the embedding domain gap honestly: sample a slice of generic web text and a slice of your `eval/corpus` markdown, embed both with `nomic-embed-text`, and run a two-sample test (train-a-classifier-to-separate-them, report AUC) plus per-dimension PSI on the embeddings. You are *measuring a consumed model's gap*, not training one.
+- **Why it earns its place:** It turns "is my corpus a domain gap for nomic?" from a vague worry into a number you can defend in an interview. It's the only domain-gap exercise buffr can do without a trained model, and it directly informs retrieval quality.
+- **Files to touch:** new `ml/domain_gap.py`, reads from `eval/corpus/`, a small `ml/webtext_sample/` reference set, results appended to `ml/README.md`.
+- **Done when:** the harness prints a separability AUC (≈0.5 = no gap, →1.0 = gap) and the top-5 most-shifted embedding dimensions by PSI; a one-paragraph note states whether the gap is severe enough to suspect in retrieval misses.
 - **Estimated effort:** 1 day.
 
-### Augment eval/queries.json with paraphrase and typo variants to expose brittleness
+### Wire a drift sentinel over captured trajectories
 
-- **Exercise ID:** GAP-2 (Case B — widens the eval distribution).
-- **What to build:** generate paraphrase and typo variants of the 3 existing `eval/queries.json` rows (e.g. "what does the author do for work" → "where does the writer work?", "what does teh author do for work"), keep the same relevant-doc labels, and run them through the eval harness. Measure how much P@1/R@3 degrades on the perturbed variants versus the clean originals.
-- **Why it earns its place:** augmentation is the train→serve fix you *can* afford with no model — and applying it to the eval set widens the test distribution and exposes whether the embedder is brittle to surface variation (the covariate-shift signature). It's GAP-1's claim made actionable in the existing harness.
-- **Files to touch:** new `eval/queries-augmented.json`; a small variant of `src/cli/eval-cmd.ts` that loads it; reuse the existing `scorePrecisionAtK`/`scoreRecallAtK` scorers.
-- **Done when:** the run reports clean vs augmented P@1/R@3 and you can point to which paraphrase/typo variants drop retrieval.
-- **Estimated effort:** 1 day.
+- **Exercise ID:** [B2C.6b] Phase 2C / Phase 3
+- **What to build:** Not yet implemented — buffr trains nothing. Build a recurring check that compares the *current* distribution of queries hitting buffr (from `agents.messages`) against a baseline window, using PSI over query embeddings. Emit a single drift score per run. This watches buffr's real input distribution shift over time — still no model trained, just the input world monitored.
+- **Why it earns its place:** It's the production-hygiene half of this concept and the on-ramp to `15-drift-detection.md`. It uses a real buffr capture surface (`agents.messages`) as the honest source of "what the system actually sees."
+- **Files to touch:** new `ml/drift_sentinel.py`, reads `agents.messages` (query text), writes a per-run drift score to `ml/drift_log.json`.
+- **Done when:** running the sentinel twice over two different time windows produces two comparable drift scores; a synthetic injected shift (feed it off-topic queries) reliably trips the threshold.
+- **Estimated effort:** 1–1.5 days.
 
 ## Interview defense
 
-**Q: Your model passes validation but fails in production. First hypothesis?**
-Answer: domain gap. Validation is drawn from the training distribution, so it structurally can't catch a serving-distribution shift. My first move is to check `P(x)` — compare serving input statistics to the training stats I saved, no labels needed. If the inputs drifted, the model is off-distribution and its confidence stopped being evidence; I'd then ask which shift moved — covariate, label, or concept — because each needs a different fix.
+Most candidates have only consumed pre-trained models and have never measured the gap between train and prod — having instrumented it is the signal.
 
+**Q: Your model scored 0.90 in the notebook and 0.61 in prod. Where do you look first?**
 ```
-  passes val, fails prod  ──►  compare P_serve(x) to P_train(x)
-                               drifted? → off-domain → confident-wrong
+   first hypothesis: DOMAIN GAP, not a code bug
+        │
+        ├─ compare P(x): train sample vs recent prod sample (PSI / 2-sample AUC)
+        │     gap found ─► localize the shifted features, then retrain/re-weight
+        │
+        └─ if P(x) looks stable ─► suspect concept drift; pull fresh labels
 ```
+Anchor: the model is usually fine — the two distributions on either side of deploy are not.
 
-**Q: What's the most dangerous property of an off-distribution input?**
-Answer: the model stays confident. It partitions feature space and the decision surface extends into regions it never saw data for, so it returns a high-confidence label with nothing backing it — no error, no low-confidence flag, just plausible garbage. **The part people forget: distribution shift throws no exception. You only catch it by monitoring the input distribution, because the output looks fine right up until it isn't.**
+**Q: How do you detect a domain gap without production labels?**
+```
+   labels NOT required for covariate shift:
+     train a classifier to tell train-rows from prod-rows
+        AUC ≈ 0.5 ─► indistinguishable, no covariate shift
+        AUC → 1.0 ─► the two distributions are separable = gap
+   labels REQUIRED for concept drift ─► say so plainly
+```
+Anchor: covariate shift lives in P(x) and is label-free; concept drift lives in P(y|x) and is not.
 
+**Q: Does buffr have a domain gap?**
 ```
-  off-domain point → confident label, ZERO data behind it → silent wrong
-                     └─ catch it on P(x), never on the output alone
+   honest answer: buffr trains nothing, so it OWNS no model with a gap.
+        │
+        └─ BUT it CONSUMES nomic-embed (pretrained on web text) over
+           personal markdown ─► a real adjacent gap in a model it can't
+           retrain. Mitigation today is corpus-side, not model-side.
 ```
+Anchor: name the consumed-model gap honestly; don't manufacture a trained model to own it.
 
 ## See also
 
-- `15-drift-detection.md` — PSI over feature distributions is the productionized version of the gap-detection check here.
-- `07-transfer-learning.md` — fine-tuning is domain adaptation; the embedder gap closes by adapting to buffr's domain.
-- `05-class-imbalance.md` — label shift is a distribution shift in `P(y)`; the two files overlap there.
-- `16-retraining-pipelines.md` — collecting in-domain data and retraining is the durable gap fix.
-- `../05-evals-and-observability/04-llm-observability.md` — the trajectory trace where serving-distribution signals would live.
+- `./05-class-imbalance.md` — the other way held-out metrics lie: class ratios, not distribution shift.
+- `./07-transfer-learning.md` — fine-tuning on a small in-domain set is the heavyweight domain-gap mitigation.
+- `../03-retrieval-and-rag/` — `01-embeddings.md`: the consumed embedding model where buffr's real domain-gap risk lives.
+- `../05-evals-and-observability/` — `eval/queries.json` and `agents.messages` as the surfaces you'd measure drift against.
+- `../09-ml-system-design-templates/` — where continuous distribution monitoring becomes an architectural component.

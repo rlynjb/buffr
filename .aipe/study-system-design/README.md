@@ -1,71 +1,80 @@
-# System Design — buffr-laptop
+# Study — System Design · buffr-laptop
 
-A per-repo system-design guide for **buffr-laptop**: a single-device personal RAG
-agent that consumes `@rlynjb/aptkit-core@0.4.1` as a library and adds Postgres+pgvector
-persistence plus an interactive chat CLI. The sole interface is `npm run chat`.
+This guide turns **this repo** — `buffr-laptop`, a single-device personal RAG agent — into a
+system-design study. It owns the architecture *actually present in the code*: where data,
+state, and work live; how they move; where the boundaries are; and what changes at scale.
 
-This guide teaches the architecture *actually present* in the repo — boundaries, flows,
-state ownership, failure handling, and what breaks at scale — anchored to real
-`file:line` evidence. It does not teach generic system-design theory, and it never
-invents infrastructure the repo doesn't run.
+It does **not** re-teach foundation topics. Mechanism-level teaching is cross-linked to the
+neighboring foundation guides (see the bottom of this file).
+
+## What this repo is, in one sentence
+
+A long-lived terminal chat agent (`npm run chat`) that runs **stock Gemma 2 locally**,
+retrieves over **Postgres + pgvector**, and persists every conversation as a replayable
+trajectory — built as the *body* on top of `@rlynjb/aptkit-core` (consumed as a library,
+never edited here).
 
 ## Reading order
 
 ```
-  1.  00-overview.md   the whole system in one diagram — read this first
-  2.  audit.md         Pass 1: the 8-lens architectural audit, honest gaps named
-  3.  01-08            Pass 2: the patterns this repo actually exercises
+  1. 00-overview.md   ← start here. one diagram, the whole system, every box labelled.
+  2. audit.md         ← the 8-lens system-design audit. what each lens found, or
+                        `not yet exercised`. read it second to know the shape.
+  3. 01..06           ← the discovered patterns. each is a full concept file —
+                        zoom out → structure pass → how it works → interview defense.
 ```
 
-Skim `00-overview.md` and you have the map. Read `audit.md` and you know which lenses
-the repo exercises and which it leaves `not yet exercised`. The numbered files are the
-deep walks of each load-bearing pattern.
+## The discovered patterns (Pass 2)
 
-## The patterns this repo exercises (Pass 2)
+Each file is named after a real architectural pattern this repo exercises. The file list
+itself is the teaching artifact — a senior engineer skimming it should learn what buffr does
+before opening anything.
 
 ```
-  01-vector-store-adapter.md          PgVectorStore implements aptkit's VectorStore
-  02-library-as-dependency-boundary.md  aptkit consumed, never edited; the memory round-trip
-  03-trajectory-capture.md            full-signal CapabilityEvent persistence
-  04-long-lived-chat-session.md       warm pool, ONE conversation, agent built once
-  05-profile-injection-as-context.md  me.md profile → system prompt
-  06-retrieval-as-memory.md           episodic memory riding the chunks table
-  07-deferred-body.md                 what's gated, and what won't have to change
+  01-vector-store-adapter.md         ports & adapters — PgVectorStore behind aptkit's
+                                     VectorStore contract; the drop-in seam.
+  02-retrieval-pipeline.md           index path + query path; embed → store → search → rank.
+  03-trajectory-capture.md           full-signal CapabilityEvent sink; every event a row.
+  04-library-as-dependency-boundary.md  aptkit as a hard boundary + the memory round-trip
+                                     (engine extracted UP, store injected DOWN).
+  05-long-lived-chat-session.md      one warm pool, one conversation, agent built once.
+  06-profile-injection-as-context.md me.md profile row → system prompt; "your" assistant.
 ```
 
-The file list is itself a teaching artifact: a reader who has never opened the repo
-learns what's architecturally interesting from these names alone.
+## Where the seams are (one-line map)
 
-## Cross-links — neighboring foundation guides
+```
+  app code  ──contract──►  aptkit-core  ──adapter──►  buffr's PgVectorStore / TraceSink
+  (chat.tsx)  (the boundary you  (run-agent-loop,   (the implementations buffr owns)
+               never cross)       retrieval, memory)
+                                       │
+                                       ▼
+                              Postgres + pgvector (reindb, schema `agents`)
+```
 
-System design owns the architectural boundaries and tradeoffs. The mechanism-level
-teaching belongs to the foundation generators. Where this guide names a mechanism, it
-cross-links rather than re-teaching:
+## Cross-links to the foundation guides
 
-- **`study-database-systems`** — how pgvector's HNSW index executes the cosine query,
-  what `<=>` does at the storage layer, transaction isolation on the `upsert` batch.
-  This guide owns *why* Postgres is the store and what durability boundary it draws;
-  the engine internals live there.
-- **`study-data-modeling`** — the *shape* of the `agents` schema (the soft FK, the
-  `meta jsonb`, the `app_id` tenancy column, chunk-id design). This guide owns where
-  state lives and who owns each transition; the normalization and integrity analysis
-  lives there.
-- **`study-distributed-systems`** — correctness when the laptop and phone brains both
-  go live and share one memory plane (the deferred sync/merge problem). This guide
-  names the deferred boundary; the coordination mechanics live there.
-- **`study-runtime-systems`** — how the warm pool, the sync `emit()` + async `flush()`
-  trace sink, and the single-threaded chat session execute inside one Node process.
-  This guide owns the session as an architectural boundary; the execution model lives
-  there.
-- **`study-ai-engineering`** / **`study-agent-architecture`** — the RAG retrieval
-  pipeline, the agent loop, the eval harness (precision@k / recall@k), and tool-calling.
-  This guide names the seams where buffr injects its adapters; the AI mechanics live
-  there.
-- **`study-dsa-foundations`** — vector similarity, ANN, cosine distance as algorithms.
-  Not re-taught here.
+System-design owns boundaries and tradeoffs. The mechanisms underneath are owned elsewhere:
 
-## What this repo is, in one line
+- **`.aipe/study-database-systems/`** — how pgvector executes the cosine query, what HNSW
+  does internally, transaction/durability mechanics of the `begin/commit` in `PgVectorStore.upsert`.
+- **`.aipe/study-data-modeling/`** — the *shape* of the `agents` schema: the soft-link
+  `document_id`, the `meta jsonb`, the memory-rides-on-chunks decision, normalization tradeoffs.
+- **`.aipe/study-runtime-systems/`** — the Node event loop, the sync `emit()` / async `flush()`
+  split in the trace sink, how the warm `pg.Pool` multiplexes connections.
+- **`.aipe/study-networking/`** — the wire calls to Ollama (`/api/chat`, embeddings) and the
+  pg TCP connection; timeouts, pooling, retries.
+- **`.aipe/study-dsa-foundations/`** — ANN / vector search as an algorithm, cosine distance,
+  the priority-queue substrate inside HNSW.
 
-> A single off-the-shelf-Gemma RAG agent on aptkit's runtime, persisted to Postgres
-> pgvector on one device, capturing every conversation as a full-signal trajectory —
-> the laptop brain (v1b) of a deliberately-deferred two-brain body.
+For the standard role-vocabulary of a pattern (port / adapter / client / factory / seam),
+the canonical definitions live in `study-software-design` → PATTERN VOCABULARY. This guide
+uses those terms and keeps buffr's local names in parens on first use.
+
+## Cross-links to neighboring study guides
+
+- **software-design** (ports & adapters / dependency inversion) — `01` and `04` both lean on
+  it; the deep code-altitude treatment of the `VectorStore` port is there.
+- **data-modeling** — the schema decisions behind `02` and `03`.
+- **ai-engineering** — the RAG pipeline (`02`), evals (`precision@k`), the memory pattern.
+- **agent-architecture** — the agent loop, tool-calling, the trajectory-capture thesis (`03`).

@@ -1,276 +1,322 @@
-# 04 — Sync interface, async work
+# Sync interface, async work — the trace sink as an observer
 
-**Industry name(s):** Fire-and-collect · deferred flush · "sync emit, async
-drain" · write-behind buffer. **Type:** Industry standard.
+**Industry names:** the observer pattern · publish/subscribe · the
+write-behind buffer · fire-and-forget with a barrier. **Type:** Industry
+standard.
+
+aptkit's agent loop emits events as it runs — a step, a tool call, token
+usage. buffr wants to persist all of them to Postgres. The catch: aptkit's
+emit contract is *synchronous* (it calls `emit(event)` and moves on, it
+won't await you), but writing to Postgres is *asynchronous*. `SupabaseTrace
+Sink` bridges that gap: a sync `emit` that queues a promise, and an async
+`flush` that drains the queue after the run. That sync-front/async-back
+split is the whole design.
+
+Role-vocabulary (observer pattern), named once:
+
+- **the subject** — aptkit's `RagQueryAgent`; the thing being observed; it
+  emits events as it runs.
+- **the observer** — `SupabaseTraceSink` (`supabase-trace-sink.ts`); it
+  subscribes by being passed in, and reacts to each event.
+- **notify** — `emit(event)`, the synchronous notification the subject
+  calls per event.
+- **the subscription** — the `trace` argument handed to the agent
+  (`session.ts:57`); how the observer attaches to the subject.
+- **flush** — the async barrier that drains queued writes after the run
+  (buffr's addition; not part of the classic observer).
 
 ---
 
 ## Zoom out, then zoom in
 
-aptkit's agent loop emits trajectory events *synchronously* — `emit(event)`
-returns `void`, no `await`, because the loop can't stop and wait on a database
-between reasoning steps. But buffr wants those events in Postgres, and a
-Postgres write is *async*. `SupabaseTraceSink` bridges the impedance mismatch:
-`emit()` is sync and just queues a promise; `flush()` is async and drains the
-queue after the run.
+The observer sits beside the agent loop, catching every event the loop
+emits and turning it into a row in `agents.messages`.
 
 ```
-  Zoom out — where the trace sink sits in a turn
+  Zoom out — the observer beside the agent loop
 
-  ┌─ Service (aptkit agent loop) ──────────────────────────────┐
-  │  reason → emit(step) → call tool → emit(tool_call_end) ...  │
-  │           │ sync, void, no await — the loop never blocks    │
-  └───────────┼─────────────────────────────────────────────────┘
-              │  push a promise (don't await)
-  ┌─ buffr ──▼──────────────────────────────────────────────────┐
-  │  ★ SupabaseTraceSink ★   supabase-trace-sink.ts              │ ← here
-  │  emit() queues · flush() awaits all                          │
-  └───────────┬─────────────────────────────────────────────────┘
-              │  after the run: await flush()
-  ┌─ Storage ▼──────────────────────────────────────────────────┐
-  │  agents.messages   (full-signal trajectory)                 │
-  └─────────────────────────────────────────────────────────────┘
+  ┌─ aptkit (the subject) ───────────────────────────────────────┐
+  │  RagQueryAgent.answer(q)                                      │
+  │    ├─ emit(step)          ──┐                                 │
+  │    ├─ emit(tool_call_start)──┤ notify() — SYNCHRONOUS,        │
+  │    ├─ emit(tool_call_end) ──┤ the loop won't await you        │
+  │    ├─ emit(model_usage)   ──┤                                 │
+  │    └─ emit(warning|error) ──┘                                 │
+  └───────────────────────────────│──────────────────────────────┘
+                                  │ each event
+  ┌─ buffr (the observer) ────────▼──────────────────────────────┐ ← here
+  │  ★ SupabaseTraceSink ★                                        │
+  │    emit(e): map → PUSH a pending promise (returns instantly)  │
+  │    flush(): await Promise.all(pending)  ← the barrier         │
+  └───────────────────────────────│──────────────────────────────┘
+                                  │ INSERTs (async, drained at flush)
+  ┌─ Storage ─────────────────────▼──────────────────────────────┐
+  │  agents.messages  (full-signal trajectory, replayable)        │
+  └───────────────────────────────────────────────────────────────┘
 ```
 
-Zoom in: the pattern decouples *when work is requested* from *when work
-completes*. The interface stays sync to satisfy the contract; the work happens
-async, batched and awaited at a safe point. The question: **how does the sink
-honor a sync contract while doing async I/O, and what's the one thing that
-breaks if you forget the flush?**
+Zoom in: the subject (the agent) doesn't know or care that the observer
+writes to a database — it just calls `emit` and keeps running. The
+observer's job is to react *without blocking the subject*. It can't `await`
+inside `emit` (the contract is sync), so it queues the write and lets the
+event loop run it later. After the agent finishes, `flush` waits for all
+queued writes. That's the bridge between a sync contract and async I/O.
 
 ---
 
-## Structure pass
+## The structure pass
 
-**Layers.** The synchronous emitter above, the async DB below, the queue
-between them.
+**Layers:** the agent loop (subject) · the `CapabilityTraceSink` contract
+(the seam) · the trace sink (observer) · Postgres.
+
+**The axis: is this call synchronous or asynchronous?** Trace it across
+emit and flush:
 
 ```
-  one axis traced: "is this call synchronous or async?"
+  axis traced = "does the caller wait for the work?"
 
-  ┌─ aptkit loop ───────────────┐  SYNC: emit() returns void immediately
-  │  emit(event)                │
-  └──────────────┬──────────────┘
-        seam ◄── sync/async flips here ──►
-  ┌─ the pending queue ─────────▼┐  the buffer: Promise<void>[]
-  │  push(p)                     │
-  └──────────────┬──────────────┘
-  ┌─ Postgres ───▼──────────────┐  ASYNC: each insert is a real await
-  │  persistMessage → INSERT     │
-  └──────────────────────────────┘
+  ┌─ agent.emit(e) ─┐  seam   ┌─ emit() body ─┐   ┌─ flush() ────┐
+  │ caller does NOT │ ══╪════►│ queues promise │   │ caller WAITS │
+  │ wait (sync)     │        │ returns instantly│  │ (async)      │
+  └─────────────────┘        └────────────────┘   └──────────────┘
+       sync                      sync push            async drain
+            the same data (events) handled two ways:
+            captured synchronously, persisted asynchronously
 ```
 
-**Axis — "sync or async?"** The emitter side is sync (the loop demands it).
-The storage side is async (I/O always is). **The flip happens at the queue** —
-`emit` is sync because it only does a synchronous `array.push`; the await is
-deferred to `flush`. The queue is the shock absorber between two timing
-models.
-
-**Seam.** `implements CapabilityTraceSink` (`supabase-trace-sink.ts:49`) is
-the contract seam — aptkit dictates `emit(event): void`. The second seam is
-`flush()` (`:91`), buffr's addition, called by the session *after* the agent
-returns (`session.ts:63`). The contract gives you sync emit; buffr adds the
-async drain.
+The axis flips *inside the observer*: `emit` is the sync face (it must be —
+the subject won't await it), `flush` is the async face (it can be — the run
+is over). The seam is the `CapabilityTraceSink` contract, and the
+load-bearing fact about it is that `emit` returns `void`, not
+`Promise<void>` — that's what forces the queue-and-flush design.
 
 ---
 
 ## How it works
 
-### Move 2 variant — the load-bearing skeleton
+### Move 1 — the mental model
 
-This concept has an irreducible kernel, so walk it as a skeleton: the smallest
-thing that's still the pattern, then what breaks when each part is removed.
+You know this shape from the DOM: `element.addEventListener('click', fn)`.
+The browser (subject) calls your handler (observer) synchronously on every
+click; your handler can't make the browser *wait* for an async operation —
+if you need to do I/O, you kick it off and return. `SupabaseTraceSink` is
+exactly that handler, with one addition: a `flush` that lets you await all
+the I/O you kicked off, once the clicks stop.
+
+In one sentence: **capture every event synchronously by queuing a promise,
+then drain the queue with one async barrier after the run.**
 
 ```
-  the kernel — queue on emit, await on flush
+  Sync emit / async flush — the kernel
 
-   sync emit:                 async flush:
-   ─────────                  ──────────
-   pending = []               await Promise.all(pending)
-   emit(e):                   ─ drains every queued write
-     p = startWriteAsync(e)
-     pending.push(p)   ◄── push, DON'T await
-     return            ◄── sync return satisfies the contract
+  emit(e) ─► map event ─► push promise to pending[] ─► return (sync)
+  emit(e) ─► map event ─► push promise to pending[] ─► return (sync)
+  emit(e) ─► ...                                    ─► return (sync)
+       ──────────── run ends ────────────
+  flush() ─► await Promise.all(pending)            ─► (async barrier)
 ```
 
-**Part 1 — the queue (what breaks: the sync contract).**
+### Move 2 — the load-bearing skeleton
 
-**File:** `src/supabase-trace-sink.ts` · **Lines:** 50-51, 87-89.
+This pattern has an irreducible kernel. Let's isolate it and name each
+part by **what breaks when it's missing.**
+
+**The kernel: a pending array + sync push + async drain.**
 
 ```ts
-private readonly pending: Promise<void>[] = [];
-// ...
-private push(p: Promise<void>): void {
-  this.pending.push(p);
-}
-```
+// supabase-trace-sink.ts:49-93 (skeleton)
+export class SupabaseTraceSink implements CapabilityTraceSink {
+  private readonly pending: Promise<void>[] = [];      // ← part 1: the queue
 
-A plain array of in-flight promises. This is the whole shock absorber. Remove
-it and `emit` would have to `await` its write — but `emit` *can't* be async
-(the contract says `void`), so without the queue you'd either block the sync
-caller (impossible) or fire-and-forget with no way to know the writes
-finished. The queue is what lets `emit` return instantly while still tracking
-the work. **Load-bearing — it's the pattern's reason to exist.**
-
-**Part 2 — sync `emit`, the contract face (what breaks: aptkit can't call
-it).**
-
-**File:** `src/supabase-trace-sink.ts` · **Function:** `emit` · **Lines:**
-53-85.
-
-```ts
-emit(event: CapabilityEvent): void {        // ← void, no async, no await
-  const { pool, conversationId } = this.opts;
-  const at = event.timestamp;
-  switch (event.type) {
-    case 'step':
-      if (event.content) {
-        this.push(persistMessage(pool, conversationId, event.role, event.content, { createdAt: at }));
-      }                                      // ← push the promise, return
-      return;
-    case 'tool_call_start': /* ... */ return;
-    case 'tool_call_end':   /* ... */ return;
-    case 'model_usage':     /* ... */ return;
-    case 'warning':
-    case 'error':           /* ... */ return;
+  emit(event: CapabilityEvent): void {                 // ← part 2: sync notify
+    switch (event.type) { /* map each variant → persistMessage(...) */ }
+  }
+  private push(p: Promise<void>): void {
+    this.pending.push(p);                              // ← queue, don't await
+  }
+  async flush(): Promise<void> {
+    await Promise.all(this.pending);                   // ← part 3: the barrier
   }
 }
 ```
 
-`persistMessage` returns a `Promise<void>`. `emit` calls it, pushes the
-*unawaited* promise (`this.push(...)`), and returns synchronously. The agent
-loop calls `emit` between reasoning steps and never blocks on the database.
-The `switch` exhaustively maps all six `CapabilityEvent` types to rows —
-that's the "full-signal trajectory" the comment at `:39-48` describes: tool
-args (the cause), `durationMs` + error, token usage, warnings, all persisted,
-not just assistant steps. **Load-bearing: the sync signature is what makes the
-sink usable from a sync loop.**
+**Part 1 — the `pending` array.** Remove it and you have nowhere to keep
+the in-flight writes. `emit` is sync, so the moment it returns, any promise
+it created is unreferenced — without `pending`, the writes either get
+garbage-collected mid-flight or you have no handle to await. The array is
+what keeps the async work alive across the sync boundary.
 
-**Part 3 — async `flush`, the drain (what breaks: silent data loss).**
+**Part 2 — `emit` returns `void`, never awaits.** This is forced by the
+contract (`CapabilityEvent` → `void`), and it's the constraint the whole
+design exists to satisfy. If you `await` inside `emit`, you'd either change
+the contract (you can't — it's aptkit's) or block the agent loop on every
+event. So `emit` does the cheap part synchronously — map the event, build
+the insert promise — and pushes it. Remove the no-await discipline and you
+serialize the agent on database round-trips.
 
-**File:** `src/supabase-trace-sink.ts` · **Function:** `flush` · **Lines:**
-91-93.
-
-```ts
-async flush(): Promise<void> {
-  await Promise.all(this.pending);   // ← wait for every queued insert
-}
-```
-
-The single most-forgettable part of this pattern. `emit` returned before its
-writes finished; if the process exits (or the session moves on) without
-`flush`, in-flight inserts are abandoned and **trajectory rows silently
-vanish**. The session calls it at the right moment — `session.ts:63`, *after*
-`agent.answer()` returns:
+**Part 3 — `flush` as the barrier.** Remove it and the process can exit (or
+the next turn can start) with writes still in flight — you lose trajectory
+rows nondeterministically. `flush` is called at exactly one place,
+`session.ts:63`, *after* `agent.answer()` returns:
 
 ```ts
-const answer = await agent.answer(question);  // emits happen in here
-await trace.flush();                          // NOW drain the queue
+// session.ts:62-63
+const answer = await agent.answer(question);   // subject runs, emits sync events
+await trace.flush();                           // ← barrier: now wait for all queued writes
 ```
 
-This is the interview-payoff part: forgetting the flush is the bug everyone
-ships first with fire-and-collect. Naming it — "the writes are queued, not
-done, until you await flush" — signals you've actually run this pattern.
-**Load-bearing, and the part people forget.**
+**The event-mapping — six variants, each a different row.** `emit`'s body
+is a `switch` over all six `CapabilityEvent` types, each mapped to a
+`messages` row shape (`supabase-trace-sink.ts:56-84`):
 
-**Skeleton vs hardening.** The kernel is queue + sync-emit + async-flush.
-Everything else is hardening: the exhaustive `switch` (completeness, not
-correctness of the pattern), the `toJsonb` stringify (`:25`, a node-postgres
-quirk), the `createdAt` from event timestamp (`:26`, deterministic replay
-order). You could drop all three and still have the pattern; drop the queue or
-the flush and it's broken.
+```ts
+// supabase-trace-sink.ts:62-65  (one variant, annotated)
+case 'tool_call_start':
+  this.push(persistMessage(pool, conversationId, 'tool_call', event.toolName, {
+    toolCalls: { toolName: event.toolName, args: event.args },  // ← the CAUSE, previously dropped
+    createdAt: at,                                              // ← event timestamp, not now()
+  }));
+  return;
+```
+
+Two design choices ride here. First, the `switch` has **no `default`** —
+an unknown event type is a silent no-op, not an error (audit lens 6:
+special case defined out of existence). Second, every variant threads
+`createdAt: at` from `event.timestamp`, so replay order matches *emit*
+order, not the race between concurrent flush inserts (the class comment at
+`:39-48` explains exactly this). Without the timestamp, `Promise.all`'s
+nondeterministic completion order would scramble the trajectory.
+
+```
+  Layers-and-hops — one event becoming one row
+
+  ┌─ aptkit ───┐ emit(tool_call_start)  ┌─ TraceSink ──┐
+  │ agent loop │ ─────────────────────► │ map → push   │ returns sync
+  └────────────┘   (sync, no await)     └──────┬───────┘
+                                               │ pending[].push(INSERT promise)
+                       ── run ends, flush() ──►│
+                                               ▼ (async drain)
+                                        ┌─ agents.messages ─┐
+                                        │ role=tool_call,   │
+                                        │ tool_calls={args},│
+                                        │ created_at=event.ts│
+                                        └───────────────────┘
+```
+
+**Hardening vs skeleton.** The skeleton is queue + sync-push + async-drain.
+Everything else is hardening: the six-way event mapping (richer data, not a
+different pattern), the timestamp-for-ordering (correctness under
+`Promise.all`), the `toJsonb` stringify in `persistMessage` that dodges a
+node-postgres array-literal gotcha (`:23-25`). Naming which is which is the
+lesson — the pattern is three parts; the rest is making it *good*.
 
 ### Move 3 — the principle
 
-When a contract forces a sync interface but the work is inherently async,
-don't fight the contract — buffer. Queue the async work on the sync call,
-return immediately, and drain at a controlled point. The cost you accept is a
-discipline: *someone must call flush*, and forgetting it loses data silently.
-Make the flush point obvious and single (here, one line in the session right
-after the run) so the discipline is hard to skip.
+When you have to satisfy a synchronous contract but do asynchronous work,
+you can't await in the hot path — so you **decouple capture from
+completion**: capture synchronously (cheap, non-blocking), complete
+asynchronously (queued, drained at a barrier). The pending array is the
+decoupling buffer; the flush is the barrier that re-couples them when it's
+safe to wait. This is the same shape as a write-behind cache, a logging
+ring buffer, or React's effect cleanup — anywhere a fast producer can't
+block on a slow consumer. The part people forget is the barrier: fire-and-
+forget without a `flush` loses data silently, and silent data loss in a
+trajectory log is the worst kind, because the gap looks like the agent
+simply didn't do anything.
 
 ---
 
 ## Primary diagram
 
-The full sync-emit / async-flush cycle for one turn.
-
 ```
-  SupabaseTraceSink — sync emit, async flush, over one turn
+  SupabaseTraceSink — sync observer + async barrier, full recap
 
-  ┌─ aptkit agent loop (SYNC) ──────────────────────────────────────┐
-  │  step ─emit─► step ─emit─► tool_start ─emit─► tool_end ─emit─► …  │
-  └────┼──────────┼─────────────┼─────────────────┼──────────────────┘
-       │ push     │ push        │ push            │ push  (no awaits)
-       ▼          ▼             ▼                 ▼
-  ┌─ pending: Promise<void>[] ──────────────────────────────────────┐
-  │   [ p1,        p2,           p3,               p4, ... ]         │
-  └─────────────────────────────────┬────────────────────────────────┘
-                                    │  agent.answer() returns, THEN:
-                                    ▼   await trace.flush()  (session.ts:63)
-  ┌─ Storage (ASYNC) ──────────────────────────────────────────────┐
-  │  Promise.all → all rows land in agents.messages                 │
-  │  (forget flush → these rows are lost, no error)                 │
-  └─────────────────────────────────────────────────────────────────┘
+  ┌─ aptkit: RagQueryAgent (the subject) ────────────────────────┐
+  │  answer(q) loop emits, synchronously:                        │
+  │    step · tool_call_start · tool_call_end ·                  │
+  │    model_usage · warning · error      (6 CapabilityEvents)   │
+  └───────────────────────────┬──────────────────────────────────┘
+              notify() = emit() │ SYNC — agent never awaits buffr
+  ┌─ buffr: SupabaseTraceSink (the observer) ─▼──────────────────┐
+  │  emit(e):  switch(e.type) → persistMessage(...) → pending.push│
+  │            no default (unknown = no-op) · createdAt = e.ts    │
+  │  pending: [ INSERT, INSERT, INSERT, ... ]   ← the queue       │
+  │  flush(): await Promise.all(pending)        ← the barrier     │
+  └───────────────────────────┬──────────────────────────────────┘
+        called once at session.ts:63, AFTER agent.answer() returns
+                              ▼ (async drain)
+  ┌─ Storage: agents.messages ───────────────────────────────────┐
+  │  full-signal trajectory, ordered by event timestamp, replayable│
+  └───────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
 ## Elaborate
 
-This is a write-behind buffer (the same idea as a DB write-back cache or a
-batched logger): accept writes instantly, persist them out-of-band. The
-specific constraint here is the `CapabilityTraceSink` contract's sync `emit` —
-aptkit chose sync so the agent loop, which is itself sync between awaited model
-calls, can instrument every step without turning every emit into a blocking
-I/O point.
+The observer pattern (Gang of Four) is the base: a subject maintains a list
+of observers and notifies them on change, decoupling "something happened"
+from "who reacts." aptkit's `CapabilityTraceSink` is a one-observer
+specialization — the agent notifies a single sink. The sync/async twist is
+buffr's, and it's the part worth studying, because it's where most people
+get the design wrong: they either block the producer (await in the handler,
+serializing the agent on the database) or fire-and-forget with no barrier
+(losing rows on exit). The pending-array-plus-flush is the standard fix,
+the same shape as a write-behind buffer in a database or a batched logger.
 
-The honest tradeoff (audit §6): trajectory persistence is *best-effort within
-the turn* — `flush` awaits everything, but if a single insert rejects,
-`Promise.all` rejects and the rest are still in-flight. For a single-device
-personal agent that's acceptable; trajectory rows are observability, not the
-user's answer (which `session.ts` persists separately and synchronously at
-`:61`). If buffr ever needed guaranteed trajectory durability, the move would
-be `Promise.allSettled` plus a dead-letter retry — hardening on top of the
-same kernel.
-
-Read next: `03-dependency-as-a-boundary.md` (the `CapabilityTraceSink`
-contract this implements) and `05-deep-session-facade.md` (who calls `flush`).
+The timestamp-for-ordering detail connects to a deeper idea: when you
+parallelize writes with `Promise.all`, you give up completion order, so any
+order you need must be *carried in the data* (here, `event.timestamp` →
+`created_at`), not implied by insert sequence. That's a general rule for
+async fan-out, not specific to buffr.
 
 ---
 
 ## Interview defense
 
-**Q: Why not just make `emit` async and await each write?**
-Because the contract is `emit(event): void` — aptkit's agent loop calls it
-synchronously between reasoning steps and can't await it. Making the *writes*
-async while keeping the *interface* sync is the only way to honor the contract
-and still persist to Postgres. The queue is the bridge: push the promise on
-emit, await the batch on flush.
+**Q: Why doesn't `emit` just `await` the database write?** Because the
+contract won't let it — `CapabilityTraceSink.emit` returns `void`, not a
+promise, and aptkit's agent loop calls it synchronously without awaiting.
+If `emit` did its own `await`, it couldn't actually block the loop (the
+loop ignores the return), so the write would become an unhandled floating
+promise — exactly the bug the `pending` array prevents. The design queues
+the promise so there's a handle to await later, at `flush`.
+*Anchor:* "the contract returns void — so the only place you *can* await is
+a separate flush, not inside emit."
+
+**Q: What's the load-bearing part people forget?** The flush barrier. The
+queue-and-push half is intuitive; the part that gets dropped is awaiting
+the queue before the process exits or the next turn starts. Without it
+(`session.ts:63`), `Promise.all` never runs and you lose trajectory rows
+nondeterministically — and a missing row looks like the agent did nothing,
+which is the worst failure mode for a debugging log.
 
 ```
-  the bridge: push on emit (sync), await on flush (async)
-
-  emit ──► pending.push(writePromise) ──► return void   (loop continues)
-                       │
-  flush ──► Promise.all(pending) ──► await                (run finished)
+  with flush                    without flush (the bug)
+  emit → queue → flush:await    emit → queue → (exit)
+  all rows land                 in-flight writes lost silently
 ```
+*Anchor:* "fire-and-forget needs a barrier — the flush is the difference
+between a complete trajectory and a lossy one."
 
-**Q: What's the failure mode of this pattern?**
-Forgetting to flush. `emit` returns before its write completes, so if the
-process ends without `await trace.flush()`, in-flight inserts are dropped and
-trajectory rows vanish with no error. buffr guards it with a single obvious
-flush point — `session.ts:63`, right after `agent.answer()` returns. The fix
-for *guaranteed* durability would be `allSettled` + retry, but for a personal
-agent the current best-effort flush is the right call.
-
-**Anchor:** "Sync emit queues, async flush drains — and the data's not saved
-until you await the flush."
+**Q: Why thread the event timestamp into `created_at`?** Because the writes
+run under `Promise.all`, which gives no ordering guarantee — insert
+completion order is a race. If `created_at` defaulted to `now()`, the
+trajectory would be scrambled by that race. Carrying `event.timestamp`
+into the row means replay order matches emit order regardless of which
+insert finishes first. When you fan out async writes, any order you need
+has to live in the data.
+*Anchor:* "parallel writes lose ordering — so the order rides in the
+timestamp column, not the insert sequence."
 
 ---
 
 ## See also
 
-- `audit.md` §6 (errors and special cases — the trace error-as-value).
-- `03-dependency-as-a-boundary.md` — the `CapabilityTraceSink` contract.
-- `05-deep-session-facade.md` — the session that owns the flush point.
+- `03-dependency-as-a-boundary.md` — `CapabilityTraceSink` is another
+  aptkit contract buffr implements and injects up.
+- `05-deep-session-facade.md` — where `flush` is called in the turn loop.
+- `audit.md` lens 6 — the no-`default` switch as a special case erased.
+- `study-debugging-observability/` (if present) — the trajectory as a
+  debugging artifact.
+- `study-testing/` — replay-order determinism as a correctness property.

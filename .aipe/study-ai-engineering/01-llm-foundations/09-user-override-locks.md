@@ -1,220 +1,195 @@
-# User Override Locks
+# User-Override Locks
 
-*Override flag / `_overridden_at` guard — Project-specific pattern (not yet exercised).*
+*Industry name: override tracking / dirty-flag / last-write-wins protection. Type: **Language-agnostic** pattern.*
 
 ## Zoom out, then zoom in
 
-When an LLM *writes* a field that a human can also edit, you have a collision waiting: the next model re-run overwrites the human's careful manual edit. The fix is an override lock — a flag or timestamp that tells the writer "a human touched this; don't clobber it." buffr doesn't have this, because buffr has no LLM-written-and-user-editable field. Here's the data layer where it would live if it did.
+When a pipeline re-runs and overwrites stored data, any *human edit* to that data gets silently clobbered. *User-override locks* are a flag (`_overridden_at`) that says "a person touched this — don't auto-overwrite." Here's where buffr writes data that could be clobbered, with the unprotected upserts marked ★.
 
 ```
-  Zoom out — where an override lock WOULD live in buffr
-
-  ┌─ Agent layer (aptkit) ──────────────────────────────────────────┐
-  │  RagQueryAgent — produces ANSWERS (ephemeral, not stored fields) │
-  └──────────────────────────┬───────────────────────────────────────┘
-                             │  writes traces, never user-owned fields
-  ┌─ Persistence layer (buffr) ▼─────────────────────────────────────┐
-  │  agents.messages (trace)   ·   agents.profiles (USER-authored)   │
-  │     ★ no LLM-written, user-editable field ★ ── lock would gate it │ ← would-be home
-  └──────────────────────────┬───────────────────────────────────────┘
-                             │
-  ┌─ Storage (Postgres) ─────▼───────────────────────────────────────┐
-  │  every column is either trace OR user-authored — never both      │
-  └──────────────────────────────────────────────────────────────────┘
+buffr stack — where re-runs overwrite data
+┌───────────────────────────────────────────────────────────┐
+│ npm run index   re-chunk + re-embed a document              │
+├───────────────────────────────────────────────────────────┤
+│ ★ indexDocumentRow   documents: on conflict do update       │ blind overwrite
+├───────────────────────────────────────────────────────────┤
+│ ★ PgVectorStore.upsert   chunks: on conflict do update      │ blind overwrite
+├───────────────────────────────────────────────────────────┤
+│ agents.profiles (me.md)   loadProfile reads latest          │ user-editable, no lock
+└───────────────────────────────────────────────────────────┘
 ```
 
-Zoom in: an override lock is a per-row marker (`_overridden_at`, or a boolean `is_overridden`) that a regeneration job checks before writing. If the human edited the row, the timestamp is set, and the job skips it. The pattern needs *one precondition*: a field that **both** an LLM and a human write. buffr's data has no such field — `agents.profiles` is purely user-authored (the model never writes it), and `agents.messages` is purely a trace (the user never hand-edits it). No collision, no need for a lock. This file is honest about that and gives a Case-B where the lock *would* earn its place.
+Every re-index does `on conflict do update set ... = excluded.*` — last write wins, unconditionally. There are no `_overridden_at` fields anywhere. **This is Case B: not implemented.** Today it doesn't bite because re-indexing regenerates content from the source file (no human edits to lose) — but the `profiles` table (`me.md`) is the closest thing to user-editable data, and it's the natural place this pattern would land. This file teaches the lock and makes it the exercise.
 
-## Structure pass
+## Structure pass — trace *who wins on conflict* across the data
 
-Trace the axis **who is the authoritative writer of this field?** across buffr's two stored tables.
+Pick one axis: **when machine-written and human-written data collide, who wins?** Trace it.
 
 ```
-  Axis: "who writes this field authoritatively?" — buffr has no contested field
-
-  ┌─ agents.profiles (me.md) ────────────────┐
-  │  written by: USER only                    │  writer = HUMAN  (model reads, never writes)
-  └─────────────────────┬─────────────────────┘
-                        │  no seam — single writer
-  ┌─ agents.messages (trace) ▼────────────────┐
-  │  written by: TRACE SINK only              │  writer = MACHINE (user never hand-edits)
-  └───────────────────────────────────────────┘
-
-  the lock pattern needs a CONTESTED field (both write it) — buffr has none
+conflict resolution, by table (buffr today)
+  agents.documents │ on conflict do update → MACHINE wins │ no human edits exist
+  agents.chunks    │ on conflict do update → MACHINE wins │ derived, regenerable
+  agents.profiles  │ insert new row, read latest          │ human edits LIVE here ★
+  ─────────────────────────────────────────────────────────────────────────────
+  no seam: nothing checks "did a human touch this?" before overwriting
 ```
 
-The pattern's whole reason to exist is a *contested* field — one with two writers. buffr's tables each have a single, clear writer, so there's no seam where the authority flips, and therefore no race to guard. The lesson is structural: the override lock is the contract you add *exactly when* a field gains a second writer. Name the precondition and you know when to reach for it.
+The seam that *should* exist is missing. A robust system asks, before overwriting: "is this row machine-owned (safe to clobber) or human-owned (must preserve)?" Buffr never asks — `excluded.*` wins every time. The consequence is latent: the moment any field becomes both machine-written *and* human-editable, a re-run erases the human's work with no warning.
 
 ## How it works
 
-#### Move 1 — the mental model
+### Move 1 — the mental model: optimistic-UI conflict, but for a pipeline
 
-You know optimistic-concurrency in a form — a `version` or `updatedAt` you send back so the server rejects a stale write? An override lock is that, but the "stale writer" is specifically an *automated LLM re-run*, and the "winner" is always the human. The strategy: **stamp a row when a human edits it; the regeneration job reads that stamp and skips locked rows.**
-
-```
-  Pattern — the override lock (a guard clause on regeneration)
-
-  LLM regeneration job, per row:
-    if (row._overridden_at != null)        ← human touched it
-        skip                               ← preserve the human edit
-    else
-        row.value = model.generate(...)    ← safe to (re)write
-
-  human edit path:
-    on user save → row.value = edit
-                   row._overridden_at = now()   ← raise the lock
-```
-
-The lock is one nullable timestamp and one `if`. That's the entire kernel.
-
-#### Move 2 — the step-by-step walkthrough
-
-**Why the precondition is absent — the profile is user-only.** buffr's `loadProfile` *reads* the profile into the prompt; nothing ever writes it from the model.
+You've hit this in frontend: optimistic UI updates local state, then a server response arrives and overwrites it — and if the user kept typing, their edits vanish. The fix is a "dirty" flag: don't overwrite a field the user is actively editing. Override locks are that dirty-flag, persisted: a column marking a row (or field) as human-touched, checked before any machine overwrite.
 
 ```
-  loadProfile — src/profile.ts (annotated)
-
-  export async function loadProfile(pool, appId): Promise<string> {
-    const { rows } = await pool.query(
-      'select content from agents.profiles where app_id = $1 order by updated_at desc limit 1', [appId]);
-    return rows[0]?.content ?? '';   // ← READ only; the model never writes agents.profiles
-  }
+the dirty-flag shape
+  machine wants to write row X
+        │
+  is X._overridden_at set?  (did a human edit it?)
+        ├── yes ──▶ SKIP machine write (or write only non-overridden fields)
+        └── no ───▶ overwrite freely
 ```
 
-The profile (`me.md`) is authored by the user and only *injected* into the system prompt (`rag-query-agent.ts:55-57`, `position:'start'`). The model consumes it; it never regenerates it. Single writer → no lock needed.
+### Move 2 — the moving parts
 
-**Why the other table is machine-only — messages are a trace.** Everything in `agents.messages` is written by the trace sink as an append-only record; there's no UI to hand-edit a past message.
+#### The blind upsert, site 1: documents
 
-```
-  SupabaseTraceSink.emit — supabase-trace-sink.ts:53-84 (annotated)
+`indexDocumentRow` (`src/runtime.ts:11–17`) overwrites the documents row unconditionally on re-index:
 
-  switch (event.type) {
-    case 'step':           this.push(persistMessage(... event.content ...));  // machine-written
-    case 'tool_call_start':...                                                // machine-written
-    case 'model_usage':    ...                                               // machine-written
-  }   // ← every row is a TRACE; the user never edits these rows
-```
-
-Append-only machine writes, no human edits → again, no contested field, no lock.
-
-**Where a lock would attach — the would-be regeneration path (Case B).** Suppose buffr added an LLM-written, user-editable field — say a model-generated **summary** of an indexed document, stored on `agents.documents`, that the user can hand-correct. *That* field is contested, and re-indexing would clobber the correction unless gated.
-
-```
-  Layers-and-hops — the lock buffr would add for an LLM-written summary
-
-  ┌─ re-index job (buffr) ─────────────────────────────────────────┐
-  │  for each document row:                                        │
-  │    if (row.summary_overridden_at != null)  ── skip ────────────┼─► human edit preserved
-  │    else: row.summary = model.generate(doc) ── write ───────────┼─► safe regen
-  └───────────────────────────────┬────────────────────────────────┘
-                                  │ user later corrects the summary in a UI
-                                  ▼
-  ┌─ Postgres: agents.documents ──────────────────────────────────┐
-  │  summary TEXT   ·   summary_overridden_at TIMESTAMPTZ (lock)   │
-  └────────────────────────────────────────────────────────────────┘
+```ts
+await pool.query(
+  `insert into agents.documents (id, app_id, source_type, source_path, content)
+   values ($1, $2, 'markdown', $3, $4)
+   on conflict (id) do update set
+     content = excluded.content, source_path = excluded.source_path`,   // ← human edits to content? gone.
+  [doc.id, appId, doc.sourcePath ?? null, doc.text],
+);
 ```
 
-The lock is the `summary_overridden_at` column plus the `if` in the job. Without it, every re-index silently erases the user's correction — the exact failure the pattern prevents.
+Annotation that matters: `content = excluded.content` means a re-index replaces stored content with whatever the source file says — no check for whether the row was edited since last index. Safe *today* (content mirrors the file), unsafe the instant content becomes editable in-app.
 
-#### Move 2 variant — the load-bearing skeleton
+#### The blind upsert, site 2: chunks
 
-Tiny kernel; name each part by what breaks without it.
+`PgVectorStore.upsert` (`src/pg-vector-store.ts:47–56`) does the same for every chunk — embedding, content, meta all `= excluded.*`:
 
-```
-  Kernel — user override lock
-
-  1. a per-row LOCK marker (_overridden_at)  — drop it → no way to know a human edited
-  2. a GUARD in the regen job (if locked skip)— drop it → re-run clobbers the edit anyway
-  3. SET the marker on human edit             — drop it → marker never rises; guard never fires
-
-  precondition (not hardening — REQUIRED): a field with TWO writers
-                                            (LLM + human). buffr has none.
+```ts
+`insert into agents.chunks (...) values (...)
+ on conflict (id) do update set
+   document_id = excluded.document_id, ...,
+   embedding = excluded.embedding, ..., meta = excluded.meta`   // ← unconditional, every field
 ```
 
-The forgotten part is **#3, raising the lock on edit** — teams add the column and the guard, then forget to *set* it in the save path, so the guard never triggers and edits still get clobbered. And the load-bearing precondition is the contested field: without two writers, the whole pattern is dead weight, which is precisely buffr's situation.
+This is *correct* for chunks — they're derived data, regenerated from the document, with no human-editable fields. Worth stating plainly: not every upsert *needs* a lock. Chunks shouldn't have one.
 
-#### Move 3 — the principle
+```
+which upserts need a lock?
+  documents.content │ could become human-editable │ NEEDS a lock eventually
+  chunks.*          │ derived, regenerable         │ NO lock (correct as-is)
+  profiles.content  │ already human-authored (me.md)│ NEEDS a lock ★
+```
 
-The moment a field has two writers — an LLM and a human — the human must win, and the cheapest enforcement is a per-row lock the regeneration job checks. Don't add it speculatively: the pattern's precondition is a *contested* field, and buffr deliberately has none (profiles are user-only, messages are trace-only). Knowing *when* the lock becomes necessary — the instant you let the model write a field a user can also edit — is the actual skill.
+#### The actual at-risk data: profiles
+
+`loadProfile` (`src/profile.ts:4–8`) reads the *latest* profile row — and `agents.profiles` (`sql/001_agents_schema.sql:52–58`) has `content` and `updated_at` but **no `overridden_at`**:
+
+```sql
+create table if not exists agents.profiles (
+  id uuid primary key default gen_random_uuid(),
+  app_id text not null default 'laptop',
+  user_id text,
+  content text not null,          -- ← me.md: human-authored, the thing to protect
+  updated_at timestamptz not null default now()
+);
+```
+
+Annotation that matters: profiles is *append-latest* (loadProfile orders by `updated_at desc`), so today a human edit and a machine write just create competing rows — the newest wins. There's no flag distinguishing "human wrote this" from "a future auto-profiler wrote this." The day buffr generates profile content automatically, it'll overwrite the user's `me.md` with no lock to stop it.
+
+### Move 2.5 — current vs future state
+
+**Current:** no override tracking. Documents and chunks upsert blindly (fine for derived data); profiles append-latest with no provenance flag. Nothing bites yet because no machine writes human-editable fields.
+
+**Future (the exercise):** add `overridden_at timestamptz` to `profiles`. When a human edits the profile, set it. Any future machine writer checks it: if set, skip (or merge non-overridden fields only). This is the lock landing exactly where the at-risk data is.
+
+```
+current → future (profiles)
+  CURRENT │ insert row, loadProfile reads latest → newest wins, no provenance
+  FUTURE  │ overridden_at set on human edit
+          │ machine write: overridden_at IS NULL ? overwrite : skip
+```
+
+### Move 3 — the principle that generalizes
+
+> **Before a pipeline overwrites a field, ask whether a human owns it. Derived data (chunks) is free to clobber; human-authored data (the profile) needs a provenance flag, or your next re-run quietly deletes someone's work.**
+
+The discriminator is *provenance*, not table. Within one row, some fields are machine-derived and some human-authored, and last-write-wins is correct for the former and a data-loss bug for the latter. The `_overridden_at` flag encodes provenance so the overwrite logic can branch on it. Buffr's chunks correctly need no lock; its profile correctly will. Knowing *which* is the skill.
 
 ## Primary diagram
 
+The blind upserts, the at-risk profile, and the lock that's missing.
+
 ```
-  User override lock — absent in buffr (no contested field), and where it'd go
-
-  buffr TODAY — every field has ONE writer:
-  ┌─ agents.profiles ─┐   ┌─ agents.messages ─┐
-  │ USER writes       │   │ TRACE SINK writes │   no two-writer field → no lock
-  │ [profile.ts]      │   │ [trace-sink.ts:53]│
-  └───────────────────┘   └───────────────────┘
-
-  CASE B — add an LLM-written, user-editable summary:
-  ┌─ agents.documents ─────────────────────────────────────────┐
-  │  summary (LLM writes)  +  summary_overridden_at (lock)     │
-  │     re-index job: if overridden → SKIP, else regenerate    │
-  │     user edit:    set summary + set summary_overridden_at  │
-  └────────────────────────────────────────────────────────────┘
-   the lock = one timestamp column + one if + set-on-edit
+user-override locks (the missing flag)
+  npm run index
+        │
+  ┌─────┴──────────────────────────────────────────────┐
+  documents: on conflict do update content=excluded     │ blind (safe: mirrors file)
+  chunks:    on conflict do update *=excluded            │ blind (CORRECT: derived)
+  └──────────────────────────────────────────────────────┘
+        │
+  agents.profiles (me.md)  ── human-authored ──┐
+        │                                       │
+  loadProfile: order by updated_at desc         │  ← newest wins, NO provenance flag
+        │                                       │
+   ✗ no overridden_at  ──────────────────────────┘
+  ───────────────────────────────────────────────────────────────
+  FUTURE: overridden_at on profiles → machine write skips human-edited rows
 ```
 
 ## Elaborate
 
-The override lock is a special case of conflict resolution under multiple writers, and it picks a deliberately asymmetric policy: the human *always* wins over the automation. That's different from generic optimistic concurrency (last-write-wins or version-reject) because the two writers aren't peers — one is a person making a judgment, the other is a job that will happily run again tomorrow. The timestamp variant (`_overridden_at`) is preferred over a boolean because it also records *when*, which is useful for auditing and for "regenerate everything not touched since date X" sweeps.
-
-For buffr the honest takeaway is that the pattern is correctly *absent*: adding a lock with no contested field would be complexity for nothing. The pattern becomes load-bearing the instant buffr lets the model write a user-editable field — the most likely candidates being LLM-generated document summaries or auto-extracted metadata that a user can correct. This connects to `04-structured-outputs.md` (an LLM-written field is often a structured-output field) and to the data-modeling concerns in the sibling `study-data-modeling` guide (where the `_overridden_at` column and its migration would be designed).
+- **Origin.** The dirty-flag / optimistic-concurrency pattern from databases and collaborative editing (think Google Docs' "X is editing"). In data pipelines it's the "don't clobber manual overrides" rule — common in CRM/MDM systems where an enrichment job must not overwrite a human-corrected field.
+- **Adjacent concepts.** *Provider abstraction* (08) — both are "data shape vs behavior" concerns the abstraction doesn't cover. *Data modeling* (cross-guide) — where the `profiles` schema and its provenance columns live. *Memory* (sub-section 04) — conversation memory writes are machine-only, so they correctly need no lock.
+- **Honest gap.** **Not implemented** — no `_overridden_at`, no provenance flag, blind upsert everywhere. It doesn't bite today because no machine process writes human-editable fields. It's a latent bug that activates the moment buffr auto-generates profile content. Don't claim buffr "protects user edits"; it doesn't, it just hasn't had the collision yet.
+- **What to read next.** Back up to the README, or jump to sub-section 02 (context & prompts) — the profile this lock protects is injected straight into the system prompt.
 
 ## Project exercises
 
-No curriculum file present; exercises derived from the codebase. This concept is **not yet exercised** — Case B (introduce an LLM-written field and protect user edits).
+### Add override tracking to the profiles table
 
-### EX-09-1 — Add an LLM-written document summary with an override lock
+- **Exercise ID:** [B1.17] (Phase 1 — LLM foundations) — **Not yet implemented** (Case B; no provenance flag exists).
+- **What to build:** Add `overridden_at timestamptz` to `agents.profiles`; set it when a human edits the profile (e.g. via a `profile set` CLI); and add a guarded machine-write path that refuses to overwrite a profile whose `overridden_at` is set. Leave documents/chunks alone — they're derived and correctly need no lock.
+- **Why it earns its place:** Lands the lock exactly where buffr's only human-authored data lives, before an auto-profiler can clobber `me.md`. Teaches provenance-based conflict resolution on real columns.
+- **Files to touch:** `sql/001_agents_schema.sql:52` (add column); `src/profile.ts` (a guarded `saveProfile` that respects the flag); a new `src/cli/profile-cmd.ts` for the human edit path.
+- **Done when:** a human-set profile survives a subsequent machine write attempt (the write is skipped because `overridden_at` is set), and a non-overridden profile still updates.
+- **Estimated effort:** 1–4hr
 
-- **Exercise ID:** EX-09-1
-- **What to build:** Generate a short summary for each indexed document (a model call at index time), store it on a documents row with a `summary` and a nullable `summary_overridden_at`, and gate the index/re-index path to skip regenerating any summary whose lock is set.
-- **Why it earns its place:** Creates the first genuinely contested field in buffr and protects it correctly — turning an abstract pattern into a working guard. Exercises the full kernel.
-- **Files to touch:** `src/runtime.ts` (the index path, where `indexDocumentRow` runs), a migration for the new columns on the documents table, `src/cli/index-cmd.ts:22-26` (the indexing loop). Do not edit aptkit.
-- **Done when:** re-indexing a document does NOT overwrite a summary whose `summary_overridden_at` is set, proven by a test that sets the lock then re-indexes.
-- **Estimated effort:** 1-2 days
+### Audit which upserts are safe to clobber
 
-### EX-09-2 — Set the lock on user edit
-
-- **Exercise ID:** EX-09-2
-- **What to build:** A small command/path that lets a user overwrite a generated summary and, on save, stamps `summary_overridden_at = now()` — closing the loop so the EX-09-1 guard actually fires.
-- **Why it earns its place:** The forgotten part of the pattern is raising the lock on edit; this exercise makes that the explicit deliverable.
-- **Files to touch:** a new `src/cli/edit-summary.ts` (or extend an existing CLI); the documents-table update query.
-- **Done when:** editing a summary sets the timestamp, and a subsequent re-index preserves the edit.
-- **Estimated effort:** 1-4hr
+- **Exercise ID:** [B1.18] (Phase 1 — LLM foundations)
+- **What to build:** A short written audit (in the repo's docs, not a code change) classifying every `on conflict do update` in buffr as machine-owned (safe) or potentially human-owned (needs a lock), with the reasoning.
+- **Why it earns its place:** Forces the provenance judgment this file's principle rests on, and documents *why* chunks need no lock while profiles will — so the next engineer doesn't add a pointless lock or miss a needed one.
+- **Files to touch:** read-only against `src/runtime.ts`, `src/pg-vector-store.ts`, `src/profile.ts`; output a doc.
+- **Done when:** every upsert in buffr is classified with a one-line rationale, and the profile is flagged as the one needing a lock.
+- **Estimated effort:** <1hr
 
 ## Interview defense
 
-**Q: "Does buffr protect against an LLM re-run clobbering a user's edit?"**
+**Q: "Buffr re-indexes with blind upserts. When is that a bug, and how would you fix it?"**
 
-It doesn't need to — there's no field both the model and the user write. The profile (`agents.profiles`) is user-authored and only read into the prompt; messages (`agents.messages`) are an append-only machine trace. With a single writer per field, there's no collision to guard, so adding an override lock would be complexity for nothing.
-
-```
-  no contested field → no lock needed
-
-  profiles: USER only      messages: TRACE only
-  (model reads)            (user never edits)
-```
-
-*Anchor:* read-only profile at `src/profile.ts`; append-only trace writes at `supabase-trace-sink.ts:53-84`.
-
-**Q: "When *would* you add an `_overridden_at` lock here?"**
-
-The instant the model writes a field a user can also edit — e.g. an LLM-generated document summary the user can correct. Then re-indexing would silently erase the correction unless the regen job checks the lock and skips locked rows. The kernel is one timestamp column, an `if` in the job, and setting the stamp on edit.
+Model answer: It's correct for *derived* data and a latent bug for *human-authored* data. Chunks and document content are regenerated from the source file, so `on conflict do update set ... = excluded.*` is fine — last write wins, nothing human to lose. The risk is `agents.profiles` (the `me.md` text): it's human-authored and has no provenance flag, so the day buffr auto-generates profile content, a re-run silently overwrites the user's edits. The fix is an `overridden_at` column: set it on human edit, and have any machine writer skip rows where it's non-null. The discriminator is provenance, not table — within a row, some fields are safe to clobber and some aren't.
 
 ```
-  add the lock when a field gains a SECOND writer
-
-  summary: LLM writes + USER edits → contested → needs _overridden_at
+when blind upsert is a bug
+  derived data (chunks, doc content)  │ clobber freely        │ OK
+  human-authored (profiles/me.md)     │ needs overridden_at   │ BUG when auto-written
+  ★ fix: provenance flag → machine skips human-edited rows
 ```
 
-*Anchor:* the would-be home is the index path (`src/runtime.ts` / `src/cli/index-cmd.ts:22`), not aptkit.
+Anchor: *Clobber derived data freely; guard human-authored data with `overridden_at`.*
 
 ## See also
 
-- `04-structured-outputs.md` — LLM-written fields are usually structured-output fields.
-- `06-token-economics.md` — a summary-generation field would add model calls to meter.
-- `08-provider-abstraction.md` — the model that would write the contested field.
-- `../03-retrieval-and-rag/11-rag.md` — the index path where a generated summary would attach.
+- `08-provider-abstraction.md` — the sibling "data shape vs behavior" concern.
+- `06-token-economics.md` — another place buffr writes rows (model_usage) — machine-only, correctly lock-free.
+- `../02-context-and-prompts/` — where the protected profile is injected into the system prompt.

@@ -1,229 +1,312 @@
-# Trace-Sink Write Buffering
+# 02 — Trace-sink write buffering
 
-**Industry names:** async write buffering · deferred flush · timestamp-decided ordering (ordering at write-time, not commit-time). **Type:** Project-specific (a common shape, this repo's specific resolution).
+## Subtitle
+
+**Asynchronous write buffering with read-time ordering** — *Project-specific*
+shape over two industry standards: a **fire-and-forget write buffer** and
+**event-time ordering** (the logical clock, absent — a physical timestamp
+stands in). In buffr this is `SupabaseTraceSink`
+(`src/supabase-trace-sink.ts:49-94`).
 
 ## Zoom out, then zoom in
 
-This is the most interesting correctness fact in `buffr-laptop`, and it's subtle enough to get wrong in an interview. The trace sink captures the agent's whole trajectory — every step, tool call, token-usage event — and writes it to `agents.messages`. The writes are **buffered and flushed concurrently**, so they hit the database in a **nondeterministic order**. Yet trajectory *replay* comes back in the right order anyway. The trick is that ordering is decided at **emit time** via `created_at`, not by the flush race. Here's where it sits.
+aptkit's agent loop calls `trace.emit(event)` synchronously as it runs — it
+can't `await` a database write in the middle of reasoning. buffr's job is to
+turn those synchronous emits into durable rows in `agents.messages` without
+blocking the agent, and without scrambling the order they replay in.
 
 ```
-  Zoom out — where the trace sink buffers writes
+  Zoom out — where the trace sink lives
 
-  ┌─ Process layer ──────────────────────────────────────────────┐
-  │  RagQueryAgent.answer()  (aptkit)                             │
-  │      │ emits CapabilityEvents (step, tool_call_*, usage, ...) │
-  │      ▼                                                        │
-  │  ★ SupabaseTraceSink ★   ← THIS CONCEPT                       │ ← we are here
-  │     emit() → push promise onto pending[]                      │
-  │     flush() → Promise.all(pending)   (unordered race)         │
-  └──────────────────────────┼────────────────────────────────────┘
-                             │  N concurrent INSERTs over the pool
-                             ▼
-  ┌─ Storage layer ──────────────────────────────────────────────┐
-  │  agents.messages  —  created_at carries the emit-time order   │
-  └───────────────────────────────────────────────────────────────┘
+  ┌─ Client (one Node process) ───────────────────────────────┐
+  │  RagQueryAgent (aptkit)                                   │
+  │     │ emit(event)  — SYNCHRONOUS (aptkit's contract)       │
+  │     ▼                                                      │
+  │  ★ SupabaseTraceSink (src/supabase-trace-sink.ts) ★        │
+  │     buffers a write-promise per event; flush() drains them │
+  └─────────────────────────────────┬──────────────────────────┘
+                                    │ pooled pg conn ×N
+  ┌─ Storage layer ─────────────────▼──────────────────────────┐
+  │  Postgres  agents.messages   (created_at = event.timestamp) │
+  └─────────────────────────────────────────────────────────────┘
 ```
 
-Zoom in: the pattern is **buffer-then-flush with the ordering key captured up front.** The question it answers is the classic concurrency one — *"if N writes race to the database, how do I still reconstruct the order they happened in?"* The repo's answer: don't rely on insertion order at all; stamp each event with `event.timestamp` when it's emitted, sort by that on read. The race becomes irrelevant.
+Zoom in: the pattern is a **write buffer** — `emit()` doesn't write, it
+*enqueues* a promise; `flush()` awaits the whole batch after the run. The twist
+that makes it correct: the rows go in **out of order** (a `Promise.all` race),
+but each row carries `created_at = event.timestamp`, so a replay that does
+`ORDER BY created_at` reconstructs the true emit order. **Order is decided at
+emit time, not by the flush race.**
 
-## The structure pass
+## Structure pass — layers, one axis, the seam
 
-**Layers.** Three: the agent (emits events, fast, synchronous), the sink (buffers, then flushes), Postgres (stores rows). The sink is the joint.
-
-**The axis: guarantees — what's promised vs best-effort, and *what determines order*.** Trace "who decides the order events appear in on replay?" down the stack.
+Trace **one axis — what decides ordering — down through the path** and watch it
+flip.
 
 ```
-  One axis — "who decides replay order?" — traced down the layers
+  axis traced = "what decides the order events end up in?"
 
-  ┌─ agent (emit) ─────────────┐   → the AGENT decides:
-  │ emits e1,e2,e3 in sequence │     event.timestamp stamped here
-  └───────────┬────────────────┘
-              │  seam: ordering key is already fixed
-  ┌─ sink (flush) ────────────▼┐   → the RACE decides INSERT order
-  │ Promise.all → e2,e1,e3 land │     (nondeterministic!) ...
-  │ in whatever order finishes  │     ...but it DOESN'T decide replay order
-  └───────────┬────────────────┘
-              ▼
-  ┌─ Postgres (read) ──────────┐   → created_at decides:
-  │ ORDER BY created_at → e1,e2,e3│   replay = emit order, race ignored
-  └────────────────────────────┘
+  ┌─ emit() — src/supabase-trace-sink.ts:53 ─────┐  → emit ORDER fixed here:
+  │  reads event.timestamp, pushes a promise     │    timestamp captured now
+  └──────────────────────┬───────────────────────┘
+                         │  seam — the buffer (pending[])
+  ┌─ flush() — :91 ─────▼────────────────────────┐  → INSERT order = RACE:
+  │  Promise.all(pending) — concurrent inserts   │    whoever Postgres finishes
+  └──────────────────────┬───────────────────────┘
+                         │
+  ┌─ replay — ORDER BY created_at ───────────────┐  → READ order = emit order:
+  │  sorts by the timestamp captured at emit      │    the race is undone
+  └───────────────────────────────────────────────┘
+
+  the axis answer flips twice: emit fixes it → flush scrambles it →
+  read restores it. the restore works ONLY because created_at came from
+  one machine's clock.
 ```
 
-**The seam that matters is between emit and flush — and the key insight is that the ordering decision happens *above* it, not at it.** If you traced only "insert order," you'd see nondeterminism and conclude the trajectory is corrupt. Trace "replay order" and you see it's sound, because the decision was made one layer up. That altitude flip is the whole lesson: **the race is real, and it doesn't matter, because order was decided before the race started.**
+The **seam is the buffer (`pending[]`)** — the boundary between synchronous
+emit and asynchronous, racing inserts. The whole correctness argument is: *the
+ordering information is captured before the seam, so the race after it doesn't
+matter.*
 
 ## How it works
 
 ### Move 1 — the mental model
 
-You've written this shape without naming it: a function that can't `await` (a sync callback, an event handler) but needs to do async work, so it **fires the promise and stashes it**, then something later awaits the batch. `Array.prototype.forEach` with an async callback bites people for exactly this reason — the callbacks all start, none are awaited. The trace sink does it *on purpose*: `emit()` must be synchronous (aptkit's `CapabilityTraceSink` contract), so it pushes the write-promise into an array and `flush()` awaits them all after the agent run finishes.
+You've written this shape: a UI that fires off several `fetch()` POSTs with
+`Promise.all` and doesn't care which resolves first — because each POST carries
+its own data, the server doesn't need them in arrival order. The trace sink is
+exactly that, plus a sort key. Each event carries its own timestamp, so the
+inserts can race; replay sorts them back.
 
 ```
-  The pattern — buffer on emit, flush after the run
+  the kernel — buffer, race, sort-key
 
-  emit(e1) ─► push P1 ─┐
-  emit(e2) ─► push P2 ─┤  pending = [P1, P2, P3]   (sync, no await)
-  emit(e3) ─► push P3 ─┘
+   emit(e1) → push p1   (p1 carries created_at = t1)
+   emit(e2) → push p2   (p2 carries created_at = t2)
+   emit(e3) → push p3   (p3 carries created_at = t3)
         │
-        ▼  (agent run ends)
-  flush() ─► Promise.all(pending)   ← P2 may resolve before P1
-        │                              INSERT order is a RACE
-        ▼
-  on read: ORDER BY created_at       ← order restored from emit-time stamp
+        ▼  flush()
+   Promise.all([p1,p2,p3])   ← inserts complete in ANY order: p3,p1,p2
+        │
+        ▼  later: SELECT ... ORDER BY created_at
+   e1(t1), e2(t2), e3(t3)    ← true order restored by the sort key
 ```
 
-The kernel has three parts. Name each by **what breaks if it's missing:**
+Name each part by what breaks without it:
 
-- **The `pending` buffer** — drop it and `emit()` would have to `await`, violating the sync contract; the agent loop couldn't emit.
-- **The `flush()` join** — drop it and the process could exit (or the next turn start) with writes still in flight, losing trajectory rows.
-- **The `created_at = event.timestamp` stamp** — drop it (fall back to `now()` at insert time) and replay order becomes the **race order**, which is nondeterministic. This is the load-bearing part everyone forgets.
+- **The buffer (`pending[]`)** — without it, `emit()` would have to `await`,
+  but `emit()` is synchronous by aptkit's contract. Drop it and you can't
+  persist from inside the loop at all.
+- **The sort key (`created_at = event.timestamp`)** — without it, replay order
+  is the `Promise.all` race, which is *arbitrary*. Drop it and your trajectory
+  reads back scrambled — a tool result before the tool call that caused it.
+- **`flush()`** — without it, the process could exit with writes still pending,
+  losing the tail of the trajectory.
 
-Everything else — the jsonb stringify, the per-event-type switch — is incidental detail, not skeleton.
+The sort key is the load-bearing, easy-to-forget part. Everything else is
+plumbing; that one column is what makes the race safe.
 
-### Move 2 — the step-by-step walkthrough
+### Move 2 — the walkthrough
 
-**`emit()` is synchronous and just enqueues.** This is the contract constraint that forces the whole pattern:
+**`emit()` is synchronous and just enqueues.** aptkit's `CapabilityTraceSink`
+contract makes `emit` return `void` — the agent can't be blocked on I/O
+mid-reasoning. So every branch does the same move: build a `persistMessage`
+promise and `push` it (`src/supabase-trace-sink.ts:53-85`). The critical detail
+is `const at = event.timestamp` on line 55, threaded into *every* branch as
+`createdAt: at`:
 
 ```ts
-// src/supabase-trace-sink.ts:53
-emit(event: CapabilityEvent): void {        // ← returns void, CANNOT await
+emit(event: CapabilityEvent): void {
   const { pool, conversationId } = this.opts;
-  const at = event.timestamp;               // ← the ordering key, captured NOW
+  const at = event.timestamp;                          // ← capture order NOW
   switch (event.type) {
     case 'step':
-      if (event.content) {
-        this.push(persistMessage(pool, conversationId, event.role, event.content, { createdAt: at }));
-        //         └─ persistMessage returns a Promise; push() stashes it, no await
-      }
+      if (event.content)
+        this.push(persistMessage(pool, conversationId, event.role,
+                  event.content, { createdAt: at }));   // ← carried into the row
       return;
-    // ... tool_call_start, tool_call_end, model_usage, warning, error — same shape
+    case 'tool_call_start': /* args = the cause */       return;
+    case 'tool_call_end':   /* result, error, durationMs */ return;
+    case 'model_usage':     /* tokens_used */             return;
+    case 'warning': case 'error': /* message */           return;
   }
 }
 ```
 
-The two lines that matter: `const at = event.timestamp` grabs the emit-time clock reading, and `this.push(persistMessage(...))` fires the insert and stows the promise without awaiting. `emit` returns `void` — it has to, that's aptkit's contract — so it physically cannot wait for the write.
+Every variant is persisted — not just assistant steps. Tool-call args (the
+cause), `durationMs` + error, token usage, and warning/error events all become
+rows. That's what makes `agents.messages` a *complete, replayable trajectory*
+rather than a partial log. And every one of them stamps `createdAt: at`.
 
-**`push()` is the buffer.** One line, and it's the queue:
-
-```ts
-// src/supabase-trace-sink.ts:87
-private push(p: Promise<void>): void {
-  this.pending.push(p);                     // ← in-memory, in-process, unbounded for one run
-}
-```
-
-This is the "queue" lens 6 of the audit calls thin: it's a `Promise<void>[]`, not a durable queue. No ack, no redelivery, no backpressure. Crash before flush, the buffered writes vanish. For a single turn's handful of events that's an acceptable durability tradeoff — the trajectory is observability data, not a ledger.
-
-**`flush()` joins — and this is where the race lives:**
+**The buffer and the flush race.** The push and drain are four lines
+(`:87-93`):
 
 ```ts
-// src/supabase-trace-sink.ts:91
+private push(p: Promise<void>): void { this.pending.push(p); }
+
 async flush(): Promise<void> {
-  await Promise.all(this.pending);          // ← waits for ALL, in NO particular order
+  await Promise.all(this.pending);   // ← inserts race; completion order arbitrary
 }
 ```
 
-`Promise.all` waits for every promise to settle but imposes **no ordering** on when each insert commits. P2's `INSERT` round-trip may finish before P1's. So the *physical row order* in `agents.messages` — if you sorted by some hidden insertion sequence — would be nondeterministic across runs.
+`Promise.all` awaits them concurrently. Postgres finishes them in whatever order
+it pleases — connection scheduling, query cost, pure timing. **Nothing here
+preserves emit order.** That's intentional: emit order was already captured in
+`created_at`.
 
-**The resolution — `created_at` carries the order, set in `persistMessage`:**
+**Where the order actually gets written.** `persistMessage`
+(`src/session.ts:27-36`) lands the timestamp:
 
 ```ts
-// src/supabase-trace-sink.ts:26
-const createdAt = extra?.createdAt && extra.createdAt.length > 0 ? extra.createdAt : null;
-await pool.query(
-  `insert into agents.messages (..., created_at)
-   values ($1, ..., coalesce($8::timestamptz, now()))`,   // ← emit-time stamp, or now() fallback
-  [ /* ... */ createdAt ],
-);
+`insert into agents.messages
+   (conversation_id, role, content, tool_calls, tool_results, model,
+    tokens_used, created_at)
+ values ($1, $2, $3, $4, $5, $6, $7, coalesce($8::timestamptz, now()))`
 ```
 
-`coalesce($8::timestamptz, now())` is the hinge. When `createdAt` is the event's emit-time timestamp, *that* becomes the row's `created_at` — not the moment the insert happened to win the race. Replay reads `ORDER BY created_at` and gets emit order back. The race is defused not by serializing the writes (which would be slower and pointless) but by **deciding the order before the race begins.**
+`coalesce($8::timestamptz, now())` (`:30`): use the event's timestamp when
+present, fall back to the server's `now()` only when it's absent. So the
+ordering key is the **event's** time, set on the client, not the insert's time.
+Replay is then `ORDER BY created_at` and the flush race vanishes.
 
 ```
-  Execution trace — three events, raced inserts, correct replay
+  Layers-and-hops — emit-time order survives the flush race
 
-  emit order:   e1 (t=100ms)   e2 (t=110ms)   e3 (t=120ms)
-  pending:      [P1,            P2,             P3]
-  flush race:   P2 commits 1st, P3 commits 2nd, P1 commits 3rd   ← nondeterministic
-  rows' created_at:  P1=100, P2=110, P3=120     ← set at EMIT, not at commit
-  read ORDER BY created_at:  e1(100), e2(110), e3(120)   ← emit order restored ✓
+  ┌─ Client ───────────────────────────────────────┐
+  │ emit(step,   t=10:00:01) → push p_a             │
+  │ emit(tool,   t=10:00:02) → push p_b             │
+  │ emit(result, t=10:00:03) → push p_c             │
+  │            flush(): Promise.all([p_a,p_b,p_c])   │
+  └───────┬─────────────┬─────────────┬─────────────┘
+          │ insert #2    │ insert #3   │ insert #1   ← RACE: arbitrary
+          ▼ (p_c lands)  ▼ (p_a lands) ▼ (p_b lands)
+  ┌─ Storage: agents.messages ──────────────────────┐
+  │ created_at carries 10:00:03 / :01 / :02          │
+  │ SELECT ... ORDER BY created_at →                 │
+  │   step(:01), tool(:02), result(:03)  ✓ restored  │
+  └──────────────────────────────────────────────────┘
 ```
 
-### Move 2.5 — current state vs future state (where this breaks)
+### Move 2.5 — current state vs future state
 
-This is sound **today** and breaks under **one specific future change**, so it earns the Phase-A/Phase-B treatment.
+This is the file's whole reason for existing. The read-time ordering is **sound
+on one device and breaks under cross-device clock skew.**
 
 ```
-  Phase A (now): one device, one clock        Phase B (deferred): two writers, two clocks
+  Phase A (now): one machine's clock           Phase B (deferred two-brain)
+  ───────────────────────────────────          ──────────────────────────────
+  laptop emits → laptop clock stamps all        laptop AND phone both emit into
+  created_at. every timestamp comes from        the same agents.messages. each
+  ONE clock, so "t1 < t2" is always true        stamps created_at from ITS OWN
+  if e1 happened before e2.                      clock.
 
-  laptop emits e1,e2,e3                        laptop emits eL  (clock = T)
-  all created_at from ONE clock                phone  emits eP  (clock = T - 400ms skew)
-  → monotonic, comparable                      both write SAME agents.messages conversation
-  → ORDER BY created_at = truth                → ORDER BY created_at interleaves WRONG:
-                                                 eP sorts before eL even if eL happened first
-  fix needed:  none                            fix needed: logical clock (Lamport/hybrid)
-                                                            or server-assigned sequence
+  ORDER BY created_at = true causal order        laptop clock and phone clock can
+                                                 differ by seconds. a phone event
+                                                 stamped 10:00:01 can sort BEFORE
+                                                 a laptop event that truly
+                                                 happened first at 10:00:02.
+
+  ✓ correct                                      ✗ ORDER BY created_at can lie
 ```
 
-The takeaway is *what wouldn't have to change*: the buffer, the flush, the sink interface all stay. Only the **ordering key** would have to graduate from wall-clock `created_at` to something skew-proof. That's the one-way-door decision named in `audit.md` lens 7 and revisited in `03-deferred-two-brain-shared-memory.md`. Worth writing down now precisely because it's invisible while there's only one clock.
+What doesn't have to change is most of the code — the buffer, the per-event
+persistence, the flush. What *does* have to change is the **clock**: a physical
+wall-clock sort key (`event.timestamp`) is only a valid total order when one
+clock produces all the timestamps. Two writers need a **logical clock** (a
+Lamport or per-conversation sequence number) or a server-assigned monotonic
+sequence, so order doesn't depend on two machines agreeing on time. That's the
+single sharpest future-RFC point in this guide — see `03` and `audit.md` lens 7.
+
+This is not a bug to fix now. On one device the physical clock *is* a correct
+total order, and a logical clock would be machinery with nothing to coordinate.
+It's a prerequisite to name *before* a second writer ships, not before.
 
 ### Move 3 — the principle
 
-When concurrent writes race to storage, you have two ways to recover their order: **serialize the writes** (slow, often needless) or **capture the ordering key before the race and sort on read** (fast, what this repo does). The second is almost always right — *until your "ordering key" is a wall clock and you grow a second clock.* The principle: a timestamp is a perfectly good ordering key right up to the moment two clocks generate it, at which point it silently lies. One writer, one clock, `created_at` is truth; two writers, you need a logical clock.
+**Capture ordering information before the boundary that scrambles it, and you
+can let the writes race.** That's the general move: don't fight the concurrency,
+make it irrelevant by stamping order at the source. The catch is the source of
+truth for "order" — a physical clock is a valid total order only under one
+clock. The day "the source" becomes plural, the physical timestamp stops being
+an order and becomes an *approximation*, and you need a logical clock. buffr is
+on the right side of that line today and one design decision away from the wrong
+side.
 
 ## Primary diagram
 
-The whole mechanism in one frame — buffer, raced flush, order restored on read.
+The complete sink — synchronous emit, racing flush, read-time restore, and the
+clock assumption that holds it all up.
 
 ```
-  Trace-sink write buffering — full recap
+  SupabaseTraceSink — the complete picture
 
-  ┌─ Process layer ──────────────────────────────────────────────────┐
-  │  agent.answer() emits CapabilityEvents (timestamp stamped on each)│
-  │         │                                                         │
-  │   emit(event)  src/supabase-trace-sink.ts:53                      │
-  │     at = event.timestamp        ← ordering key captured at EMIT   │
-  │     push(persistMessage(...,{createdAt:at}))  → pending[]  (:87)  │
-  │         │                                                         │
-  │   flush()  (:91)  await Promise.all(pending)                      │
-  │         │   ← inserts commit in a RACE (no ordering)              │
-  └─────────┼─────────────────────────────────────────────────────────┘
-            │  N concurrent INSERTs over pg.Pool
-            ▼
-  ┌─ Storage layer ──────────────────────────────────────────────────┐
-  │  agents.messages                                                  │
-  │    created_at = coalesce(emit_timestamp, now())   (:30)           │
-  │    REPLAY: ORDER BY created_at  → emit order, race irrelevant     │
-  └───────────────────────────────────────────────────────────────────┘
+  ┌─ Client: one Node process ─────────────────────────────────────┐
+  │  RagQueryAgent ── emit(event) [SYNC] ──►                        │
+  │                                                                 │
+  │   emit (sink.ts:53)        flush (sink.ts:91)                   │
+  │   ┌──────────────────┐     ┌─────────────────────┐             │
+  │   │ at = event.      │     │ Promise.all(pending)│             │
+  │   │   timestamp  ────┼──┐  │  → inserts RACE     │             │
+  │   │ push promise     │  │  └──────────┬──────────┘             │
+  │   └──────────────────┘  │             │                        │
+  │       pending[] ◄───────┘             │ pooled pg conn ×N      │
+  └───────────────────────────────────────┼────────────────────────┘
+                                          │
+  ┌─ Storage: Postgres agents.messages ───▼────────────────────────┐
+  │  created_at = coalesce(event.timestamp, now())  (session.ts:30) │
+  │  replay:  ORDER BY created_at  → true emit order                │
+  │                                                                 │
+  │  ⚠ valid ONLY while all timestamps come from ONE clock          │
+  │    (logical clock absent — see 03, audit lens 7)                │
+  └─────────────────────────────────────────────────────────────────┘
 ```
 
 ## Elaborate
 
-The buffer-then-flush shape comes straight from the constraint that `emit` is synchronous — aptkit defined `CapabilityTraceSink.emit` as `(event) => void` so the agent loop never blocks on I/O. Anything that has to do async work inside a sync callback ends up with this exact pattern: fire the promise, collect it, await the batch at a join point. You've hit it in the browser too (a click handler that kicks off a `fetch` but can't await it).
-
-The deeper idea — **decide order at write time, not commit time** — is the same insight behind event-sourcing's sequence numbers and Kafka's per-partition offsets: the order is a property of the *event*, assigned when it's produced, not an accident of when storage got around to it. The repo does the cheap single-device version of that with a wall-clock timestamp. The expensive distributed version (logical clocks) is what Phase B would need, and naming the gap now is the whole point of capturing trajectories early (`agent-layer-plan.md`'s trajectory-capture thesis).
-
-This same sink is also an **observability** artifact — full-signal trajectory capture, every event type persisted. That angle (what it lets you *see*, debugging a bad agent run) belongs to `study-debugging-observability/`. This file owns the **ordering** angle only.
+The "stamp order at the source, let writes race" pattern is the same instinct
+behind event sourcing and append-only logs: the event carries its own position,
+so storage order is incidental. The clock caveat is the classic distributed-
+systems lesson — wall clocks aren't a reliable cross-machine order, which is why
+Lamport timestamps and vector clocks exist (to order events *without* trusting
+synchronized physical time). buffr doesn't need them yet; it's a textbook
+example of *when you don't* (single clock) and *exactly when you start to*
+(second writer). Read `study-debugging-observability` for how this trajectory is
+*read back* as an observability artifact; this file only covers its
+write-ordering correctness.
 
 ## Interview defense
 
-**Q: "You buffer trace writes and flush them with `Promise.all`. Doesn't that mean the rows land out of order?"**
+**Q: Your trace writes race in `Promise.all`. How is the trajectory not
+scrambled?**
 
-> The inserts do land out of order — `Promise.all` (`src/supabase-trace-sink.ts:92`) imposes no ordering, so whichever round-trip wins, commits first. But replay order is correct anyway, because I don't rely on insertion order at all. Each event's `created_at` is stamped from `event.timestamp` at emit time (`:55`, coalesced at `:30`), and replay reads `ORDER BY created_at`. The race is real and irrelevant — order was decided before the race started.
+Verdict first: the writes race, but the *order* doesn't live in the write order
+— it lives in a column.
 
 ```
-  insert order:  P2, P3, P1   ← race (nondeterministic)
-  created_at:    e1<e2<e3      ← stamped at emit, one clock
-  read order:    e1, e2, e3    ← correct
+  emit: at = event.timestamp ──► created_at column
+  flush: Promise.all ──► inserts complete in ANY order
+  replay: ORDER BY created_at ──► race undone
 ```
 
-> The part most people miss — and the part that proves you've thought about it distributed-ly: **this is only sound because there's one clock.** Add a second writer (the deferred phone brain) writing the same conversation, and wall-clock `created_at` ordering breaks on clock skew — a phone message stamped 400ms slow sorts ahead of a laptop message that actually came first. The fix then is a logical clock or a server-assigned sequence, not `now()`. That's the one distributed-systems hazard this design quietly sidesteps by having a single writer.
+The load-bearing part people miss: ordering is captured at *emit*, before the
+buffer, so the `Promise.all` race after it is irrelevant. The one line that
+makes it work is `const at = event.timestamp` (`sink.ts:55`) threaded into every
+branch, landing via `coalesce($8::timestamptz, now())` (`session.ts:30`).
 
-**Anchor:** *"Order decided at emit via created_at, not by the flush race — sound on one clock, needs a logical clock the moment there's a second writer."*
+**Q: When does that break?**
+
+The instant a second device writes to the same table. Two clocks, two sources of
+`created_at`, and `ORDER BY created_at` can interleave them wrong — a phone event
+sorting before a laptop event that truly came first. The fix is a logical clock
+(per-conversation sequence number), not a physical one. Anchor: it's sound on
+one device *because* one machine stamps every timestamp; that's the assumption,
+and it's the assumption the deferred two-brain design has to retire (`03`).
 
 ## See also
 
-- `01-app-to-postgres-boundary.md` — the seam these buffered writes cross.
-- `03-deferred-two-brain-shared-memory.md` — the second writer that breaks single-clock ordering.
-- `audit.md` — lens 6 (queues/ordering) and lens 7 (clocks); the clock-skew red flag (Rank 2).
-- `study-debugging-observability/` — the same sink as a trajectory/evidence artifact.
-- `study-system-design/03-trajectory-capture.md` — the architectural reason every event is captured.
+- `00-overview.md` — finding #2.
+- `03-deferred-two-brain-shared-memory.md` — DESIGN-NOT-CODE; the clock-skew
+  break projected forward.
+- `audit.md` — lens 6 (buffer/backpressure), lens 7 (clocks).
+- `01-app-to-postgres-boundary.md` — the pool these N inserts fan across.
+- `study-debugging-observability` — reading the trajectory back.

@@ -1,71 +1,78 @@
-# Trees, Tries, and Balanced Indexes
+# Trees, Tries & Balanced Indexes
 
-**Industry names:** binary search tree · self-balancing tree (AVL / red-black) ·
-B-tree / B+tree · trie (prefix tree) · skip list. **Type:** Language-agnostic.
+**Industry name(s):** binary search tree (BST) · self-balancing tree (B-tree /
+red-black) · trie (prefix tree) — *Industry standard*
 
----
-
-## Zoom out, then zoom in
-
-Verdict first: buffr's own TypeScript builds **no** tree. But trees are running
-*underneath* it on every query — Postgres uses a **B-tree** for the `app_id`
-index and the primary-key lookup, and the HNSW vector index (file 05) is a
-**layered, skip-list-like** structure that's tree-adjacent. This file teaches
-the tree family, marks what's exercised (B-tree, implicitly, in Postgres) vs
-`not yet exercised` (BST, trie, balanced trees in buffr's code), and anchors to
-the `BinarySearchTree.ts` you built by hand.
-
-```
-  Zoom out — where trees run (mostly below buffr)
-
-  ┌─ buffr TS layer ──────────────────────────────────────────┐
-  │  no tree built here — ids in a flat Map / Set              │
-  └──────────────────────────┬─────────────────────────────────┘
-                             │  queries hit
-  ┌─ pgvector / Postgres ────▼─────────────────────────────────┐
-  │  ★ B-tree ★  chunks_app_id index   (sql/001:33)            │ ← we are here
-  │  ★ B-tree ★  primary-key on chunks.id                       │
-  │  HNSW layered graph (tree-adjacent skip structure)          │
-  └─────────────────────────────────────────────────────────────┘
-```
-
-Zoom in: a **tree** is a hierarchy where each node has children, giving you
-O(log n) navigation *if it stays balanced*. A **BST** orders nodes left-smaller /
-right-larger so search halves the space each step. A **B-tree** is the
-disk-friendly, high-fanout balanced tree every database index is built on. A
-**trie** indexes by *prefix* — the structure for autocomplete and "all ids
-starting with X". The repo runs the first three under the hood and exercises the
-trie not at all.
+The leading nouns: **balanced index** (the structure that keeps lookups
+O(log n) as data grows), **trie** (prefix tree for string lookup), **BST**
+(the ordered-tree primitive you already built). buffr exercises tree
+*structures* only **indirectly** — through Postgres's indexes — and **tries
+are not exercised at all**, which makes this the honest-gap file.
 
 ---
 
-## The structure pass
+## Zoom out — where trees live (mostly hidden)
 
-**Layers** — the tree family by what they're for:
+buffr has no hand-written tree. But it leans on two tree-shaped indexes inside
+Postgres, and it pointedly *lacks* a third (the trie). The zoom-out marks all
+three.
 
 ```
-  the tree family — one shape, different jobs
+  Zoom out — trees in and around buffr
 
-  ┌─ BST ────────────────────────────────┐  ordered lookup, O(log n) if balanced
-  └──────────────────┬─────────────────────┘
-   ┌─ balanced BST (AVL/red-black) ─────┐   guarantees the balance → O(log n)
-   └──────────────────┬──────────────────┘
-    ┌─ B-tree / B+tree ────────────────┐    balanced + high fanout for DISK
-    └──────────────────┬─────────────────┘    ← Postgres indexes
-     ┌─ trie ─────────────────────────┐       indexed by PREFIX, not by value
-     └────────────────────────────────┘        ← autocomplete, not in buffr
+  ┌─ buffr source ─────────────────────────────────────────────┐
+  │  no BST, no trie, no balanced tree in TypeScript           │ ← we are here
+  └───────────────────────────┬────────────────────────────────┘
+                              │ every query / upsert hits indexes
+  ┌─ Postgres indexes ────────▼────────────────────────────────┐
+  │  primary key on chunks.id   → B-tree (balanced)            │
+  │  chunks_app_id index        → B-tree (balanced)            │  sql/001:30
+  │  ★ HNSW vector index ★      → graph, NOT a tree (file 05)  │  sql/001:28
+  └───────────────────────────┬────────────────────────────────┘
+                              │ NOT present anywhere:
+  ┌─ trie (prefix tree) ──────▼────────────────────────────────┐
+  │  would power autocomplete / prefix search over doc text     │
+  │  NOT YET EXERCISED — and absent from your portfolio too     │
+  └────────────────────────────────────────────────────────────┘
 ```
 
-**Axis — guarantees.** Trace "is O(log n) guaranteed?": a plain BST promises it
-only if inserts arrive randomly (sorted inserts degrade it to a O(n) linked
-list); a *balanced* BST and a B-tree *guarantee* it by rebalancing on insert.
-That guarantee is the entire reason databases use B-trees, not naive BSTs.
+Zoom in: the question is **"how does a lookup stay O(log n) as rows grow, and
+which structures buy that?"** You built the answer's prototype — a
+`BinarySearchTree` with insert/search/delete and all three traversals. This
+file maps that prototype to the *balanced* trees Postgres actually uses, and
+flags the trie as the real gap.
 
-**Seam — the balance boundary.** Between "BST that can degrade to a line" and
-"B-tree that can't" is the load-bearing seam. You felt this building
-`BinarySearchTree.ts`: insert 1,2,3,4,5 in order and your tree is a linked list,
-O(n) search. The balanced version refuses to degrade. Postgres lives on the safe
-side of that seam so query plans stay predictable.
+---
+
+## Structure pass — layers, axis, seams
+
+**Axis: lookup cost as data grows — does it stay O(log n)?** Trace it; the
+seam is *balance*, the property your hand-built BST didn't guarantee but a
+B-tree does.
+
+```
+  Axis: "does lookup stay O(log n) as n grows?" — across trees
+
+  ┌─ plain BST (your BinarySearchTree.ts) ──┐
+  │  O(log n) IF balanced...                 │   → but inserts can skew it
+  │  worst case (sorted inserts): O(n) chain │
+  └───────────────┬─────────────────────────┘
+      seam: who guarantees balance?   (THIS flip is why DBs use B-trees)
+      ┌───────────▼──────────────────────────┐
+      │ B-tree (Postgres PK / app_id index)   │   → self-rebalances on every
+      │  O(log n) GUARANTEED, wide fan-out     │     insert; stays shallow
+      └───────────────┬───────────────────────┘
+      seam: keys are strings with shared prefixes?  (trie territory)
+          ┌──────────▼───────────────────────┐
+          │ trie — O(length), shares prefixes  │   → NOT in buffr
+          └────────────────────────────────────┘
+```
+
+The load-bearing seam: a plain BST is O(log n) only *if* it stays balanced,
+and nothing forces it to — sorted inserts degrade it to a linked list. A
+**B-tree** self-rebalances on every insert, so it's O(log n) *guaranteed*.
+That guarantee is exactly why every database index, including buffr's primary
+key, is a B-tree and not the BST you built.
 
 ---
 
@@ -73,181 +80,215 @@ side of that seam so query plans stay predictable.
 
 ### Move 1 — the mental model
 
-You built the BST: `insert`, `search`, `delete` (recursive and iterative), all
-three traversals, successor/predecessor. The mental model is "binary search made
-into a structure" — every node splits the remaining space in half.
+You built the unbalanced version. Your `BinarySearchTree.ts` is the kernel:
+every left descendant is smaller, every right is larger, so search walks down
+halving the candidates each step. A **balanced** tree is that same shape with
+one extra rule — *no path is allowed to get much longer than any other.*
 
 ```
-  BST — left < node < right, so search halves each step
+  BST search vs the balance problem (you built the left side)
 
-              [50]                 search for 30:
-             /    \                 30 < 50 → go left
-          [30]    [70]              30 = 30 → found, 2 hops not 5
-         /   \    /   \             O(log n) IF balanced
-      [20]  [40][60] [80]
-
-  the catch: insert 10,20,30,40,50 in order →
-      [10]-[20]-[30]-[40]-[50]   a linked list, O(n)   ← degenerate BST
+  BALANCED (B-tree-ish)          DEGENERATE (plain BST, sorted inserts)
+        [50]                      [10]
+       /    \                         \
+    [25]    [75]                       [20]
+    /  \    /  \                          \
+  [10][30][60][90]                         [30]
+  search 60: 50→75→60            search 60:  10→20→30→...→60
+  depth 3, O(log n)              depth n, O(n)  ← the skew your BST allows
 ```
 
-A B-tree is this idea hardened for disk: instead of one key per node it packs
-*many* keys per node (a whole disk page), so the tree is wide and shallow — a
-million rows in 3–4 hops. That high fanout is why it's the database index, not
-the binary BST.
+One sentence: **a balanced tree keeps every root-to-leaf path roughly the same
+length, so lookup stays O(log n) no matter the insert order — which a plain
+BST can't promise.** A **trie** is a different tree entirely: nodes are
+*characters*, paths spell *strings*, and shared prefixes share nodes.
 
-### Move 2 — what's actually running, and what isn't
+### Move 2 — the trees buffr actually leans on (and the one it lacks)
 
-**Exercised (under buffr): the B-tree index.** Two B-trees serve every buffr
-query, both declared in one schema file:
+**The B-tree — buffr's primary key and `app_id` index.** Every `chunks` row
+has `id text primary key` (`sql/001_agents_schema.sql:15`) and a secondary
+index (`:30`):
 
 ```sql
--- sql/001_agents_schema.sql:33 — a B-tree index (Postgres default)
 create index if not exists chunks_app_id on agents.chunks (app_id);
--- and the implicit B-tree behind the primary key:
---   id text primary key   → B-tree on chunks.id
 ```
 
-Walk what the B-tree does for the search query (`pg-vector-store.ts:70-77`):
+Both are B-trees (Postgres's default index type). When `search` filters `where
+app_id = $2` (`src/pg-vector-store.ts:75`), Postgres can walk the `app_id`
+B-tree instead of scanning every row. When `upsert` does `on conflict (id)`
+(`:50`), it walks the primary-key B-tree to find the existing row. A B-tree is
+a BST generalised: each node holds *many* keys and has *many* children (wide
+fan-out), so the tree is shallow — a few levels covers millions of rows.
 
 ```
-  the WHERE filter rides a B-tree; the ORDER BY rides HNSW
+  B-tree — wide fan-out keeps it shallow (Postgres index)
 
-  select ... from agents.chunks
-  where app_id = $2          ── B-tree lookup on chunks_app_id (sql/001:33)
-  order by embedding <=> $1  ── HNSW graph walk (file 05), NOT the B-tree
-  limit $3
+  ┌────── one node holds MANY keys ──────┐
+  │  [ k1 | k2 | k3 | ... | k_m ]        │   ← m can be hundreds
+  └───┬────┬────┬─────────────┬──────────┘
+      ▼    ▼    ▼             ▼
+    subtree subtree ...    subtree         depth = log_m(n)
+                                            m large → very shallow
+  millions of rows → 3-4 levels → 3-4 disk reads per lookup
 ```
 
-The annotation that matters: **two different index structures serve one query**.
-The `where app_id` filter is a B-tree range/equality lookup — O(log n), the BST
-idea you built, just disk-shaped. The `order by <=>` is the HNSW graph. A
-B-tree could never answer "nearest vector" (there's no 1-D order on 768-dim
-points to binary-search) — which is exactly why a second, graph index exists.
-That's the cleanest illustration in the repo of "pick the index for the query
-shape."
+The *why a B-tree and not your BST* is the storage-engine reason: each node is
+a disk page, and wide fan-out minimises page reads. That mechanism — pages,
+fan-out, the build cost — belongs to **`study-database-systems`**; this file
+owns the tree *shape* and the balance guarantee.
 
-**Not yet exercised: the BST in buffr's own code.** buffr keeps ids in a flat
-`Set`/`Map` (file 02), not a BST. A BST would matter the day you needed *ordered*
-iteration or range queries over ids in-process ("all chunks between id X and Y")
-— a hash map can't do that, an ordered tree can. You've built the structure; the
-repo just doesn't have the requirement yet.
+**The HNSW index is a graph, NOT a tree — a deliberate contrast.** It's easy
+to assume the vector index is also a tree. It isn't (`sql/001:28-29`):
 
-**Not yet exercised: the trie.** A trie indexes by prefix — share the common
-front of keys down a path, branch where they diverge.
+```sql
+create index if not exists chunks_embedding_hnsw
+  on agents.chunks using hnsw (embedding vector_cosine_ops);
+```
+
+A tree has one parent per node and no cycles; HNSW is a *navigable
+small-world graph* — many links per node, cycles everywhere (file `05`). Trees
+work when you can split the space cleanly in two at each node (a single key has
+a well-defined "less than"). In 768 dimensions there's no single axis to split
+on, so the tree shape breaks down and a graph takes over. Naming *why the tree
+stops working in high dimensions* is the insight here.
+
+**The trie — not yet exercised, and the clearest gap.** A **trie** stores
+strings as paths of character-nodes, so all words sharing a prefix share the
+top of the tree:
 
 ```
-  trie — indexed by prefix (the structure buffr lacks)
-
-  insert "memory:c1:1", "memory:c1:2", "doc#0"
+  Trie — prefix tree (NOT in buffr; here's the shape to drill)
 
         (root)
-        /     \
-     "m"      "d"
-      │        │
-   "emory:c1:"  "oc#0"
-      /    \
-    "1"    "2"
-
-  query "all ids starting with memory:c1" → walk to that node, O(prefix len)
+        /    \
+      c        d
+      │         \
+      a          o
+     / \          \
+    t   r          g
+    │   │          │
+  "cat""car"     "dog"
+  lookup "car": walk c→a→r, O(length) — independent of how many words stored
+  shared prefix "ca" stored ONCE → prefix queries ("all words starting ca") cheap
 ```
 
-This is *almost* relevant: buffr's memory ids are `"memory:<conv>:<n>"`
-(`context.md`, `session.ts:53`) — a perfectly prefix-structured key space. If you
-ever needed "fetch every memory chunk for conversation c1" by id prefix rather
-than by vector similarity, a trie (or Postgres `LIKE 'memory:c1:%'`, which uses a
-B-tree prefix scan) is the structure. Today that recall goes through vector
-search instead, so the trie is a clean `not yet exercised` — and a real gap,
-since you haven't built one in reincodes either.
+Where it would land in buffr: prefix search or autocomplete over document
+content — "show me docs whose title starts with…" Today buffr does *semantic*
+search (vectors, file `02`), never *prefix* search, so there's no trie. This
+is **not yet exercised** in buffr **and** absent from your reincodes portfolio
+(`me.md` lists tries under "less depth"). That double-absence is why the
+practice map (file `08`) ranks it high: it's genuinely new structure for you,
+and it's the natural complement to the semantic search you already have.
+
+**The BST you built — where it sits now.** Your `BinarySearchTree.ts` with
+recursive+iterative insert/search/delete and successor/predecessor is the
+*foundation* both B-trees and balanced trees generalise. buffr doesn't use it
+directly, but understanding it is what makes the B-tree's balance guarantee
+legible: you know what goes wrong without balance because you built the version
+that can skew.
 
 ### Move 3 — the principle
 
-Trees buy you O(log n) ordered navigation, but only if balance is guaranteed —
-which is why databases use B-trees (balance + disk fanout), not the textbook
-BST. The repo's lesson is index-selection: a B-tree answers `where app_id =`, a
-graph answers `order by <vector distance>`, and no single structure does both.
+**Balance is a guarantee you pay for on every write to collect on every read.**
+A plain BST is cheaper to insert into and risks O(n) lookups; a balanced tree
+does extra rebalancing work per insert so lookups are *always* O(log n). And
+when the data is high-dimensional, even balance isn't enough — the tree shape
+itself fails, and you switch to a graph (HNSW). The skill is recognising which
+regime you're in: low-dimensional ordered keys → balanced tree; string prefixes
+→ trie; high-dimensional vectors → graph.
 
 ---
 
 ## Primary diagram
 
-The tree family mapped onto buffr — what runs, what doesn't.
+The tree family in buffr, with the gaps marked.
 
 ```
-  trees in buffr — exercised vs gap
+  Trees & indexes — buffr-laptop recap
 
-  EXERCISED (in Postgres, below buffr's code):
-   ┌ B-tree on chunks.id (PK)        ── O(log n) id lookup
-   └ B-tree on app_id (sql/001:33)   ── the WHERE filter
+  USED (indirectly, via Postgres):
+  ┌─ B-tree: chunks.id PK, chunks_app_id ─┐  sql/001:15,30
+  │  balanced, O(log n) guaranteed         │  used by upsert on-conflict,
+  │  wide fan-out, shallow                  │  app_id filter in search
+  └─────────────────────────────────────────┘
 
-  REINCODES (built by hand, not in buffr):
-   └ BinarySearchTree.ts             ── insert/search/delete, all traversals
+  NOT a tree (common misconception):
+  ┌─ HNSW: the vector index ─┐  sql/001:28 → file 05
+  │  a GRAPH, not a tree      │  trees break in 768 dimensions
+  └───────────────────────────┘
 
-  NOT YET EXERCISED (neither buffr nor reincodes):
-   ┌ self-balancing BST (AVL/red-black) ── the guarantee under the B-tree
-   └ trie / prefix tree                  ── memory ids are prefix-shaped ★ gap
+  NOT YET EXERCISED (the gaps):
+  ┌─ trie ─────────────────┐  ┌─ self-balancing internals ──┐
+  │ prefix/autocomplete     │  │ red-black / AVL rotations    │
+  │ absent in buffr + repo  │  │ (you built unbalanced BST)   │
+  │ → drill, file 08        │  │ → understand, file 08        │
+  └─────────────────────────┘  └──────────────────────────────┘
 ```
 
 ---
 
 ## Elaborate
 
-The progression BST → balanced BST → B-tree is one of the cleanest "same idea,
-hardened for reality" stories in DSA. The BST is the clean concept; AVL/red-black
-trees add the rebalancing that makes O(log n) a *guarantee* not a hope; the
-B-tree adds high fanout so each node is a disk page and the tree is shallow
-enough that a billion rows is 4 hops. Postgres' B-tree is the one you use every
-day without seeing it. The trie is the odd cousin — it indexes by position in the
-key rather than by comparison, which makes it unbeatable for prefix queries
-(autocomplete, IP routing tables, dictionary lookups) and useless for "nearest
-value". The database-systems guide owns the B-tree-as-storage view; this guide
-owns the algorithmic shape.
+The B-tree (Bayer & McCreight, 1970) was invented *specifically* for
+disk-backed databases — the wide fan-out exists because disk reads are the
+bottleneck, so you want maximum keys per page. That's why it, not your
+in-memory BST, is what Postgres reaches for. The trie (Fredkin, 1960) solves
+the orthogonal problem: lookup by *prefix* in time proportional to key length,
+not to the number of keys — the backbone of autocomplete and IP routing tables.
+
+The honest portfolio note: you've built the BST foundation but not its
+*balanced* descendants (red-black, AVL) and not the trie. For interviews and
+for understanding why databases pick the indexes they do, the balanced
+rotations and the trie are the two highest-value additions — file `08`
+sequences them.
 
 ---
 
 ## Interview defense
 
-**Q: The query filters `where app_id` and orders by vector distance. Why can't
-one index serve both?**
+**Q: Postgres indexes buffr's keys with a B-tree, not a plain BST. Why?**
 
 ```
-  B-tree: orders keys on ONE comparable dimension → great for app_id =
-          768-dim vectors have no single sort order → useless for nearest
-  HNSW:   graph of "who's near whom" in 768-d space → great for nearest
-          can't answer app_id = without scanning → useless for the filter
+  plain BST  │ O(log n) only if balanced; sorted inserts → O(n) chain
+  B-tree     │ self-balances every insert → O(log n) GUARANTEED
+             │ + wide fan-out → fewer disk page reads
 ```
 
-A B-tree needs a total order on one dimension; vectors live in 768 dimensions
-with no such order, so "nearest" isn't a range query. HNSW is built for exactly
-that and can't do equality filtering. So Postgres uses both — B-tree for the
-`where`, HNSW for the `order by` (`sql/001:30-33`). Naming "two index shapes,
-two query shapes" is the answer.
+Answer: a plain BST's depth depends on insert order — sequential keys (common
+for ids) degrade it to a linked list, O(n) lookups. A B-tree rebalances on
+every insert so depth stays O(log n) regardless, and its wide fan-out
+minimises disk reads. The part people forget: balance is a *write-time* cost
+paid to guarantee *read-time* performance.
 
-**Q: When does a BST degrade, and what fixes it?**
+Anchor: *"A B-tree is a BST that refuses to skew, with fan-out tuned to disk
+pages — that's why databases use it and not the textbook BST."*
+
+**Q: The vector index is HNSW. Why isn't it a tree?**
 
 ```
-  insert sorted 1,2,3,4,5 → right-leaning chain → O(n) search (a linked list)
-  fix: self-balancing (AVL rotations / red-black recoloring) → forced O(log n)
-       or B-tree: rebalances on split, stays shallow on disk
+  trees split space on ONE key per node ("< or ≥")
+  768 dimensions → no single axis to split on → tree shape fails
+  → switch to a navigable graph (HNSW), many links per node
 ```
 
-A plain BST degrades to O(n) on sorted input — it becomes a linked list. That's
-the bug your hand-built `BinarySearchTree.ts` has and a balanced tree doesn't.
-Databases never ship the naive version precisely because real insert order isn't
-random. Naming the degenerate case is the signal you built one.
+Answer: trees rely on a clean two-way split at each node, which needs a single
+ordering dimension. In 768-D embedding space there's no such axis, so
+tree-based indexes degrade toward a full scan ("curse of dimensionality"); a
+graph index sidesteps it by linking near-neighbours directly. The detail that
+signals depth: it's the dimensionality, not the data size, that kills the tree.
 
-**Anchor:** "B-tree for ordered/range/equality on one dimension; a graph index
-for nearest-neighbor in many dimensions — the repo runs both because no single
-tree does both."
+Anchor: *"Trees need one axis to split on; high-dimensional vectors don't have
+one, so you switch to a graph."*
 
 ---
 
 ## See also
 
-- `05-graphs-and-traversals.md` — HNSW, the graph that answers what the B-tree
-  can't
-- `02-arrays-strings-and-hash-maps.md` — the hash map (O(1) membership) vs the
-  tree (O(log n) ordered) tradeoff
-- `06-sorting-searching-and-selection.md` — binary search, the BST idea without
-  the tree
-- Cross-link: `.aipe/study-database-systems/` — the B-tree as a storage engine
-  structure
+- `02-arrays-strings-and-hash-maps.md` — the hash index, the other way to get
+  fast lookup (O(1), unordered) vs a B-tree (O(log n), ordered).
+- `05-graphs-and-traversals.md` — why the vector index is a graph, and how the
+  walk works.
+- `08-dsa-foundations-practice-map.md` — where tries and balanced-tree
+  internals rank in the drill plan.
+- **`study-database-systems`** — the storage-engine side: pages, fan-out,
+  index build cost.

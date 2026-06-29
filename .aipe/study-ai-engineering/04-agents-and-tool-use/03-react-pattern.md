@@ -1,274 +1,263 @@
-# ReAct — Thought → Action → Observation
+# The ReAct Pattern — Gather, then Synthesize
+### *Reason + Act as a loop, and the forced turn that ends it*
+**Type label:** agent reasoning pattern (interleaved action/observation)
 
-*Industry standard (the ReAct paper). buffr's `runAgentLoop` is a minimal bounded ReAct executor; the reasoning trace is captured in `agents.messages`.*
+## Zoom out
 
-## Zoom out, then zoom in
-
-ReAct isn't a separate machine bolted onto buffr — it *is* the agent loop you already met in `01-agents-vs-chains.md`, viewed through a different lens. That file asked "who decides control?" This one asks "what's the *shape* of one iteration?" and the answer is the ReAct triple: the model reasons in text (Thought), maybe emits a tool-call (Action), the tool result comes back as the next message (Observation), repeat.
+ReAct is a *shape the loop takes*, not a layer of its own. So locate it inside the loop you already know.
 
 ```
-  Zoom out — where ReAct's three beats live in buffr
-
-  ┌─ Session ───────────────────────────────────────────────────┐
-  │  src/session.ts — persist → agent.answer → flush → remember  │  ← CODE decides
-  └───────────────────────────┬─────────────────────────────────┘
-                              │  agent.answer(question)
-  ┌─ Agent loop (aptkit) ─────▼─────────────────────────────────┐
-  │  ★ runAgentLoop — one turn = Thought · Action · Observation ★│  ← we are here
-  │    Thought      = response text                              │
-  │    Action       = tool_use block in the response            │
-  │    Observation  = tool_result fed back as the next message   │
-  └───────────────────────────┬─────────────────────────────────┘
-                              │  callTool(name, args)
-  ┌─ Tool ────────────────────▼─────────────────────────────────┐
-  │  search_knowledge_base — produces the Observation            │  ← TOOL runs
-  └─────────────────────────────────────────────────────────────┘
+The agent loop, and the shape ReAct gives it
+┌──────────────────────────────────────────────────────────┐
+│  RagQueryAgent.answer    sets budget + synthesis text       │
+├──────────────────────────────────────────────────────────┤
+│  ★ runAgentLoop          the loop — ReAct is its RHYTHM     │  ← this file
+│     turn N:  act (tool)  → observe (result)                │
+│     turn N+1: act again, OR synthesize (answer)            │
+├──────────────────────────────────────────────────────────┤
+│  search_knowledge_base   the "act" — retrieve chunks        │
+└──────────────────────────────────────────────────────────┘
 ```
 
-Zoom in: the name "ReAct" is "Reason + Act" — the insight from the original paper is that letting a model *interleave* reasoning and tool use beats doing all reasoning first then all acting. buffr does exactly this, bounded. And here's the buffr-specific kicker worth caring about: because the trace sink persists every `step` (Thought) and `tool_call_start` (Action) and `tool_call_end` (Observation) into `agents.messages`, **buffr's database row sequence IS a readable ReAct trace.** You can replay the model's reasoning after the fact.
+ReAct (★) isn't a function you can point to. It's the *rhythm* the loop produces: act, observe, act, observe, then answer. buffr's variant collapses to two beats — **gather** (act on the tool, observe results) then **synthesize** (answer over what was gathered) — and the transition between them is forced by code.
+
+Conversational version. The classic ReAct pattern interleaves three things the model writes out loud: *Thought* ("I should search for X"), *Action* (the tool call), *Observation* (the result), repeating until the model decides it has enough and answers. You can think of it as a state machine you already know — `idle → fetching → resolved → render` — except the model drives the transitions. buffr runs this, with one honest caveat we'll hit head-on: `gemma2:9b` does not reliably write "Thought:" traces. The *prose reasoning* is mostly absent. What survives — and what actually matters — is the loop *structure*: gather, then a forced synthesize. The skeleton is ReAct even when the narration isn't.
 
 ## Structure pass
 
-**Layers:** the conversation (the growing `messages` array) → one ReAct turn (Thought/Action/Observation) → the model + tool that produce each beat.
-
-**Axis — "what produces this beat, and where does it get stored?" — traced across the triple:**
+The axis: **who ends the reasoning — the model, or the code?** Classic ReAct lets the model decide it's done. buffr lets the model decide *up to a point*, then code forces the ending.
 
 ```
-  trace "who produces each beat" across one ReAct turn
-
-  ┌─ Thought ───────┐  ┌─ Action ──────────┐  ┌─ Observation ─────┐
-  │ MODEL writes    │→ │ MODEL emits        │→ │ TOOL produces      │
-  │ free text       │  │ tool_use block     │  │ result            │
-  │ → 'step' event  │  │ → 'tool_call_start'│  │ → 'tool_call_end' │
-  │ → messages row  │  │ → messages row     │  │ → messages row    │
-  └─────────────────┘  └────────────────────┘  └───────────────────┘
-       (assistant)          (model's call)          (tool's answer)
-
-  the PRODUCER flips: model · model · tool — and each beat lands as a row
+The "who ends it" axis
+   MODEL ENDS                                        CODE ENDS
+   (answers when ready)                              (budget forces it)
+   ├─────────────────────────────────────────────────────────────┤
+   classic ReAct                  buffr                  rigid chain
+   thought/act/obs until done   gather, then FORCED synth   step→step→done
+                                         ▲
+                                         │
+                                  forceFinal is the lever
 ```
 
-**The seam:** between Action and Observation, control flips from model to tool and back. The model emits a `tool_use`; the loop runs the tool; the result re-enters the conversation as a `user`-role message containing a `tool_result` block (run-agent-loop.ts:181-189). That re-entry is the load-bearing joint — it's how the model "sees" what its action did and reasons about it next turn.
+The seam where the model's control ends and the code's control takes over is `forceFinal`. Up to that point, the model is in classic-ReAct mode: it may act again or answer. At `forceFinal`, the tools vanish and the model *must* synthesize. That's the gather→synthesize gate.
+
+```
+The two beats and the gate between them
+  GATHER (model may loop)              GATE              SYNTHESIZE (forced)
+  ┌──────────────────────────┐   forceFinal flips   ┌────────────────────┐
+  │ act: search_knowledge_base│  ───────────────►   │ tools: undefined    │
+  │ observe: chunks back      │  budget spent /     │ system += synthInstr│
+  │ act again? (model decides)│  last turn          │ → MUST answer       │
+  └──────────────────────────┘                      └────────────────────┘
+```
 
 ## How it works
 
 ### Move 1 — the mental model
 
-You know how a debugger REPL works? You evaluate an expression (your "action"), it prints a result (your "observation"), you read it, think, and type the next expression. ReAct is the model running its own REPL: it "types" a tool-call, reads the result that comes back, and decides the next move — except the loop, not a human, drives it, and a hard turn budget stops it.
+ReAct = the loop body, where "Action" is a tool call and "Observation" is the result you feed back. The reasoning isn't a separate phase; it's whatever the model does between reading the observation and emitting the next action.
 
 ```
-  the ReAct loop kernel — one beat feeds the next
-
-  ┌──────────┐  reason in text   ┌──────────┐
-  │ Thought  │ ────────────────► │ Action?  │
-  └──────────┘                   └────┬─────┘
-       ▲                    tool_use? │ yes
-       │                              ▼
-       │                       run search_kb
-       │  feed result back     ┌────────────┐
-       └────────────────────── │ Observation│
-                               └────────────┘
-                  no tool_use │
-                              ▼
-                         final answer (Thought with no Action)
-
-  the loop ends when a Thought carries NO Action
+One ReAct cycle in buffr
+  [Reason]   model reads messages, decides            (implicit, often silent)
+  [Act]      emits tool_use → search_knowledge_base    (the JSON call)
+  [Observe]  tool_result pushed back into messages     (chunks as next input)
+       │
+       └── loop: enough? → answer (Reason→Synthesize) | not enough? → Act again
 ```
 
-The part people forget: **the termination signal is "a Thought with no Action."** The model doesn't say "I'm done" — it just answers in plain text instead of emitting a tool-call, and the loop reads the *absence* of a tool_use as "stop" (run-agent-loop.ts:131-135).
+### Move 2 — step by step
 
-### Move 2 — the step-by-step walkthrough
+#### Gather: the act/observe beat (`callTool` → `tool_result`)
 
-This loop is reached every time the TUI calls `agent.answer(question)` — every question runs at least one ReAct turn (the first Thought), and a question that needs retrieval runs at least two (Thought → Action → Observation → Thought-that-answers).
+Bridge from what you know: this is a render-fetch cycle. The component renders (model decides), fires a fetch (tool call), the response lands in state (observation pushed to `messages`), and the next render reads that new state. The model's "next render" sees the chunks it just retrieved.
 
-**Step 1 — the conversation starts as a one-element array, and the model produces the first Thought.** The loop seeds `messages` with the user's question, then calls `model.complete`. Whatever text comes back is the Thought.
+```
+Gather: action produces an observation, which becomes the next input
+  model.complete(messages, tools)
+     │ emits tool_use
+     ▼
+  callTool → search_knowledge_base → chunks
+     │ JSON.stringify(result), truncate 16k
+     ▼
+  messages.push({ role: user, content: [tool_result] })   ← observation IS the next prompt
+     │
+     ▼  next turn: model sees the chunks, reasons over them
+```
+
+Real code, the act/observe portion of `runAgentLoop`, `aptkit packages/runtime/src/run-agent-loop.ts:139`:
 
 ```ts
-// aptkit packages/runtime/src/run-agent-loop.ts:94, 103-129 (condensed)
-const messages: ModelMessage[] = [{ role: 'user', content: userPrompt }];
-// ...
-const response = await model.complete({ system, messages, tools, maxTokens, signal });
-// ...
-messages.push({ role: 'assistant', content: response.content });   // ← the Thought joins the conversation
-const text = textFromContent(response.content);
-if (text) {
-  trace?.emit({ type: 'step', capabilityId, role: 'assistant', content: text, timestamp: timestamp() });
-}                                                                  // ← Thought → 'step' event → messages row
+for (const toolUse of toolUses) {
+  trace?.emit({ type: 'tool_call_start', toolName: toolUse.name, args: toolUse.input, ... });
+  try {
+    const { result, durationMs } = await tools.callTool(toolUse.name, toolUse.input, { signal });
+    resultContent = truncate(JSON.stringify(result));     // ← OBSERVATION, capped at 16k chars
+  } catch (error) {
+    isError = true;
+    resultContent = truncate(JSON.stringify({ error: ... }));   // ← errors are observations too (see 06)
+  }
+  toolResults.push({ type: 'tool_result', toolUseId: toolUse.id, content: resultContent,
+                     ...(isError ? { isError: true } : {}) });
+}
+messages.push({ role: 'user', content: toolResults });    // ← feed the observation back, loop again
 ```
 
-The Thought is appended to `messages` *and* emitted as a `step` trace event. So the reasoning is in two places: the live conversation (so the next turn sees it) and the durable trace (so you can read it later). That dual-write is what makes buffr's trace a ReAct transcript.
+The consequence of the observation being a `user` message: the model literally re-reads its own retrieved chunks as if the user handed them over. That's the Act→Observe→Reason handoff, made concrete by pushing onto an array.
+
+#### The gate: `forceFinal` strips the tools
+
+Bridge: a state machine guard. You've written `if (retries >= max) state = 'giveUp'`. `forceFinal` is exactly that guard, and "giveUp" here means "stop searching, answer now."
 
 ```
-  Step 1 — the first Thought, two destinations
-
-  model.complete ──► response.content
-                       │
-            ┌──────────┴───────────┐
-            ▼                      ▼
-      messages.push          trace.emit('step')
-      (live conversation)    (durable, → agents.messages row)
+The gate: when to stop gathering
+  forceFinal = (turn === maxTurns - 1)  OR  (toolCalls.length >= maxToolCalls)
+     │ true
+     ▼
+  model.complete({
+    system: system + synthesisInstruction,   ← tell it to answer
+    tools: undefined,                          ← REMOVE the tools — can't act
+  })
 ```
 
-**Step 2 — the Action: a `tool_use` block extracted from the response.** ReAct's "Act" is the model choosing to call a tool. The loop scans the response content for `tool_use` blocks. None → the Thought was the final answer; stop. One or more → that's the Action.
+Real code, `aptkit packages/runtime/src/run-agent-loop.ts:101`:
 
 ```ts
-// aptkit packages/runtime/src/run-agent-loop.ts:131-135
-const toolUses = toolUsesFromContent(response.content);
-if (toolUses.length === 0) {
-  finalText = text;          // ← a Thought with NO Action = done
-  break;
+const budgetSpent = maxToolCalls !== undefined && toolCalls.length >= maxToolCalls;
+const forceFinal = turn === maxTurns - 1 || budgetSpent;       // ← THE GATE
+const response = await model.complete({
+  system: forceFinal && synthesisInstruction ? `${system}\n\n${synthesisInstruction}` : system,
+  messages,
+  tools: forceFinal ? undefined : toolSchemas,                  // ← strip tools when forced
+  maxTokens,
+  signal,
+});
+```
+
+The consequence is the whole reason this works on a weak model: a small model left to its own devices keeps searching, never deciding it has enough. `forceFinal` doesn't *ask* it to stop — it *removes the ability to act*. With `tools: undefined`, there are no schemas in the prompt and nothing to emit a call against. Synthesis is the only move left.
+
+#### Synthesize: the forced final turn (`buildSynthesisInstruction`)
+
+Bridge: a final-state reducer. The machine has gathered all its data; the last transition renders the result. Here the "render" is the model writing the answer, nudged by an instruction that forbids stalling.
+
+```
+Synthesize: the forced answer
+  system + "You have NO more tool calls available. Now answer the question
+            directly and concisely, citing the sources you retrieved.
+            Do not say you need more queries."
+     │  model.complete, tools: undefined
+     ▼
+  prose answer → no tool_use → finalText, BREAK
+```
+
+Real code, the instruction builder, `aptkit packages/runtime/src/run-agent-loop.ts:72`:
+
+```ts
+export function buildSynthesisInstruction(middle: string): string {
+  return `You have NO more tool calls available. ${middle} Do not say you need more queries.`;
 }
 ```
 
-Remember from `02-tool-calling.md`: on Gemma there's no native `tool_use` block — the provider *parses* one out of the model's JSON-shaped text. So the "Action" here is reconstructed from free text. ReAct doesn't care how the Action is represented; it only needs "is there an action or not."
-
-```
-  Step 2 — Action present or absent
-
-  response.content ──► toolUsesFromContent()
-                          │
-              ┌───────────┴────────────┐
-              ▼                        ▼
-        [] (no tool_use)          [tool_use, ...]
-        → finalText, break        → run the Action(s)
-        (this Thought answered)   (Step 3)
-```
-
-**Step 3 — run the Action, capture the Observation, feed it back.** For each tool_use, the loop emits `tool_call_start` (the Action, with args), runs `callTool`, emits `tool_call_end` (the Observation, with result/error/duration), then pushes the result into `messages` as a fresh message.
+And how `RagQueryAgent` fills the middle, `aptkit packages/agents/rag-query/src/rag-query-agent.ts:77`:
 
 ```ts
-// aptkit packages/runtime/src/run-agent-loop.ts:147-189 (condensed)
-trace?.emit({ type: 'tool_call_start', capabilityId, toolName: toolUse.name, args: toolUse.input, ... });
-try {
-  const { result, durationMs } = await tools.callTool(toolUse.name, toolUse.input, { signal });
-  resultContent = truncate(JSON.stringify(result));
-} catch (error) {
-  isError = true;
-  resultContent = truncate(JSON.stringify({ error: message }));   // ← even a failure becomes an Observation
-}
-trace?.emit({ type: 'tool_call_end', capabilityId, toolName: toolUse.name, result, error, durationMs, ... });
-toolResults.push({ type: 'tool_result', toolUseId: toolUse.id, content: resultContent, ...(isError && { isError: true }) });
-// after the loop over tool uses:
-messages.push({ role: 'user', content: toolResults });            // ← Observation re-enters as the next message
+synthesisInstruction: buildSynthesisInstruction(
+  'Now answer the question directly and concisely, citing the sources you retrieved.',
+),
 ```
 
-That last line is the heart of ReAct. The Observation comes back as a `role: 'user'` message holding `tool_result` blocks — from the model's point of view, the environment "spoke" the tool output back to it. Next turn, `model.complete` sees the question, its own Thought, its Action, and now the Observation, and reasons forward. **Note the `catch`: even a thrown error becomes an Observation** (`{ error: message }` with `isError: true`) — the model gets to see its action failed and react. That's error-recovery built into the ReAct substrate (`06-error-recovery.md`).
+The two clamps in that string are doing real work. "You have NO more tool calls available" is *true* (the tools are gone) and stating it stops the model from emitting a doomed call. "Do not say you need more queries" pre-empts the small-model failure of answering "I should search for more" *instead of* answering. Both are there because `gemma2:9b` will, unprompted, stall at exactly this moment.
+
+### Move 2.5 — current vs future
 
 ```
-  Layers-and-hops — one Action/Observation round trip
-
-  ┌─ Loop ───────────┐ hop1: callTool(name,args)  ┌─ Tool registry ─┐
-  │ for each tool_use │ ──────────────────────────►│ run handler     │
-  │  emit start       │ hop3: {result | error} ◄── └──────┬──────────┘
-  │  emit end         │                            hop2 │ embed+ANN
-  │  push tool_result │                                 ▼
-  └────────┬──────────┘                          ┌─ Pipeline ───────┐
-           │ hop4: messages.push(role:user)      │ search_kb        │
-           ▼                                      └──────────────────┘
-   next turn: model sees the Observation and reasons again
+Explicit reasoning traces (current ✗ / possible ✓)
+  ✗ current:  model rarely writes "Thought: ..." — gemma narrates inconsistently
+              the loop STRUCTURE carries ReAct; the prose doesn't
+  ✓ possible: a scratchpad prompt + a parser that extracts Thought/Action
+              → visible reasoning in the trace, gradeable in evals
 ```
 
-**Step 4 — repeat until a Thought has no Action, or the budget forces a stop.** The `for turn` loop runs the triple again. Each pass grows `messages` by a Thought (assistant) and possibly an Observation (user). It ends one of two ways: the model emits a Thought with no Action (natural stop), or the budget hits and `forceFinal` strips the tools so the next Thought *can't* carry an Action (`01-agents-vs-chains.md`).
-
-```
-  the growing conversation = the ReAct transcript
-
-  [user: question]
-  [assistant: Thought 1]          ← turn 0 Thought
-  [user: tool_result (Obs 1)]     ← turn 0 Observation
-  [assistant: Thought 2 = answer] ← turn 1 Thought, no Action → break
-```
-
-### Move 2 variant — the load-bearing skeleton
-
-The irreducible ReAct kernel: **append Thought to the conversation → detect Action (tool_use present?) → if Action, run it and append the Observation as a message → loop → stop when a Thought carries no Action.**
-
-- Drop **"append the Observation back into `messages`"** → the model can't see what its action did; it re-reasons with no new information and either loops or hallucinates the result. This is the part that makes it ReAct and not "call a tool once."
-- Drop **"stop when no Action"** → the loop can't recognize the answer; it runs forever or until the budget.
-- Drop the **trace emits** → ReAct still *works*, but you lose the transcript. (This is hardening, not kernel — buffr adds it on top so the reasoning is replayable.)
-
-Optional hardening layered on: the 16k-char truncation of tool results (run-agent-loop.ts:52-57, keeps one giant Observation from blowing the context), the `forceFinal` budget, the `recoveryPrompt`/`runRecoveryTurn` path for structured outputs (run-agent-loop.ts:204-228, which buffr's `RagQueryAgent` doesn't use).
+Classic ReAct papers lean on the model narrating its reasoning, which lets you read and grade the chain of thought. buffr doesn't get that for free — `gemma2:9b` doesn't reliably emit "Thought:" lines, so the trace shows *actions and observations* but rarely the reasoning between them. The structure is ReAct; the narration is missing. If you wanted gradeable reasoning, you'd prompt for an explicit scratchpad and parse it — but that's added scaffolding, not present today.
 
 ### Move 3 — the principle
 
-ReAct's whole bet is that a model reasons *better* when it can act between thoughts and see the consequences — versus planning everything blind up front. The mechanism that delivers that is dead simple: **feed each Observation back into the conversation so the next Thought is informed by it.** Everything else (the budget, the trace, the parsing) is plumbing around that one move. If you can name "the Observation re-enters as a message," you understand ReAct.
+ReAct's power is the feedback loop — act, observe, *let the observation change the next decision*. Its danger on a weak model is non-termination — the model never decides it has enough. buffr keeps the power and kills the danger by making termination a *code* decision, not a model decision. The forced synthesis turn is the load-bearing part: it guarantees that every question, no matter how the gathering went, ends in an answer.
 
 ## Primary diagram
 
-```
-  buffr's bounded ReAct loop — one full answer()
+The full gather→synthesize arc for one question.
 
-  question ─► messages = [user: question]
-                │
-  ┌─ for turn 0..5 ──────────────────────────────────────────────┐
-  │  forceFinal = (turn==5) || toolCalls>=4                        │
-  │                                                                │
-  │  ── THOUGHT ──────────────────────────────────────────────    │
-  │  response = model.complete(system, messages, tools?)          │
-  │  messages.push(assistant: response)                           │
-  │  trace.emit('step')               ── Thought → messages row    │
-  │                                                                │
-  │  ── ACTION? ──────────────────────────────────────────────    │
-  │  toolUses = tool_use blocks in response                       │
-  │  if none → finalText = text ; break   (Thought = answer)      │
-  │  else:                                                          │
-  │    trace.emit('tool_call_start')   ── Action → messages row    │
-  │                                                                │
-  │  ── OBSERVATION ──────────────────────────────────────────    │
-  │    result = callTool(name, args)  (error → {error}, isError)  │
-  │    trace.emit('tool_call_end')     ── Obs → messages row       │
-  │    messages.push(user: tool_result)  ◄── fed back to model     │
-  └────────────────────────────────────────────────────────────────┘
-                │
-                ▼
-            finalText ─► (session: trace.flush → readable ReAct transcript in agents.messages)
+```
+ReAct in buffr: gather, gate, synthesize
+  question → messages = [user]
+     │
+  ┌─ GATHER (turns 0..k, model in control) ────────────────────┐
+  │  Reason (implicit) → Act (search) → Observe (chunks back)    │
+  │  push observation → loop                                     │
+  │  model may act again, or it may answer early                 │
+  └──────────────────────────────────────────────────────────────┘
+     │  forceFinal = last turn OR toolCalls >= 4
+     ▼  ░░░ THE GATE: tools stripped, synthesis instr added ░░░
+  ┌─ SYNTHESIZE (forced, code in control) ─────────────────────┐
+  │  "No more tool calls. Answer, cite, don't stall."           │
+  │  model writes prose → no tool_use → BREAK                   │
+  └──────────────────────────────────────────────────────────────┘
+     │
+     ▼  finalText (the answer)
 ```
 
 ## Elaborate
 
-ReAct comes from Yao et al. (2022), "ReAct: Synergizing Reasoning and Acting in Language Models." The original framing had the model emit literal `Thought:` / `Action:` / `Observation:` strings in a single completion, parsed by regex. Modern tool-calling APIs formalized the "Action" as a structured `tool_use` block and the "Observation" as a `tool_result`, which is what aptkit's loop uses — Gemma just reconstructs those blocks from text because it has no native API (`02-tool-calling.md`). buffr is the smallest interesting ReAct instance: one tool, so each Action is "search or don't," and the reasoning rarely runs past two or three turns. The richer cousins — multi-tool ReAct, Plan-and-Execute, reflexion loops — live in `.aipe/study-agent-architecture/`. The thing buffr does that many ReAct demos don't: it *persists the whole transcript*, which is exactly the corpus you'd fine-tune on later (`../05-evals-and-observability/04-llm-observability.md`).
+The honest reframe worth keeping: buffr's ReAct is really *bounded* ReAct, and the bound is what makes it shippable. Frontier-model ReAct can afford to trust the model to stop; the model is good at knowing when it's done. `gemma2:9b` is not, so buffr replaces "trust the model to stop" with "let the model stop early if it wants, but force it to stop at the budget." The early-exit path (model answers before the budget, `toolUses.length === 0 → break`) is the model deciding; the forced-exit path (`forceFinal`) is the code deciding. Both end in the same place: a `finalText`. The agent has two ways to finish and exactly zero ways to not finish.
+
+Notice also that the observation is *truncated to 16k chars* before it re-enters the prompt. That's a context-budget defense — retrieval can return a lot, and dumping it all back would blow the window. It also means the model synthesizes over a *capped* view of what it retrieved. For buffr's `minTopK: 4` searches that's plenty, but it's a real boundary: the synthesis sees at most 16k chars of each observation.
 
 ## Project exercises
 
-> No curriculum file present; exercises derived from the codebase.
+### Add an explicit reasoning scratchpad to the gather turns
 
-### Render a stored conversation as a ReAct transcript
+- **Exercise ID:** [B4.5], Phase 4.
+- **What to build:** Extend the system prompt to ask the model to prefix each turn with a short `Thought:` line before its action, and add a parser that pulls those lines into the trace as a `reasoning` event. Keep them out of the final answer.
+- **Why it earns its place:** Right now the trace shows *what* the agent did (actions, observations) but not *why*. Surfacing the reasoning makes the loop debuggable and gives evals (`05-evals-and-observability/`) something to grade beyond the final answer. It also teaches you how fragile small-model narration is.
+- **Files to touch:** `aptkit packages/agents/rag-query/src/rag-query-agent.ts` (system template), `aptkit packages/runtime/src/run-agent-loop.ts` (parse + emit a `reasoning` trace event), `buffr src/supabase-trace-sink.ts` (persist it).
+- **Done when:** A multi-turn answer records at least one `reasoning` event per gather turn, the final answer is unchanged, and a turn where the model omits `Thought:` degrades gracefully (no crash, empty reasoning).
+- **Estimated effort:** 2–4 hours.
 
-- **Exercise ID:** REACT-1 (Case A — ReAct loop runs and is traced; reading it is the next step).
-- **What to build:** a small CLI that reads one `agents.conversations` row's `messages` ordered by `created_at` and prints them as a `Thought: / Action: / Observation:` transcript, mapping `step`→Thought, `tool_call`→Action, `tool`→Observation.
-- **Why it earns its place:** proves the trace IS a ReAct trace, and gives you a "here's my agent reasoning, step by step" artifact to show — the strongest possible evidence you understand the pattern, not just the term.
-- **Files to touch:** new `src/cli/trace-cmd.ts`, reading from `agents.messages` via `src/db.ts`; reuse the role conventions in `src/supabase-trace-sink.ts:57-83`.
-- **Done when:** one real question's conversation prints as an ordered Thought/Action/Observation transcript matching the order the model produced.
-- **Estimated effort:** 1–4hr.
+### Make the synthesis instruction adaptive to whether anything was retrieved
 
-### Make the Thought visible live in the TUI
-
-- **Exercise ID:** REACT-2 (Case A — surfacing the reasoning beat).
-- **What to build:** stream or print the assistant `step` text (the Thought between Action and Observation) to the TUI so the user sees "searching for X…" reasoning, not just a spinner then an answer.
-- **Why it earns its place:** demonstrates you understand which beat is the Thought and can wire it to a UI — turns the invisible loop into a visible one.
-- **Files to touch:** `src/session.ts` (surface intermediate `step` events from the trace sink), the TUI render path; the trace sink already emits `step` per Thought.
-- **Done when:** a multi-turn question shows its intermediate reasoning before the final answer lands.
-- **Estimated effort:** 1–4hr.
+- **Exercise ID:** [B4.6], Phase 4.
+- **What to build:** Branch the synthesis instruction: if the gather phase returned zero usable chunks, instruct the model to say plainly that the knowledge base lacks the answer (matching `FALLBACK_ANSWER` intent) instead of citing nonexistent sources.
+- **Why it earns its place:** Today the forced synthesis always says "cite the sources you retrieved" — even when nothing was retrieved, which pushes a weak model to fabricate citations. Making the instruction aware of empty retrieval closes a hallucination path at the exact moment the model is most pressured to produce *something*.
+- **Files to touch:** `aptkit packages/agents/rag-query/src/rag-query-agent.ts`, `aptkit packages/runtime/src/run-agent-loop.ts` (expose whether any tool result was non-empty to the synthesis branch).
+- **Done when:** A question with no matching corpus produces a plain "not found" answer rather than fabricated citations, verified by an eval case with an empty index.
+- **Estimated effort:** 3–4 hours.
 
 ## Interview defense
 
-**Q: Is buffr a ReAct agent? Walk me through one turn.**
-Answer: yes — `runAgentLoop` is a bounded ReAct executor. One turn is the triple: the model produces a Thought (free text), maybe an Action (a `tool_use` for `search_knowledge_base`), and if it acts, the loop runs the tool and feeds the result back as an Observation — a `role:user` message carrying a `tool_result` block. The next turn reasons over that Observation. It stops when a Thought carries no Action, or the budget forces a final synthesis turn.
+**Q: "Does buffr implement ReAct? It doesn't print Thought/Action/Observation."**
+
+It implements the ReAct *structure*, not the narration. The loop interleaves action (the `search_knowledge_base` call) and observation (the result pushed back into `messages`), and reasons over each observation before the next action. `gemma2:9b` just doesn't reliably write "Thought:" lines out loud — the prose reasoning is mostly silent, but the act/observe/reason cycle is exactly ReAct.
 
 ```
-  one turn:  Thought (text) ─► Action? (tool_use) ─► Observation (tool_result fed back) ─► next Thought
+  Act (search) → Observe (chunks) → Reason (silent) → Act or Answer
 ```
 
-**Q: What's the one mechanism that makes it ReAct and not just "call a tool once"?**
-Answer: **the Observation re-enters the conversation as a message** (`messages.push({role:'user', content: toolResults})`, run-agent-loop.ts:189), so the next Thought is informed by what the last Action did. That feedback is the whole pattern — and the part people forget. Without it the model can't react to its own actions. buffr also persists every beat (`step`/`tool_call_start`/`tool_call_end`) to `agents.messages`, so the row sequence is a replayable ReAct transcript.
+*Anchor: the loop structure is the ReAct skeleton even when the model doesn't narrate it.*
+
+**Q: "How does the agent decide to stop gathering and answer?"** — the part people forget.
+
+Two ways, and the forced one is what people miss. The model can stop on its own by emitting prose with no tool call (`toolUses.length === 0 → break`). But if it doesn't, `forceFinal` (last turn, or `maxToolCalls` reached) takes over: it strips the tools (`tools: undefined`) and appends a synthesis instruction that says there are no more tool calls and not to ask for more. The model can't act, so it must synthesize. The load-bearing part is that the forced synthesis turn *removes* the ability to call a tool — it doesn't merely ask the model to stop.
 
 ```
-  the anchor:  Observation → messages.push(role:user) → informs next Thought
+  budget spent → forceFinal → tools removed + "no more queries" → MUST answer
 ```
+
+*Anchor: termination is a code decision via forceFinal, not a model decision — that's what makes it work on a weak model.*
 
 ## See also
 
-- `01-agents-vs-chains.md` — the same loop, viewed as control flow and the budget.
-- `02-tool-calling.md` — how the Action (`tool_use`) is reconstructed from Gemma's text.
-- `06-error-recovery.md` — how a failed Action becomes an Observation the model can recover from.
-- `../05-evals-and-observability/04-llm-observability.md` — the trace that makes the ReAct transcript durable.
-- `.aipe/study-agent-architecture/` — richer ReAct variants (multi-tool, plan-execute, reflexion).
+- **`01-agents-vs-chains.md`** — the load-bearing skeleton this file's gate lives inside.
+- **`02-tool-calling.md`** — what the "Act" beat actually emits and parses (the emulated JSON path).
+- **`04-tool-routing.md`** — why gather-vs-synthesize is the *real* routing decision in a one-tool agent.
+- **`06-error-recovery.md`** — what happens when the "Observe" beat is an error instead of chunks.

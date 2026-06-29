@@ -1,231 +1,328 @@
-# Tool calling — and the Gemma emulation seam
+# Tool Calling — the Emulated JSON Path
+### *Schemas into the prompt, JSON back out, and the validation that isn't there*
+**Type label:** model–tool interface (structured output)
 
-*Industry standard pattern; project-specific reliability ceiling.*
+## Zoom out
 
-## Zoom out, then zoom in
-
-This is the most important file in the agents section, because it's where buffr's reliability ceiling lives. Pull up the layer where the model's text becomes an action.
+Look at where tool calling sits. It's not the loop and it's not the tool — it's the *translation layer* between them, the thing that turns "the model wants to search" into "a function got called with arguments."
 
 ```
-  Zoom out — where the tool-call contract lives
-
-  ┌─ Agent loop ────────────────────────────────────────────────┐
-  │  runAgentLoop — needs a tool-call out of the model           │
-  └───────────────────────────┬─────────────────────────────────┘
-                              │  model.complete(system + tool schema)
-  ┌─ Model provider ──────────▼─────────────────────────────────┐
-  │  ★ GemmaModelProvider — NO native tools → EMULATES them ★    │ ← we are here
-  │   render schema into prompt · parse JSON back out of text    │
-  └───────────────────────────┬─────────────────────────────────┘
-                              │  { name, input } (unvalidated)
-  ┌─ Tool registry ───────────▼─────────────────────────────────┐
-  │  InMemoryToolRegistry.callTool(name, args) — runs handler    │
-  └─────────────────────────────────────────────────────────────┘
+The translation layers around a tool call
+┌────────────────────────────────────────────────────────────┐
+│  Agent loop      runAgentLoop — wants the model to act        │  control
+├────────────────────────────────────────────────────────────┤
+│  ★ TOOL CALLING  GemmaModelProvider — schemas↔JSON translate  │  ← this file
+│                  outbound: schemas→prompt                     │
+│                  inbound:  text→parsed call                   │
+├────────────────────────────────────────────────────────────┤
+│  Tool registry   callTool(name, input) → search_knowledge_base│  execution
+└────────────────────────────────────────────────────────────┘
 ```
 
-The verdict up front: buffr's tool-calling works, but on a model that has **no native tool-calling API**. aptkit fakes it — renders the JSON schema into the prompt, then parses a JSON object back out of the model's free text. And critically: **there is no argument-schema validation on the way back.** That single missing check is the ceiling on how reliable buffr can be.
+The agent loop above speaks in `tool_use` blocks (`{name, input}`). The tool registry below speaks in function calls. Neither knows the model can't do tool calling natively. The ★ layer hides that — and *how* it hides it is the most consequential design fact in buffr.
+
+Conversational version. With a frontier model (Claude, OpenAI), tool calling is a *protocol*: you send a `tools` array, the API returns a typed, schema-*validated* tool-call object. The provider guarantees the arguments match the schema. `gemma2:9b` has none of that. It's a chat model that emits text. So buffr *emulates* the protocol: it writes the tool schemas into the system prompt as JSON, asks the model to please reply with a JSON object, and then hand-parses whatever comes back. It works. It also has a hole, and the hole is the whole story.
 
 ## Structure pass
 
-**Layers:** loop (wants an action) → provider (emulates the tool protocol) → registry (dispatches to the handler).
-
-**Axis — "trust: what's validated at this boundary?"**
+The one axis here: **native validation vs emulated trust.** On the native path, the provider validates arguments against the schema before you ever see the call. On the emulated path, *nobody does* — the parsed object goes straight to the tool.
 
 ```
-  trace "what is validated?" across the tool-call seam
-
-  ┌─ loop ──────────┐  seam   ┌─ provider ──────┐  seam   ┌─ registry ─────┐
-  │ tool NAME must  │ ═══════►│ JSON parsed     │ ═══════►│ args passed    │
-  │ match registry  │ (checked)│ name extracted  │ (NOT    │ straight to    │
-  │                 │         │ args extracted   │ checked)│ handler        │
-  └─────────────────┘         └─────────────────┘         └────────────────┘
-        validated                   shape-checked              UNVALIDATED args
-
-  the trust answer FLIPS: name is checked, arguments are not
+The validation axis (where buffr sits on the dangerous end)
+   VALIDATED                                        TRUSTED-AS-IS
+   (provider checks args)                           (parse and pass)
+   ├─────────────────────────────────────────────────────────────┤
+   Claude / OpenAI                                  gemma2:9b (buffr)
+   schema-checked tool call                         JSON parsed, NOT checked
+                                                              ▲
+                                                              │
+                                                    THE RELIABILITY CEILING
 ```
 
-That flip is the whole story. The tool *name* is validated (`callTool` throws "tool not found" on a bad name — `tool-registry.ts:57`). The *arguments* are not. A structurally-valid JSON with the wrong keys sails through.
+The seam where the protocol flips from native to emulated is `GemmaModelProvider.complete`. Above it, the loop thinks it's getting a validated `tool_use` block. Below it, the provider is doing string surgery on chat text. The flip is invisible to the loop — which is exactly why the missing validation is easy to miss.
 
 ## How it works
 
 ### Move 1 — the mental model
 
-A native tool-call API (Anthropic, OpenAI) is like a typed function signature the provider enforces — you declare the schema, and the model's tool-call comes back conforming to it or the API errors. Gemma has no such API. aptkit's emulation is like passing a function's *documentation* as a string and asking the model to "please reply with JSON shaped like this," then `JSON.parse`-ing whatever it says. It usually works. It is not enforced.
+Tool calling, emulated, is a round trip through text. Schemas go out as prompt; a call comes back as a JSON object you dig out of prose.
 
 ```
-  native tool-call           emulated tool-call (buffr/Gemma)
-  ────────────────           ───────────────────────────────
-  schema enforced by         schema = text in the prompt
-  the provider               │
-  │                          ▼  model replies with free text
-  ▼                          {"tool":"search_knowledge_base",
-  conforming tool-call        "arguments":{"query":"..."}}
-  (or API error)             │
-                             ▼  parseAgentJson + parseToolCall
-                             {name, input}  ← NO validation
+The round trip
+  OUTBOUND                         INBOUND
+  tool schemas                     model's raw text
+     │ buildSystemText                │ parseAgentJson
+     ▼                                ▼
+  JSON in system prompt            { "tool": "...", "arguments": {...} }
+     │                                │ parseToolCall
+     ▼                                ▼
+  "reply with ONLY a JSON object"  tool_use block → callTool
 ```
 
-### Move 2 — the step-by-step walkthrough
+The model never sees a `tools` parameter. It sees instructions in English and JSON in its system text, and it's *asked* to cooperate. Whether it does is probabilistic.
 
-**Step 1 — the tool schema is rendered into the system prompt.** aptkit serializes each tool — name, description, `input_schema` — as JSON and tells the model the exact reply format.
+### Move 2 — step by step
+
+#### Outbound: schemas rendered into the system prompt (`buildSystemText`)
+
+Bridge from what you know: this is server-side rendering of a form. You have a JSON schema; you render it into the page (here, the prompt) as text, with instructions on how to fill it. The model is the user filling the form, and like any HTML form, nothing stops the user from submitting garbage.
+
+```
+Outbound: each tool → JSON block in the system text
+  request.tools = [search_knowledge_base]
+     │  JSON.stringify({name, description, input_schema})
+     ▼
+  system prompt += 
+    "You can call the following tools:
+     { "name": "search_knowledge_base",
+       "input_schema": { ... required: ["query"] ... } }
+     When a tool is needed, respond with ONLY a single JSON object:
+     {"tool": "<tool name>", "arguments": { ...arguments... }}"
+```
+
+Real code, `aptkit packages/providers/gemma/src/gemma-provider.ts:133`:
 
 ```ts
-// aptkit packages/providers/gemma/src/gemma-provider.ts:137-162 (buildSystemText, condensed)
-const rendered = request.tools.map((tool) => JSON.stringify({
-  name: tool.name, description: tool.description ?? '', input_schema: tool.inputSchema,
-}, null, 2)).join('\n\n');
-parts.push([
-  'You can call the following tools:', '', rendered, '',
-  'When a tool is needed, respond with ONLY a single JSON object, no prose:',
-  '{"tool": "<tool name>", "arguments": { ...arguments... }}',
-  'Otherwise, answer the user directly in natural language.',
-].join('\n'));
+function buildSystemText(request: ModelRequest): string {
+  const parts: string[] = [];
+  if (request.system) parts.push(request.system);
+
+  if (request.tools?.length) {
+    const rendered = request.tools
+      .map((tool) =>
+        JSON.stringify({
+          name: tool.name,
+          description: tool.description ?? '',
+          input_schema: tool.inputSchema,        // ← the schema goes IN as text...
+        }, null, 2),
+      )
+      .join('\n\n');
+    parts.push([
+      'You can call the following tools:', '', rendered, '',
+      'When a tool is needed, respond with ONLY a single JSON object, no prose:',
+      '{"tool": "<tool name>", "arguments": { ...arguments... }}',
+      'Otherwise, answer the user directly in natural language.',
+    ].join('\n'));
+  }
+  return parts.join('\n\n');
+}
 ```
 
-So the model *sees* the schema — including that the search tool requires `query` (`search-knowledge-base-tool.ts:53-76` declares `required: ['query']`). But "sees" is not "is bound by."
+The consequence: the schema is *advisory*. It's a description in the prompt, not a contract the runtime enforces. The model reads `required: ["query"]` as a suggestion. That's the setup for the hole; hold it.
 
-**Step 2 — the model's text reply is parsed back into a tool-call.** This is the inbound half of the emulation. `parseToolCall` runs `parseAgentJson` (a fenced-or-bounded-substring JSON scan) and extracts name + input, accepting several key aliases.
+#### Inbound: hand-parsing the model's text (`parseToolCall` → `parseAgentJson`)
+
+Bridge: you've done this. A `fetch()` that returns text you have to `JSON.parse`, except the server sometimes wraps it in a code fence or pads it with prose, so you scan for the braces. That's exactly `parseAgentJson` — a forgiving parser for an unreliable producer.
+
+```
+Inbound: dig a JSON object out of messy text
+  raw model text
+     │ parseAgentJson
+     ├─ try: fenced ```json ... ``` block?  → JSON.parse
+     ├─ else: bounded { ... } substring scan → JSON.parse
+     └─ else: throw "no parseable json"
+     ▼
+  parseToolCall: name = tool | name | tool_name
+                 input = arguments | input | args
+     ▼  (name is string? input is object?)
+  { name, input }    ← or null (not a tool call → treat raw as prose)
+```
+
+Real code, the parser, `aptkit packages/runtime/src/json-output.ts:7`:
 
 ```ts
-// aptkit packages/providers/gemma/src/gemma-provider.ts:168-182 (parseToolCall)
-function parseToolCall(text: string) {
-  let parsed; try { parsed = parseAgentJson(text); } catch { return null; }
+export function parseAgentJson(text: string): unknown {
+  const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  const candidate = (fence ? fence[1] : text).trim();
+  try { return JSON.parse(candidate); } catch { /* fall through */ }
+
+  const objectStart = candidate.indexOf('{');
+  const arrayStart = candidate.indexOf('[');
+  const starts = [objectStart, arrayStart].filter((index) => index >= 0);
+  const start = starts.length > 0 ? Math.min(...starts) : -1;
+  const end = Math.max(candidate.lastIndexOf('}'), candidate.lastIndexOf(']'));
+  if (start >= 0 && end > start) return JSON.parse(candidate.slice(start, end + 1));
+  throw new Error('no parseable json in model output');
+}
+```
+
+And the call extraction, `aptkit packages/providers/gemma/src/gemma-provider.ts:168`:
+
+```ts
+function parseToolCall(text: string): { name: string; input: Record<string, unknown> } | null {
+  let parsed: unknown;
+  try { parsed = parseAgentJson(text); } catch { return null; }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
   const obj = parsed as Record<string, unknown>;
-  const name  = obj.tool ?? obj.name ?? obj.tool_name;      // name aliases tolerated
-  const input = obj.arguments ?? obj.input ?? obj.args;     // arg-object aliases tolerated
+  const name = obj.tool ?? obj.name ?? obj.tool_name;     // ← lenient: 3 spellings for the name
+  const input = obj.arguments ?? obj.input ?? obj.args;   // ← lenient: 3 spellings for the args
   if (typeof name !== 'string') return null;
   if (!input || typeof input !== 'object' || Array.isArray(input)) return null;
-  return { name, input: input as Record<string, unknown> };  // ← input returned AS-IS
+  return { name, input: input as Record<string, unknown> };   // ← input passed through UNCHECKED
 }
 ```
 
-Read the last line carefully. The `input` object is returned **as-is**. There's no check that `input.query` exists, no check against the declared `input_schema`. The emulation validates the *envelope* (is it an object with a string name and an object input?) and nothing about the *contents*.
+Read that last line slowly. `input` is checked to be *an object*. It is **never** checked against `input_schema`. Whatever keys the object has, that's what `callTool` gets.
 
-**Step 3 — the registry dispatches without validating args.** `InMemoryToolRegistry.callTool` looks up the handler by name and calls it with the raw args.
+#### The one retry: a single corrective nudge (`RETRY_NUDGE`)
+
+Bridge: an optimistic retry with a hint, like re-fetching once with a corrected header. One shot, not a loop.
+
+```
+The retry budget (one nudge, then give up)
+  attempt 0:  complete(baseMessages)
+     │  parseToolCall → call?  → return it
+     │  no call, but looksLikeToolAttempt (text contains '{')?
+     ▼  yes → attempt 1
+  attempt 1:  complete(baseMessages + RETRY_NUDGE)
+     │  parseToolCall → call?  → return it
+     ▼  still no → fall through, treat raw text as the answer (prose)
+```
+
+Real code, `aptkit packages/providers/gemma/src/gemma-provider.ts:62`:
 
 ```ts
-// aptkit packages/tools/src/tool-registry.ts:50-63 (callTool)
-async callTool(name, args, options?) {
-  const handler = this.handlers.get(name);
-  if (!handler) throw new Error(`tool not found: ${name}`);   // ← name IS checked
-  const start = performance.now();
-  const result = await handler(args, options);                // ← args NOT checked
-  return { result, durationMs: Math.round(performance.now() - start) };
+for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+  const messages = attempt === 0
+    ? baseMessages
+    : [...baseMessages, { role: 'user', content: RETRY_NUDGE }];   // ← corrective hint on retry
+  lastResponse = await this.chat({ model: this.defaultModel, messages, stream: false, ... });
+  raw = lastResponse.message?.content ?? '';
+
+  if (wantsTool) {
+    const call = parseToolCall(raw);
+    if (call) return this.toResponse([{ type: 'tool_use', ... }], lastResponse);
+    if (looksLikeToolAttempt(raw)) continue;   // ← only retry if it LOOKED like a botched call
+  }
+  break;
 }
+return this.toResponse([{ type: 'text', text: raw }], lastResponse);   // ← give up → prose
 ```
 
-**Step 4 — the handler defensively coerces a missing arg to empty.** And here's where the failure becomes silent. The search tool's handler reads `args.query`, and if it isn't a string, uses `''`.
+`maxToolCallAttempts` defaults to 2, so there is exactly *one* retry. The `looksLikeToolAttempt` check (does the text contain a `{`?) is a cheap heuristic: if the model wrote prose with no brace, that's a real answer, don't retry. If it wrote a malformed `{`, nudge once. After that, malformed JSON becomes the user's "answer" — prose where a tool call should have been.
+
+### Move 2.5 — current vs future
+
+```
+Where validation could live (current ✗ / future ✓)
+  parseToolCall returns { name, input }
+     │
+  ✗ current:  input → callTool                  (no check)
+  ✓ future:   input → validate(input, schema)?  (Ajv / hand-rolled)
+                 │ ok    → callTool
+                 └ fail  → RETRY_NUDGE with the specific error, OR reject
+```
+
+Today the parsed call goes straight to `callTool`. The natural place to close the hole is *between* `parseToolCall` and the returned `tool_use` block: validate `input` against `input_schema`, and on failure either reject (so the model retries) or pass the schema error back as the nudge. Native providers do this for free. The emulated path has to do it by hand, and currently doesn't.
+
+### Move 3 — the principle: THE RELIABILITY CEILING
+
+State it without hedging: **the emulated tool-calling path performs no argument-schema validation, and that is the hard ceiling on buffr's reliability.**
+
+Here is the concrete failure. The search tool's schema declares `required: ["query"]`. Suppose `gemma2:9b` emits `{"tool":"search_knowledge_base","arguments":{"q":"my notes on X"}}` — the right *idea*, the wrong *key* (`q` not `query`). `parseToolCall` sees a string name and an object input, returns it as valid. `callTool` invokes the handler. The handler, `aptkit packages/retrieval/src/search-knowledge-base-tool.ts:79`, does:
 
 ```ts
-// aptkit packages/retrieval/src/search-knowledge-base-tool.ts:78-82 (handler)
-const query = typeof args.query === 'string' ? args.query : '';   // ← wrong key → ''
-const requestedTopK = typeof args.top_k === 'number' && args.top_k > 0 ? args.top_k : defaultTopK;
-const topK = Math.max(requestedTopK, minTopK);                    // buffr sets minTopK: 4
-let hits = await pipeline.query(query, fetchK);                   // search over ''
+const query = typeof args.query === 'string' ? args.query : '';   // ← args.query is undefined → ''
 ```
 
-Now trace the consequence concretely: the model emits `{"tool":"search_knowledge_base","arguments":{"q":"how do I take coffee"}}`. `parseToolCall` returns `{name:"search_knowledge_base", input:{q:"..."}}`. `callTool` finds the handler (name is valid) and calls it. The handler reads `args.query` → undefined → `''`. `pipeline.query('', 4)` embeds the empty string and returns whatever four chunks are nearest to the embedding of nothing. The trace shows a clean `tool_call_start` / `tool_call_end`, the loop continues, and the model answers from garbage. **No error anywhere.** That's the ceiling.
+So `query` becomes the **empty string**. The pipeline embeds `''`, pgvector returns whatever the empty-string vector is nearest to — noise, top-of-corpus, garbage — and the model synthesizes an answer over irrelevant chunks. No error is thrown. No retry fires (the JSON *was* valid JSON). The user gets a confident, wrong answer, and nothing in the trace says "the argument was malformed."
 
 ```
-  the failure trace — every layer reports success
-
-  model: {"arguments":{"q":"..."}}   ← wrong key (model's mistake)
-    │ parseToolCall → {input:{q:"..."}}        ✓ valid envelope
-    │ callTool("search_knowledge_base", {q})   ✓ name found
-    │ handler: args.query → undefined → ''      ✓ no throw
-    │ pipeline.query('', 4)                     ✓ returns 4 chunks
-    ▼
-  answer grounded in noise   ← the ONLY symptom, and it's invisible to the trace
+The empty-query failure, start to finish
+  model emits {"arguments":{"q":"..."}}   ← wrong key, valid JSON
+     │  parseToolCall: name ok, input is an object → ACCEPTED
+     ▼
+  callTool(search_knowledge_base, {q:"..."})
+     │  handler: args.query is undefined → query = ""
+     ▼
+  pipeline.query("")  → pgvector nearest-to-empty → noise chunks
+     ▼
+  model synthesizes over noise → confident wrong answer, NO error
 ```
 
-### Move 2 variant — the load-bearing skeleton
-
-The kernel of emulated tool-calling: **render schema as prompt text → parse JSON from reply → dispatch by name.** What's missing that breaks reliability: **validate the parsed args against the schema before dispatch.**
-
-- Without the render step → the model doesn't know the tool exists.
-- Without the parse step → you can't turn text into an action.
-- Without **arg validation** → wrong keys become empty searches silently. This is the part buffr inherits as a gap; aptkit is consumed, not edited, so the fix is a buffr-side wrapper.
-
-### Move 2.5 — current state vs future state
-
-```
-  Phase A (today)                    Phase B (the fix, buffr-side wrapper)
-  ─────────────                      ────────────────────────────────────
-  parse {name, input}                parse {name, input}
-  dispatch input as-is               validate input vs inputSchema
-  wrong key → '' → empty search      wrong key → throw → loop retries with
-  silent garbage answer                the error as an observation
-```
-
-The migration cost is small and lives entirely in buffr: wrap `createSearchKnowledgeBaseTool`'s handler (or the registry) to assert `required` keys are present before calling `pipeline.query`, and on a miss, return a tool *error* so the loop's error-recovery (`06-error-recovery.md`) re-prompts. What doesn't change: the agent loop, the provider, the schema. You only add a gate.
-
-### Move 3 — the principle
-
-The model is the brain, the tool is the hands — but on an emulated provider, the wire between them is untyped. Any time you call tools on a model without a native tool API, *you* own the validation the provider would otherwise do. Skipping it doesn't fail loudly; it fails as quietly degraded retrieval, which is the worst kind of bug because no exception ever fires.
+A native provider rejects `{q:"..."}` because it violates `required:["query"]` — you never reach the tool. The emulated path sails right through. That asymmetry is the ceiling: buffr can be no more reliable than `gemma2:9b`'s ability to spell `query` correctly, every single time, with nothing catching it when it doesn't.
 
 ## Primary diagram
 
-```
-  buffr tool-calling — full path with the missing gate marked
+The full emulated round trip, with the hole marked.
 
-  loop ─► model.complete(system + rendered schema, tools)
-            │
-            ▼  free text
-        parseAgentJson → parseToolCall → {name, input}
-            │                                 │
-       name checked ✓                    input UNCHECKED ✗  ◄── the gap
-            ▼
-        callTool(name, input)
-            ▼
-        handler: query = args.query ?? ''   ◄── coerces miss to empty
-            ▼
-        pipeline.query(query, max(top_k, minTopK=4))
-            ▼
-        ranked chunks ─► back to loop as observation
+```
+Emulated tool calling, end to end (★ = the missing check)
+  loop wants a tool
+     │ toolSchemas
+     ▼
+  ┌─ GemmaModelProvider.complete ───────────────────────────────┐
+  │  OUTBOUND  buildSystemText: schemas → JSON in system prompt   │
+  │     │                                                         │
+  │     ▼  chat to Ollama /api/chat                               │
+  │  raw text  ← model, asked to emit JSON                        │
+  │     │                                                         │
+  │  INBOUND   parseAgentJson (fence → brace scan)                │
+  │     │      parseToolCall (lenient name/arg keys)              │
+  │     │                                                         │
+  │     ├─ valid call?  ── yes ──►  ★ NO SCHEMA CHECK ──► tool_use│
+  │     │                                                         │
+  │     └─ no, looks like attempt? ── yes ── RETRY_NUDGE (once)   │
+  │                                  no ──── return as prose      │
+  └──────────────────────────────────────────────────────────────┘
+     │
+     ▼
+  callTool(name, input)   ← input trusted as-is
 ```
 
 ## Elaborate
 
-Native tool-calling (function calling) was introduced precisely to kill this class of bug — the provider constrains the output to the schema. buffr can't use it because Gemma via Ollama doesn't expose one, so aptkit reconstructs the protocol in user space. This is a completely standard pattern for open local models, and it's a great thing to have built — but the honest framing is that emulation moves the validation burden onto the application, and buffr hasn't picked it up yet. The structured-output discipline (`../01-llm-foundations/04-structured-outputs.md`) is the same lesson from the output side.
+Why emulate at all, instead of swapping to a model with native tool calling? Because the constraint is *local and free*. buffr's whole premise is a private RAG agent that runs on your laptop with no API bill and no data leaving the machine. `gemma2:9b` is the price of that premise. The emulation is the bridge between "local model that only does chat" and "an agent loop that needs structured calls." It's a reasonable bridge — and the missing validation is the toll you haven't paid yet.
+
+The lenient parsing (`tool | name | tool_name`, `arguments | input | args`) is a deliberate counterweight: since the model is unreliable about *format*, the parser is generous about format. That's correct. But generosity about *format* must not become generosity about *content*. Accepting three spellings of the key `tool` is fine. Accepting an arguments object that doesn't match the schema is the bug. The fix isn't to make parsing stricter — it's to add a *separate* validation step after parsing.
+
+One more honest note: `parseAgentJson`'s brace scan (`indexOf('{')` to `lastIndexOf('}')`) is a substring grab, not a balanced-brace parser. If the model emits two JSON objects, or a `{` inside a string before the real object, the scan can slice the wrong span. It's good enough for a single-object reply and it's the pragmatic choice — but it's another place where "good enough for the common case" is doing load-bearing work.
 
 ## Project exercises
 
-> No curriculum file present; exercises derived from the codebase.
+### Validate parsed tool arguments against the schema before calling the tool
 
-### Validate tool args before dispatch
+- **Exercise ID:** [B4.3], Phase 4 (the primary exercise for this concept — Case B: this is the unbuilt feature that defines the file).
+- **What to build:** Between `parseToolCall` returning a call and `complete` returning the `tool_use` block, validate `input` against the tool's `input_schema`. On failure, do not return the call — instead trigger the retry with a *specific* nudge naming the missing/wrong key. After the retry budget, surface a typed error rather than a silent empty-query search.
+- **Why it earns its place:** This closes the single biggest reliability hole in the codebase — the no-arg-validation ceiling. It converts "confident wrong answer over noise" into "model gets told exactly what it got wrong and tries again." It's the difference between an emulated path that *resembles* native tool calling and one that *behaves* like it.
+- **Files to touch:** `aptkit packages/providers/gemma/src/gemma-provider.ts` (add validation in `complete` after `parseToolCall`), `aptkit packages/runtime/src/json-output.ts` (reuse/extend `parseValidatedJson` with a JSON-schema validator), optionally a small Ajv dependency or a hand-rolled `required`-keys check.
+- **Done when:** `{"arguments":{"q":"..."}}` no longer reaches `callTool` with an empty query — it either retries with a key-specific nudge or returns a typed validation error. Covered by a unit test feeding a wrong-key call and asserting no empty-string search occurs.
+- **Estimated effort:** 3–5 hours.
 
-- **Exercise ID:** TOOL-1 (Case B — validation not yet exercised). **The highest-leverage exercise in this guide.**
-- **What to build:** a buffr-side wrapper around the search tool handler that checks `inputSchema.required` keys are present and correctly typed; on a miss, return a tool error instead of searching `''`.
-- **Why it earns its place:** turns a silent reliability ceiling into a loud, recoverable error — exactly the "I found and fixed my agent's quiet failure mode" story interviewers want.
-- **Files to touch:** `src/session.ts:43-44` (wrap `tool.handler` before registering), or a new `src/validated-tool.ts`.
-- **Done when:** a forced wrong-key tool-call produces a tool error in the trace and a loop retry, verified by a test.
-- **Estimated effort:** 1–4hr.
+### Make the brace scan balanced-brace aware
 
-### Log emulation parse failures
-
-- **Exercise ID:** TOOL-2 (Case A — observability of the emulation).
-- **What to build:** persist a `warning` trace event whenever `parseToolCall` returns null mid-loop (the model emitted prose where a tool-call was expected) so you can measure emulation reliability.
-- **Why it earns its place:** quantifies how often Gemma's emulation actually misfires — a number you can put on a slide.
-- **Files to touch:** `src/supabase-trace-sink.ts` (already handles `warning` events — surface them), and a count in `eval` tooling.
-- **Done when:** the eval run reports an emulation-miss rate.
-- **Estimated effort:** 1–4hr.
+- **Exercise ID:** [B4.4], Phase 4.
+- **What to build:** Replace the `indexOf('{')` / `lastIndexOf('}')` span grab in `parseAgentJson` with a balanced-brace scanner that returns the first complete top-level object, ignoring braces inside strings.
+- **Why it earns its place:** The current scan silently mis-slices when the model emits prose-with-braces or multiple objects. A balanced scanner removes a whole class of "valid JSON parsed from the wrong span" bugs that are invisible until they bite.
+- **Files to touch:** `aptkit packages/runtime/src/json-output.ts`.
+- **Done when:** A reply like `Here is the call: {"tool":"x","arguments":{"query":"a {b} c"}} thanks` parses to the correct object, verified by a unit test, and existing tests still pass.
+- **Estimated effort:** 2–3 hours.
 
 ## Interview defense
 
-**Q: How does buffr call tools if Gemma has no tool API?**
-Answer: aptkit emulates it — renders the tool's JSON schema into the system prompt, instructs the model to reply with a single JSON object, then parses that object back out of the free text with `parseToolCall`. It's the standard pattern for local models without function-calling.
+**Q: "How does tool calling work with a model that has no native tool support?"**
 
-**Q: What's the reliability ceiling, and how would you raise it?**
-Answer: there's no argument-schema validation. The tool *name* is checked, but the arguments are passed straight to the handler, which coerces a missing `query` to the empty string — so a wrong key (`q` vs `query`) becomes a search over `''` with no error anywhere. **The load-bearing part everyone forgets is validating the parsed args against the schema before dispatch.** The fix is a buffr-side handler wrapper that throws on missing required keys, turning a silent failure into a recoverable tool error.
+Emulation. The provider renders each tool's schema into the system prompt as JSON and instructs the model to reply with a single JSON object `{"tool":..., "arguments":...}`. Inbound, it hand-parses that out of the text — fenced block first, then a brace scan — and is lenient about key spelling. If it parses, it becomes a `tool_use` block the loop runs.
 
 ```
-  the one-liner:  name validated ✓  ·  args validated ✗  →  wrong key = empty search, silently
+  schemas → prompt (out)   |   text → parseAgentJson → tool_use (in)
 ```
+
+*Anchor: the model never sees a tools array — it sees instructions and JSON in its system text.*
+
+**Q: "What's the reliability ceiling of that design?"** — the part people forget.
+
+There is **no argument-schema validation** on the parsed call. The schema says `required:["query"]`, but nothing enforces it. If the model emits `{"q":"..."}` instead of `{"query":"..."}`, the call is accepted, the handler coerces the missing `query` to an empty string, pgvector returns noise, and the user gets a confident wrong answer with no error and no retry. A native provider rejects the bad args before you ever see them; the emulated path passes them straight through. That asymmetry is the ceiling — buffr is only as reliable as the model's spelling, with nothing catching the misses.
+
+```
+  {"q":"..."} → ACCEPTED (object) → query="" → search noise → wrong answer, no error
+```
+
+*Anchor: the schema is advisory text in a prompt, not a contract the runtime enforces — the missing check is the whole reliability story.*
 
 ## See also
 
-- `01-agents-vs-chains.md` — the loop that runs this contract.
-- `06-error-recovery.md` — where a validated tool-error would be recovered.
-- `../01-llm-foundations/04-structured-outputs.md` — the same validation lesson, output side.
-- `../05-evals-and-observability/04-llm-observability.md` — why the trace doesn't catch this today.
+- **`01-agents-vs-chains.md`** — the loop that calls `model.complete` and feeds the `tool_use` result back.
+- **`03-react-pattern.md`** — what happens on the forced-final turn when tools are stripped (`forceFinal`).
+- **`06-error-recovery.md`** — what a *thrown* tool error does (becomes an observation) vs the silent empty-query case this file describes (no throw at all).
+- **`../01-llm-foundations/`** — structured output and why local models are unreliable producers of it.

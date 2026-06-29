@@ -1,216 +1,381 @@
-# RAG — Retrieval-Augmented Generation
+# Retrieval-Augmented Generation
 
-*Industry standard. The core pattern of buffr.*
+### *industry: retrieval-augmented generation (RAG) · type: the full pipeline that grounds an LLM in retrieved evidence*
 
-## Zoom out, then zoom in
+## Zoom out
 
-Okay — pull up the whole stack and find where RAG lives. It isn't one box; it's the wiring between the agent and storage that lets a model answer from data it was never trained on.
+This is the file every other file in this sub-section was building toward. Embeddings, chunking, the vector store, the search tool — they're all components of *one machine*: a pipeline that retrieves evidence and forces the model to answer from it. This is buffr's whole reason to exist.
+
+**buffr's retrieval stack, RAG as the assembled whole**
 
 ```
-  Zoom out — where RAG sits
-
-  ┌─ Agent layer (aptkit) ──────────────────────────────────────┐
-  │  RagQueryAgent.answer() — the loop that calls the tool       │
-  └───────────────────────────┬─────────────────────────────────┘
-                              │  search_knowledge_base(query)
-  ┌─ Retrieval layer ─────────▼─────────────────────────────────┐
-  │  ★ RAG: embed query → ANN search → return ranked chunks ★    │ ← we are here
-  │  createRetrievalPipeline({ embedder, store })                │
-  └──────────────┬──────────────────────────┬───────────────────┘
-                 │ embed (768-dim)          │ search(vector, k)
-  ┌─ Provider ───▼───────────┐  ┌─ Storage ──▼──────────────────┐
-  │ nomic-embed-text:v1.5    │  │ pgvector, HNSW cosine          │
-  │ (Ollama, 768-dim)        │  │ agents.chunks                  │
-  └──────────────────────────┘  └───────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│  ★ RAG PIPELINE ★       retrieve-then-generate, grounded      │  ◄── this file
+│  ┌──────────────────────────────────────────────────────────┐│
+│  │ RagQueryAgent  "search first, ground every answer, cite"  ││
+│  ├──────────────────────────────────────────────────────────┤│
+│  │ search_knowledge_base  ranked chunks + citations          ││
+│  ├──────────────────────────────────────────────────────────┤│
+│  │ PgVectorStore  cosine top-k over agents.chunks            ││
+│  ├──────────────────────────────────────────────────────────┤│
+│  │ embeddings · chunker · index path                         ││
+│  └──────────────────────────────────────────────────────────┘│
+└──────────────────────────────────────────────────────────────┘
 ```
 
-You already see RAG as a shape: retrieve → augment → generate. What buffr adds is that the "augment" step is a *tool the model chooses to call*, not a fixed pre-fetch. The model decides it needs the knowledge base, calls `search_knowledge_base`, and the retrieved chunks come back as the tool result that grounds its next turn. So buffr's RAG is **agentic** — retrieval is inside the loop, not bolted on in front of it.
+You've shipped RAG before, so the *shape* — retrieve, stuff into prompt, generate — lands in one breath. This file slows down hard on the mechanism buffr uses to make it *trustworthy*: the grounding contract, the agent loop's turn budget, citations as a verifiability seam, and the fallback that makes "I don't know" a first-class answer.
 
 ## Structure pass
 
-Before the mechanics, read the skeleton. Three layers, one axis traced across them, and the seam where it flips.
+The axis is **where the answer's facts come from**: the model's weights (parametric memory) vs. the retrieved chunks (non-parametric evidence). The seam is the grounding instruction that flips the model from "recall" to "read."
 
-**Layers:** agent (decides to retrieve) → retrieval pipeline (embeds + searches) → storage (pgvector ANN).
-
-**Axis traced — "who decides what gets into the model's context?"**
+**Parametric recall vs. retrieved grounding**
 
 ```
-  one axis: who decides the context content?
-
-  ┌─ agent ────────────────┐   the LLM decides WHETHER to retrieve
-  │  LLM emits a tool call  │   (it can also just answer cold)
-  └────────────┬───────────┘
-               │  seam: free-text → structured query
-  ┌─ pipeline ─▼───────────┐   the EMBEDDER decides WHAT is "similar"
-  │  embed → ANN → rank     │   (geometry, not the LLM)
-  └────────────┬───────────┘
-               │  seam: vector → SQL ANN scan
-  ┌─ storage ──▼───────────┐   the INDEX decides which k rows return
-  │  HNSW cosine top-k      │   (approximate, not exact)
-  └────────────────────────┘
+   PLAIN LLM                          RAG (buffr)
+   ─────────                          ───────────
+   answer from weights                answer from retrieved chunks
+   "knows" coffee in general          knows YOUR coffee from coffee.md
+   no source, can hallucinate         cited, refusable, verifiable
+   ┌──────────────────┐               ┌──────────────────────────────┐
+   │ question → model │   ──seam──►    │ question → SEARCH → chunks    │
+   │        → answer  │               │ → model grounded in chunks    │
+   └──────────────────┘               │ → cited answer / "I don't know"│
+                                       └──────────────────────────────┘
+        the seam: "search first, ground every answer, cite, or say you can't"
 ```
 
-**The seam that matters:** the agent→pipeline boundary, where the model's free text becomes a structured `{query}` argument. That's exactly where Gemma's tool-call emulation can drop the ball (wrong key → empty query). The whole RAG quality story hinges on that one contract. Hold that; `04-agents-and-tool-use/02-tool-calling.md` walks it in full.
+Before the seam: the model answers from what it absorbed in training — general, sourceless, prone to confident invention. After the seam: the model is *instructed and structured* to retrieve first and answer only from what it found. Consequence: buffr can answer questions about *your private notes* (which no training run ever saw) and, crucially, *refuse* when the notes don't contain the answer — the difference between a knowledge assistant and a confident liar.
 
 ## How it works
 
-### Move 1 — the mental model
+### Move 1 — Mental model: an open-book exam with a citation rule
 
-You know how a `fetch()` in a component pulls fresh data the component didn't have at build time, and then you render with it? RAG is that for an LLM. The model's training is the build-time bundle — frozen, generic. Retrieval is the `fetch()` — it pulls *your* data at request time so the answer is grounded in something specific the model never saw.
+A plain LLM is a closed-book exam — answer from memory, no sources, bluff when unsure. RAG is an open-book exam with one extra rule: *you must quote the book, and if the book doesn't cover it, you say so.* The retrieval is "open the book to the right page"; the grounding prompt is the rule "answer only from the page, and cite it."
+
+**RAG as a graded open-book exam**
 
 ```
-  the RAG kernel — three moves
-
   question
-    │
-    ▼  (1) RETRIEVE   embed query, ANN search pgvector
-  [chunk] [chunk] [chunk]          ← the fresh, private data
-    │
-    ▼  (2) AUGMENT    stuff chunks into the prompt as tool result
-  system + profile + chunks + question
-    │
-    ▼  (3) GENERATE   model answers FROM the chunks
-  answer (grounded, citable)
+     │ 1. open the book ──► search_knowledge_base ──► relevant chunks
+     ▼
+  evidence in hand
+     │ 2. answer from the evidence (grounding rule)
+     ▼
+  cited answer        OR    "the book doesn't cover that" (fallback)
+     │
+     ▼ 3. citations let a grader CHECK the answer against the source
 ```
 
-The kernel is those three moves. Strip any one and it stops being RAG: no retrieve → the model guesses from training; no augment → the chunks never reach the model; no generate → you have search, not an answer.
+Frontend bridge: it's a data-fetch-then-render component. You don't render from stale local state — you fetch the current data, render *from the response*, and show an empty state when the fetch returns nothing. RAG is fetch-then-render for facts, with citations as the "view source" link and the fallback as the empty state.
 
-### Move 2 — the step-by-step walkthrough
+### Move 2 — Walk the mechanism
 
-**Step 1 — the pipeline is wired once, with a dimension assertion.** buffr builds the retrieval pipeline by handing aptkit an embedder and a store. The dimension is asserted at construction so an index/query mismatch can't slip through silently.
+This is the centerpiece, so we walk it in full: the index path, the query path, the grounding contract, the loop budget, citations, and the fallback. Six parts, each a diagram.
 
-```ts
-// src/session.ts:40-42
-const embedder = new OllamaEmbeddingProvider({ model: 'nomic-embed-text:v1.5', host: cfg.ollamaHost });
-const store = new PgVectorStore({ pool, appId: cfg.appId, dimension: embedder.dimension }); // 768
-const pipeline = createRetrievalPipeline({ embedder, store });
+**Part A — The index path (offline): doc → chunk → embed → store**
+
+Before any question can be answered, the corpus must become searchable vectors. This runs offline, once per doc, via `npm run index`.
+
+**Index path**
+
+```
+  file.md
+     │ readFile ; id = basename
+     ▼ indexDocumentRow
+  documents row (source of truth) ──► pipeline.index({id, text})
+     │ chunkText (512/64)
+     ▼ embedder.embed(chunks)  → 768-dim vectors
+  chunks: { id: "<docId>#<i>", vector, meta:{docId, chunkIndex, text} }
+     │ store.upsert (txn, on conflict do update)
+     ▼
+  agents.chunks  (searchable)
 ```
 
-aptkit's `createRetrievalPipeline` calls `assertWiring(wiring)` on both the index and query paths (`packages/retrieval/src/pipeline.ts`), throwing if `embedder.dimension !== store.dimension`. This is the first of buffr's four defense-in-depth dimension checks — see `02-embedding-model-choice.md`.
+```ts
+// src/cli/index-cmd.ts:22-26 → src/runtime.ts:11-17 → aptkit pipeline.ts:32-47
+await indexDocumentRow(pool, cfg.appId, pipeline, { id: basename(path), text, sourcePath: path });
+// runtime: writes documents row, then pipeline.index → chunk → embed → upsert
+```
 
-**Step 2 — the query path: embed, search, return.** When the agent calls the tool, the pipeline embeds the query string into one 768-dim vector and hands it to the store's `search`.
+The index path writes *two* things: the authoritative `documents` row (full text, source path) and the searchable `chunks` (vectors + per-chunk text in `meta`). The documents row is the source of truth; the chunks are the searchable projection of it. Both carry the `docId` so a retrieved chunk can always name its parent document.
+
+**Part B — The query path (online): question → embed → search → chunks**
+
+At question time, the same embedder turns the query into a vector and the store returns the nearest chunks.
+
+**Query path**
+
+```
+  question
+     │ embedder.embed([question])  → 768-dim query vector
+     ▼ store.search(vector, k)
+  cosine top-k over agents.chunks  (where app_id, order by <=>)
+     │
+     ▼ Hit[] { id, score, meta:{docId, chunkIndex, text} }
+```
 
 ```ts
-// aptkit packages/retrieval/src/pipeline.ts:49-59  (queryKnowledgeBase)
-const [vector] = await wiring.embedder.embed([query]);
-if (!vector) return [];
+// aptkit pipeline.ts:50-58 — query path, same embedder as index
+const [vector] = await wiring.embedder.embed([query]);   // SAME model as index time
 return wiring.store.search(vector, topK);
 ```
 
-Note the boundary condition: if the embedder returns nothing, the pipeline returns `[]` — an empty retrieval, not an error. Downstream, an empty result becomes "no chunks to ground on," which is the *better* failure (the alternative is a confidently wrong answer).
+The non-negotiable invariant: the query is embedded with the *same* provider as the corpus (file 02's one-way door). Query path and index path meet in the same 768-dim space, or the search is noise. This is why the pipeline asserts `embedder.dimension === store.dimension` at wiring time.
 
-**Step 3 — the ANN search in pgvector.** buffr's `PgVectorStore.search` is where the geometry happens. The `<=>` operator is pgvector's cosine *distance*; similarity score is `1 - distance`.
+**Part C — The grounding contract (the system prompt)**
+
+Retrieval gets evidence into the prompt; the *grounding instruction* is what makes the model use it instead of its own memory. This is the load-bearing sentence of the whole system.
+
+**The grounding rule**
+
+```
+  SYSTEM PROMPT (RagQueryAgent):
+  ┌────────────────────────────────────────────────────────────┐
+  │ "Always call search_knowledge_base FIRST to retrieve        │
+  │  relevant passages before answering."        ◄── retrieve   │
+  │ "Ground every answer in the retrieved chunks and CITE       │
+  │  their sources."                             ◄── grounded   │
+  │ "If the knowledge base does not contain the answer, say so  │
+  │  plainly rather than guessing."              ◄── refusable  │
+  └────────────────────────────────────────────────────────────┘
+```
 
 ```ts
-// src/pg-vector-store.ts:67-85
-async search(vector: number[], k: number): Promise<Hit[]> {
-  this.assertDim(vector);                              // per-vector dimension guard
-  const { rows } = await this.pool.query(
-    `select id, content, chunk_index, document_id, meta,
-            1 - (embedding <=> $1::vector) as score    -- cosine similarity
-     from agents.chunks
-     where app_id = $2
-     order by embedding <=> $1::vector                 -- HNSW ANN, ascending distance
-     limit $3`,
-    [toVectorLiteral(vector), this.appId, k]);
-  return rows.map((r) => ({
-    id: r.id, score: Number(r.score),
-    meta: { ...(r.meta ?? {}), docId: r.document_id, chunkIndex: r.chunk_index, text: r.content },
-  }));
+// aptkit rag-query-agent.ts:20-27 — the grounding contract, verbatim shape
+const DEFAULT_SYSTEM_TEMPLATE = [
+  'You are a personal knowledge assistant.', '',
+  `Always call the ${SEARCH_KNOWLEDGE_BASE_TOOL_NAME} tool first to retrieve relevant`,
+  'passages before answering. Ground every answer in the retrieved chunks and cite',
+  'their sources. If the knowledge base does not contain the answer, say so plainly',
+  'rather than guessing.',
+].join('\n');
+```
+
+Three clauses, three jobs: *retrieve-first* (don't answer from memory), *ground-and-cite* (answer only from chunks, and show your work), *refuse-when-empty* (no guessing). Retrieval without this prompt is just context-stuffing — the model might still answer from its weights. The prompt is what converts retrieved chunks from *available* into *binding*.
+
+**Part D — The agent loop budget (`maxTurns:6`, `maxToolCalls:4`, forced synthesis)**
+
+The model doesn't get unlimited tries. The loop bounds how many turns and tool calls it gets, then *forces* a synthesis turn so it must produce an answer from what it retrieved.
+
+**The bounded loop**
+
+```
+  runAgentLoop:
+  turn 1 ──► model calls search_knowledge_base ──► chunks back
+  turn 2 ──► maybe searches again (refine)      ──► more chunks
+     …      (≤ maxToolCalls = 4 searches)
+  ───────────────────────────────────────────────────────
+  budget hit (≤ maxTurns = 6) ──► FORCED synthesis turn:
+     "Now answer directly and concisely, citing what you retrieved."
+     ▼
+  finalText
+```
+
+```ts
+// aptkit rag-query-agent.ts:66-80 — the budget and the forced synthesis
+const { finalText } = await runAgentLoop({
+  …, maxTurns: 6, maxToolCalls: 4,
+  synthesisInstruction: buildSynthesisInstruction(
+    'Now answer the question directly and concisely, citing the sources you retrieved.'),
+});
+```
+
+The budget exists because a weak local model can loop — search, search again, never commit. `maxToolCalls:4` caps the searching; `maxTurns:6` caps the total back-and-forth; the forced synthesis turn guarantees termination with an *answer* rather than an endless tool spiral. Bounded work, guaranteed output.
+
+**Part E — Citations (the verifiability seam)**
+
+Every retrieved chunk comes back with a citation string — the doc id plus a snippet — so the answer can be checked against its source.
+
+**Citation construction**
+
+```
+  Hit { meta: { docId: "coffee.md", text: "Espresso, oat milk, no sugar…" } }
+        │
+        ▼ toResult: snippet = text.slice(0,157)+"…" if long
+  citation = "[coffee.md] Espresso, oat milk, no sugar, every morning…"
+        │
+        ▼ returned to the model, who cites it in the answer
+  reader can now VERIFY: open coffee.md, check the claim
+```
+
+```ts
+// aptkit search-knowledge-base-tool.ts:108-117 — citation = [docId] + snippet
+function toResult(hit) {
+  const docId = typeof hit.meta.docId === 'string' ? hit.meta.docId : hit.id;
+  const text = typeof hit.meta.text === 'string' ? hit.meta.text : '';
+  const snippet = text.length > 160 ? `${text.slice(0, 157)}...` : text;
+  return { …, citation: snippet ? `[${docId}] ${snippet}` : `[${docId}]`, meta: hit.meta };
 }
 ```
 
-Two load-bearing details. First, `order by embedding <=> $1::vector` is what hits the HNSW index — without it the planner does a full scan. Second, the `meta` is *rebuilt* to the exact in-memory shape (`docId`, `chunkIndex`, `text`) so the `search_knowledge_base` tool's citation formatter works unchanged whether the store is in-memory or pgvector. That parity is deliberate: buffr is a drop-in `VectorStore` implementation.
+Citations are the difference between a black box and an auditable one. `[coffee.md] …` lets the reader (or an eval) trace each claim to a source chunk. This is *why* the schema preserves `docId` from index through search through tool result — citation granularity is built into every layer's data shape. Recall file 04: the store *rebuilds* `meta.docId` on search precisely so this citation works.
 
-**Step 4 — augment and generate.** The tool returns the ranked chunks; aptkit's tool handler formats them into a result the agent loop feeds back to the model as the next message. The model's next turn sees system prompt + profile + chunks + question, and answers. The "augment" is literally "the tool result is in the conversation now."
+**Part F — The fallback (refusal as a first-class answer)**
+
+If the loop produces nothing usable, buffr returns an explicit "I couldn't find it" rather than an empty string or a hallucination.
+
+**The fallback floor**
 
 ```
-  Layers-and-hops — one RAG turn
-
-  ┌─ Agent ──────┐  hop 1: search_knowledge_base({query})   ┌─ Pipeline ──┐
-  │ RagQueryAgent│ ────────────────────────────────────────►│ embed+search│
-  └──────▲───────┘  hop 4: [chunk,chunk,chunk] as result ◄── └──────┬──────┘
-         │                                              hop 2 │ vector
-         │ hop 5: generate answer from chunks                 ▼
-         │                                             ┌─ Storage ────────┐
-         └─────────────────────────────────────────── │ pgvector HNSW    │
-                       hop 3: top-k rows ◄──────────── │ agents.chunks    │
-                                                       └──────────────────┘
+  finalText.trim()  ──► empty?
+        │ no                    │ yes
+        ▼                       ▼
+  cited answer            FALLBACK_ANSWER:
+                          "I couldn't find anything in the
+                           knowledge base to answer that."
 ```
 
-### Move 3 — the principle
+```ts
+// aptkit rag-query-agent.ts:31, 82 — refusal beats a blank or a guess
+const FALLBACK_ANSWER = "I couldn't find anything in the knowledge base to answer that.";
+…
+return finalText.trim() || FALLBACK_ANSWER;
+```
 
-RAG is only as good as its retrieval. A perfect model over bad chunks gives a confident wrong answer; a mediocre model over the right chunks gives a correct one. That's why buffr measures *retrieval* (precision@k) before anything else — and why the unmeasured gap (faithfulness: did the model actually use the chunks?) is the real risk. The model is rarely the bug. The retrieval, or the model ignoring good retrieval, is.
+The fallback is the grounding contract's "say so plainly" made mechanical. A RAG system that *can't say no* will fabricate; buffr makes "no answer in the KB" an explicit, honest output. Refusal is a feature, not a failure — it's what keeps the system trustworthy when the corpus is silent.
+
+### Move 2.5 — Current vs. future
+
+**buffr is honest single-stage RAG: real grounding, no rewrite/rerank/hybrid (yet).**
+
+```
+  TODAY (solid core)                 NOT YET EXERCISED (named in this sub-section)
+  ──────────────────                 ─────────────────────────────────────────────
+  raw question → cosine top-k        query rewrite / HyDE  (08) — query side
+  single-stage ANN                   reranking             (07) — precision side
+  dense only                         hybrid + RRF          (05,06) — sparse side
+  grounding + citations + fallback   staleness / delta     (09,10) — freshness side
+  ┌──────────────────────────┐
+  │ the trustworthy core      │  ◄── these all PLUG INTO the same pipeline
+  │ works end-to-end          │       without changing the grounding contract
+  └──────────────────────────┘
+```
+
+The core — grounded, cited, refusable, bounded — is real and complete. The enhancements (rewrite, rerank, hybrid, freshness) are the *named gaps* of the other files, and every one of them slots into this same pipeline without touching the grounding contract. That's the architecture's payoff: the trustworthy core is stable, the quality levers are pluggable.
+
+### Move 2.6 — The above-threshold rule (when NOT to use RAG)
+
+**Don't add RAG where hand-picked retrieval already wins.**
+
+```
+  small, fixed, always-relevant context     large, dynamic, query-dependent corpus
+  ──────────────────────────────────────    ──────────────────────────────────────
+  the profile (me.md)                        the knowledge base (many docs)
+  ──► inject DIRECTLY into the prompt         ──► RAG: retrieve only what's relevant
+      (no search; it's always relevant)           (can't fit it all, varies per query)
+  ┌──────────────────────────┐               ┌──────────────────────────┐
+  │ deterministic, no recall  │               │ retrieval earns its cost  │
+  │ risk, no latency           │               │ because hand-pick can't    │
+  └──────────────────────────┘               └──────────────────────────┘
+```
+
+buffr demonstrates *both* answers in one system. The profile is small and relevant to every question, so it's injected directly at the start of the prompt (`injectProfile`, `src/session.ts:57`) — no retrieval, no recall risk. The knowledge base is large and query-dependent, so it gets RAG. The rule: RAG is for context you *can't* hand-pick because it's too big or too query-specific. If you can name the relevant context up front, inject it — retrieval is overhead you haven't earned.
+
+### Move 3 — The principle
+
+**RAG isn't "search plus an LLM" — it's a contract that the answer must come from retrieved, citable evidence or not be given.** The retrieval is the easy half; the grounding contract, the citations, the bounded loop, and the fallback are what make it *trustworthy*. buffr's core is a complete, honest implementation of that contract: it answers from your private corpus, shows its sources, and refuses when the corpus is silent. Every fancier retrieval technique in this sub-section is a quality upgrade *to the retrieval feeding this contract* — none of them change the contract itself. Get the contract right first; the levers come after.
 
 ## Primary diagram
 
-The full pipeline, both paths, one frame:
+The full RAG machine, index to grounded answer.
+
+**buffr's complete RAG pipeline**
 
 ```
-  buffr RAG — index path (offline) + query path (per turn)
-
-  INDEX (npm run index -- file.md)
-  ────────────────────────────────
-  file.md ─► indexDocumentRow ─► documents row (source of truth)
-                   │
-                   └─► pipeline.index() ─► chunk(512/64) ─► embed(768) ─► chunks
-                                                                              │
-  ════════════════════════════════════════════════════════════════ pgvector ╪══════
-                                                                              │
-  QUERY (agent tool-call)                                                     ▼
-  ────────────────────────                                          agents.chunks
-  question ─► embed(768) ─► search(vector,k) ─► HNSW cosine ─► top-k ─┘
-                                                       │
-                                                       ▼  1 - distance = score
-                                              [chunk,chunk,chunk] ─► augment ─► generate ─► answer
+  OFFLINE INDEX                          ONLINE QUERY
+  ─────────────                          ────────────
+  file.md                                user question
+   │ chunk(512/64)                        │
+   │ embed(768)                           │ ┌─ profile (me.md) injected at START
+   ▼                                      │ │  (above-threshold: hand-picked, no RAG)
+  agents.chunks ◄───── same 768 space ────┤ ▼
+   (vector + meta.docId)                  │ RagQueryAgent
+                                          │  grounding contract: search-first,
+                                          │  ground+cite, refuse-if-empty
+                                          ▼
+                              runAgentLoop (≤6 turns, ≤4 tool calls)
+                                          │ calls search_knowledge_base
+                                          ▼
+                              cosine top-k ──► chunks + citations "[docId] …"
+                                          │
+                                          ▼ forced synthesis turn
+                              answer grounded in chunks, cited
+                                          │
+                                          ▼ empty? ──► FALLBACK "couldn't find it"
+                              ───────────────────────────────────────────────
+                              trustworthy core; rewrite/rerank/hybrid/freshness
+                              all plug in WITHOUT changing the contract
 ```
+
+After the box: index and query meet in one 768-dim space; the contract turns retrieved chunks into a cited, refusable answer; and the whole thing has clean seams for every enhancement the other files describe.
 
 ## Elaborate
 
-RAG emerged because two facts about LLMs are permanent: they don't know your private data, and even public data they know is frozen at training time. Retrieval injects fresh, specific, private knowledge at request time without retraining. buffr's variant is *agentic* RAG — retrieval is a tool inside the agent loop rather than a fixed pre-fetch — which is strictly more flexible (the model can skip retrieval, or retrieve twice) and strictly harder to make reliable (the tool-call boundary is fragile under Gemma emulation).
-
-The above-threshold rule applies hard here: don't add RAG to features that work without it. buffr's corpus is small (a handful of markdown files), so a naive "stuff all docs" approach would also work at this scale. RAG earns its place the moment the corpus exceeds the context window — and it's the right architecture to grow into, which is why buffr builds it now even though the corpus is tiny.
+- **Retrieval-based memory rides the same pipeline.** buffr's conversation memory embeds each past exchange into the *same* store (tagged `kind=memory`, `src/session.ts:53`) so prior turns surface through the *same* `search_knowledge_base` tool. The RAG machine doubles as episodic memory — one retrieval path, two kinds of recall (knowledge + history).
+- **`minTopK:4` is a RAG-quality knob, not just a count.** buffr floors top-k at 4 (`src/session.ts:43`) so a weak model can't starve its own retrieval by asking for `top_k:1` on a multi-part question. Small enough to dodge lost-in-the-middle, large enough to cover compound questions.
+- **Least privilege: the agent can only search.** `ragQueryToolPolicy` grants exactly one tool — `search_knowledge_base`. The RAG agent can't write, can't call anything else. The grounding contract is enforced partly by *capability*, not just by prompt.
+- **Filters are hallucination-resistant.** `matchesFilter` only excludes hits that *have* the filter key with a different value (`search-knowledge-base-tool.ts:101-106`), so a weak model inventing a filter key can't wipe every result. Robustness baked into the retrieval boundary.
+- **The fallback is also an eval signal.** A rising fallback rate means the corpus has gaps or retrieval is missing — it's an observable health metric, not just a user-facing message.
 
 ## Project exercises
 
-> No `aieng-curriculum.md` is present in this repo, so Build-item IDs are not cited. Exercises are derived directly from the codebase and the spec's concept set.
+### Measure grounding faithfulness (do citations match claims?)
 
-### Render citations to the user
+- **Exercise ID:** [B2A.8] (cite [C2.10], Phase 2A) — Case A: RAG core is implemented. This is the *next step* — verify the grounding contract actually holds.
+- **What to build:** An eval that, for each answer, checks whether the cited `[docId]` chunks actually support the answer's claims (LLM-judge faithfulness, or string overlap against the cited chunk text). Track a faithfulness score and the fallback rate.
+- **Why it earns its place:** The grounding contract is *instructed* but not *measured* — you don't yet know how often gemma2:9b answers from chunks vs. its own memory. This turns "grounded" from a prompt into a number.
+- **Files to touch:** a new eval beside `src/cli/eval-cmd.ts` driving `RagQueryAgent` via `src/session.ts`; persist via `src/supabase-trace-sink.ts`.
+- **Done when:** A report shows faithfulness and fallback rate over `eval/queries.json`, and you can name any query where the answer drifts off its citations.
+- **Estimated effort:** 1–2 days.
 
-- **Exercise ID:** RAG-1 (Case A — RAG implemented; next step).
-- **What to build:** surface the retrieved chunk citations (already captured in `tool_results`) in the Ink TUI, so each answer shows which `docId#chunkIndex` it drew from.
-- **Why it earns its place:** "citations rendered, not just stored" is the difference between a demo and a trustworthy RAG product; interviewers probe for it.
-- **Files to touch:** `src/cli/chat.tsx`, `src/session.ts` (return citations alongside the answer), read from `agents.messages.tool_results`.
-- **Done when:** a chat answer displays its source chunks, and clicking/expanding shows the chunk text.
-- **Estimated effort:** 1–4hr.
+### Add a retrieval-quality gate to the loop (refuse on weak hits)
 
-### Add a relevance-threshold refusal
-
-- **Exercise ID:** RAG-2 (Case A — hardening).
-- **What to build:** if the top chunk's cosine score is below a threshold, have the agent refuse ("I don't have that in the knowledge base") instead of answering ungrounded.
-- **Why it earns its place:** "refuse rather than hallucinate" is the single most-probed RAG failure mitigation.
-- **Files to touch:** the tool handler wiring in `src/session.ts:43` (wrap or configure `createSearchKnowledgeBaseTool`), possibly a small post-retrieval check.
-- **Done when:** a query with no relevant doc yields a refusal, verified by an eval case.
-- **Estimated effort:** 1–4hr.
+- **Exercise ID:** [B2A.9] (cite [C2.10], Phase 2A) — Case A: builds on the fallback to make refusal smarter.
+- **What to build:** Before synthesis, check the top hit's cosine score against a threshold (measured in [B2A.2]); if everything is below it, short-circuit to the fallback instead of letting the model strain to answer from weak evidence.
+- **Why it earns its place:** Today the fallback only fires on an empty answer, not on *weak retrieval*. A score gate makes "the KB doesn't cover this" fire when it should — tightening the refuse-when-empty clause.
+- **Files to touch:** the retrieval-to-synthesis seam (`src/session.ts` / around the tool), using scores from `src/pg-vector-store.ts`.
+- **Done when:** A query with no good match returns the fallback via the score gate, and the eval confirms it doesn't regress good queries.
+- **Estimated effort:** 1 day.
 
 ## Interview defense
 
-**Q: What is RAG and why does buffr use it instead of just fine-tuning Gemma on the corpus?**
-Answer: RAG retrieves private data at request time and grounds the answer in it; fine-tuning bakes knowledge into weights. RAG wins for buffr because the corpus changes (re-index a file, retrieval updates instantly — no retraining), it's citable (the answer points at chunks), and it's cheap locally. Fine-tuning is buffr's *ceiling*, not its current move — and notably, buffr is already capturing the trajectory corpus a future fine-tune would need.
+**Q: "What makes buffr RAG and not just an LLM with search?"**
+
+The grounding contract. The system prompt forces three things: search first, answer only from retrieved chunks *and cite them*, and refuse plainly if the KB lacks the answer. Plus a bounded loop and a fallback. Retrieval feeds it; the contract makes the answer come from evidence, not the model's memory.
 
 ```
-  RAG vs fine-tune — the one-liner sketch
-  RAG:        weights frozen + fetch data at query time   → fresh, citable
-  fine-tune:  bake data into weights                       → stale, opaque
+  search-first ──► ground+cite ──► refuse-if-empty
+  retrieval = evidence ; contract = binding
 ```
 
-**Q: Where does buffr's RAG break, and how would you know?**
-Answer: at the tool-call seam — Gemma emulation has no arg-schema validation, so a wrong key (`q` instead of `query`) silently searches the empty string. You'd catch it with the precision@k eval *if* it covered the agent path, but `eval-cmd.ts` tests the pipeline directly, bypassing the agent — so today you wouldn't know from evals. The anchor: **the load-bearing part people forget is validating the tool argument before the search runs.**
+Anchor: *"The answer must come from the chunks, or not be given."*
+
+**Q: "When would you NOT use RAG?"**
+
+When the context is small, fixed, and always relevant — hand-pick it. buffr proves this: the profile is injected directly into the prompt (no search), the knowledge base gets RAG. Retrieval is for context too big or too query-specific to name up front. Otherwise it's overhead.
+
+```
+  always-relevant + small ──► inject directly
+  large + query-dependent ──► RAG
+```
+
+Anchor: *"RAG is for context you can't hand-pick."*
+
+**Q: "How does buffr stay trustworthy when it doesn't know?"**
+
+It refuses. The grounding prompt says "say so plainly rather than guessing," and the code backs it with a `FALLBACK_ANSWER` when the loop produces nothing. Citations let any claim be checked against its source. Refusal and verifiability are first-class, not afterthoughts.
+
+```
+  empty/weak ──► FALLBACK ; every claim ──► [docId] citation
+```
+
+Anchor: *"A RAG system that can't say no will lie."*
 
 ## See also
 
-- `01-embeddings.md` — what the 768-dim vector means geometrically.
-- `04-vector-databases.md` — pgvector, HNSW, the dropped FK.
-- `10-incremental-indexing.md` — the index path in detail.
-- `../04-agents-and-tool-use/02-tool-calling.md` — the fragile seam.
-- `../05-evals-and-observability/02-eval-methods.md` — why retrieval is measured but faithfulness isn't.
+- `./07-reranking.md`, `./08-query-rewriting-hyde.md`, `./05-dense-vs-sparse.md`, `./06-hybrid-retrieval-rrf.md` — the pluggable quality levers feeding this pipeline.
+- `./09-stale-embeddings.md`, `./10-incremental-indexing.md` — keeping the corpus this pipeline retrieves over fresh.
+- `../04-agents-and-tool-use/` — `runAgentLoop`, the turn budget, and least-privilege tool policy.
+- `../02-context-and-prompts/02-lost-in-the-middle.md` — `minTopK:4` and profile-at-start as window curation.
+- `../05-evals-and-observability/` — faithfulness, P@1/R@3, and fallback rate as RAG health metrics.

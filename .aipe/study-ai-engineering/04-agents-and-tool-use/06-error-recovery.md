@@ -1,310 +1,270 @@
-# Error recovery — agent failure modes and what stops them
+# Error Recovery — Failure as an Observation
+### *Tool throws become input, hard stops bound the rest, and the gaps that remain*
+**Type label:** agent resilience (fault handling)
 
-*Industry standard (agent robustness). buffr recovers from budget overruns, context overflow, and memory-write failures; it does NOT recover from wrong-arg tool calls — that gap is the headline.*
+## Zoom out
 
-## Zoom out, then zoom in
-
-An agent loop is a small machine that calls a flaky model and a flaky tool in a loop. Every layer can fail, and the question this file answers is: **when something goes wrong, does the loop catch it, contain it, and keep producing a useful answer — or does it fail silently?** buffr has three real recoveries and two named gaps, and the gaps are the interesting part.
+Error recovery isn't a layer — it's a property woven through the loop. Locate where failures *enter* and where they're *contained*.
 
 ```
-  Zoom out — the failure layers, and what guards each
-
-  ┌─ Session ───────────────────────────────────────────────────┐
-  │  memory.remember in try/catch        ← RECOVERED (best-effort)│
-  └───────────────────────────┬─────────────────────────────────┘
-                              │  agent.answer(question)
-  ┌─ Agent loop (aptkit) ─────▼─────────────────────────────────┐
-  │  ★ maxTurns / maxToolCalls hard stop  ← RECOVERED (budget) ★ │  ← we are here
-  │    forceFinal synthesis turn          ← RECOVERED (no-loop)   │
-  │    callTool throw → tool_result error ← RECOVERED (bad NAME)  │
-  │    parseToolCall → null               ← handled (treated as   │
-  │                                          a final answer)       │
-  │    wrong ARG (q vs query) → empty ''  ← NOT RECOVERED ✗       │
-  └───────────────────────────┬─────────────────────────────────┘
-                              │  model.complete(...)
-  ┌─ Provider ────────────────▼─────────────────────────────────┐
-  │  ContextWindowGuard: refuse + warn   ← RECOVERED (overflow)   │
-  └─────────────────────────────────────────────────────────────┘
+Where failures enter and where they're caught
+┌──────────────────────────────────────────────────────────┐
+│  Agent loop      runAgentLoop — hard stops + try/catch      │  ← containment
+├──────────────────────────────────────────────────────────┤
+│  ★ RECOVERY      failure → observation, OR → bounded stop   │  ← this file
+│     tool throws → tool_result{isError}                     │
+│     budget hit  → forced synthesis                         │
+│     bad JSON    → one retry nudge → prose                  │
+├──────────────────────────────────────────────────────────┤
+│  Tool / model    where things actually break                │  failure source
+└──────────────────────────────────────────────────────────┘
 ```
 
-Zoom in: "recovery" splits into two flavors. **Containment** — stop a failure from spreading or hanging (the budget, the context guard, the memory swallow). **Correction** — turn a failure into a retry with better information (the tool-error-as-observation path). buffr has plenty of containment, one piece of correction (bad tool *name*), and a glaring missing correction (bad tool *args*) that fails silently — the same ceiling from `02-tool-calling.md`, seen now as a recovery gap.
+Failures originate below (a tool throws, the model emits garbage); recovery (★) decides whether each one becomes *feedback the model can react to* or *a bound that ends the run*. That's the entire mental model: every failure is routed to one of those two fates.
+
+Conversational version. You know the two ways to handle a failed `await`. You can `catch` it and *recover* — show a fallback, retry, degrade. Or you can let a *circuit breaker* trip — stop hammering, bail with a bounded result. buffr does both, and the elegant part is the first: when a tool throws, buffr doesn't crash and doesn't hide it — it hands the error *back to the model as an observation*, the same way a successful result would come back, so the model can read "that failed" and try a different move. Failure becomes input. The circuit breakers are the hard stops — `maxTurns`, `maxToolCalls`, forced synthesis — that guarantee the run ends no matter how badly the model behaves.
 
 ## Structure pass
 
-**Layers:** session (best-effort writes) → loop (budget + tool-error handling) → provider (context guard). Each layer owns one failure class.
-
-**Axis — "when this layer fails, is the failure contained, corrected, or silent?" — traced down:**
+The axis: **recoverable (feedback) vs bounded (stop).** Some failures the model can react to; some the code just has to cap.
 
 ```
-  trace "failure disposition" across the layers
-
-  ┌─ session ───────────────────┐  memory write throws
-  │  → try/catch swallow         │  → CONTAINED (answer survives)
-  └──────────────────────────────┘
-      ┌─ loop: budget ─────────────┐  model loops on tool
-      │  → forceFinal, drop tools   │  → CONTAINED (forced to answer)
-      └─────────────────────────────┘
-          ┌─ loop: bad tool NAME ─────┐  callTool throws
-          │  → catch → error Observation│ → CORRECTED (model retries)
-          └─────────────────────────────┘
-              ┌─ loop: bad tool ARG ──────┐  wrong key → ''
-              │  → no guard                │ → SILENT ✗ (the gap)
-              └─────────────────────────────┘
-                  ┌─ provider: overflow ──────┐  input too big
-                  │  → refuse + warn + throw   │ → CONTAINED (no crash)
-                  └─────────────────────────────┘
-
-  the disposition flips per layer: contained · contained · CORRECTED · SILENT · contained
+The recovery axis
+   RECOVERABLE                                       BOUNDED
+   (feed back, model reacts)                         (cap it, end the run)
+   ├─────────────────────────────────────────────────────────────┤
+   tool throw → observation        bad JSON → 1 nudge    budget → forced synth
+   model can try again              then prose            run always terminates
 ```
 
-**The seam:** the one boundary where disposition flips from "corrected" to "silent" is *inside one layer* — the loop catches a thrown tool error (bad name) but never sees a wrong-arg call because the handler swallows it into an empty query before it can throw. Same layer, two failures, opposite outcomes. That's the seam to study.
+The seam: recoverable failures stay *inside* the loop (they become the next observation and the loop continues); bounded failures *exit* the loop (forced synthesis or break). A tool that throws is recoverable — the model gets another turn. A spent budget is bounded — there are no more turns.
+
+```
+Two fates for a failure
+  failure
+     ├─ RECOVERABLE → tool_result{isError:true} → model reads it → next turn
+     └─ BOUNDED     → hard stop (maxTurns / maxToolCalls / forceFinal) → answer
+```
 
 ## How it works
 
 ### Move 1 — the mental model
 
-Think of how a robust `fetch` wrapper handles failure: a timeout (don't hang forever), a `try/catch` (don't crash the page), a retry-with-backoff (correct a transient blip), and — the bug — a path where a 200-with-garbage-body slips through as "success." buffr's loop has all four. The timeout is the iteration budget, the catch is the memory swallow and the context guard, the retry is the tool-error-as-observation, and the garbage-success is the empty-query failure.
+Recovery = turn the failure into something the loop already knows how to carry. A tool error is shaped like a tool result; a budget overrun is shaped like a normal turn-end. Nothing special-cases a crash because crashes are converted into the loop's existing currency.
 
 ```
-  the recovery taxonomy — two strategies, mapped to buffr
-
-  CONTAIN (stop the bleed)          CORRECT (retry smarter)
-  ─────────────────────             ───────────────────────
-  budget hard-stop          ┌────►  tool error → Observation
-  forceFinal synthesis      │       (model sees failure, retries)
-  context-guard refusal     │
-  memory try/catch          │       MISSING: wrong-arg correction
-                            │       (silent empty search — no signal
-   all bound latency &      │        to retry on)
-   protect the answer ──────┘
+Failures, normalized into loop currency
+  tool throws        → tool_result with isError  (looks like an observation)
+  budget exhausted   → forceFinal                 (looks like a normal turn)
+  bad tool JSON      → retry nudge, then prose     (looks like an answer)
+  empty answer       → FALLBACK_ANSWER             (looks like a string)
 ```
 
-### Move 2 — the step-by-step walkthrough
+### Move 2 — step by step
 
-Each of these is reached on a real failure during `agent.answer()`. Walk them one at a time.
+#### Tool throws become observations (`try/catch` → `isError` tool_result)
 
-**Recovery 1 — the budget hard-stop contains a model that won't quit.** A model can loop forever calling the tool, never emitting a final answer. The loop refuses to trust it: every turn computes whether the budget is spent, and on the last turn (or once tool-calls hit the cap) it sets `forceFinal`.
+Bridge from what you know: an error boundary that renders a fallback *into the same slot* as the real content. The model's "render" reads the error where it expected a result, and reacts.
+
+```
+A thrown tool error is fed back, not raised
+  callTool(name, input)
+     │ throws (network down, bad query, pipeline error)
+     ▼ catch
+  tool_result {
+    content: JSON.stringify({ error: message }),   ← the error, serialized
+    isError: true,                                  ← flagged so the model knows
+  }
+     │ pushed into messages as the observation
+     ▼ next turn: model reads "{error: ...}" and can try a different query
+```
+
+Real code, `aptkit packages/runtime/src/run-agent-loop.ts:158`:
 
 ```ts
-// aptkit packages/runtime/src/run-agent-loop.ts:101-109
-const budgetSpent = maxToolCalls !== undefined && toolCalls.length >= maxToolCalls;
-const forceFinal = turn === maxTurns - 1 || budgetSpent;   // ← the hard stop
-const response = await model.complete({
-  system: forceFinal && synthesisInstruction ? `${system}\n\n${synthesisInstruction}` : system,
-  tools: forceFinal ? undefined : toolSchemas,             // ← no tools on the final turn
-  maxTokens, signal,
-});
-```
-
-buffr sets `maxTurns:6, maxToolCalls:4` (`rag-query-agent.ts:62-83`). So no matter how confused the model gets, the loop runs at most 6 model calls and 4 tool calls, then stops. This is pure containment: it bounds latency and guarantees termination. The cost — it may answer with imperfect context — is accepted on purpose.
-
-```
-  Recovery 1 — budget contains the runaway loop
-
-  turn:   0    1    2    3    4    5
-  tools:  ✓    ✓    ✓    ✓    ✗    ✗     ← forceFinal once toolCalls>=4 or turn==5
-                              └──────┴──► tools=undefined → model MUST answer
-```
-
-**Recovery 2 — the synthesis instruction corrects the "I need more queries" non-answer.** Dropping the tools isn't enough on its own — a model told "no tools" might still reply "I'd need to search for X to answer." So `forceFinal` also injects an instruction that forbids exactly that.
-
-```ts
-// aptkit packages/runtime/src/run-agent-loop.ts:72-74
-export function buildSynthesisInstruction(middle: string): string {
-  return `You have NO more tool calls available. ${middle} Do not say you need more queries.`;
-}
-// buffr's middle (rag-query-agent.ts): "Now answer directly and concisely, citing the sources you retrieved."
-```
-
-This is a small but real correction: it transforms a likely non-answer ("I can't, I need to search") into a committed answer from whatever context is already in hand. Without it, the budget would terminate the loop on a useless turn.
-
-```
-  Recovery 2 — synthesis turn forces a real answer
-
-  budget spent ─► system += "NO more tool calls... Do not say you need more queries"
-               ─► tools = undefined
-               ─► model.complete ─► answer (not "I need to search")
-```
-
-**Recovery 3 — a thrown tool error becomes an Observation the model can retry on.** This is buffr's one piece of *correction* in the tool path. If the model emits a tool-call with a bad **name**, `callTool` throws (`tool-registry.ts:57`, "tool not found"). The loop catches it and feeds the error back as a `tool_result` with `isError: true` — the model sees its action failed and gets another turn to fix it.
-
-```ts
-// aptkit packages/runtime/src/run-agent-loop.ts:158-189 (condensed)
 try {
   const { result, durationMs } = await tools.callTool(toolUse.name, toolUse.input, { signal });
+  toolCall.result = result;
   resultContent = truncate(JSON.stringify(result));
 } catch (error) {
   isError = true;
   const message = error instanceof Error ? error.message : String(error);
   toolCall.error = message;
-  resultContent = truncate(JSON.stringify({ error: message }));   // ← the error IS the Observation
+  resultContent = truncate(JSON.stringify({ error: message }));   // ← error becomes the observation
 }
 // ...
-toolResults.push({ type: 'tool_result', toolUseId: toolUse.id, content: resultContent, ...(isError && { isError: true }) });
-messages.push({ role: 'user', content: toolResults });            // ← model sees the error next turn
+toolResults.push({
+  type: 'tool_result',
+  toolUseId: toolUse.id,
+  content: resultContent,
+  ...(isError ? { isError: true } : {}),                          // ← isError flag travels with it
+});
 ```
 
-Concretely: model emits `{"tool":"serch_kb",...}` (typo). `callTool` throws "tool not found: serch_kb". The loop wraps it as `{error: "tool not found: serch_kb"}`, the model reads that next turn and can re-emit the correct name. **A bad tool name is recoverable** because it throws, and the loop turns throws into observations.
+The consequence: a tool failure never crashes the run and never silently vanishes. The model sees `{error: "..."}` exactly where it expected chunks, and its next turn can adapt — rephrase, narrow, or give up gracefully. The `isError` flag tells the provider this observation is a failure, not data. This is the *recoverable* fate, in full.
+
+#### Hard stop: turn and tool-call budgets (`maxTurns`, `maxToolCalls`)
+
+Bridge: a retry cap. You've written `if (attempts >= 3) break`. Two caps here, whichever trips first.
 
 ```
-  Recovery 3 — bad NAME corrected via error-as-Observation
-
-  model: {"tool":"serch_kb"}  ← typo
-    │ callTool → THROWS "tool not found"
-    │ catch → tool_result {error, isError:true}
-    │ messages.push(user: that error)
-    ▼
-  next turn: model sees the error → retries with "search_knowledge_base"  ✓
+Two circuit breakers, OR'd together
+  budgetSpent = toolCalls.length >= maxToolCalls   (4)
+  forceFinal  = turn === maxTurns - 1  OR  budgetSpent   (turns capped at 6)
+     │ either trips
+     ▼
+  next model.complete gets tools: undefined → run MUST end in an answer
 ```
 
-**Recovery 4 — the context guard refuses an overflowing request instead of letting it crash.** Before any oversized prompt reaches Ollama, `ContextWindowGuardedProvider` estimates the input tokens; if they exceed `maxTokens - outputReserve`, it emits a `warning` and throws `ContextWindowExceededError` rather than sending a request that would overflow gemma2:9b's window.
+Real code, `aptkit packages/runtime/src/run-agent-loop.ts:98` and the `RagQueryAgent` values at `:75`:
 
 ```ts
-// aptkit packages/providers/local/src/context-window-guard.ts:57-70
-const estimate = estimateContextWindow(request, this.options);
-if (!estimate.ok) {
-  this.options.trace?.emit({ type: 'warning', capabilityId: this.options.capabilityId,
-    message: `Skipping local provider ...: estimated ${estimate.estimatedInputTokens} input tokens exceed ${estimate.availableInputTokens}.`,
-    timestamp: timestamp() });
-  throw new ContextWindowExceededError(estimate);     // ← refuse, don't overflow
+for (let turn = 0; turn < maxTurns; turn += 1) {                  // ← maxTurns: 6 — iteration cap
+  const budgetSpent = maxToolCalls !== undefined && toolCalls.length >= maxToolCalls;  // ← 4 — spend cap
+  const forceFinal = turn === maxTurns - 1 || budgetSpent;
+  // ... tools: forceFinal ? undefined : toolSchemas ...
 }
-return this.provider.complete(request);
 ```
 
-buffr wires this with `{ maxTokens: 8192 }` (`src/session.ts:46`). This is containment with a twist: it converts a would-be silent truncation (or a provider error mid-stream) into a clean, *observable* refusal — the `warning` lands in `agents.messages`, so the failure is visible (`../05-evals-and-observability/04-llm-observability.md`).
+The consequence: two independent breakers. `maxTurns` bounds *time* (how many round trips); `maxToolCalls` bounds *work* (how many searches). A model that emits one tool call per turn hits `maxToolCalls` first; a model that loops without calling tools hits `maxTurns`. Either way the run terminates. There is no input that makes this loop run forever.
+
+#### Bad tool JSON: one nudge, then prose (`RETRY_NUDGE`)
+
+Bridge: a single retry with a corrected request, then give up gracefully — not an infinite retry storm.
 
 ```
-  Recovery 4 — context guard refuses + warns
-
-  input estimate ─► > (maxTokens 8192 - reserve 768)?
-                       │ yes
-                       ▼
-                  emit 'warning' (→ messages row)  +  throw ContextWindowExceededError
-                       (no overflow, failure is visible)
+Malformed tool JSON gets exactly one correction
+  attempt 0: model emits broken {...}  (parseToolCall → null, but text has '{')
+     │ looksLikeToolAttempt → retry
+  attempt 1: + RETRY_NUDGE "respond with ONLY a single JSON object..."
+     │ still null?
+     ▼ fall through: treat raw text as the answer (prose)
 ```
 
-**Recovery 5 — memory writes are best-effort, so a DB hiccup never costs the answer.** Back at buffr's layer, the conversation-memory write runs *after* the answer is in hand, inside a swallowing `try/catch`. A memory failure degrades future recall; it never fails the current turn.
+Real code, `aptkit packages/providers/gemma/src/gemma-provider.ts:77` (full path in `02-tool-calling.md`):
 
 ```ts
-// src/session.ts:62-70
-const answer = await agent.answer(question);
-await trace.flush();
-try {
-  await memory.remember({ conversationId, question, answer });
-} catch {
-  // swallow: memory is best-effort, the turn already succeeded
+if (wantsTool) {
+  const call = parseToolCall(raw);
+  if (call) return this.toResponse([{ type: 'tool_use', ... }], lastResponse);
+  if (looksLikeToolAttempt(raw)) continue;   // ← ONE retry with nudge, then break to prose
 }
-return answer;
 ```
 
-Ordering is the recovery here: `remember` runs after the answer is ready, so even an unhandled throw inside it is caught and dropped. This is deliberate containment — memory is an enhancement, the answer is the product.
+The consequence, stated honestly: this is a *one-shot* recovery, and it only fires for *malformed* JSON. JSON that parses but has the wrong *arguments* (the `{"q":...}` case from `02-tool-calling.md`) is not malformed — it never triggers the nudge. So this recovery catches "the model produced broken JSON," not "the model produced valid JSON with wrong keys." The second, more dangerous case, sails through unrecovered.
 
-### Move 2.5 — the gaps: what is NOT recovered
+#### Empty answer: the fallback string (`FALLBACK_ANSWER`)
 
-Two failures slip through, and being able to name them precisely is the interview win.
-
-**Gap A — wrong tool ARG fails silently (the headline gap).** From `02-tool-calling.md`: there's no arg-schema validation. A model that emits `{"arguments":{"q":"..."}}` (wrong key) doesn't throw — the handler coerces the missing `query` to `''` (`search-knowledge-base-tool.ts`), searches over the empty string, and returns four arbitrary chunks. Because nothing throws, Recovery 3's error-as-Observation never fires; the model never learns it asked the wrong question.
+Bridge: a default value for an empty render. Never hand the user a blank.
 
 ```
-  Gap A — wrong ARG bypasses every recovery
-
-  model: {"arguments":{"q":"coffee"}}   ← wrong key
-    │ parseToolCall → {input:{q:"coffee"}}   ✓ (no schema check)
-    │ callTool → name found, NO throw        ✗ Recovery 3 can't fire
-    │ handler: args.query → '' → search('')  ✗ no signal to correct
-    ▼
-  answer over noise — every layer reports success
+Empty final → a sentence, never nothing
+  finalText.trim() || FALLBACK_ANSWER
+     │ empty?
+     ▼ "I couldn't find anything in the knowledge base to answer that."
 ```
 
-The fix is a buffr-side guard that validates args against `inputSchema.required` and *throws* on a miss — which would route straight into Recovery 3's error-as-Observation path and become correctable. (Exercise ERR-1.)
+Real code, `aptkit packages/agents/rag-query/src/rag-query-agent.ts:82`:
 
-**Gap B — `parseToolCall` returning null is handled, but not as a recovery.** When the model emits prose where a tool-call JSON was expected, `parseToolCall` returns null (`gemma-provider.ts:168-182`), so the provider yields a plain text block, no `tool_use`. The loop reads "no Action" and treats that text as the *final answer* (run-agent-loop.ts:131-135). That's not wrong, exactly — but a model that *meant* to call a tool and botched the JSON gets its half-formed prose shipped as the answer with no warning. There's no `warning` event, no retry. (Exercise ERR-2 makes it observable; aptkit's unused `recoveryPrompt`/`runRecoveryTurn` at run-agent-loop.ts:195-228 is the shape a real correction would take.)
+```ts
+return finalText.trim() || FALLBACK_ANSWER;   // ← never return an empty string to the user
+```
+
+The consequence: if the whole loop produces no usable text — model returned empty, synthesis stalled — the user still gets a coherent sentence, not a blank. It's the last guard, after every other recovery has failed.
+
+### Move 2.5 — current vs future (the honest gaps)
 
 ```
-  Phase A (today)                      Phase B (with the arg guard)
-  ─────────────                        ──────────────────────────
-  bad NAME  → throw → corrected ✓      bad NAME  → throw → corrected ✓
-  bad ARG   → '' → silent ✗            bad ARG   → throw → corrected ✓
-  parse null → shipped as answer       parse null → 'warning' emitted, observable
+What recovery does NOT do today (✗) and could (✓)
+  ✗ no loop detection: the same search twice burns budget; nothing notices
+     ✓ hash (name,input); on repeat → force synthesis early                [B4.2]
+  ✗ no per-tool timeout: a slow callTool only stops via AbortSignal cancel
+     ✓ wrap callTool in a timeout → treat timeout as an isError observation
+  ✗ one-shot JSON retry only: bad JSON gets ONE nudge, then becomes prose
+     ✓ validate args + re-prompt with the specific schema error              [B4.3]
 ```
+
+These aren't oversights to hide in an interview — they're the real edges of the current design. The loop is *bounded* (it always terminates) but not *smart* about how it spends the bound: it can waste all four tool calls re-running an identical failing search, and it can't interrupt a hung tool except by cancelling the whole run. Name these plainly.
 
 ### Move 3 — the principle
 
-Recovery is two jobs: **contain everything, correct what you can.** buffr contains well — it never hangs, never crashes on overflow, never loses an answer to a memory hiccup. Where it's weak is correction, and the rule that exposes the weakness is simple: *a failure can only be corrected if it produces a signal.* A thrown error is a signal (Recovery 3 catches it). A silently-coerced empty query is not (Gap A). So the highest-leverage recovery work is usually upstream — making silent failures throw — not adding more catch blocks.
+Good agent recovery has two jobs: keep recoverable failures *in the loop* as feedback, and keep everything else *bounded* so the run can't hang or spin. buffr does both cleanly — errors become observations, budgets force an ending. What it doesn't yet do is *reason about its own failures*: it can't tell it's repeating itself, and it can't time out one slow tool. The load-bearing guarantee is termination; the missing sophistication is efficiency within that bound.
 
 ## Primary diagram
 
-```
-  buffr error recovery — every failure and its disposition, one frame
+The full recovery map — every failure mode and its fate.
 
-  ┌─ Session ────────────────────────────────────────────────────┐
-  │  memory.remember in try/catch ──────► CONTAIN (answer safe)    │
-  └───────────────────────────┬───────────────────────────────────┘
-                              │ agent.answer
-  ┌─ Loop (runAgentLoop) ─────▼───────────────────────────────────┐
-  │  budgetSpent = toolCalls>=4                                     │
-  │  forceFinal  = turn==5 || budgetSpent ─► CONTAIN (terminate)    │
-  │     + synthesisInstruction            ─► CORRECT ("answer now") │
-  │                                                                │
-  │  for each tool_use:                                            │
-  │    callTool ── throws? (bad NAME) ─► catch ─► error Observation │
-  │                                      ─► CORRECT (model retries) │
-  │    callTool ── bad ARG (q vs query) ─► '' ─► SILENT ✗  ◄── gap  │
-  │                                                                │
-  │  parseToolCall → null ─► treated as final answer (no warn) ◄ gap│
-  └───────────────────────────┬───────────────────────────────────┘
-                              │ model.complete
-  ┌─ Provider guard ──────────▼───────────────────────────────────┐
-  │  input estimate > 8192-768 ─► emit 'warning' + throw           │
-  │                            ─► CONTAIN (no overflow, observable) │
-  └────────────────────────────────────────────────────────────────┘
+```
+buffr error recovery: every failure, routed
+  ┌─ tool throws ─────────► catch → tool_result{isError} ──► model reacts (RECOVER)
+  │
+  ┌─ bad tool JSON ───────► RETRY_NUDGE (once) ──► still bad? ──► prose
+  │
+  ┌─ wrong-key args ──────► ✗ NOT caught (valid JSON) ──► empty query, silent
+  │                          (the 02-tool-calling ceiling)
+  ┌─ budget hit ──────────► forceFinal → tools stripped ──► forced synthesis (BOUND)
+  │
+  ┌─ maxTurns hit ────────► loop exits ──► forced synthesis (BOUND)
+  │
+  ┌─ empty final text ────► FALLBACK_ANSWER (BOUND, last guard)
+  │
+  ┌─ repeated identical call → ✗ NO detection ──► burns budget silently
+  │
+  └─ slow / hung tool ─────► ✗ NO per-tool timeout ──► only AbortSignal cancels whole run
 ```
 
 ## Elaborate
 
-The "turn a tool error into an observation and let the model retry" pattern is the canonical agent-recovery move — it's why native tool-calling APIs return tool errors *to the model* rather than to your code. aptkit implements exactly that (run-agent-loop.ts:163-189). The iteration budget descends from the same lineage as ReAct's max-steps and any bounded-search algorithm: never trust an autonomous loop to terminate itself. buffr's specific gap — silent arg coercion — is a textbook example of why "be liberal in what you accept" (Postel's law) is *wrong* for agent tool inputs: a handler that defaults a missing required arg to `''` trades a loud, correctable error for a quiet, uncorrectable one. The structured-output discipline (`02-tool-calling.md`, `../01-llm-foundations/04-structured-outputs.md`) is the same lesson from the validation side; the observability story (`../05-evals-and-observability/04-llm-observability.md`) is what makes the gaps measurable.
+The cleanest thing about this design is that *recovery reuses the loop's normal data path*. A tool error isn't handled by a special error channel — it's stuffed into a `tool_result` block, the exact shape a success uses, with one extra `isError` flag. That means the model's reaction to an error and its reaction to a result go through identical machinery; there's no separate "error mode" for the model to get confused by. It just reads its observations, one of which happens to say `{error: ...}`. Simplicity through uniformity.
+
+The sharpest gap to internalize is the one that *isn't* on the recovery map as a recoverable case: wrong-key arguments. A tool that *throws* recovers beautifully. A tool that *succeeds with garbage input* — because the emulated path never validated the args — produces no error to recover from. There's nothing to catch. That's why `02-tool-calling.md` calls argument validation the reliability ceiling: error recovery is excellent at handling failures that *announce themselves*, and powerless against failures that *look like success*. The empty-query search is the canonical "looks like success" failure, and the entire recovery system never sees it.
 
 ## Project exercises
 
-> No curriculum file present; exercises derived from the codebase.
+### Add a per-tool timeout that degrades to an error observation
 
-### Make wrong-arg tool calls throw, routing them into the existing retry path
+- **Exercise ID:** [B4.11], Phase 4.
+- **What to build:** Wrap each `callTool` in a timeout (e.g. via `AbortSignal.timeout` composed with the existing signal). On timeout, produce an `isError` tool_result saying the tool timed out, so the model can react — rather than the whole run hanging until the outer signal fires.
+- **Why it earns its place:** Today a slow or hung tool can stall a turn indefinitely; the only escape is cancelling the entire run. A per-tool timeout converts "the run hangs" into "the model gets a timeout observation and tries something else" — turning a bounded-but-stuck case into a recoverable one. It directly fills a named gap.
+- **Files to touch:** `aptkit packages/runtime/src/run-agent-loop.ts` (compose a timeout signal around `callTool`), respecting the existing `signal` cancellation.
+- **Done when:** A tool that exceeds the timeout yields an `isError` observation (not a hang), the model gets another turn, and an explicit `AbortSignal` cancel still aborts immediately. Covered by a test with a slow scripted tool.
+- **Estimated effort:** 3–4 hours.
 
-- **Exercise ID:** ERR-1 (Case B — wrong-arg recovery not yet exercised). **The highest-leverage recovery exercise.**
-- **What to build:** a buffr-side handler wrapper that checks the tool's `inputSchema.required` keys are present and correctly typed *before* searching; on a miss, throw — which the loop already catches and feeds back as a correctable `tool_result` error (Recovery 3).
-- **Why it earns its place:** converts buffr's one silent failure (Gap A) into a correctable one for free, reusing the existing error-as-Observation path. The "I made my agent's quiet failure loud and self-healing" story.
-- **Files to touch:** `src/session.ts:43-44` (wrap `tool.handler` before registering in `InMemoryToolRegistry`), or a new `src/validated-tool.ts`.
-- **Done when:** a forced wrong-key tool-call produces a `tool` error row in the trace and a corrected retry on the next turn, verified by a test.
-- **Estimated effort:** 1–4hr.
+### Detect and short-circuit repeated identical tool calls
 
-### Surface parse-null and force-final as warning events
-
-- **Exercise ID:** ERR-2 (Case B — silent-handling made observable).
-- **What to build:** emit a `warning` trace event when `parseToolCall` returns null mid-loop (Gap B) and when `forceFinal` fires due to budget exhaustion, so both failure-adjacent paths are visible in `agents.messages`.
-- **Why it earns its place:** you can't recover what you can't see; this turns two silent handlings into measurable signals you can later act on.
-- **Files to touch:** `src/supabase-trace-sink.ts` (already persists `warning` — surface them); the emit point for budget exhaustion would be a buffr-side wrapper since `runAgentLoop` is aptkit-owned and not edited.
-- **Done when:** an eval run reports how often the loop hit `forceFinal` and how often a turn's tool-call failed to parse.
-- **Estimated effort:** 1–4hr.
+- **Exercise ID:** [B4.12], Phase 4.
+- **What to build:** Hash each `(toolName, input)`; if the exact pair repeats within a run, stop spending budget on it — force synthesis early and emit a `loop_detected` trace event. (Shares intent with [B4.2] in `01-agents-vs-chains.md`; here it's framed as recovery.)
+- **Why it earns its place:** Re-issuing the identical failing search is a weak model's signature failure, and today the loop happily burns all four tool calls on it before the budget saves it. Detecting the repeat converts wasted budget into an immediate, honest "I have what I have, answering now." It's recovery from the model's own non-convergence.
+- **Files to touch:** `aptkit packages/runtime/src/run-agent-loop.ts`, `buffr src/supabase-trace-sink.ts` (persist the `loop_detected` event).
+- **Done when:** A scripted duplicate `search_knowledge_base` call triggers forced synthesis on the repeat with a `loop_detected` trace event, and non-duplicate multi-call runs are unaffected.
+- **Estimated effort:** 2–3 hours.
 
 ## Interview defense
 
-**Q: What happens in buffr when the model keeps calling the tool and never answers?**
-Answer: it can't run forever. `forceFinal = turn == maxTurns-1 || toolCalls >= maxToolCalls` (6 and 4 in buffr) strips the tools on the final turn and injects a synthesis instruction — "You have NO more tool calls available… Do not say you need more queries." That contains a runaway loop and corrects the likely "I need to search more" non-answer into a committed one.
+**Q: "What happens when a tool fails mid-run?"**
+
+It becomes an observation, not a crash. `callTool` is wrapped in try/catch; on a throw, the loop serializes the error into a `tool_result` block with `isError: true` and pushes it into `messages` exactly where a success would go. The model reads `{error: ...}` on its next turn and can react — rephrase the query, narrow it, or give up gracefully. Failure is fed back as input.
 
 ```
-  budget hard-stop:  turn==5 OR toolCalls>=4 → drop tools + "answer now"
+  callTool throws → tool_result{isError} → model's next turn reads it → adapts
 ```
 
-**Q: Which tool failures does buffr recover from, and which does it miss?**
-Answer: a bad tool *name* is recovered — `callTool` throws, the loop catches it and feeds the error back as an Observation, so the model retries (run-agent-loop.ts:163-189). A bad tool *arg* is NOT — there's no schema validation, so a wrong key coerces to an empty-string search with no throw, no signal, no retry. **The part people forget: a failure is only correctable if it produces a signal.** The fix is making wrong-args throw, which routes them into the exact retry path bad names already use.
+*Anchor: a thrown tool error never crashes the run — it's handed back to the model through the normal observation path.*
+
+**Q: "What stops a misbehaving model from running forever or spinning on the same call?"** — the part people forget.
+
+Termination is guaranteed; efficiency isn't. Two hard stops bound every run: `maxTurns` (6) caps iterations, `maxToolCalls` (4) caps tool spend, and whichever trips first forces synthesis by stripping the tools. So the run *always* ends. But — and this is the honest gap — there's **no loop detection**: a model can re-issue the *identical* search up to four times, and nothing notices; the budget just runs out. There's also no per-tool timeout (only whole-run `AbortSignal` cancel) and the JSON retry is one-shot. The load-bearing fact people forget: the loop is bounded, not smart — it guarantees an ending, not an efficient path to one.
 
 ```
-  bad NAME → throws → corrected ✓   ·   bad ARG → '' → silent ✗ → (fix: make it throw)
+  maxTurns(6) OR maxToolCalls(4) → forced synth → ALWAYS ends
+  but: identical call ×4? → no detection → budget wasted
 ```
+
+*Anchor: the hard stops guarantee termination; loop detection, timeouts, and arg validation are the recovery gaps that remain.*
 
 ## See also
 
-- `02-tool-calling.md` — the unvalidated-args ceiling, seen here as the recovery gap.
-- `03-react-pattern.md` — how a failed Action becomes an Observation the model reacts to.
-- `01-agents-vs-chains.md` — the budget hard-stop as the loop's termination guarantee.
-- `../05-evals-and-observability/04-llm-observability.md` — the `warning`/`error` events that make failures visible.
+- **`02-tool-calling.md`** — the wrong-key argument failure that recovery can't catch (it looks like success).
+- **`03-react-pattern.md`** — `forceFinal` as the bounded stop, here seen as a circuit breaker.
+- **`01-agents-vs-chains.md`** — the hard stops as the guardrails that make the hybrid safe.
+- **`../05-evals-and-observability/`** — the trace sink that records `tool_call_end` errors and where you'd see recovery happen.

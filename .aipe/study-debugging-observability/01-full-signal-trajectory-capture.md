@@ -1,360 +1,204 @@
 # Full-Signal Trajectory Capture
 
-**Industry names:** agent trajectory logging · execution trace persistence ·
-event-sourced agent run. **Type:** Project-specific (the application of a
-general pattern — event sourcing — to an agent loop).
+**Industry name(s):** agent trajectory / execution-trace logging, "full-fidelity event capture" — *Project-specific* implementation of an *Industry-standard* pattern.
+
+The repo's strongest observability investment: the trace / structured event stream (`CapabilityEvent` → `agents.messages`) persists *every* event the agent loop emits — not just the answer, but the cause, the result, the timing, and the token cost.
 
 ---
 
 ## Zoom out, then zoom in
 
-You know how, when a `fetch()` fails, the only thing worse than the error is an
-error with no request/response logged next to it? You're left guessing what you
-sent. This pattern is the opposite end of that: the agent loop emits a typed
-event at every interesting moment, and the sink writes *all* of them down, so
-nothing is left to guess.
-
-Here's where it sits. The thick box is this concept.
+Here's the whole thing. You know how a browser's Network tab shows you every request, not just the final rendered page — the URL that went out, the status that came back, the timing bar? This is that, for an agent turn. Each turn produces a stream of events; this pattern catches all of them and writes one database row per event.
 
 ```
   Zoom out — where trajectory capture lives
 
-  ┌─ UI layer (Ink) ─────────────────────────────────────────┐
-  │  chat.tsx → session.ask(q)                                │
-  └──────────────────────────┬────────────────────────────────┘
-                             │  agent.answer(q)
-  ┌─ Session / Agent layer ──▼────────────────────────────────┐
-  │  RagQueryAgent → runAgentLoop → trace?.emit(event) × 6    │
-  └──────────────────────────┬────────────────────────────────┘
-                             │  CapabilityEvent (6 variants)
-  ┌─ Trace sink ═════════════▼════════════════════════════════┐
-  │ ║ ★ SupabaseTraceSink.emit() ★  switch on event.type      ║│ ← we are here
-  │ ║   one persistMessage() per event, queued in pending[]   ║│
-  └──────────────────────────┬────────────────────────────────┘
-                             │  insert into agents.messages
-  ┌─ Storage (Postgres) ─────▼────────────────────────────────┐
-  │  agents.messages — the replayable trajectory              │
-  └───────────────────────────────────────────────────────────┘
+  ┌─ CLI layer (src/cli/chat.tsx) ──────────────────────────────┐
+  │  Ink UI → session.ask(question)                             │
+  └────────────────────────────────┬─────────────────────────────┘
+                                    │  one turn
+  ┌─ Session layer (src/session.ts) ──────▼─────────────────────┐
+  │  agent.answer() ── emits ──►  ★ trace.emit() per event ★    │ ← we are here
+  │                  then         trace.flush()                  │
+  └────────────────────────────────┬─────────────────────────────┘
+            CapabilityEvent ×6      │  (6 variants)
+  ┌─ Sink (src/supabase-trace-sink.ts) ───▼─────────────────────┐
+  │  SupabaseTraceSink.emit() → persistMessage() → INSERT       │
+  └────────────────────────────────┬─────────────────────────────┘
+                                    │
+  ┌─ Storage (agents.messages) ────▼────────────────────────────┐
+  │  one row per event — the replayable trajectory              │
+  └──────────────────────────────────────────────────────────────┘
 ```
 
-Zoom in: the pattern is **persist every event type, not just the answer.** The
-agent loop is a sequence of decisions and effects — it picks a tool, calls it,
-spends tokens, writes text. Capture the *whole* sequence as durable rows and the
-messages table stops being a chat log and becomes a trajectory you can replay,
-audit, and root-cause from. The question it answers: *when an answer is wrong,
-what evidence exists to explain it?* All of it.
+Now zoom in. The question this pattern answers: *when a turn goes wrong, can I reconstruct exactly what the agent did — including why it called a tool and what came back?* The pattern is **capture every event variant, not just the visible output**. The comment on the sink names the stakes directly: tool-call args (the cause), `durationMs` + error, and token usage "were previously dropped on the floor" (`src/supabase-trace-sink.ts:39-48`). Catching them is what turns a log into a trajectory.
 
-## Structure pass
+## The structure pass
 
-Three layers stack here, and one axis makes the boundaries pop: **failure
-visibility** — "if something goes wrong at this layer, does a durable record
-exist?"
+Before the mechanics, the skeleton. Three layers, one axis traced across them, the seam where the axis flips.
+
+**Layers:** the agent loop (emits events) → the sink (`SupabaseTraceSink`) → the storage table (`agents.messages`).
+
+**Axis — "who owns the event's shape?"** Trace it down:
 
 ```
-  One axis — "does a durable record survive?" — down the layers
+  One question down the layers: who owns the event's shape?
 
-  ┌─ aptkit loop (emits) ───────────────┐  → emits 6 typed events;
-  │  runAgentLoop, RagQueryAgent        │    owns WHAT is observable
-  └──────────────────┬──────────────────┘
-        seam: CapabilityTraceSink contract  ← axis flips here
-  ┌─ buffr sink (persists) ─────────────┐  → DECIDES each event becomes
-  │  SupabaseTraceSink.emit()           │    a row; durable record exists
-  └──────────────────┬──────────────────┘
-        seam: SQL insert (sync emit → async write)
-  ┌─ Postgres (stores) ─────────────────┐  → record survives the process;
-  │  agents.messages                    │    queryable after the fact
-  └─────────────────────────────────────┘
+  ┌──────────────────────────────────────────────┐
+  │ agent loop (@rlynjb/aptkit-core)             │  → APTKIT owns it
+  │   defines the 6 CapabilityEvent variants      │    (typed contract)
+  └───────────────────────┬───────────────────────┘
+       seam: trace.emit()  │  ═══ the contract boundary ═══
+  ┌───────────────────────▼───────────────────────┐
+  │ SupabaseTraceSink (src/supabase-trace-sink.ts)│  → BUFFR owns it
+  │   maps each variant → a messages row           │    (the translation)
+  └───────────────────────┬───────────────────────┘
+  ┌───────────────────────▼───────────────────────┐
+  │ agents.messages (sql/001_agents_schema.sql)   │  → POSTGRES owns it
+  │   columns: role, tool_calls, tool_results, …   │    (the durable form)
+  └────────────────────────────────────────────────┘
 ```
 
-**The load-bearing seam is `CapabilityTraceSink`.** Above it, aptkit decides
-*what events exist* (the six `CapabilityEvent` variants). Below it, buffr decides
-*which become durable and how*. The contract is one method: `emit(event)`,
-synchronous. That seam is why buffr can capture the full signal without editing
-aptkit — it just implements the sink richly. The axis flips right there: above
-the seam an event is a fleeting function call; below it, it's a row that outlives
-the run.
-
-The other seam — `emit()` is **sync** but a SQL insert is **async** — is where
-the `flush()` mechanism lives (Move 2 below). Hold that thought.
+**The seam that matters: `trace.emit()`.** This is the vertical contract between aptkit (which *produces* events in a shape it controls) and buffr (which *consumes* them into a schema it controls). The axis flips here — above the seam the event is an in-memory typed union; below it, it's a row. Everything load-bearing about this pattern is buffr's job *below* the seam: deciding which fields of each variant survive into which columns. That's where you study it.
 
 ## How it works
 
-### Move 1 — the mental model
+#### Move 1 — the mental model
 
-The shape is event sourcing, shrunk to one agent run. Instead of storing the
-final state ("the answer"), you store the *stream of events that produced it*,
-and the state is whatever you get by replaying them. You've built the read-side
-of this shape every time you rendered a list from an array of items: the array is
-the source of truth, the rendered list is a projection. Here the event stream is
-the source of truth; the answer is just the last projection.
+You've written a `switch` on a discriminated union before — `switch (action.type)` in a reducer, one `case` per action shape, each pulling different fields off the payload. That's exactly this. `CapabilityEvent` is a tagged union with six tags; `emit()` is the reducer that fans each tag out to a row with the right columns filled.
 
 ```
-  The pattern — one run, six event types, six (or more) rows
+  The shape — fan-out by event type
 
-  agent run ──┐
-              │  emit(step)             → row: role=assistant, content
-              │  emit(tool_call_start)  → row: role=tool_call, args  ◄ THE CAUSE
-              │  emit(tool_call_end)    → row: role=tool, result/error/durationMs
-              │  emit(model_usage)      → row: role=model_usage, model, tokens
-              │  emit(warning)          → row: role=warning, message
-              │  emit(error)            → row: role=error, message
-              ▼
-        agents.messages  ── select order by created_at ──► replay the run
+                      emit(event)
+                          │
+        ┌─────────┬───────┼───────┬────────────┬─────────┐
+        ▼         ▼       ▼        ▼            ▼         ▼
+      step    tool_call  tool   model_usage  warning   error
+        │      _start    _end      │            │         │
+   content   args=     result+   tokens+     message   message
+   → assistant the      error+    model       → warning → error
+     row      CAUSE     durationMs row          row       row
+              row       =EFFECT row
+        └─────────┴───────┴────────┴────────────┴─────────┘
+                          │
+                  persistMessage() → INSERT into agents.messages
 ```
 
-The kernel: **a switch over `event.type`, one `persistMessage` per case, and a
-`pending[]` queue awaited by `flush()`.** Everything else is which columns each
-event type fills.
+The point the diagram makes: six tags, six row shapes, and the two that carry the diagnostic weight are `tool_call_start` (the **cause** — the args) and `tool_call_end` (the **effect** — result, error, and how long it took). A logger that keeps only `step` and `tool_call_end` answers "what did the agent do" but not "why" — you'd see a tool returned junk but not what you asked it. Keeping `args` is what makes the trajectory debuggable.
 
-### Move 2 — the step-by-step walkthrough
+#### Move 2 — the step-by-step walkthrough
 
-**The use case.** Every chat turn. `session.ask()` runs the agent, then calls
-`trace.flush()` (`src/session.ts:62-63`). Between those two lines, the loop has
-emitted a handful of events and the sink has queued a handful of inserts.
-
-**Part 1 — the sink is a switch over six event types.** This is the whole
-contract. Drop any case and that event type silently vanishes from the
-trajectory.
-
-```ts
-// src/supabase-trace-sink.ts:53-85
-emit(event: CapabilityEvent): void {
-  const { pool, conversationId } = this.opts;
-  const at = event.timestamp;            // ← client timestamp, see file 02
-  switch (event.type) {
-    case 'step':                         // assistant text
-      if (event.content) {               // ← gate: empty text = no row (the gap)
-        this.push(persistMessage(pool, conversationId, event.role, event.content, { createdAt: at }));
-      }
-      return;
-    case 'tool_call_start':              // THE CAUSE — args the tool was called with
-      this.push(persistMessage(pool, conversationId, 'tool_call', event.toolName, {
-        toolCalls: { toolName: event.toolName, args: event.args }, createdAt: at,
-      }));
-      return;
-    case 'tool_call_end':                // result + error + how long it took
-      this.push(persistMessage(pool, conversationId, 'tool', event.toolName, {
-        toolResults: { result: event.result, error: event.error, durationMs: event.durationMs },
-        createdAt: at,
-      }));
-      return;
-    case 'model_usage':                  // fills the otherwise-orphaned tokens_used
-      this.push(persistMessage(pool, conversationId, 'model_usage', '', {
-        model: `${event.provider}/${event.model}`,
-        tokensUsed: (event.inputTokens ?? 0) + (event.outputTokens ?? 0),
-        createdAt: at,
-      }));
-      return;
-    case 'warning':
-    case 'error':                        // both fold into a single message row
-      this.push(persistMessage(pool, conversationId, event.type, event.message, { createdAt: at }));
-      return;
-  }
-}
-```
-
-Read it as: each event type maps to one row, and the *interesting* payload lands
-in the right column. `tool_call_start` captures `args` into `tool_calls` — that's
-**the cause**, the thing you need to explain a wrong answer. `tool_call_end`
-captures `result`, `error`, and `durationMs` into `tool_results` — the effect and
-its cost. `model_usage` is the one that fills `tokens_used`, a column that would
-otherwise sit empty forever. Boundary condition: the `step` case has an
-`if (event.content)` guard — keep that in mind, it's the source of the fallback
-gap in Move 2.5.
-
-**Part 2 — sync emit, async write: the `pending[]` queue.** Here's the seam the
-structure pass flagged. `emit()` must be synchronous (that's aptkit's contract —
-the loop calls it inline and moves on), but a SQL insert is a Promise. You can't
-`await` inside `emit()`. So each insert is *queued*, not awaited:
-
-```ts
-// src/supabase-trace-sink.ts:50, 87-93
-private readonly pending: Promise<void>[] = [];
-
-private push(p: Promise<void>): void {
-  this.pending.push(p);          // fire the insert, stash the promise
-}
-
-async flush(): Promise<void> {
-  await Promise.all(this.pending);   // session.ts awaits this after the run
-}
-```
+**The `emit()` dispatch.** `emit()` is synchronous because that's aptkit's contract — the agent loop can't `await` a trace write mid-step. So buffr's sink doesn't write inline; it *queues* the promise and awaits the batch later via `flush()`. Here's the dispatch and the two load-bearing cases, from `src/supabase-trace-sink.ts:53-72`:
 
 ```
-  Sync emit feeds an async drain
-
-  loop (sync)        sink                    Postgres
-  ──────────         ────                    ────────
-  emit(e1) ───► push(insert1) ─┐ fire
-  emit(e2) ───► push(insert2) ─┤ fire        inserts run
-  emit(e3) ───► push(insert3) ─┘ fire        concurrently
-                    │
-  (run ends)        │
-  flush() ─────► await Promise.all(pending)  ◄── all settled here
+  src/supabase-trace-sink.ts:53   emit(event: CapabilityEvent): void {
+  :54     const at = event.timestamp;        // ← client timestamp, see 02-
+  :56     switch (event.type) {
+  :57       case 'step':
+  :58         if (event.content)             // ← empty steps skipped (note the gap!)
+  :59           this.push(persistMessage(…, event.role, event.content, {createdAt: at}));
+  :62       case 'tool_call_start':          // ── THE CAUSE ──
+  :63         this.push(persistMessage(…, 'tool_call', event.toolName, {
+  :64           toolCalls: { toolName: event.toolName, args: event.args }, createdAt: at,
+  :65         }));
+  :67       case 'tool_call_end':            // ── THE EFFECT ──
+  :68         this.push(persistMessage(…, 'tool', event.toolName, {
+  :69           toolResults: { result: event.result, error: event.error,
+  :70                          durationMs: event.durationMs }, createdAt: at,
+  :71         }));
 ```
 
-What breaks if you remove `flush()`: the process could exit (or the next turn
-start) before the inserts land — you'd lose the tail of the trajectory. What
-breaks if you `await` inside `emit()` instead: you'd violate aptkit's sync
-contract and serialize the whole loop on Postgres latency. The queue is the
-resolution of that tension. Note the side effect: because inserts fire
-concurrently, *insert completion order is a race* — which is exactly why ordering
-can't rely on `now()` and must use the client timestamp. That's file 02.
+Read the two cases together. `tool_call_start` (`:62-66`) writes `args` into the `tool_calls` jsonb column — that's the input you handed the tool. `tool_call_end` (`:67-72`) writes `result`, `error`, *and* `durationMs` into `tool_results`. Put the two rows side by side for the same `toolName` and you have a complete call record: what went in, what came out, whether it failed, how long it took. That's the trajectory.
 
-**Part 3 — the correlation key ties every row to one run.** The sink is
-constructed with a `conversationId` (`src/supabase-trace-sink.ts:51`), set once
-per session in `startConversation` (`:4-8`). Every `persistMessage` carries it
-(`sql/001_agents_schema.sql:42`, the FK). So the trajectory is queryable as a
-unit:
+**Why queue-then-flush.** `push()` (`:87-89`) just appends the insert promise to `this.pending`; `flush()` (`:91-93`) does `Promise.all(this.pending)`. The session calls it once after the run (`src/session.ts:62-63`):
 
 ```
-  Layers-and-hops — one run becomes one queryable trajectory
-
-  ┌─ Session ────┐ startConversation()  ┌─ Postgres ──────────┐
-  │ session.ts   │ ───────────────────► │ conversations: 1 row│
-  └──────┬───────┘    returns uuid      └─────────┬───────────┘
-         │ new SupabaseTraceSink({conversationId})│ FK
-         ▼                                         ▼
-  ┌─ Trace sink ─┐  emit × N            ┌─ messages ──────────┐
-  │ holds the id │ ───────────────────► │ N rows, same conv id│
-  └──────────────┘                      └─────────────────────┘
-       debug query: select * from messages
-                    where conversation_id = $1 order by created_at
+  src/session.ts:61   const answer = await agent.answer(question);
+  :62                 await trace.flush();      // ← all queued inserts settle here
 ```
 
-#### Move 2.5 — current state vs the fallback gap
+The boundary condition: because `flush()` races all the inserts in parallel, **insertion order does not equal emit order**. The pattern survives that race only because each row carries its own `created_at = event.timestamp` — replay sorts by the timestamp, not by which insert landed first. That's a whole pattern on its own → `02-client-timestamp-ordering.md`.
 
-The capture is full *except* for one path, and it's worth drawing as
-before/after because it's the audit's #1 blind spot.
+**The model-usage and warning/error cases.** `model_usage` (`:73-78`) fills the otherwise-orphaned `tokens_used` column by summing `inputTokens + outputTokens`, and stamps `model` as `provider/model`. `warning` and `error` (`:80-83`) share one case — each lands as a row tagged with its own `role`. Nothing is dropped on the floor.
 
-```
-  Two paths out of the loop — only one leaves a row
+#### Move 2 variant — the load-bearing skeleton
 
-  PATH A: model returns text         PATH B: model returns empty
-  ────────────────────────          ────────────────────────────
-  text = "..." (truthy)              text = "" (falsy)
-  if (text) → emit(step) ✓           if (text) → NO emit          ← gate
-  finalText = text                   finalText = ""
-  answer = text                      answer = "" || FALLBACK_ANSWER
-                                              = FALLBACK_ANSWER
-  ▼                                  ▼
-  messages has a step row            messages has NO row for the answer
-  (the answer is recorded)           (user sees fallback, trace is blank)
-```
+The irreducible kernel of this pattern, the part you'd reconstruct from memory:
 
-Grounding: the gate is `if (text)` at
-`@aptkit/runtime/dist/src/run-agent-loop.js:50-52`; the substitution is
-`finalText.trim() || FALLBACK_ANSWER` at
-`@aptkit/agent-rag-query/dist/src/rag-query-agent.js:51`. The fallback string is
-`"I couldn't find anything in the knowledge base to answer that."` (`:21`).
+1. **A sink that implements the trace contract** (`CapabilityTraceSink`) — without it the agent loop has nowhere to emit. (`src/supabase-trace-sink.ts:49`)
+2. **A total switch over every event variant** — drop a `case` and that event type silently vanishes from the trajectory. The `step` case's `if (event.content)` guard (`:58`) is exactly this failure in miniature: empty-content steps are *intentionally* dropped, which is why the FALLBACK_ANSWER turn (empty synthesis) leaves no row.
+3. **The cause/effect pair** — `args` on start, `result`/`error` on end. Drop `args` and you can see *that* a tool failed but never *why* you called it.
+4. **A correlation key** — `conversationId`, threaded through every `persistMessage`. Drop it and the rows are an undifferentiated heap; you can't reconstruct a single turn.
 
-This is an **aptkit-side** gate — buffr's sink is faithful; it can't emit a `step`
-that was never emitted. The fix, if buffr wants the fallback in the trajectory,
-is in `session.ts`: after `agent.answer()`, if the returned answer is the fallback
-sentinel, persist a synthetic `step` row before `flush()`. The takeaway worth
-keeping: **full-signal capture is only as complete as the events the producer
-emits** — a gated `emit` upstream is a hole in your trajectory downstream, and you
-won't see the hole until you go looking for the row that isn't there.
+Optional hardening layered on top: `durationMs` (latency attribution — nice, not load-bearing for correctness), `tokens_used` (cost tracking), the queue/flush batching (a throughput optimization over inserting inline).
 
 #### Move 3 — the principle
 
-Store the events, not the state. The state is a projection you can always
-recompute; the events are the only thing you can't reconstruct after the fact. An
-agent run is a perfect fit for this because the run *is* a sequence of decisions
-and effects — capture them all and "why did it do that?" becomes a query instead
-of a guess. The discipline that makes it pay off: capture the *cause* (args) next
-to the *effect* (result), at the same fidelity, or you'll have half a story.
+Capture the **cause alongside the effect**, or your trace can only narrate, not explain. A log that records "tool returned X" tells you what happened; one that also records "because you called it with args Y" tells you why — and "why" is what every debugging session is actually after. The general rule: an observable boundary is only as good as the *inputs* it records, not just the outputs.
 
 ## Primary diagram
 
-The whole pattern in one frame.
+The full recap — one turn, every event, every row.
 
 ```
-  Full-signal trajectory capture — end to end
+  One turn → the full trajectory in agents.messages
 
-  ┌─ Agent loop (aptkit) ─────────────────────────────────────────────┐
-  │  per run, emits in causal order:                                   │
-  │   model_usage → tool_call_start(args) → tool_call_end(result) → step│
-  │   (+ warning / error anywhere)                                     │
-  └───────────────────────────────┬───────────────────────────────────┘
-                  seam: CapabilityTraceSink.emit(event)  [sync]
-  ┌─ SupabaseTraceSink ───────────▼───────────────────────────────────┐
-  │  switch(event.type) → persistMessage(...) → push to pending[]      │
-  │     step          → role=assistant, content   [gated on content]  │
-  │     tool_call_start→ role=tool_call, tool_calls={toolName,args}    │
-  │     tool_call_end  → role=tool, tool_results={result,error,durMs}  │
-  │     model_usage    → role=model_usage, model, tokens_used          │
-  │     warning/error  → role=warning|error, content=message          │
-  └───────────────────────────────┬───────────────────────────────────┘
-              run ends → flush(): await Promise.all(pending)
-  ┌─ agents.messages (Postgres) ──▼───────────────────────────────────┐
-  │  conversation_id (corr key) · role · content · tool_calls ·        │
-  │  tool_results · model · tokens_used · created_at (event ts)        │
-  │  → select where conversation_id=$1 order by created_at = replay    │
-  └───────────────────────────────────────────────────────────────────┘
+  Session (src/session.ts)                     Storage (agents.messages)
+  ────────────────────────                     ─────────────────────────
+  persistMessage('user', q) ─────────────────► row: role=user, content=q
+
+  agent.answer(q)
+    │  emits CapabilityEvents
+    ▼
+  SupabaseTraceSink.emit():
+    tool_call_start  ──► push ──┐
+    tool_call_end    ──► push   │  queued
+    model_usage      ──► push   │  (sync emit,
+    step (assistant) ──► push ──┘   no await)
+    │
+  trace.flush() ── Promise.all ──────────────► rows (each created_at =
+                                                event.timestamp):
+                                                 role=tool_call  (args)
+                                                 role=tool       (result/error/ms)
+                                                 role=model_usage(tokens/model)
+                                                 role=assistant  (the answer)
+
+  replay:  SELECT … WHERE conversation_id=$1 ORDER BY created_at
+           → the trajectory, in emit order
 ```
 
 ## Elaborate
 
-This is event sourcing (Fowler's term) narrowed to a single bounded context: one
-agent run. The full pattern keeps an append-only event log as the system of
-record and derives all read models from it; here the "read model" is just a
-`select`, and there's no projection cache because one conversation is small.
+This pattern is the agent-era descendant of structured request logging. The classic version logs one line per HTTP request with method, path, status, latency. The agent version logs one *event* per reasoning step because a single user turn isn't one request — it's a small program the LLM writes at runtime (call this tool, read the result, call again, synthesize). You can't reconstruct that program from a single log line, so you capture the whole event stream.
 
-Where it connects: the captured `durationMs` and `tokens_used` are raw material
-for **performance** metrics (study-performance-engineering owns turning them into
-p95 latency and token budgets). The typed events are effectively **structured
-logs** (file 03 contrasts this with the repo's stdout logging). And the producer
-of these events — the ReAct-style loop, the tool policy, the synthesis turn —
-belongs to **study-agent-architecture**; this file only reads the events that
-loop emits.
+The deliberate design choice worth calling out: buffr persists the trajectory into the *same* table it uses for conversation content (`agents.messages`), not a separate `traces` table. That's why `role` carries values like `tool_call`, `tool`, and `model_usage` alongside `user`/`assistant` — the trajectory and the conversation are the same artifact, queried the same way. The cost: the table mixes "what the user sees" with "how the agent got there," so any UI replay has to filter by `role`. The benefit: one correlation key, one query, no join.
 
-What to read next: `02-client-timestamp-ordering.md` for why `created_at` makes
-replay deterministic, and the audit's lens 6 for the fallback gap in context.
+Where it connects: `study-agent-architecture` owns the loop that *produces* these events (`run-agent-loop`, `RagQueryAgent`); this file owns the sink that *persists* them. `study-performance-engineering` reads `durationMs` as a latency budget; here it's just a trace field.
 
 ## Interview defense
 
-**Q: You persist agent events to Postgres. Why not just log the final answer?**
-Because the answer alone can't explain itself. When an answer is wrong, the
-question is "which passages did retrieval surface, what did the tool return, did
-it error, how many tokens did it burn?" — and all of that is *cause*, not
-*result*. I capture `tool_call_start.args` (the cause) right next to
-`tool_call_end.result/error/durationMs` (the effect), so root-causing a bad answer
-is a `select ... order by created_at`, not a re-run with print statements.
+**Q: Your agent calls a tool and gets a wrong answer. Walk me through debugging it with your trace.**
 
 ```
-  the cause lives one row before the effect
-  tool_call_start { args }  →  tool_call_end { result, error, durationMs }
-        WHY it called             WHAT it got back + how long
+  the cause/effect pair is the whole answer
+
+  tool_call row  ──►  tool row
+   args = {q:…}        result = {…}, error = null, durationMs = 240
+      │                   │
+      └─── compare ───────┘
+      "I asked X, it returned Y" — root cause in two rows
 ```
 
-**Q: `emit()` is synchronous but a DB insert is async. How do you not lose
-writes?** I queue, I don't await. `emit()` fires the insert and pushes the promise
-into a `pending[]` array; after the run, `session.ts` calls `flush()` which awaits
-`Promise.all(pending)`. That respects aptkit's sync `emit` contract without
-serializing the loop on DB latency. The cost I accepted: insert *completion* order
-is a race, so ordering can't use `now()` — I use the event's own timestamp. The
-load-bearing part people forget is `flush()`: without it the process can exit
-before the tail of the trajectory lands.
+Pull the turn by `conversation_id`, sort by `created_at`. Find the `tool_call` row — its `tool_calls.args` is exactly what I handed the tool. Find the matching `tool` row — `tool_results.result` is what came back, `error` tells me if it threw, `durationMs` if it was slow. The bug is whichever side is wrong: bad `args` means the agent reasoned wrong; bad `result` with good `args` means the tool's the problem. **Anchor:** the cause/effect pair at `src/supabase-trace-sink.ts:62-72`.
 
-```
-  emit (sync) → push promise → pending[] → flush() awaits all
-```
+**Q: What's the one thing this trace gets wrong?**
 
-**Q: Is the capture actually complete?** Almost — and I'll name the hole, because
-naming it is the point. The loop gates the `step` event behind `if (text)`, so when
-the model returns empty text no step fires, yet the agent still returns a
-`FALLBACK_ANSWER` the user sees. That answer-class — "it found nothing" — is the
-one with no row, which is exactly the one you'd most want to debug. The fix is a
-synthetic step row in `session.ts` when the answer equals the fallback sentinel.
+The FALLBACK_ANSWER gap. The `step` case skips empty content (`:58`), and `RagQueryAgent` returns its fallback string *without emitting a step* (aptkit `rag-query-agent.js:51`) — so an empty-synthesis turn shows the user "I couldn't find anything" but leaves no assistant row in the table. The trace says the agent answered nothing; the user got an answer. That's the load-bearing part people miss: full-signal capture is only as full as the loop's willingness to emit. **Anchor:** `if (event.content)` at `src/supabase-trace-sink.ts:58`.
 
 ## See also
 
-- `02-client-timestamp-ordering.md` — why `created_at = event.timestamp` makes
-  the replay in this file deterministic.
-- `03-stdout-as-only-log.md` — the contrast: these typed events vs the repo's
-  unstructured stdout logging.
-- `04-eval-numbers-as-quality-signal.md` — the other place numbers come from.
-- `audit.md` lens 5 (traces) and lens 6 (the fallback gap).
-- Cross-guide: study-agent-architecture (the loop that emits these events),
-  study-performance-engineering (turning `durationMs`/`tokens_used` into metrics).
+- `02-client-timestamp-ordering.md` — why `created_at` carries the event timestamp, and the tie it leaves.
+- `03-stdout-as-only-log.md` — what observability looks like *outside* this table.
+- `audit.md` lens 5 (traces) and lens 6 (state snapshots).
+- Cross-guide: `study-agent-architecture` (the emitting loop), `study-performance-engineering` (`durationMs` as a budget).

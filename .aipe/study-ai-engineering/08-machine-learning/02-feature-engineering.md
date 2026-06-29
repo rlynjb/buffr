@@ -1,235 +1,252 @@
-# Feature engineering — raw signal → engineered feature vector
+# Feature Engineering
 
-*Industry standard (feature engineering / representation). buffr does none by hand — its features come pre-baked from nomic-embed-text:v1.5. Not yet implemented.*
+### *industry: feature engineering · type: turning raw signal into numeric features before the model*
 
-## Zoom out, then zoom in
+## Zoom out
 
-The FEATURES stage of the pipeline (`01-supervised-pipeline.md`) is where a model's accuracy is mostly decided — and it's the one stage buffr quietly *already gets for free*, because a pre-trained encoder hands it a 768-dim vector per chunk without anyone hand-crafting a single feature. This file teaches the hand-crafting buffr skips, then marks honestly where buffr's automated features sit.
+This is the stage that decides whether your model is good, and it sits *before* the model touches anything. In classical ML, 60–80% of model quality is set here — in how you turn raw rows into numbers — not in the model choice. buffr does none of it. It hand-engineers no features; it leans entirely on a learned feature extractor (the embedder) it didn't build.
+
+**The pipeline, with FEATURES marked ★ — the stage that decides most of the quality**
 
 ```
-  Zoom out — features in the pipeline; buffr's are auto, not hand-made
-
-  ┌─ Provider (Ollama) ──────────────────────────────────────────┐
-  │  nomic-embed-text:v1.5 ──► vector(768)  ← AUTOMATED features  │
-  │  (representation learning: features for free, no hand-craft)  │
-  └───────────────────────────────┬───────────────────────────────┘
-                                  │ stored as
-  ┌─ Storage (Supabase) ─────────▼────────────────────────────────┐
-  │  agents.chunks.embedding  vector(768)                         │
-  │  agents.messages  ← raw trajectory signal (UN-featurized)     │
-  └───────────────────────────────┬───────────────────────────────┘
-                                  │ hand feature-engineering WOULD attach here
-  ┌─ ML FEATURES — ★ NOT PRESENT ★ ─▼─────────────────────────────┐ ← we are here
-  │  scaling · encoding · interactions · temporal · text→features │
-  │  (buffr engineers NONE of these by hand)                      │
-  └───────────────────────────────────────────────────────────────┘
+┌────────┐   ┌──────────┐   ┌────────┐   ┌────────┐   ┌────────┐
+│  DATA  │──►│ FEATURES │──►│ SPLIT  │──►│ TRAIN  │──►│ DEPLOY │
+│        │   │ ★ raw →  │   │        │   │        │   │        │
+│        │   │ numeric  │   │        │   │        │   │        │
+└────────┘   └──────────┘   └────────┘   └────────┘   └────────┘
+              ◄── this file
+              60–80% of model quality is decided HERE, BEFORE the model
 ```
 
-Zoom in: **feature engineering** is turning raw signal into the fixed-width numeric vector a model can actually learn from — and choosing *what the model is allowed to notice*. The industry rule of thumb is blunt: **features contribute 60–80% of the result, the model contributes ~10%.** buffr does zero hand-crafting; its only features are the embeddings nomic-embed-text emits, which is genuinely a form of feature engineering — automated representation learning — just not the kind you do by hand. The contrl pose pipeline rhymes here: turning raw pose landmarks into joint angles was hand feature-engineering; you've done this before, on a different signal.
+In contrl you did this constantly — raw frames became joint angles, normalized coordinates, distances between landmarks. Those weren't pixels you fed the model; they were *features you computed*. That hand-crafting is the thing buffr skips entirely, because nomic-embed-text does it learned-style. This file is about the hand-crafted craft, and the honest contrast with embeddings.
 
 ## Structure pass
 
-**Layers:** raw signal (bottom) → engineered features → the vector the model consumes (top).
+The axis is **hand-engineered vs learned features**. contrl (and all classical ML) hand-engineers: a human decides "the angle between these two joints matters" and computes it. buffr uses learned: the embedder *discovered* what matters during its own training. The seam is who chose the features — a human, or gradient descent.
 
-**Axis — "how much does the model get to see, and who decided?"** Trace it up the stack.
+**One axis: who designed the features**
 
 ```
-  trace "what does the model SEE, and who chose it?"
-
-  ┌─ raw signal ─────┐  everything, unusable shape
-  │ trajectory rows  │  (model can't eat this directly)
-  └────────┬─────────┘
-  ┌─ engineering ────┐  YOU choose: scale, encode, combine, aggregate
-  │ transforms       │  ← this is where accuracy is mostly won or lost
-  └────────┬─────────┘
-  ┌─ feature vector ─┐  exactly what you exposed, nothing more
-  │ fixed-width nums │  (model is blind to anything you didn't engineer)
-  └──────────────────┘
-
-  the model's ceiling is set HERE, before training starts
+   HAND-ENGINEERED (classical / contrl)   LEARNED (buffr's embedder)
+   ────────────────────────────────────   ──────────────────────────
+   human picks transforms                 model discovers them
+   scale, one-hot, day_of_week, ratios    768 floats, no human meaning
+   inspectable, debuggable                opaque, but no manual labor
+   ┌──────────────────────────┐           ┌──────────────────────────┐
+   │ raw ─► chosen transforms │ ──seam──► │ raw text ─► nomic ─► 768d │
+   └──────────────────────────┘           └──────────────────────────┘
+        the seam: did a human or an optimizer choose the features?
 ```
 
-**The seam:** the boundary between hand-crafted features and *learned* features. On the hand side, a human picks the representation (joint angles, token counts). On the learned side, a pre-trained encoder picks it for you (nomic-embed-text turns text into 768 numbers it learned during its own training). The axis-answer flips across that seam — *who decided the representation* — and buffr lives entirely on the learned side: it never hand-engineers, it consumes an encoder's output. That's the honest framing for the whole file.
+Left of the seam: the classical craft — and buffr does none of it. Right of the seam: buffr's reality — it hands raw text to a learned extractor and gets a vector. Consequence: buffr never decides what a feature *is*, so the entire skill below is new ground, taught as a thing you'd build, with embeddings as the honest contrast.
 
 ## How it works
 
-### Move 1 — the mental model
+### Move 1 — Mental model
 
-You already do feature engineering every time you normalize props before passing them to a component. Raw API gives you `{ created_at: "2026-06-19T..." }`; your component needs `daysAgo: 9`. You don't pass the raw string — you derive the number the UI can actually use. Feature engineering is that, at scale, for a model: take raw fields, derive the numeric quantities the model can learn from, and *drop the shapes it can't use*.
+Feature engineering is translation: the model speaks only numbers with comparable scales, so you translate every raw signal into that language. A string, a date, a paragraph — each needs a transform that preserves the *useful* information as floats. Do the translation well and a simple model wins; do it badly and no model recovers.
 
-```
-  PATTERN — raw row → engineered feature vector
-
-  raw row (mixed types, unusable)        engineered vector (numeric, fixed)
-  ┌─────────────────────────────┐        ┌──────────────────────────────┐
-  │ created_at: "2026-06-19..." │  ───►  │ recency_days:      9         │
-  │ tool_calls: [{...},{...}]   │  ───►  │ tool_call_count:   2         │
-  │ tokens_used: 1840           │  ───►  │ tokens_scaled:     0.61      │
-  │ role: "assistant"           │  ───►  │ role_is_assistant: 1         │
-  │ content: "long text..."     │  ───►  │ embedding[0..767]: 0.02,...  │
-  └─────────────────────────────┘        └──────────────────────────────┘
-   strings, arrays, timestamps             only numbers the model can fit
-```
-
-The strategy: every transform below is a way to turn one messy field into model-usable numbers without leaking the answer.
-
-### Move 2 — the step-by-step walkthrough
-
-Five families of transform, one per sub-heading. Each takes a raw field and emits numbers.
-
-**Numeric scaling / normalization.** Raw numbers live on wildly different scales — `tokens_used` in the thousands, `tool_call_count` in single digits. Many models (anything distance- or gradient-based) let the big-magnitude feature dominate purely because it's big. Scaling fixes that: standardize to mean-0 / std-1, or min-max to [0,1].
+**Raw signals and their transforms**
 
 ```
-  Numeric scaling — put features on a comparable scale
-
-  raw          standardized (z = (x - mean) / std)
-  ─────        ────────────────────────────────────
-  tokens=1840    0.61   ┐
-  tool_calls=2  -0.30   ├─ now comparable; no single feature
-  turns=6        0.15   ┘   dominates by raw magnitude alone
+  RAW                    TRANSFORM                  NUMERIC FEATURE
+  ─────────────────────  ─────────────────────────  ───────────────
+  47.0, 9000.0 (mixed)   scale (z-score / min-max)  -0.3, 1.8
+  "premium" (category)   one-hot / target encode    [0,1,0] or 0.72
+  "great coffee" (text)  tf-idf / embedding         sparse / 768d vec
+  2026-06-19 (datetime)  extract day/month/cyclic   day=4, sin(month)
+  price × qty (interact) multiply / cross           feature_AB
 ```
 
-Boundary condition: compute mean/std on the **train split only**, then apply to val/test. Fit the scaler on the whole dataset and you've leaked test statistics into training — a quiet form of the leakage `03-train-val-test.md` is about.
+Frontend bridge: it's the serializer between your domain model and the wire format. The model is an API that only accepts a strict numeric schema; feature engineering is the adapter that conforms every input to it. A sloppy adapter corrupts everything downstream.
 
-**Categorical encoding.** A model can't read `role: "assistant"`. You encode categories into numbers — three common ways, each with a tradeoff.
+### Move 2 — Walk the mechanism
 
-```
-  Categorical encoding — three ways to turn "assistant" into numbers
+All code below is **illustrative pseudocode** — buffr has none of it. The categories are the standard toolkit, shaped by contrl-style examples.
 
-  ONE-HOT          TARGET (mean-encode)        EMBEDDING
-  ───────          ────────────────────        ─────────
-  role=tool   →    role=tool → 0.12            role → learned
-   [1,0,0]         (avg label for this role)    dense vector
-  role=user   →    cheap, leak-prone:           (what nomic-embed
-   [0,1,0]          must compute on TRAIN only    does for text)
-  small cardinality  high cardinality           huge cardinality
-```
+**Category A — Numeric scaling: make ranges comparable**
 
-One-hot for a few categories; target-encoding for many (but compute the per-category mean on train only, or you leak the label); embeddings for huge-cardinality or text. The boundary condition is target-encoding's leak: the encoded value *is derived from the label*, so it must never see val/test rows.
-
-**Interactions.** Sometimes the signal isn't in any single feature but in a *combination*. A run with many tool calls *and* an error is suspicious; either alone is fine. Linear models can't discover that on their own — you hand them the product feature `tool_calls × had_error`.
+A feature in [0,1] and one in [0,10000] aren't comparable; distance- and gradient-based models will let the big one dominate. Scaling fixes the units.
 
 ```
-  Interactions — combine features the model can't combine itself
-
-  tool_calls │ had_error │ interaction (product)
-  ───────────┼───────────┼──────────────────────
-       5     │     0     │        0      (fine)
-       1     │     1     │        1      (one error, low effort)
-       6     │     1     │        6      ← the suspicious case pops out
+  before:  age=47    income=90000   ◄── income swamps age
+  z-score: (x - mean) / std
+  after:   age=-0.3  income=1.8      ◄── now comparable
 ```
 
-Tree models find interactions automatically; linear models (`04-model-selection.md`) need you to engineer them.
-
-**Temporal / aggregate features.** Raw events become features by *aggregating over a window or a unit*. One trajectory has many `agents.messages` rows; you collapse them into per-conversation aggregates: total turns, total tokens, max tool latency, count of warnings.
-
-```
-  Temporal / aggregate — many rows → one feature vector per unit
-
-  agents.messages (one conversation_id, N rows)   aggregate
-  ───────────────────────────────────────────     ──────────────
-  step, step, tool_call, tool, model_usage...  ─► turn_count:    6
-  tokens_used per model_usage row              ─► tokens_total: 1840
-  durationMs per tool_results                  ─► max_tool_ms:   920
-  warning/error events                         ─► error_flag:    0
-                                                  (one row the model fits)
+```python
+# ILLUSTRATIVE PSEUDOCODE — not buffr code.
+mean, std = X_train.mean(), X_train.std()   # FIT on train only
+X_train = (X_train - mean) / std
+X_test  = (X_test  - mean) / std            # reuse train stats (no leakage)
 ```
 
-This is exactly the FEAT-1 exercise below, and it's the natural unit because the model predicts *per conversation*, not per message.
+The leakage trap is baked in here: you compute mean/std on *train only* and reuse them — never fit the scaler on the full set (that's stage 03's rule, appearing already).
 
-**Text → features.** Free text is the hardest raw signal. Classic options: bag-of-words / TF-IDF (count word occurrences), or — the modern default — feed it through a pre-trained encoder and use the output vector. **This is the one buffr already does.** `nomic-embed-text:v1.5` turns chunk text into a `vector(768)`, stored in `agents.chunks.embedding` and searched in `src/pg-vector-store.ts`.
+**Category B — Categorical encoding: strings to numbers**
 
-```ts
-// src/pg-vector-store.ts:67-78 — the 768-dim feature vector in use
-async search(vector: number[], k: number): Promise<Hit[]> {
-  this.assertDim(vector);                         // the 768-dim feature vector
-  const { rows } = await this.pool.query(
-    `select id, content, ...,
-            1 - (embedding <=> $1::vector) as score  // cosine over learned features
-     from agents.chunks
-     where app_id = $2
-     order by embedding <=> $1::vector
-     limit $3`, ...);
-}
+Models can't multiply `"premium"`. One-hot makes a binary column per category; target encoding replaces a category with its mean label — powerful but leakage-prone.
+
+```
+  ONE-HOT                         TARGET ENCODE
+  "premium" ─► [0,1,0]            "premium" ─► mean(label | premium)=0.72
+  safe, sparse, high-cardinality  dense, strong, LEAKS if fit on test
+  blows up with many categories   needs out-of-fold computation
 ```
 
-The honest read: nobody at buffr hand-engineered those 768 numbers. nomic-embed-text *learned* the representation during its own pre-training (representation learning), and buffr gets the features for free. That's still feature engineering — just automated, and outsourced to a pre-trained encoder. What buffr does *not* do is engineer features over its trajectory signal in `agents.messages`; that's untouched.
+```python
+# ILLUSTRATIVE PSEUDOCODE — not buffr code.
+X = one_hot(X, "tier")                      # safe default
+# target encoding MUST be out-of-fold to avoid leaking the label:
+X["tier_te"] = target_encode_oof(X["tier"], y)
+```
 
-### Move 3 — the principle
+**Category C — Text to features: the place embeddings live**
 
-Features set the model's ceiling before training starts — the model can only learn from what you exposed, and it's blind to everything you didn't. That's why features dominate the result and the model choice is a smaller lever: you can't out-fit a representation that doesn't contain the signal. The modern shift is that for text and images, a pre-trained encoder does the representation work for you — which is precisely buffr's situation: it skips hand-crafting because it inherited a good representation. The skill that survives that shift is knowing *when* the free representation is enough (buffr's retrieval) and when you still need hand-crafted features (anything over the trajectory signal, which no encoder gives you for free).
+Raw text becomes numbers two ways. Classical: tf-idf — a sparse vector of term weights. Learned: an embedding — a dense 768-d vector. **This is buffr's one real feature step, and it's the learned kind.**
+
+```
+  CLASSICAL (tf-idf)              LEARNED (buffr: nomic-embed-text)
+  "great coffee" ─► sparse vec    "great coffee" ─► 768 dense floats
+  one slot per vocabulary term    no human-readable slots
+  human-inspectable weights       opaque, captures meaning
+  ◄── you'd build this            ◄── buffr already does this
+```
+
+```python
+# ILLUSTRATIVE PSEUDOCODE — not buffr code.
+X_tfidf = tfidf.fit_transform(texts)        # classical, sparse
+# buffr's real path is the learned extractor instead:
+# embedding = ollama.embed("nomic-embed-text:v1.5", text)  # 768-d
+```
+
+**Category D — Datetime: unpack the timestamp**
+
+A raw timestamp is one opaque number. The signal lives in its parts — day of week, hour, month — and cyclic features encode that Sunday is next to Monday.
+
+```
+  2026-06-19 14:00
+        │ extract
+        ▼
+  day_of_week=4   hour=14   month=6
+        │ cyclic (so Dec is near Jan)
+        ▼
+  sin(2π·month/12), cos(2π·month/12)
+```
+
+**Category E — Interactions: combine features that only matter together**
+
+Sometimes `price` alone and `quantity` alone are weak, but `price × quantity` (total) is the real signal. Interaction features hand the model the combination explicitly.
+
+```
+  price=4   quantity=3       ─► weak alone
+  price × quantity = 12      ─► strong (the model can't always find this itself)
+```
+
+### Move 2.5 — Current vs future
+
+**Case B: buffr engineers no hand-crafted features.** Its only feature step is the learned embedding — and it didn't even build that; it calls Nomic's frozen extractor.
+
+```
+  TODAY (buffr)                      IF YOU BUILT FEATURES (new ml/)
+  ─────────────                      ───────────────────────────────
+  text ─► nomic ─► 768d              raw signal ─► hand-crafted features:
+  one learned step, opaque            scale + one-hot + datetime + tf-idf
+  ┌──────────────┐                   ┌─────────────────────────────────┐
+  │ no human      │   ──gap──►       │ a human-chosen feature vector,   │
+  │ feature design│                  │ inspectable, for a real model    │
+  └──────────────┘                   └─────────────────────────────────┘
+```
+
+What you'd build: features for the intent classifier from file 01 — query length, has-question-mark, tf-idf over query terms, maybe the cosine to each doc's centroid. That's hand-engineering, and buffr has none of it.
+
+### Move 3 — The principle
+
+**Features are where the modeling actually happens; the model just draws the boundary your features made drawable.** A linear model on great features beats a deep model on raw garbage. buffr sidesteps this entirely by renting a learned extractor — convenient, but it means buffr has never decided what a feature *is*. contrl did, every day. The signal is being able to say: "embeddings are a learned feature extractor, and the classical alternative is the hand-crafted vector I'd build instead — here's when each wins."
 
 ## Primary diagram
 
-Every transform family, raw input to engineered output, with buffr's reality marked.
+The five feature categories and buffr's single learned shortcut past all of them.
+
+**Hand-engineered toolkit vs buffr's one learned step**
 
 ```
-  Feature engineering — the five transform families, buffr's reality
-
-  RAW SIGNAL                         ENGINEERED FEATURES (model input)
-  ┌──────────────────┐
-  │ tokens_used=1840 │── SCALING ───► z=0.61   (fit scaler on TRAIN only)
-  │ role="assistant" │── ENCODING ──► one-hot / target / embedding
-  │ tool_calls × err │── INTERACT ──► product feature (linear models need it)
-  │ N message rows   │── AGGREGATE ─► turn/tool/token/error per conversation_id
-  │ chunk text       │── TEXT→VEC ──► vector(768)  ★ buffr DOES this (auto) ★
-  └──────────────────┘                            via nomic-embed-text:v1.5
-
-  buffr reality:
-    ✓ TEXT→VEC   (free, from pre-trained encoder → agents.chunks.embedding)
-    ✗ everything else (no hand-crafted features over agents.messages signal)
-
-  rule of thumb: features ≈ 60–80% of result · model ≈ 10%
+  HAND-ENGINEERED (you'd build — buffr has none)
+  ┌─────────┬───────────┬──────────┬──────────┬─────────────┐
+  │ scaling │ categorical│  text   │ datetime │ interactions │
+  │ z-score │ one-hot/TE │ tf-idf  │ cyclic   │ a×b crosses  │
+  └─────────┴───────────┴──────────┴──────────┴─────────────┘
+                    │ a human chose each transform
+                    ▼
+  ────────────────────────────────────────────────────────────
+  LEARNED (buffr's only feature step)
+  raw text ─► nomic-embed-text ─► 768 floats   ◄── no human design
 ```
+
+After the box: buffr lives on the bottom line only. The top line is the craft this file teaches and the half buffr never does.
 
 ## Elaborate
 
-Feature engineering was *the* job in classical ML before deep learning — Kaggle was won on it, and "feature stores" exist as production infrastructure precisely because computing features consistently across train and serve is hard (the parity problem from `01`). The "features dominate" rule comes out of that era and still holds for tabular data. Deep learning's big move was *learned* features: instead of a human designing the representation, the network learns it from raw input — which is exactly what an embedding model like nomic-embed-text is, a frozen learned feature extractor you can call. So buffr sits on the modern side of this history: it never hand-engineers because it consumes a learned representation. The contrl pose pipeline sat on the *classical* side — you hand-derived joint angles from landmarks, which is textbook feature engineering. Holding both in your head is the lesson: the discipline didn't disappear, it moved to "pick and validate the right pre-trained encoder," plus hand-crafting for any signal (like trajectories) no encoder covers.
+- **Why feature engineering is 60–80% of quality.** The model's job is to find a boundary in feature space. If your features already separate the classes, a trivial model finds the boundary; if they don't, no model can. Garbage in, garbage boundary. This is why veterans spend their time on features and juniors spend it on architectures.
+- **Embeddings are feature engineering — just automated.** nomic-embed-text learned, during *its* training, which combinations of token patterns carry meaning, and bakes them into 768 dimensions. That's feature extraction, learned instead of hand-coded. The tradeoff: you lose inspectability (no dimension means "has question mark") and gain coverage (it handles paraphrase you'd never hand-code). Saying this out loud connects buffr's real work to the classical concept.
+- **The leakage trap lives in features, not just splits.** Fitting a scaler or a target-encoder on the full dataset leaks test information into training. The fix — fit transforms on train only, apply to val/test — belongs to feature engineering even though it's a split concern. The two stages are coupled.
+- **buffr's corpus would barely need hand features — that's why it gets away with embeddings.** Personal markdown notes are pure text; the embedder handles them. The moment you add structured signal (timestamps on messages, token counts, tool-call patterns from `agents.messages`), hand-engineered features re-enter, and buffr has no machinery for them.
 
 ## Project exercises
 
-> No curriculum file present; exercises derived from the codebase.
+### Hand-engineer a feature set for the query-intent classifier
 
-### Engineer trajectory features from agents.messages
+Not yet implemented — buffr trains nothing, so it has no hand-engineered features at all. This builds the Features stage on buffr's own queries and forces the human design decisions the embedder hides.
 
-- **Exercise ID:** FEAT-1 (Case B — feature engineering not yet implemented). **The core exercise: build the one feature representation buffr's signal needs and no encoder provides.**
-- **What to build:** a function that reads all `agents.messages` rows for one `conversation_id` and emits a feature vector — `turn_count`, `tool_call_count`, `tokens_total` (sum of `tokens_used`), `error_flag` / `warning_flag` (from the `error`/`warning` event rows), and `max_tool_ms` / `total_tool_ms` (from `durationMs` inside `tool_results`). Scale the numerics with stats fit on the train split only.
-- **Why it earns its place:** this is the FEATURES stage for PIPE-1 and the representation no pre-trained model hands buffr — the only place buffr would do *real* hand feature-engineering. The "I turned my agent's raw trajectory into a model-ready vector" story.
-- **Files to touch:** read the schema written by `src/supabase-trace-sink.ts` (`agents.messages` columns); put the feature function next to `src/cli/eval-cmd.ts` so the classifier and the scorer share it (parity).
-- **Done when:** given a `conversation_id`, the function returns a fixed-width numeric vector, and the *same* function is callable from both training and serving.
+- **Exercise ID:** [B2C.3] (cite [B2C.3], Phase 2C) — Case B: no hand-crafted features exist; this is the primary buildable target.
+- **What to build:** `ml/features.py` that turns a raw query string into a hand-crafted numeric vector: length, word count, has-question-mark, tf-idf over query terms, and (optionally) cosine to each doc centroid. Fit all transforms on train only.
+- **Why it earns its place:** It makes the abstract "60–80% of quality is here" concrete on buffr data, and it makes you choose features a human can read — the opposite of the opaque 768-d embedding.
+- **Files to touch:** new `ml/features.py`, `ml/dataset.py` (reads `eval/queries.json` for seed labels).
+- **Done when:** `features.py` emits a documented numeric vector per query, transforms are fit on train only, and you can name which feature you expect to matter most.
 - **Estimated effort:** 1 day.
 
-### Add cheap retrieval-quality features alongside the cosine score
+### Contrast hand features vs embeddings on the same task
 
-- **Exercise ID:** FEAT-2 (Case B — retrieval features not yet implemented).
-- **What to build:** extend the `search()` result in `src/pg-vector-store.ts` with cheap per-hit features beyond the bare cosine score — e.g. score gap to the next hit, hit-count above a threshold, `chunk_index` position, content length — as inputs a future learned reranker (`04-model-selection.md`, SEL-1) could consume.
-- **Why it earns its place:** the cosine score is a single feature; a reranker needs a vector. This builds the feature surface that makes a learned reranker possible, on buffr's one real ML-adjacent path.
-- **Files to touch:** `src/pg-vector-store.ts` (the `search()` mapping at lines 67–85); consumed later by an eval/reranker harness next to `src/cli/eval-cmd.ts`.
-- **Done when:** each hit carries a small feature vector (not just `score`), and the eval harness can read it.
-- **Estimated effort:** 4–8hr.
+Not yet implemented — buffr only has the learned path, so the comparison doesn't exist. This runs both extractors side by side to feel the tradeoff.
+
+- **Exercise ID:** [B2C.4] (cite [B2C.4], Phase 2C) — Case B: learned features present, hand features absent; this builds the missing arm.
+- **What to build:** Train the same simple classifier twice — once on `ml/features.py` hand features, once on nomic embeddings of the query — and compare accuracy and inspectability.
+- **Why it earns its place:** It turns "embeddings are a learned feature extractor" from a sentence into a measured result on your corpus, with the inspectability tradeoff visible.
+- **Files to touch:** `ml/features.py`, new `ml/compare_features.py`; embeddings via the existing Ollama embed path.
+- **Done when:** A table prints accuracy for hand-features vs embedding-features, and you can say which won and why on this small corpus.
+- **Estimated effort:** 1 day.
 
 ## Interview defense
 
-**Q: How much does feature engineering actually matter versus picking the right model?**
-Answer: features set the ceiling — roughly 60–80% of the result, with the model around 10%. The model can only learn from what the features expose; it's blind to anything you didn't engineer in. So I spend my attention on representation: scaling so no feature dominates by magnitude, encoding categories without leaking the label, engineering interactions linear models can't find, and aggregating raw events into per-unit vectors. You can't out-fit a representation that doesn't contain the signal.
+**Q: "What's the relationship between embeddings and feature engineering?"**
+
+Embeddings *are* feature engineering — the learned kind. A hand-engineered pipeline has a human choose transforms (scale, one-hot, tf-idf, datetime). An embedder lets gradient descent discover the transforms during its own training and emits a dense vector. buffr uses the learned kind exclusively; it hand-engineers nothing.
 
 ```
-  features (ceiling) ──────────────────► model (fits under the ceiling)
-   60–80% of result                        ~10%
+  hand: human picks transforms ─► inspectable vector
+  learned: optimizer picks them ─► opaque 768-d vector (buffr)
 ```
 
-**Q: buffr does no feature engineering — is that a gap?**
-Answer: not for retrieval — buffr gets its features *for free* from `nomic-embed-text:v1.5`, which emits a `vector(768)` per chunk stored in `agents.chunks.embedding`. That's automated representation learning; nobody hand-crafted those numbers. **The part people forget: an embedding model IS feature engineering, just learned and outsourced — so buffr isn't skipping the FEATURES stage, it's inheriting it.** The genuine gap is over `agents.messages`: no encoder turns a trajectory into features, so if buffr ever modeled its own runs, that's the one place real hand-crafting is required.
+Anchor: *"An embedding is a feature extractor someone else trained."*
+
+**Q: "Why spend most of your time on features rather than model choice?"**
+
+Because features decide whether the classes are separable at all. A simple model on good features beats a complex one on raw signal — the model only draws the boundary the features made drawable. I learned this in contrl, where joint-angle features mattered far more than the network depth.
 
 ```
-  text ──► nomic-embed ──► vector(768)   features for free (buffr has this)
-  trajectory ──► (no encoder) ──► must hand-engineer (buffr's real gap)
+  good features + simple model ─► wins
+  raw signal   + complex model ─► loses
 ```
+
+Most candidates have only consumed pre-trained embeddings; having hand-engineered features for a real model (contrl) means I know what the embedding is doing under the hood. That's the signal.
+
+Anchor: *"The model draws the boundary the features made possible."*
 
 ## See also
 
-- `01-supervised-pipeline.md` — the FEATURES stage this file opens up.
-- `03-train-val-test.md` — why scalers/encoders must be fit on the train split only (leakage).
-- `04-model-selection.md` — linear models need engineered interactions; trees find them.
-- `../03-retrieval-and-rag/` — where buffr's embedding features are actually produced and used.
-- `../05-evals-and-observability/04-llm-observability.md` — the trajectory signal FEAT-1 turns into features.
+- `./01-supervised-pipeline.md` — where Features sits in the five-stage line.
+- `./03-train-val-test.md` — the leakage rule for fitting transforms (train only).
+- `./04-model-selection.md` — good features make the simple model competitive.
+- `../03-retrieval-and-rag/01-embeddings.md` — buffr's learned feature extractor in depth.
+- `../05-evals-and-observability/` — measuring whether your features actually moved the metric.
+- `../09-ml-system-design-templates/` — feature pipelines inside a full system design.

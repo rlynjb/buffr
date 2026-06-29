@@ -1,144 +1,193 @@
-# Chapter 01 — The cold open   (0:00–1:00, 60 seconds)
+# Chapter 1 — The Cold Open   (0:00–1:00, 60 seconds)
 
 ## Opening hook
 
-You have sixty seconds, and the room decides inside the first fifteen whether this is real or a slide deck. Do not introduce yourself. Do not say "so, our project is about personal AI assistants and we were thinking about privacy." The clock is running and you just spent your opening on throat-clearing. Open on the thing working: your laptop, the chat already up, a question already typed, and an answer that comes back grounded and cited. The room sees a real system respond before they've heard a single sentence of pitch.
+You have sixty seconds, and the room decides inside the first twenty
+whether this is real software or a slide deck. Do not spend them on a title
+card, your name, or "so the problem we set out to solve…". Open with buffr
+*answering a question*, on your screen, live. The room should see a working
+terminal before they hear what it is. You name the thing only after they've
+seen it move.
 
-The job of this minute is narrow: get one real answer on screen, then drop the one-liner that tells them what they just watched. That's it. The wow isn't here yet — the wow is the money shot at 2:30. This minute buys you the room's attention so they're still watching when it lands.
+This is the discipline this chapter trains: start in motion. The most
+common way to lose the cold open is ninety seconds of setup the room
+doesn't need yet — what RAG is, why local matters, who you are. Cut all of
+it. Show first. The one-liner lands *after* the first answer, not before.
 
 ## The time-budget bar
 
-You own the first sixty seconds. Get a live, cited answer on screen and say the one-liner — nothing else.
+You own the first minute. By 1:00 the room must have seen buffr answer one
+grounded question and heard one sentence telling them what it is.
 
 ```
   ┌──────────────────────────────────────────────────────┐
-  │ ▓▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ │
-  │ 0:00 ─ 1:00 ──────────────────────────────────── 10:00 │
-  │        THE COLD OPEN — you own 0:00 to 1:00 (60 sec)   │
+  │ ▓▓▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ │
+  │ 0:00 ─ 1:00 ──────────── 6:00 ─────────────── 10:00   │
+  │      COLD OPEN — you own 0:00 to 1:00 (60 sec)        │
   └──────────────────────────────────────────────────────┘
 ```
 
-## The attention curve — what you're managing
+## The attention curve — where the cold open has to put the room
 
-The room's attention is highest at second zero and falls fast unless something holds it. This is the curve you're presenting into. Open cold on a working answer and you catch attention while it's still high; open on a self-intro and you spend it.
-
-```
-  the room's attention over the cold open
-
-  high │█                                    ★ money shot
-       │█▓                                     (ch 02, 2:30)
-       │█▓▓░                                      ▲
-  attn │█▓▓▓░░░          live answer lands         │
-       │█▓▓▓▓▓░░░░░  ──► holds the line ──────────►│
-       │█▓▓▓▓▓▓▓▓▓▓░░░  one-liner reframes it
-  low  └────────────────────────────────────────────────
-       0:00      0:30      1:00 ───────────► toward the demo
-
-   you OPEN at peak attention. don't waste it on "hi, we're team X."
-```
-
-The trap is the slow on-ramp. Here's the move you make instead, side by side.
+The room's attention is highest at second zero and decays fast if nothing
+happens. Your job is to spend that peak on the thing working, then convert
+it into a held curiosity that carries into the demo. Here is the shape you
+are steering.
 
 ```
-  WEAK cold open                  STRONG cold open
-  ──────────────────────────      ──────────────────────────────
-  "Hi, I'm Rein. So personal      [chat already open, question
-   AI is a big space and we        already typed, you hit enter]
-   wanted to explore memory       "Watch this — I ask my own
-   and privacy, so we built…"       notes a question, on my
-                                    laptop, no cloud."
-  → 30 sec gone, nothing shown    → an answer is on screen by 0:15
+  The room's attention over the first 60 seconds
+
+  high │█
+       │█▓
+  att  │█▓▓        ← title slide here = curve falls off a cliff
+  ent  │█▓▓▓
+  ion  │█▓▓▓▓░░░░░░░░░░░░░░  (a demo that opens cold and slow)
+       │
+       └────────────────────────────────────────────── time
+
+  high │█  ★ buffr answers a grounded, cited question
+       │█▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓  ← curiosity HELD into the demo
+  att  │█▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓     "...and it remembers me. watch."
+  ent  │█
+  ion  │
+       └────────────────────────────────────────────── time
+              ▲
+              open ON the answer, name it AFTER
 ```
 
-## The body — the two beats
+The top curve is the demo that opens on a title and explains for a minute;
+the room is already drifting by the time anything runs. The bottom curve is
+yours: the working answer spends the attention peak, and the one-liner
+converts it into a question the room now wants answered ("wait — it
+remembers?"). Hold that curiosity; chapter 2 pays it off.
 
-### Beat 1 — the hook (0:00–0:30): a live, cited answer
+## The body — the two beats in order
 
-The chat is already running (`npm run chat`, started before you walked up — see the pre-flight in the overview). The question is pre-typed in the input. You hit enter and talk over the spinner while Gemma answers.
+Two beats only: the **hook** (it answers, live) and the **one-liner** (what
+it is, in one sentence). Choreograph them as SHOW against SAY so your mouth
+speaks value while your hands type.
 
-```
-  SHOW (on screen)                    SAY (out loud)
-  ────────────────────────────────    ─────────────────────────────────
-  npm run chat already open,          "This is running on my laptop
-  cursor in the input, question        right now — my model, my data,
-  pre-typed                            no API key, nothing leaves the
-                                       machine."
-  ── you hit enter ──                  (let it think; don't narrate the
-  the dots spinner: "thinking…"        spinner)
-  the answer prints — grounded in      "And there's the answer — pulled
-  your indexed notes, with a           straight from my own notes, and
-  citation to the source doc           it tells me where it got it."  ◄ hook lands
-```
+### Beat 1 — the hook (0:00–0:35)
 
-Do not read the whole answer aloud. The room can read. You point at the citation — the fact that it grounded the answer in a real source doc — and move.
-
-### Beat 2 — the one-liner (0:30–1:00)
-
-Now that they've seen it work, tell them what it is. One sentence, said slowly, then a half-beat of silence so it sits.
+You walk on with `npm run chat` already running, or you run it as your
+first move so the room sees a real terminal, not a mockup. You type one
+question you *know* hits the indexed corpus, and it answers — grounded and
+cited.
 
 ```
-┃ "buffr is a personal AI agent that knows me and remembers me —
-┃  running entirely on my own laptop, on my own database."
+  SHOW (on screen)                  SAY (out loud)
+  ────────────────────────────      ──────────────────────────────
+  npm run chat — the Ink            "This is my notes. It runs on
+  terminal UI, already up           my laptop — nothing in the
+                                     cloud. Watch."
+  type a question that hits         "I ask it something from my
+  the indexed corpus, hit enter     own indexed docs…"
+  the answer streams back,          "…and it answers — grounded in
+  grounded + cited                   my notes, not made up."
 ```
 
-That's the one-liner: *X is a Y that does Z for W.* buffr (X) is a personal AI agent (Y) that knows you and remembers you, self-hosted (Z), for you, the person whose data it is (W). Say it close to verbatim. It's the sentence you want a judge repeating to another judge in the hallway.
+Do not narrate the typing. "Now I'm typing a question into the prompt" is
+the dead-air failure. The SAY track is the value — *it runs locally, it's
+grounded in my own notes* — while your hands do the typing the room can
+already see.
 
-Then the bridge into the demo — short, forward-leaning:
+### Beat 2 — the one-liner (0:35–1:00)
+
+Now, and only now, you name it. The form is "X is a Y that does Z for W":
 
 ```
-┃ "Let me show you the part that made me sit up — it remembers
-┃  a conversation we had earlier."
+  ┃ "buffr is a personal AI agent that runs entirely on my laptop —
+  ┃  it answers grounded in my own documents, and it remembers our
+  ┃  past conversations."
 ```
 
-That line is a promise. It tells the room the money shot is coming and tells them what to watch for, so when it lands at 2:30 they recognize it instead of missing it.
+That sentence does three jobs: names the category (personal AI agent),
+names the local-first twist (entirely on my laptop), and plants the money
+shot you're about to pay off (it remembers). Say it close to verbatim. Then
+go straight into the demo — no breath, no "so let me show you more."
+
+One more script line to have ready, the bridge into chapter 2:
+
+```
+  ┃ "Grounded answers are table stakes now. Here's the part that
+  ┃  isn't — watch it remember something from a conversation we had
+  ┃  before."
+```
+
+## Strong vs weak — the cold-open move
+
+The contrast is the lesson. One of these openings keeps the room; the other
+loses it before the demo starts.
+
+```
+  WEAK open                          STRONG open
+  ──────────────────────────         ──────────────────────────────
+  title slide: "buffr — a            terminal already live; type a
+  self-hosted personal RAG           question; it answers grounded
+  agent"                             + cited in the first 15 seconds
+
+  "Let me explain what RAG is        name it in ONE sentence AFTER
+  and why local-first matters…"      the room has seen it work
+
+  your name, your background,        the one-liner plants the money
+  the team, the inspiration          shot: "…and it remembers me"
+
+  room is drifting by 0:45           room is leaning in by 0:45
+```
 
 ## The IF-IT-BREAKS box
 
-The hook beat is the riskiest sixty seconds in the whole demo, because it's live and it's first. The most likely failure is the one the build honestly has: Gemma's tool-calling is emulated, so it can occasionally skip the search tool and answer ungrounded — no citation. Have a known-good question ready, and a clip behind that.
+The cold open is on a live model on your laptop. The two ways it bites: the
+model answers *without* searching (emulated tool-calling — see chapter 4),
+or the terminal is slow to spin up. Have the recovery ready before you walk
+on.
 
 ```
-╔══════════════════════════════════════════════════════════════════╗
-║ IF IT BREAKS                                                       ║
-║                                                                    ║
-║ Answer comes back ungrounded / no citation (Gemma skipped the     ║
-║ search tool) → stay calm, retype your KNOWN-GOOD question (the     ║
-║ one you verified in pre-flight) and re-ask. Say: "let me ask       ║
-║ that more directly." The retry almost always grounds.             ║
-║                                                                    ║
-║ Two misses in a row, OR chat won't start → switch to the          ║
-║ 25-second recorded clip. Say: "here it is from a run a few         ║
-║ minutes ago" and keep the energy up. Never apologize twice.       ║
-╚══════════════════════════════════════════════════════════════════╝
+  ╔══════════════════════════════════════════════════════════════╗
+  ║ IF IT BREAKS                                                  ║
+  ║ buffr answers but ISN'T grounded (skipped the search tool) → ║
+  ║ stay calm, say "let me ask that more directly" and re-ask    ║
+  ║ with your KNOWN-GOOD backup question (the one you rehearsed   ║
+  ║ that reliably triggers the tool). Do NOT re-roll the same     ║
+  ║ phrasing live.                                                ║
+  ║                                                               ║
+  ║ chat won't start / model cold → switch to the 20-second      ║
+  ║ pre-recorded clip of the grounded answer. Say: "here it is   ║
+  ║ from a run a minute ago" and keep the energy up. Never        ║
+  ║ apologize twice, never freeze.                                ║
+  ╚══════════════════════════════════════════════════════════════╝
 ```
 
-## The "tighten it" cut
+## The "tighten it" treatment
 
-If the slot is shorter than ten minutes, the cold open compresses but never disappears — you always open on the thing working. The cut: **drop the bridge line into the demo** (the "made me sit up" promise) and go straight from the one-liner to the first demo beat. The floor you must not cut below: one live cited answer on screen plus the one-liner. If you cut the live answer, you've cut the cold open's whole reason to exist.
+Running long going in? Cut Beat 1's second exchange — one grounded answer
+is enough to earn the one-liner. **Floor: the room sees buffr answer one
+real question before you name it.** Never open on the one-liner with no
+working answer behind it; that turns your cold open back into a slide.
 
-## The one-page run sheet — CHAPTER 01
+## The one-page run sheet — Chapter 1
 
 ```
-  ┌─ COLD OPEN ─ 0:00–1:00 ─ 60 sec ────────────────────────────┐
-  │                                                              │
-  │  PRE-FLIGHT DONE: chat open, question pre-typed, corpus      │
-  │  indexed, clip ready.                                        │
-  │                                                              │
-  │  BEAT 1 (0:00–0:30) — hit enter on the pre-typed question    │
-  │    SAY: "running on my laptop — my model, my data, no cloud" │
-  │    SAY (on answer): "pulled from my own notes — and it cites │
-  │         where it got it"                                     │
-  │                                                              │
-  │  BEAT 2 (0:30–1:00) — the one-liner, said slowly:            │
-  │    ┃ "buffr is a personal AI agent that knows me and          │
-  │    ┃  remembers me — on my own laptop, my own database."      │
-  │    bridge: "let me show you the part that made me sit up —   │
-  │             it remembers a conversation we had earlier."     │
-  │                                                              │
-  │  NAIL THIS LINE: the one-liner.                              │
-  │  IF IT BREAKS: re-ask known-good Q once → else 25-sec clip.  │
-  │  TIGHTEN: drop the bridge line. Floor: one live cited answer │
-  │           + the one-liner.                                   │
-  └──────────────────────────────────────────────────────────────┘
+  ┌─ COLD OPEN ─────────────────── 0:00–1:00 (60s) ──────────────┐
+  │                                                               │
+  │  SAY, in order:                                               │
+  │   • "Runs on my laptop. Nothing in the cloud. Watch."         │
+  │   • "I ask it something from my own indexed docs…"            │
+  │   • "…and it answers — grounded in my notes, not made up."    │
+  │   • [THE ONE-LINER, verbatim ↓]                               │
+  │   • "Grounded is table stakes. Here's the part that isn't…"   │
+  │                                                               │
+  │  NAIL THIS LINE:                                              │
+  │   "buffr is a personal AI agent that runs entirely on my      │
+  │    laptop — grounded in my own documents, and it remembers    │
+  │    our past conversations."                                   │
+  │                                                               │
+  │  IF IT BREAKS: not grounded → re-ask with known-good backup   │
+  │   question. won't start → 20-sec recorded clip, keep energy.  │
+  │                                                               │
+  │  TIGHTEN: drop the 2nd exchange. FLOOR: one real answer       │
+  │   before you name it.                                         │
+  └───────────────────────────────────────────────────────────────┘
 ```
 
-On to chapter 02 — the demo, and the money shot.
+Next: chapter 2, the demo. You've planted "it remembers." Now pay it off.

@@ -1,71 +1,108 @@
-# AI Engineering — buffr-laptop, in one picture
+# AI Engineering — buffr-laptop, in one frame
 
-You're studying `buffr-laptop`: the laptop "brain" of a self-hosted personal RAG agent. It's a **local-first LLM application** — Ollama serves both models on your own machine, Postgres + pgvector holds the corpus, and the whole thing graduates an in-memory RAG prototype into something persistent and replayable. No cloud LLM, no managed vector DB, no edge functions. One device, one conversation at a time, through `npm run chat`.
+This is the orientation page. Read it first, then open whatever sub-section the diagram sends you to.
 
-That makes the shape unambiguous. Of the three shapes the AI-engineering spec recognizes — LLM application engineering, prompt-engineering meta-tooling, classical supervised ML — buffr is squarely the **first**. So this guide is weighted toward LLM foundations, retrieval/RAG, agents-and-tool-use, and evals. The classical-ML sections (08, 09) are generated honestly: buffr trains no model, so they're study material plus Case-B exercises, not walkthroughs of your code.
+## What buffr is, as an AI system
 
-## The whole system in one diagram
+buffr-laptop is a local **retrieval-augmented generation (the RAG pipeline)** agent. You index your own markdown into Postgres, then chat with a model that answers *only* from what it retrieved. Everything runs on your laptop: Ollama serves `gemma2:9b` for generation and `nomic-embed-text:v1.5` for **embeddings (768-dim vectors)**, and Postgres with the **pgvector** extension stores and searches them via an **approximate nearest-neighbour index (the HNSW index)**.
 
-Here is every layer the rest of this guide drills into. The `★` boxes are the patterns that earn their own concept files.
+The whole system in one picture — every box below maps to a sub-section of this guide:
 
 ```
-  buffr-laptop — the full stack, one frame
+buffr-laptop — the AI system, end to end
 
-  ┌─ Interface (Ink TUI) ───────────────────────────────────────┐
-  │  src/cli/chat.tsx — one long-lived conversation in-process   │
-  └───────────────────────────┬─────────────────────────────────┘
-                              │  ask(question)
-  ┌─ Session layer ───────────▼─────────────────────────────────┐
-  │  src/session.ts — warm pool, agent built once, per-turn:     │
-  │   persist user turn → run agent → ★ remember exchange ★      │
-  └───────────────────────────┬─────────────────────────────────┘
-                              │
-  ┌─ Agent layer (aptkit) ────▼─────────────────────────────────┐
-  │  RagQueryAgent.answer() → ★ bounded agent loop ★             │
-  │   maxTurns=6, maxToolCalls=4, forced synthesis turn          │
-  │   profile (me.md) injected into system prompt                │
-  │   tool: search_knowledge_base                                │
-  │   model: ★ Gemma tool-call emulation ★ (no native tools)     │
-  └──────────────┬──────────────────────────┬───────────────────┘
-                 │ embed query              │ generate
-  ┌─ Retrieval ──▼──────────────┐  ┌─ Generation ▼──────────────┐
-  │ ★ query path ★              │  │ Ollama gemma2:9b           │
-  │  embed → ANN → rank → cite  │  │ ContextWindowGuard 8192    │
-  │ ★ index path ★ (offline)    │  └────────────────────────────┘
-  │  chunk → embed → upsert     │
-  └──────────────┬──────────────┘
-                 │ nomic-embed-text:v1.5 (768-dim)
-  ┌─ Storage ────▼──────────────────────────────────────────────┐
-  │  Postgres + pgvector, schema `agents`, HNSW cosine           │
-  │  chunks (embedding vector(768)) ← docs ← ★ memory (kind=memory)│
-  │  conversations / messages ← ★ full trajectory trace ★        │
-  │  profiles (me.md)                                            │
-  └─────────────────────────────────────────────────────────────┘
+┌─ UI layer ─────────────────────────────────────────────────────────┐
+│  Ink chat TUI (src/cli/chat.tsx)   ·   index/eval CLIs (src/cli/)    │
+└───────────────────────────────┬────────────────────────────────────┘
+                                │  ask(question)  ·  npm run index/eval
+┌─ Session layer ───────────────▼────────────────────────────────────┐
+│  createChatSession (src/session.ts)                                 │
+│   builds the agent once · holds ONE conversation across turns       │
+└──────┬─────────────────────────────────┬───────────────────┬───────┘
+       │ system prompt                   │ agent loop        │ remember
+       ▼                                 ▼                   ▼
+┌─ Profile ──────┐   ┌─ Agent ─────────────────────┐  ┌─ Memory ───────────┐
+│ me.md injected │   │ RagQueryAgent (aptkit)      │  │ createConversation │
+│ (src/profile)  │   │  search_knowledge_base only │  │ Memory (@aptkit/   │
+└────────────────┘   │  emulated tool-calling →    │  │ memory) — episodic │
+                     │  gemma2:9b (Ollama)         │  └─────────┬──────────┘
+                     └──────────────┬──────────────┘            │
+                                    │ embed → ANN → rank → ground │
+┌─ Retrieval / Storage layer ───────▼─────────────────────────────▼──┐
+│  PgVectorStore (src/pg-vector-store.ts)  ·  RetrievalPipeline       │
+│  Postgres + pgvector · vector(768) · HNSW cosine · app_id='laptop'  │
+│  documents · chunks (memory rides here, meta.kind='memory')         │
+│  conversations · messages (full trajectory) · profiles              │
+└───────────────────────────────┬────────────────────────────────────┘
+                                │ every CapabilityEvent
+┌─ Observability ───────────────▼────────────────────────────────────┐
+│  SupabaseTraceSink (src/supabase-trace-sink.ts) → agents.messages   │
+│  precision@k / recall@k eval (src/cli/eval-cmd.ts)                  │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
-Read that top-to-bottom and you've seen the argument of the whole repo: a question comes in at the TUI, the session hands it to a bounded agent loop, the loop calls one retrieval tool, the tool embeds and ANN-searches pgvector, the model grounds an answer in what came back — and the exchange is both *traced* (into `messages`) and *remembered* (back into `chunks` as an episodic memory). Every box is a pattern this guide names.
+## The two paths that define the system
 
-## The one thing to understand first
+Every RAG system is two paths sharing one store. buffr is no exception.
 
-buffr's reliability ceiling is a single seam: **Gemma has no native tool-calling, so aptkit emulates it** — it renders the tool's JSON schema into the prompt and parses a JSON object back out of the model's free text. There is no argument-schema validation on the way back. If the model emits `{"tool":"search_knowledge_base","arguments":{"q":"..."}}` instead of `{"query":"..."}`, the handler reads `args.query`, finds it missing, coerces it to the empty string, and runs a vector search over `""`. The loop succeeds, the trace looks clean, and the retrieval is garbage. Everything downstream — answer quality, the precision@k eval, the episodic memory you write — inherits that fragility. Hold this in mind; it recurs in `04-agents-and-tool-use/02-tool-calling.md` and `gemma-tool-call-emulation`.
+```
+INDEX PATH (offline, npm run index)        QUERY PATH (online, every chat turn)
 
-## Reading order
+  markdown file                              user question
+      │                                          │
+      ▼ chunkText (~512 chars)                    ▼ embed (nomic, 768-dim)
+  chunks                                      query vector
+      │                                          │
+      ▼ embed (nomic, 768-dim)                    ▼ HNSW ANN search (cosine)
+  768-dim vectors                            top-k chunks
+      │                                          │
+      ▼ upsert                                    ▼ stuff into prompt + ground
+  agents.chunks (pgvector)  ◄──────────────  gemma2:9b answers, cites sources
+```
 
-1. **`01-llm-foundations/`** — what the Ollama models are, 768-dim embeddings as a one-way door, token economics now that the trace sink persists usage.
-2. **`02-context-and-prompts/`** — the context window guard, profile-as-context, why there's no in-prompt turn history.
-3. **`03-retrieval-and-rag/`** — the core. Index path, query path, the full RAG pipeline, episodic conversation memory. This is where buffr lives.
-4. **`04-agents-and-tool-use/`** — the bounded loop, tool-calling, Gemma emulation, agent memory, error recovery.
-5. **`05-evals-and-observability/`** — precision@k/recall@k (wired), the RubricJudge faithfulness gap (unwired), the trajectory trace.
-6. **`06-production-serving/`** — caching, cost, prompt injection, backpressure — mostly *not yet exercised*, framed as next moves.
-7. **`07-system-design-templates/`** — reframe buffr as "search ranking" and "tech-support chatbot" interview prompts.
-8. **`08-machine-learning/` + `09-ml-system-design-templates/`** — honest study material; buffr trains no model.
-9. **`ai-features-in-this-codebase.md` / `ml-features-in-this-codebase.md`** — the per-feature ledger.
+The index path is `src/cli/index-cmd.ts` → `indexDocumentRow` (`src/runtime.ts`) → the pipeline's `chunkText` → embed → `PgVectorStore.upsert`. The query path is `RagQueryAgent.answer` → the `search_knowledge_base` tool → `PgVectorStore.search` → `gemma2:9b`. Both assert the 768 dimension before touching the database.
 
-## What's not yet exercised (named honestly up front)
+## The one fact that shapes everything: 768 is a one-way door
 
-Fine-tuning (the ceiling — trajectories in `messages` are the future FT corpus, but no training happens). Reranking. Hybrid / sparse / keyword retrieval (dense-only today). Streaming (the TUI awaits the full answer). Caching (none). Chunking-strategy tuning (fixed 512/64 char windows from aptkit). Faithfulness eval (RubricJudge exists in aptkit but is wired into nothing here). Arg-schema validation at the tool boundary. Each gets a fair hearing where it belongs.
+The embedding dimension (768, from `nomic-embed-text:v1.5`) is asserted in four places as defense-in-depth: at the embedding provider, at the pipeline wiring (`assertWiring`), per-vector on every upsert and search (`PgVectorStore.assertDim`), and in the SQL column type (`embedding vector(768)`). Change the embedding model and you change the dimension, and now the entire indexed corpus is unsearchable — you must re-index from scratch. That is why the assertion is loud and everywhere: a silent mismatch would corrupt retrieval invisibly. See `03-retrieval-and-rag/02-embedding-model-choice.md` and `01-llm-foundations/08-provider-abstraction.md`.
 
-## See also
+## The reliability ceiling you should know going in
 
-- `README.md` — the full file index and cross-links to the sibling guides.
-- `ai-features-in-this-codebase.md` — the concrete AI-feature ledger for this repo.
+gemma2:9b has **no native tool-calling**. aptkit emulates it: it renders the tool's JSON schema into the system prompt and parses a JSON object back out of the model's prose (`GemmaModelProvider`, `provider-gemma`). There is **no argument-schema validation** on the parsed call — if the model emits the wrong key, the `query` field comes back empty and the search silently returns whatever an empty-string query embeds to. That is the single biggest correctness risk in the system, and it is honest to name it. See `04-agents-and-tool-use/02-tool-calling.md`.
+
+## How this guide is organized
+
+Nine sub-sections, each a directory with its own README:
+
+- **01-llm-foundations** — what the model is, tokens, sampling, structured output, streaming, cost, heuristic-before-LLM, provider abstraction, override locks.
+- **02-context-and-prompts** — the context window, lost-in-the-middle, prompt chaining.
+- **03-retrieval-and-rag** — embeddings, chunking, pgvector, dense/sparse, hybrid, reranking, query rewriting, stale embeddings, incremental indexing, RAG, GraphRAG.
+- **04-agents-and-tool-use** — agents vs chains, tool calling (the emulated path), ReAct, routing, agent memory, error recovery.
+- **05-evals-and-observability** — eval sets, eval methods, LLM-as-judge bias, observability.
+- **06-production-serving** — caching, cost optimization, prompt injection, rate limiting, retry/circuit breaker.
+- **07-system-design-templates** — search ranking and tech-support-chatbot interview reframes.
+- **08-machine-learning** — classical ML as new ground (buffr trains nothing; these are taught as buildable targets).
+- **09-ml-system-design-templates** — recommender, anomaly detection, object detection reframes.
+
+Plus two root files: `ai-features-in-this-codebase.md` and `ml-features-in-this-codebase.md`.
+
+## What this codebase does NOT yet exercise
+
+Named honestly so you know where the gaps are — these are the strongest project-exercise targets:
+
+- **Fine-tuning.** The captured trajectories (`agents.messages`) are a fine-tuning corpus, but no FT runs. This is the ceiling.
+- **Reranking.** Single-stage ANN only; no cross-encoder second stage.
+- **Hybrid / keyword search.** Pure dense retrieval; no BM25, no RRF fusion.
+- **Streaming.** `RagQueryAgent.answer` awaits the full response; `stream: false` in the Gemma transport.
+- **Caching.** No prompt cache, no semantic cache, no exact-match cache.
+- **Chunking-strategy tuning.** Fixed 512-char windows, never tuned against the eval set.
+- **Faithfulness eval.** `RubricJudge` exists in aptkit but is **unwired** in buffr — only precision@k/recall@k run.
+- **Classical ML.** buffr trains no model. All of SECTION 04 is new ground.
+
+## Cross-links to sibling guides
+
+- `study-prompt-engineering/` — the prompt anatomy, single-purpose chains, the system-prompt-injection seam.
+- `study-agent-architecture/` — the agent loop, agentic retrieval, bounded autonomy in depth.
+- `study-database-systems/` — pgvector storage, HNSW internals, the `chunks` table.
+- `study-dsa-foundations/` — ANN, the vector-space geometry, graph structure of HNSW.
+- `study-testing/` — the eval seam, `node:test`, the DATABASE_URL-gated suite.

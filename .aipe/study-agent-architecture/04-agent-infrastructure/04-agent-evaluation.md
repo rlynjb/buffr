@@ -1,183 +1,259 @@
-# Agent evaluation — the trajectory is the unit, not the output
+# Agent Evaluation
 
-**Industry name(s):** agent evaluation · trajectory eval · tool-call
-accuracy · retrieval eval (precision@k). **Type label:** Industry
-standard.
-
-**In this codebase: partially — retrieval is evaluated; the trajectory
-is captured but not yet scored.** buffr has a precision@k eval CLI over
-a labeled query set (`src/cli/eval-cmd.ts`, `eval/queries.json`) and a
-full-signal trajectory captured into `agents.messages`
-(`src/supabase-trace-sink.ts`). So it evaluates the *retrieval quality*
-and *records* the trajectory — but doesn't yet score the trajectory
-(tool-call accuracy, recovery rate).
+*Industry names: **agent evaluation** / **trajectory evaluation** / **agent observability**.
+Type label: Industry standard (the trajectory-as-unit principle is universal; buffr's 6-event
+trace sink is Project-specific). Trajectory CAPTURED in buffr; trajectory NOT YET evaluated.*
 
 ## Zoom out, then zoom in
 
-```
-  Zoom out — what expands when you eval an agent vs one call
+Evaluating an agent is not evaluating its answer. The answer can be right by luck — the model
+guessed without searching — or wrong despite a perfect process. The unit of agent evaluation is
+the **trajectory**: the full sequence of steps, tool calls, and decisions that produced the
+answer. This file is about how buffr *captures* that trajectory completely, and where it stops:
+it captures everything, but only *scores* retrieval precision.
 
-  LLM eval (one call):       Agent eval (a trajectory):
-  ┌──────────────┐           ┌──────────────────────────┐
-  │ input        │           │ was the right tool called?│
-  │ → output     │           │ in the right order?       │ ← we are here
-  │ → score      │           │ did it recover from errors│
-  └──────────────┘           │ how many steps / $ / ms?  │
-                             │ was the final output good?│
-                             └──────────────────────────┘
+```
+  buffr's stack — evaluation captures what the loop did
+
+  ┌─ Agent loop (Sections A–C) ────────────────────────────────────┐
+  │  step → execute → accumulate → terminate  (emits 6 event types)│
+  └──────────────────────────┬─────────────────────────────────────┘
+  ┌─ ★ EVALUATION — what gets RECORDED ★ ─────────────▼────────────┐
+  │  SupabaseTraceSink — persists all 6 CapabilityEvent types      │
+  │  step · tool_call_start · tool_call_end · model_usage · warn · err│
+  └──────────────────────────┬─────────────────────────────────────┘
+  ┌─ Storage — agents.messages (timestamped, replayable) ─▼────────┐
+  │  CAPTURE: complete · EVAL: only precision@k over retrieval     │
+  └─────────────────────────────────────────────────────────────────┘
 ```
 
-Zoom in: evaluating an agent is harder than evaluating one LLM call,
-because the unit is the *trajectory* — the whole path of tool calls and
-observations — not just the final answer. buffr evaluates the retrieval
-step well; the trajectory it captures fully but scores partially.
+The surprising part: buffr already captures *everything you'd need* to score a trajectory — every
+tool call's args, result, error, duration, and token usage, timestamped for deterministic replay —
+but it doesn't yet score any of it beyond retrieval precision. The load-bearing distinction:
+**capture and evaluation are two separate jobs, and buffr has done the first, not the second.**
 
 ## Structure pass
 
-**Layers.** Two eval surfaces: the retrieval step (precision@k, scored)
-and the full trajectory (captured, not scored).
+Two stages, one axis: **done vs not done** — what's captured, what's scored.
 
-**Axis — "what's measured?"** Retrieval relevance (buffr: yes,
-precision@k). Tool-call accuracy, trajectory efficiency, recovery rate
-(buffr: captured but not scored). Final-answer quality (buffr: no
-automated judge wired in, though the bundle has one).
+```
+  Axis = DONE vs NOT DONE · trace the gap between capture and eval
 
-**Seam.** The boundary between the captured trajectory
-(`agents.messages`) and an evaluator that reads it. buffr has the data;
-the evaluator that turns it into trajectory metrics is the gap.
+  CAPTURE (done)     all 6 event types → agents.messages, timestamped   supabase-trace-sink.ts:49-94
+                     args · result · error · durationMs · tokens
+  ───────────────── ★ SEAM: capture exists, scoring doesn't ★ ─────────────────
+  EVAL (partial)     ONLY precision@k over retrieval                     src/cli/eval-cmd.ts
+  EVAL (not yet)     right tool? right order? recovered? steps/cost?     — trajectory NOT scored
+```
+
+The seam is the gap between a captured trajectory and a *scored* one. Below the seam, buffr scores
+only one thing — whether retrieval returned the right chunks (precision@k, over
+`eval/queries.json`). The trajectory metrics that define agent quality — did it pick the right
+tool, in the right order, recover from errors, at acceptable steps and cost — are capturable from
+what's already persisted, but not yet computed.
 
 ## How it works
 
-#### Move 1 — the mental model
+### Move 1 — mental model
 
-You don't test a multi-step checkout by only asserting the final "order
-placed" — you assert each step fired in order, retries worked, totals
-were right. Agent eval is that: assert the *path*, not just the
-endpoint.
-
-```
-  Pattern — the two eval surfaces in buffr
-
-  RETRIEVAL EVAL (scored):          TRAJECTORY EVAL (captured, not scored):
-    labeled queries → search          every step → agents.messages
-    → precision@k                     (tool args, results, durationMs,
-    eval/queries.json                  tokens, warnings, errors)
-    src/cli/eval-cmd.ts               src/supabase-trace-sink.ts
-```
-
-#### Move 2 — the walkthrough
-
-**Retrieval is evaluated with precision@k.** buffr ships a labeled eval
-set (`eval/queries.json`) and a CLI that scores how many of the top-k
-retrieved chunks are relevant (`src/cli/eval-cmd.ts`, using aptkit's
-`@aptkit/evals` precision-at-k). That's the right eval for the
-load-bearing step: buffr's answers are only as good as its retrieval, so
-measuring retrieval directly catches the most common failure cause
-before it reaches the model.
-
-**The trajectory is captured in full — six event types.** The
-`SupabaseTraceSink` persists every `CapabilityEvent`: step,
-tool_call_start (with args — the *cause*), tool_call_end (result, error,
-durationMs), model_usage (tokens), warning, error
-(`src/supabase-trace-sink.ts:53-84`). The doc comment is explicit that
-this turns `agents.messages` into "a complete, replayable trajectory."
-So the *data* for trajectory eval exists: you could read a conversation
-and ask "did it call the search tool? how many times? did it recover
-from a tool error? how many tokens?"
-
-**What's not yet scored.** buffr captures the trajectory but doesn't run
-trajectory *metrics* on it — no automated check for tool-call accuracy
-(did it call the right tool in the right order), trajectory efficiency
-(steps/cost to completion), or recovery rate (did it handle a failed
-tool call). The bundle even has a `rubric-judge`
-(`@aptkit/evals`) that could grade final-answer quality, unused by the
-chat path. The replay-ordering work — persisting the event `timestamp`
-into `created_at` so replay matches emit order
-(`src/supabase-trace-sink.ts:26-30, 59`) — is groundwork *for*
-trajectory eval that hasn't been built on yet.
-
-**The evaluator paradox, and buffr's controls.** Using an LLM to grade
-an LLM's trajectory is real and biased. buffr sidesteps it for retrieval
-by using a *labeled* set (precision@k needs no judge — relevance is
-ground-truthed in `eval/queries.json`). For trajectory and answer
-quality, the controls would be frozen golden trajectories, the iteration
-caps buffr already has, and human spot-checks.
+A trajectory is an append-only event log of everything the agent did, with timestamps. Bridge from
+frontend: it is a structured event stream, like the network tab in dev tools — every request, its
+payload, its response, its timing, in order. Evaluation is running assertions over that log. buffr
+has built the network tab (complete) but hasn't written the assertions (only one, over retrieval).
 
 ```
-  Comparison — buffr's eval coverage
+  THE SHAPE — the trajectory is an event log; eval is assertions over it
 
-  ┌──────────────────────┬──────────────┬──────────────────────┐
-  │ eval surface         │ buffr status │ where                │
-  ├──────────────────────┼──────────────┼──────────────────────┤
-  │ retrieval precision@k│ scored ✓     │ eval/queries.json    │
-  │ trajectory captured  │ captured ✓   │ supabase-trace-sink  │
-  │ tool-call accuracy   │ not scored ✗ │ (data exists)        │
-  │ recovery rate        │ not scored ✗ │ (errors captured)    │
-  │ answer quality (judge│ unused ✗     │ bundle has rubric-judge│
-  └──────────────────────┴──────────────┴──────────────────────┘
+  ┌─ CAPTURE: the event log (agents.messages) ─────────────────────┐
+  │  step → tool_call_start → tool_call_end → model_usage → ...     │
+  │  each row timestamped → deterministic replay order             │
+  └────────────────────────────────────────────────────────────────┘
+                          │ assertions run over the log
+                          ▼
+  ┌─ EVAL: the metrics that matter ────────────────────────────────┐
+  │  precision@k   ✓ scored (retrieval only)                       │
+  │  task success / tool accuracy / efficiency / recovery  ✗ not yet│
+  └────────────────────────────────────────────────────────────────┘
 ```
 
-#### Move 3 — the principle
+### Capture: every event type is persisted, not just the answer
 
-The unit of agent evaluation is the trajectory, not the output. buffr
-does the highest-leverage half — it scores the retrieval step that
-determines answer quality, with a labeled set that needs no judge — and
-captures the full trajectory as replayable data. The remaining work
-(scoring tool-call accuracy, recovery, efficiency from the captured
-trajectory) is built on data buffr already has. Capturing the trajectory
-is the prerequisite; scoring it is the next step.
+The loop emits typed events as it runs (`run-agent-loop.ts` calls `trace.emit(...)` at each step,
+tool start, tool end, and model usage). `SupabaseTraceSink` persists *all six* into
+`agents.messages` — including the things naive sinks drop: tool args (the cause of a call), errors,
+durations, and token counts. Bridge from known: it's INSERTing one row per event into a DB table,
+with `created_at` set from the event so replay order is exact.
+
+```ts
+// src/supabase-trace-sink.ts:49-85 — all 6 CapabilityEvent types persisted (condensed).
+export class SupabaseTraceSink implements CapabilityTraceSink {
+  emit(event) {
+    const at = event.timestamp;                                  // event time → created_at (replay order)
+    switch (event.type) {
+      case 'step':                                               // 1. the assistant's reasoning text
+        if (event.content) this.push(persistMessage(pool, conv, event.role, event.content, { createdAt: at }));
+        return;
+      case 'tool_call_start':                                    // 2. the CAUSE: which tool, what args
+        this.push(persistMessage(pool, conv, 'tool_call', event.toolName,
+          { toolCalls: { toolName: event.toolName, args: event.args }, createdAt: at }));
+        return;
+      case 'tool_call_end':                                      // 3. the EFFECT: result, error, durationMs
+        this.push(persistMessage(pool, conv, 'tool', event.toolName,
+          { toolResults: { result: event.result, error: event.error, durationMs: event.durationMs }, createdAt: at }));
+        return;
+      case 'model_usage':                                        // 4. tokens + model (the cost axis)
+        this.push(persistMessage(pool, conv, 'model_usage', '',
+          { model: `${event.provider}/${event.model}`, tokensUsed: (event.inputTokens ?? 0) + (event.outputTokens ?? 0), createdAt: at }));
+        return;
+      case 'warning':                                            // 5 + 6. warnings and errors
+      case 'error':
+        this.push(persistMessage(pool, conv, event.type, event.message, { createdAt: at }));
+        return;
+    }
+  }
+}
+```
+
+```
+  CAPTURE — 6 event types → one replayable log
+
+  loop emits:  step · tool_call_start · tool_call_end · model_usage · warning · error
+                   │ each → persistMessage(..., createdAt = event.timestamp)
+                   ▼
+            agents.messages (timestamped rows)
+                   │  ordered by created_at, not by flush race
+                   ▼
+            deterministic replay of the EXACT trajectory
+```
+
+Annotation two things. First, `created_at` is set from the *event's* timestamp, not server `now()`
+(`:55, :59` etc.) — so replay order matches emit order, not the race between concurrent flush
+inserts. Second, `emit` is synchronous (aptkit's contract) but the actual writes are queued and
+awaited in `flush()` (`:91-93`), called once per turn from `session.ts:63`. The trajectory is
+durable and ordered. That's a complete capture.
+
+### Eval: only retrieval precision is scored — the trajectory is not
+
+Here's the stop. buffr's *only* automated eval is precision@k over retrieval — given a labeled
+query set (`eval/queries.json`), did the top-k chunks contain the expected sources? That's run by
+`src/cli/eval-cmd.ts`. It scores the *retrieval*, not the *trajectory*. Whether the agent called
+the right tool, in the right order, recovered from a tool error, or did it in an acceptable number
+of steps — none of that is scored yet, even though every fact needed to score it is in
+`agents.messages`.
+
+```
+  EVAL — what's scored vs what's capturable-but-not-scored
+
+  SCORED (eval-cmd.ts, queries.json)
+  ┌────────────────────────────────────────────────────────────────┐
+  │ precision@k over retrieval: did top-k contain expected sources? │
+  └────────────────────────────────────────────────────────────────┘
+
+  CAPTURED but NOT YET SCORED (all derivable from agents.messages)
+  ┌────────────────────────────────────────────────────────────────┐
+  │ task success   did the final answer actually answer the Q?      │
+  │ tool accuracy  right tool, right args?  (tool_call_start rows)   │
+  │ trajectory eff. how many steps / tool calls / tokens? (model_usage)│
+  │ recovery rate  did it recover after a tool error?  (error rows)  │
+  └────────────────────────────────────────────────────────────────┘
+```
+
+Annotation: the four un-scored metrics map one-to-one onto event types already in the log. Tool
+accuracy is a query over `tool_call_start` rows; trajectory efficiency is a `count` and a `sum` over
+`model_usage` rows; recovery rate is "did a `step` with a real answer follow an `error` row." The
+data is there. The scoring isn't. That gap is the honest state of buffr's evaluation.
+
+### Move 3 — the principle
+
+**Capture the trajectory before you can evaluate it, and the trajectory — not the answer — is the
+unit.** An agent that returns the right answer by skipping the search is broken; an answer-only eval
+can't see that, a trajectory eval can. buffr has done the hard, easy-to-skip half: it persists the
+full causal log, timestamped for replay. The remaining half — assertions over that log — is cheap
+*because* the capture is complete. Most teams do this backwards: they score the final answer, ship,
+and only build trajectory capture after the first "right answer, wrong process" incident. buffr
+built capture first.
 
 ## Primary diagram
 
-```
-  buffr's agent evaluation surfaces
+Full recap: the 6-event capture, the replay log, and the eval gap.
 
-  SCORED:    labeled queries → search_knowledge_base → precision@k
-             (eval/queries.json + src/cli/eval-cmd.ts)
-
-  CAPTURED:  every run → agents.messages (6 event types, replay-ordered)
-             ↓ (the data for trajectory eval — not yet scored)
-  NOT YET:   tool-call accuracy · recovery rate · efficiency · answer judge
 ```
+  buffr's evaluation — capture complete, eval partial (supabase-trace-sink.ts:49-94)
+
+  THE LOOP emits 6 event types
+  ┌────────────────────────────────────────────────────────────────┐
+  │ step · tool_call_start · tool_call_end · model_usage · warn · err│
+  └──────────────────────────┬─────────────────────────────────────┘
+  SupabaseTraceSink (:49-85) — persist ALL 6, created_at = event time
+  ┌──────────────────────────▼─────────────────────────────────────┐
+  │ agents.messages — timestamped, ordered, replayable             │
+  │ flush() per turn (session.ts:63)                               │
+  └──────────────────────────┬─────────────────────────────────────┘
+                             │
+        ┌────────────────────┴────────────────────┐
+        ▼                                          ▼
+  EVAL (done)                              EVAL (not yet)
+  precision@k over retrieval               task success · tool accuracy
+  (eval-cmd.ts, queries.json)              trajectory efficiency · recovery
+  ─ scores RETRIEVAL ─                      ─ scores the TRAJECTORY (capturable, unscored) ─
+```
+
+Capture is complete and replayable; evaluation scores retrieval only. That's the state of the art
+in this repo, named exactly.
 
 ## Elaborate
 
-Agent eval extends LLM eval (output quality) with trajectory and
-tool-call metrics — the path matters, not just the destination. The
-output-quality methods and LLM-as-judge bias would be covered in a
-future `study-ai-engineering` evals file; this file covers what's
-*additional* for agents. buffr's strong move is grounding retrieval eval
-in a labeled set (no judge bias) and capturing a replayable trajectory.
-The replay-ordering detail (`created_at` from the event timestamp) is
-precisely the kind of groundwork that makes deterministic trajectory
-replay — and thus golden-trajectory eval — possible.
+The reason capture-first is the right order: a trajectory eval you can't reproduce is worthless, and
+reproduction requires the *exact* event order. buffr's choice to persist `created_at` from the event
+timestamp rather than the insert time (`supabase-trace-sink.ts:55` and each case) is what makes
+replay deterministic despite concurrent flush inserts. Without that, two tool calls that flushed in
+a race could replay out of order and a trajectory assertion ("did it search *before* answering?")
+would be unreliable. The timestamp discipline is the quiet load-bearing detail of the capture.
+
+The multi-agent shape of evaluation is *handoff scoring*: when agent A delegates to agent B, you
+evaluate not just each agent's trajectory but the *handoff* — did A pass the right task, did B
+return something A could use? buffr is single-agent, so its trajectory is a single linear log with
+no handoffs to score. That keeps the eval surface small: one trajectory per `answer()`, no
+inter-agent edges. Name handoff scoring as the thing that appears the moment buffr grows a second
+agent (Section C).
+
+Cross-ref `study-ai-engineering` for the eval-harness mechanics — LLM-as-judge and its biases (the
+likely tool for the un-scored *task success* metric), labeled-set construction, and offline-vs-online
+eval. This file covers only the trajectory-as-unit angle and buffr's capture/eval gap.
 
 ## Interview defense
 
-**Q: How is buffr's agent evaluated?**
-At two surfaces. Retrieval is scored with precision@k over a labeled
-query set (`eval/queries.json`) — the right place to measure, since
-answer quality follows retrieval quality, and a labeled set means no
-judge bias. The full trajectory is captured into `agents.messages` — all
-six event types, replay-ordered — so the data for trajectory eval
-exists. What's not yet scored: tool-call accuracy, recovery rate, and
-answer-quality judging (the bundle's `rubric-judge` is unused by chat).
+**Q: "How do you evaluate your agent?"**
+
+Model answer: "I separate capture from scoring, because they're different jobs. Capture is done:
+`SupabaseTraceSink` (`supabase-trace-sink.ts:49-94`) persists all six event types — step,
+tool_call_start, tool_call_end, model_usage, warning, error — into `agents.messages`, with
+`created_at` set from the event timestamp so the trajectory replays in exact order, not in flush-race
+order. So I have the full causal log: every tool call's args, result, error, duration, and token
+count. Scoring is partial: today I only score precision@k over retrieval (`eval-cmd.ts`,
+`queries.json`). The trajectory metrics that actually define agent quality — task success, tool-call
+accuracy, trajectory efficiency, recovery rate — aren't scored yet, but every one is derivable from
+the captured log, because the unit of agent eval is the trajectory, not the answer. I built capture
+first on purpose: you can't evaluate a process you didn't record."
 
 ```
-  retrieval: precision@k (scored) | trajectory: captured, not yet scored
+  The defense in one picture
+
+  CAPTURE (done):  6 event types, timestamped → deterministic replay
+  EVAL (partial):  precision@k over retrieval  ✓
+  EVAL (not yet):  tool accuracy · efficiency · recovery  — capturable, unscored
+                   the unit is the TRAJECTORY, not the final answer
 ```
 
-**Anchor:** "The unit is the trajectory — buffr scores the retrieval
-step and captures the full path; scoring the path is the next step."
+Anchor: *The unit is the trajectory, not the answer; buffr captures all 6 event types for
+deterministic replay (`supabase-trace-sink.ts:49-94`) but scores only retrieval precision@k —
+capture complete, trajectory eval not yet.*
 
 ## See also
 
-- `02-agentic-retrieval/01-agentic-rag.md` — the retrieval being
-  evaluated
-- `03-multi-agent-orchestration/05-debate-verifier-critic.md` — the
-  unused rubric-judge
-- `01-reasoning-patterns/02-agent-loop-skeleton.md` — the budget caps
-  that bound trajectory cost
-- `.aipe/study-system-design/03-trajectory-capture.md` — the capture
-  mechanism from the system-design angle
-- `.aipe/study-testing/` — the broader correctness/eval seam
+- `03-tool-calling-and-mcp.md` — `callTool` records the `durationMs` that feeds trajectory efficiency.
+- `05-guardrails-and-control.md` — the bounds (maxTurns, maxToolCalls) are what trajectory
+  efficiency would measure against.
+- `../03-multi-agent-orchestration/` — handoff scoring, the multi-agent eval surface buffr lacks.
+- `study-ai-engineering` → LLM-as-judge bias, eval-harness mechanics, labeled-set construction.
+- `../01-reasoning-patterns/02-agent-loop-skeleton.md` — the loop that emits the events captured here.

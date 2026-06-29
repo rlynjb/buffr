@@ -1,201 +1,288 @@
-# Guardrails and control — the envelope around the autonomous loop
+# Guardrails and Control
 
-**Industry name(s):** guardrails · the control envelope · agent safety
-controls · iteration/budget caps. **Type label:** Industry standard.
-
-**In this codebase: yes — buffr has a real control envelope.** Iteration
-caps (`maxTurns`/`maxToolCalls`), a forced-synthesis budget exit, a
-context-window guard that halts on overflow, a single read-only tool
-(smallest blast radius), and the model-emits-intent boundary. What it
-*lacks*: input sanitization and a human-in-the-loop gate — acceptable
-for a single-user, read-only, local tool.
+*Industry names: **guardrails** / **the control envelope** / **capability scoping** (the
+least-privilege half). Type label: Industry standard (the envelope is universal; buffr's
+specific bounds and one-read-tool scope are Project-specific). IMPLEMENTED in buffr.*
 
 ## Zoom out, then zoom in
 
-```
-  Zoom out — the control points around buffr's loop
+An autonomous loop that can call tools is, by default, an unbounded process with a side-effect
+surface. Guardrails are the envelope you wrap around it so it always stops, and so the worst it can
+do is small. This file collects buffr's control mechanisms — the bounds from Section A, now read as
+a *safety* property, plus the one that makes buffr's blast radius the smallest possible: it has
+exactly one tool, and that tool is a read.
 
-  ┌───────────────────────────────────────────────┐
-  │  Input guardrail   (validate / sanitize)      │ ← buffr: NONE (single-user)
-  └────────────────────┬──────────────────────────┘
-                       ▼
-  ┌───────────────────────────────────────────────┐
-  │  Agent loop                                   │ ← we are here
-  │   • iteration cap (maxTurns:6)                │ ← buffr: YES
-  │   • tool-call budget (maxToolCalls:4)         │ ← buffr: YES
-  │   • context-window guard (8192, halt)         │ ← buffr: YES
-  │   • human-in-the-loop pause                   │ ← buffr: NONE
-  └────────────────────┬──────────────────────────┘
-                       ▼
-  ┌───────────────────────────────────────────────┐
-  │  Output guardrail  (schema; no direct side-    │ ← buffr: read-only tool,
-  │  effects — go through your code)               │   so side effects = none
-  └───────────────────────────────────────────────┘
+```
+  buffr's stack — guardrails wrap the loop on every side
+
+  ┌─ RagQueryAgent — sets the envelope ────────────────────────────┐
+  │  maxTurns:6 · maxToolCalls:4 · ragQueryToolPolicy (1 read tool)│
+  └──────────────────────────┬─────────────────────────────────────┘
+  ┌─ ★ GUARDRAILS + CONTROL — what STOPS it ★ ────────▼────────────┐
+  │  iteration cap · tool budget · forced synthesis on exhaustion  │
+  │  capability scoping → ONE read-only tool → no side-effect path │
+  └──────────────────────────┬─────────────────────────────────────┘
+  ┌─ The loop — runs INSIDE the envelope ─────────────▼────────────┐
+  │  step → execute → accumulate → terminate                       │
+  └─────────────────────────────────────────────────────────────────┘
 ```
 
-Zoom in: an agent without caps loops silently and burns tokens; an agent
-whose output triggers side effects directly is a prompt-injection
-liability. The control envelope bounds both. buffr has strong loop-level
-controls and a naturally-safe output (read-only), with input and
-human-gate controls absent by design.
+The surprising part: buffr needs **no human-in-the-loop gate** — and that's not a gap, it's a
+consequence of the design. The agent's only tool is read-only, so its output cannot trigger a side
+effect. The load-bearing idea: **the strongest guardrail isn't a check on the output, it's
+shrinking what the agent can touch in the first place.**
 
 ## Structure pass
 
-**Layers.** Three control points: input, loop, output. buffr's controls
-cluster at the loop.
+Two kinds of control, one axis: **runaway vs damage** — what each guardrail prevents.
 
-**Axis — "what bounds the autonomy?"** Caps bound the loop; the context
-guard bounds the input size; the read-only tool bounds the output's
-power. Tracing "what could run away" against "what stops it" is the
-audit.
+```
+  Axis = WHAT IT PREVENTS · trace the two failure classes the envelope covers
 
-**Seam.** The model→harness boundary (again). Because the model emits
-intent and the harness runs it, and the one tool is read-only, there's
-no path from model output to a side effect. That seam is buffr's
-strongest guardrail — and it's structural, not bolted on.
+  TERMINATION guardrails — prevent RUNAWAY (the loop never stops)
+    iteration cap     maxTurns:6        → at most 6 model calls
+    tool budget       maxToolCalls:4    → at most 4 searches
+    forced synthesis  strip tools @ exhaustion → MUST answer    run-agent-loop.ts:101-109
+  ───────────────── ★ SEAM: from "stops" to "can't harm" ★ ─────────────────
+  SCOPING guardrail — prevents DAMAGE (the agent does something it shouldn't)
+    capability scoping  ONE read-only tool → no side-effect path  rag-query-agent.ts:15-18
+```
+
+The seam separates two questions a guardrail can answer. Above it: *does the loop stop?* (the
+termination bounds). Below it: *if the model is wrong or hijacked, how much damage can it do?* (the
+scope). buffr answers both — bounds for runaway, scope for damage — and the scope answer is the
+strong one, because a read-only tool has no damage to bound.
 
 ## How it works
 
-#### Move 1 — the mental model
+### Move 1 — mental model
 
-You bound a `while` loop with a max-iterations guard and validate
-external input before trusting it. The control envelope is those
-instincts applied to an agent: cap the loop, guard the window, and never
-let the model's output trigger an action directly.
-
-```
-  Pattern — the control envelope (buffr's, marked)
-
-  input → [no sanitize: single-user] →
-    ┌─ loop ──────────────────────────────────┐
-    │ maxTurns 6 · maxToolCalls 4              │  ← caps
-    │ ContextWindowGuardedProvider (halt 8192) │  ← window guard
-    │ [no human gate]                          │
-    └──────────────────┬───────────────────────┘
-                       ▼
-    output → read-only tool → NO side effects possible
-```
-
-#### Move 2 — the walkthrough
-
-**Loop caps: the budget exit, audited.** buffr's `RagQueryAgent` sets
-`maxTurns: 6` and `maxToolCalls: 4` (`rag-query-agent.js:47-48`), and
-`runAgentLoop` enforces them with the forced-synthesis turn
-(`run-agent-loop.js:25-34`). This is the single most important
-guardrail: without it a weak Gemma could loop tool calls indefinitely.
-It's covered as a loop mechanic in
-`01-reasoning-patterns/02-agent-loop-skeleton.md`; here it's named as
-what it also is — the primary control on autonomy.
-
-**Context-window guard: halt on overflow.** `ContextWindowGuardedProvider`
-estimates input tokens before each call and throws
-`ContextWindowExceededError` if they exceed 8192 minus an output reserve
-(`context-window-guard.js:27-38`, `src/session.ts:46`). That's a control
-point: it halts the run loudly rather than letting Gemma silently
-truncate context into a garbage answer. It also emits a warning event to
-the trace, so the halt is observable.
-
-**Output guardrail: structurally safe, because the tool is read-only.**
-buffr's strongest output control isn't a check — it's the architecture.
-The model emits intent; the harness runs it (`tool-registry.js:14-24`);
-and the one tool granted is `search_knowledge_base`, read-only
-(`ragQueryToolPolicy`, `rag-query-agent.js:8-11`). So there is *no path*
-from model output to a side effect. A prompt injection in a document or
-a past exchange could at worst influence what's *said*, not *done* —
-there's nothing to do. That's the smallest possible blast radius, and
-it's why buffr can skip a heavy output guardrail.
-
-**What's missing, and why it's acceptable.** No input sanitization: buffr
-is single-user and local, so there's no untrusted user to defend
-against (the injection surface is the *documents and memory* it
-retrieves — see security). No human-in-the-loop gate: there are no gated
-actions to approve, because the agent can't act. Both absences are
-correct for a read-only, single-user, local tool. They'd become required
-the moment buffr's two-brain design added a *writing* or *acting* tool
-on the phone — that's when the output guardrail and the human gate stop
-being optional.
+A guardrail is a constraint placed *outside* the model, enforced by the harness, that the model
+cannot talk its way around. Bridge from frontend: it's the difference between client-side validation
+(the model "deciding" to stop) and server-side validation (the harness *making* it stop). You never
+trust the client; you never trust the model to bound itself. Two layers: bounds that force a stop,
+and a scope that limits reach.
 
 ```
-  Comparison — buffr's envelope vs an acting agent's
+  THE SHAPE — the envelope: bounds force a stop, scope limits reach
 
-  buffr (read-only, single-user):   acting agent (would need):
-    loop caps ✓                       loop caps ✓
-    window guard ✓                    + input sanitize
-    read-only tool → safe output ✓    + output schema validation
-    no human gate (nothing to gate)   + human gate on irreversible actions
+  ┌─ TERMINATION (forces a STOP) ──────────────────────────────────┐
+  │  maxTurns:6 · maxToolCalls:4 · forced synthesis on exhaustion  │
+  │  harness-enforced — the model cannot override it               │
+  └────────────────────────────────────────────────────────────────┘
+  ┌─ SCOPING (limits REACH) ───────────────────────────────────────┐
+  │  ragQueryToolPolicy: allowedTools = [search_knowledge_base]    │
+  │  one read-only tool → no write, no side effect → blast radius ≈ 0│
+  └────────────────────────────────────────────────────────────────┘
 ```
 
-#### Move 3 — the principle
+### Termination: the bounds force a stop (covered as termination in Section A)
 
-The control envelope bounds an autonomous loop at three points: input,
-loop, output. The cheapest and strongest output control is
-architectural — keep the agent read-only so its output *can't* trigger a
-side effect. buffr does exactly that, pairs it with loop caps and a
-window guard, and skips the input/human controls that a read-only
-single-user tool doesn't need. The discipline is matching the controls
-to the blast radius, not bolting on every guardrail regardless.
+The iteration cap and tool budget are set on the agent and enforced by the loop. They're the same
+bounds the agent-loop-skeleton file teaches as *termination* — here, read them as *control*: they
+guarantee the process ends regardless of what the model wants. Bridge from known: it's a `for` loop
+with a hard `maxTurns`, plus a counter that strips capabilities when spent.
+
+```ts
+// @aptkit/agents/rag-query — rag-query-agent.ts:75-79 — the bounds set on the agent.
+const { finalText } = await runAgentLoop({
+  ...
+  maxTurns: 6,                          // iteration cap: at most 6 model calls
+  maxToolCalls: 4,                      // tool budget: at most 4 searches
+  synthesisInstruction: buildSynthesisInstruction(
+    'Now answer the question directly and concisely, citing the sources you retrieved.',
+  ),                                    // what to say when the budget is spent
+});
+```
+
+```ts
+// @aptkit/runtime — run-agent-loop.ts:101-109 — FORCED SYNTHESIS when the budget is exhausted.
+const budgetSpent = maxToolCalls !== undefined && toolCalls.length >= maxToolCalls;  // 4 spent?
+const forceFinal = turn === maxTurns - 1 || budgetSpent;                             // last turn OR budget gone
+const response = await model.complete({
+  system: forceFinal && synthesisInstruction ? `${system}\n\n${synthesisInstruction}` : system,
+  tools: forceFinal ? undefined : toolSchemas,   // ← tools STRIPPED: the model CANNOT search now
+  ...
+});
+```
+
+```
+  TERMINATION — bounds force a stop the model can't override
+
+  every turn:  budgetSpent = toolCalls >= 4   forceFinal = lastTurn OR budgetSpent
+                                                  │
+                          forceFinal? ── yes ──▶ strip tools + "NO more tool calls"
+                                                  │  model has no option but to answer
+                                                  ▼
+                                            the loop STOPS with a real answer
+```
+
+Annotation: forced synthesis (`:101-109`) is stronger than counting alone. It doesn't just check a
+counter — it *removes the tools from the request* on the exhausting turn, so even a model determined
+to search again physically cannot. The bound isn't a request to the model; it's a fact about what the
+model is offered. (Full treatment in `../01-reasoning-patterns/02-agent-loop-skeleton.md`.)
+
+### Scoping: one read-only tool is the whole blast radius
+
+This is the guardrail that makes buffr safe, not just bounded. `ragQueryToolPolicy` is a
+least-privilege allowlist naming exactly one tool. `filterToolsForPolicy` enforces it: the model is
+only ever *shown* the tools on the list, so it can only ever *ask* for them. And that one tool is a
+read. Bridge from known: it's a database role with `SELECT` granted and nothing else — the role
+can't `DELETE` because the grant was never made.
+
+```ts
+// rag-query-agent.ts:15-18 — least-privilege grant: exactly one allowed tool.
+export const ragQueryToolPolicy: ToolPolicy = {
+  capabilityId: RAG_QUERY_CAPABILITY_ID,
+  allowedTools: [SEARCH_KNOWLEDGE_BASE_TOOL_NAME],   // ← the WHOLE allowlist. One read tool.
+};
+```
+
+```ts
+// @aptkit/tools — tool-policy.ts:11-23 — the policy is ENFORCED, not advisory.
+export function filterToolsForPolicy(allTools, policy): ModelTool[] {
+  const allowed = new Set(policy.allowedTools);
+  return allTools
+    .filter((tool) => allowed.has(tool.name))         // drop anything not on the allowlist
+    .map((tool) => ({ name: tool.name, description: tool.description ?? '', inputSchema: tool.inputSchema }));
+}
+// rag-query-agent.ts:63-64 — applied before the loop: the model only SEES the scoped tools.
+const allTools = await this.options.tools.listTools();
+const toolSchemas = filterToolsForPolicy(allTools, ragQueryToolPolicy);
+```
+
+```
+  SCOPING — the model can only ask for what it was shown
+
+  registry has tools ─▶ filterToolsForPolicy(allowlist=[search_knowledge_base])
+                              │ drops everything not on the list
+                              ▼
+                     model is SHOWN one read-only tool
+                              │ so it can only ASK for a read
+                              ▼
+   no write tool exists in scope → output CANNOT trigger a side effect → blast radius ≈ 0
+```
+
+Annotation: the scoping happens *before* the loop runs (`rag-query-agent.ts:63-64`), so the model
+never even learns other tools exist. This is the security-relevant move: a model that's hallucinating,
+or hijacked by a prompt injection inside a retrieved document, can still only *ask* to search. There's
+no `delete_user`, no `send_email`, no `run_sql` in scope to ask for. The damage a successful injection
+could do is bounded to "search the knowledge base," which is exactly what the agent does anyway.
+
+### Why there's no human-in-the-loop gate (and that's correct)
+
+A human-in-the-loop gate exists to catch a *side effect* before it commits — pause before sending the
+email, before the irreversible write. buffr has no side effect to gate. Its one tool reads; its output
+is text returned to the user. There is nothing to approve, so adding a gate would be ceremony, not
+safety. Bridge from known: you don't put a confirmation modal on a `SELECT` query.
+
+```
+  THE LOGIC — no gate needed because there's no side effect to gate
+
+  human gate guards ──▶ irreversible side effects (write / send / pay / delete)
+  buffr's only tool ──▶ search_knowledge_base  = a READ
+  ∴ no side effect   ──▶ nothing to approve     ──▶ no gate (correct, not missing)
+```
+
+Annotation: name this as a *consequence* of capability scoping, not a missing feature. The moment
+buffr grows a write tool (a "save note," a "schedule reminder"), the gate stops being ceremony and
+becomes required. The absence of the gate is downstream of the read-only scope.
+
+### Move 3 — the principle
+
+**Bound the loop so it stops; scope the capabilities so that when it's wrong, it can't do harm — and
+the scope is the stronger guardrail.** Termination bounds answer "does it stop?"; capability scoping
+answers "how bad is it when the model is wrong?" The second question is the one that matters under
+adversarial input, because you cannot make a model never wrong — you can only make its wrongness
+cheap. buffr makes it cheap by giving the agent the smallest possible surface: one read. The
+staff-engineer reflex when reviewing any agent: don't ask "is the model accurate," ask "what's the
+worst this tool list can do," and shrink the list until the answer is "almost nothing."
 
 ## Primary diagram
 
-```
-  buffr's control envelope (what's present, what's deliberately absent)
+Full recap: the two-layer envelope, the bounds, the scope, and why no gate.
 
-  INPUT:  (no sanitize — single-user, local)
-            │
-  LOOP:   maxTurns 6 · maxToolCalls 4 · forced synthesis  ← caps
-          ContextWindowGuardedProvider (halt + warn at 8192)
-          (no human gate — nothing to gate)
-            │
-  OUTPUT: search_knowledge_base is READ-ONLY
-          → model emits intent, harness runs it
-          → NO path to a side effect  ← structural guardrail
 ```
+  buffr's control envelope (rag-query-agent.ts:15-18,63-64,75-79 · run-agent-loop.ts:101-109)
+
+  TERMINATION (prevents runaway — the loop always stops)
+  ┌────────────────────────────────────────────────────────────────┐
+  │ maxTurns:6 · maxToolCalls:4                       (:75-76)      │
+  │ forced synthesis: strip tools @ exhaustion        (:101-109)    │
+  │   → harness-enforced, the model can't override                 │
+  └──────────────────────────┬─────────────────────────────────────┘
+  SCOPING (prevents damage — the blast radius is tiny)
+  ┌──────────────────────────▼─────────────────────────────────────┐
+  │ ragQueryToolPolicy: allowedTools=[search_knowledge_base] (:15-18)│
+  │ filterToolsForPolicy enforces it before the loop  (:11-23,:63-64)│
+  │   → ONE read-only tool → no side-effect path → blast radius ≈ 0 │
+  └──────────────────────────┬─────────────────────────────────────┘
+  NO HUMAN GATE
+  ┌──────────────────────────▼─────────────────────────────────────┐
+  │ nothing to approve: the only tool is a READ → gate = ceremony   │
+  └────────────────────────────────────────────────────────────────┘
+```
+
+Bounds force the stop; one read-only tool caps the damage; no gate because there's no side effect.
+That's the whole control envelope.
 
 ## Elaborate
 
-The control envelope is the agent-architecture framing of per-call
-defenses: prompt-injection and error-recovery mechanics (per call) would
-live in a future `study-ai-engineering` guide; this file covers them as
-the *envelope* around an autonomous loop. buffr's read-only-tool stance
-is the cleanest version of "never let agent output trigger side effects
-directly" — it's not a check you can forget, it's a capability the agent
-doesn't have. The human-in-the-loop gate is made *resumable* by graph
-orchestration (`03-multi-agent-orchestration/07-graph-orchestration.md`),
-which is why buffr would adopt a graph when it first needs to gate an
-action.
+The two halves of the envelope defend different threats and shouldn't be conflated. The termination
+bounds defend against an *operational* failure — a stubborn model burning turns and tokens forever (a
+local 9B will happily say "one more search" indefinitely). Capability scoping defends against a
+*security* failure — a model that's wrong or hijacked doing something irreversible. A system can have
+perfect termination and still be dangerous (bounded but with a `delete_everything` tool in scope), or
+perfectly scoped and still hang (one read tool, but no turn cap). buffr has both, and they're set
+independently: the bounds live on the `runAgentLoop` call, the scope lives in `ragQueryToolPolicy`.
+
+The multi-agent shape of control is a *supervisor*: in a fleet, the envelope moves up a level — a
+supervising agent or policy layer decides which sub-agent may run, with which tools, and kills runs
+that misbehave. buffr is single-agent, so its envelope is flat: one set of bounds, one scope, no
+supervisor needed. The supervisor is what you add when a *second* agent with *write* tools enters the
+system — that's when scoping-per-agent and run-killing become real work (Section C).
+
+Cross-ref `study-security` for the prompt-injection blast-radius analysis — the threat model under
+which capability scoping is the primary defense. A retrieved document can contain injected
+instructions; this file's point is that even a *successful* injection is contained, because the only
+tool it can reach is a read. That file covers the per-call injection defense; this one covers the
+architectural containment.
 
 ## Interview defense
 
-**Q: What stops buffr's agent from running away or doing harm?**
-Three things. Loop caps — `maxTurns: 6`, `maxToolCalls: 4`, and a forced
-synthesis turn — bound the autonomy so a weak model can't loop forever.
-A context-window guard halts and warns on overflow instead of silently
-truncating. And the strongest control is structural: the one tool is
-read-only, so the model emits intent the harness runs, with no path from
-output to a side effect. Smallest possible blast radius.
+**Q: "What stops your agent from running forever, or doing something destructive?"**
+
+Model answer: "Two independent layers. Termination: `maxTurns:6` and `maxToolCalls:4`
+(`rag-query-agent.ts:75-76`), and on exhaustion the loop *strips the tools* and forces synthesis
+(`run-agent-loop.ts:101-109`) — so a stubborn model that wants 'one more search' physically can't,
+because the tools aren't offered. That guarantees it stops. Damage: capability scoping. The agent's
+allowlist is exactly one tool — `ragQueryToolPolicy.allowedTools = [search_knowledge_base]`
+(`:15-18`), enforced by `filterToolsForPolicy` before the loop runs (`tool-policy.ts:11-23`), so the
+model is only ever shown one tool, and it's a read. There's no write, no side effect, so even a
+prompt injection inside a retrieved document can at worst make it search. That's why there's no
+human-in-the-loop gate — there's no side effect to approve. The strongest guardrail isn't checking
+the output, it's shrinking what the agent can touch."
 
 ```
-  caps (loop) + window guard (input size) + read-only tool (output) = bounded
+  The defense in one picture
+
+  runaway?  → maxTurns:6 + maxToolCalls:4 + strip-tools-on-exhaustion  → always STOPS
+  damage?   → ONE read-only tool in scope  → no side-effect path        → blast radius ≈ 0
+  gate?     → none needed: nothing to approve when the only tool is a READ
 ```
 
-**Anchor:** "The cheapest output guardrail is architectural — keep the
-agent read-only so its output *can't* trigger a side effect."
-
-**Q: What's missing, and is that a problem?**
-No input sanitization and no human-in-the-loop gate. Both are fine for a
-single-user, local, read-only tool — there's no untrusted user and no
-action to gate. They'd become required the moment a writing/acting tool
-is added (the two-brain phone design), at which point I'd add output
-schema validation and a human gate on irreversible actions.
+Anchor: *Two layers — termination bounds (maxTurns:6, maxToolCalls:4, forced synthesis at
+`run-agent-loop.ts:101-109`) force the stop; capability scoping to one read-only tool
+(`ragQueryToolPolicy:15-18`, `filterToolsForPolicy:11-23`) caps the blast radius; no human gate
+because a read has no side effect to approve.*
 
 ## See also
 
-- `01-reasoning-patterns/02-agent-loop-skeleton.md` — the budget exit as
-  a loop mechanic
-- `03-multi-agent-orchestration/07-graph-orchestration.md` — what makes
-  a human gate resumable
-- `04-agent-infrastructure/03-tool-calling-and-mcp.md` — the
-  emits-intent boundary
-- `.aipe/study-security/03-indirect-prompt-injection-surface.md` and
-  `.aipe/study-security/04-least-privilege-tool-scope.md` — the security
-  view of the same controls
+- `../01-reasoning-patterns/02-agent-loop-skeleton.md` — the same bounds, taught there as
+  *termination* (the budget exit); here they're read as *control*.
+- `03-tool-calling-and-mcp.md` — `filterToolsForPolicy` filters which registry tools the model is
+  shown; scoping is applied at that seam.
+- `04-agent-evaluation.md` — the bounds are what *trajectory efficiency* would be measured against.
+- `../03-multi-agent-orchestration/` — the supervisor, the multi-agent shape of this envelope.
+- `study-security` → prompt-injection blast-radius analysis; this file is the architectural
+  containment half of that story.

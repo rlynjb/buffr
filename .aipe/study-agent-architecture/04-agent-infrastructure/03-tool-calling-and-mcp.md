@@ -1,203 +1,308 @@
-# Tool calling and MCP — emulated tools under every pattern
+# Tool Calling and MCP
 
-**Industry name(s):** tool calling · function calling · emulated tool
-use · MCP (Model Context Protocol). **Type label:** Industry standard.
-
-**In this codebase: yes — and notably, tool-calling is EMULATED.**
-Gemma2:9b has no native tool API, so aptkit renders the tool schema into
-the system prompt and parses a JSON tool call back out. buffr does not
-use MCP — its one tool is wired in-process via `InMemoryToolRegistry`.
+*Industry names: **tool calling** / **function calling** (the capability); **MCP** (Model
+Context Protocol) — the standardization layer. Type label: Industry standard. Tool calling
+IMPLEMENTED in buffr (the emulated JSON path); MCP NOT YET.*
 
 ## Zoom out, then zoom in
 
-```
-  Zoom out — tool calling is the substrate under every pattern
+Tool calling is the substrate under every agent pattern in this guide. ReAct's "Act," agentic
+RAG's "search," routing's "pick a tool" — all of them are one mechanism: the model emits a
+structured request to call a named function, and the harness runs it. This file is about how
+buffr makes that work on a model with *no native tool support*, and the protocol (MCP) buffr
+deliberately doesn't use.
 
-  ┌─ ReAct / agentic RAG / every topology ───────────────────┐
-  │  all run on: model emits intent → harness runs tool       │
-  │                       ▼                                   │
-  │  ★ tool calling (emulated for Gemma) ★                    │ ← we are here
-  └───────────────────────────┬──────────────────────────────┘
-                              │  JSON tool call ↔ result
-  ┌─ Tool layer ──────────────▼──────────────────────────────┐
-  │  InMemoryToolRegistry → search_knowledge_base handler     │
-  └──────────────────────────────────────────────────────────┘
+```
+  buffr's stack — tool calling is the substrate every pattern stands on
+
+  ┌─ Agent loop (Sections A–C) ────────────────────────────────────┐
+  │  ReAct · agentic RAG · routing — ALL reduce to "call a tool"   │
+  └──────────────────────────┬─────────────────────────────────────┘
+  ┌─ ★ TOOL CALLING — what the agent can TOUCH ★ ─────▼────────────┐
+  │  InMemoryToolRegistry — listTools + callTool (records durationMs)│
+  │  emulated JSON path — Gemma has no native tools array          │
+  └──────────────────────────┬─────────────────────────────────────┘
+  ┌─ The tool itself ─────────────────────────────────▼────────────┐
+  │  search_knowledge_base → pgvector. (NO MCP — direct, in-process)│
+  └─────────────────────────────────────────────────────────────────┘
 ```
 
-Zoom in: tool calling is the connective tissue ReAct, agentic RAG, and
-every multi-agent topology run on. The buffr-specific twist is that the
-model can't call tools natively — the calling is *emulated* in the
-prompt. MCP is the protocol that would standardize tool connections
-across agents; buffr doesn't need it yet with one in-process tool.
+The surprising part: buffr's model can't take a `tools` array at all. Gemma2 has no native tool
+calling, so buffr *emulates* it — renders the tool schemas as JSON into the system text and
+demands the model reply with JSON. The most load-bearing part: tool calling is just a
+*request-response contract*, and once you see it as that, MCP is "what if that contract were a
+network protocol instead of an in-process call."
 
 ## Structure pass
 
-**Layers.** Three: the model (emits a tool call), the provider
-(emulates the calling for Gemma), and the registry (runs the handler).
+Two halves, one axis: **who speaks the contract** — the model side, then the harness side.
 
-**Axis — "how does the tool call cross from model to code?"** With a
-native-tool model, the provider API carries it. With Gemma, the *prompt*
-carries it out and a *JSON parser* carries it back. That emulation is
-the buffr-specific mechanism.
+```
+  Axis = WHO SPEAKS THE CONTRACT · trace the request-response round trip
 
-**Seam.** Two seams: the prompt→model boundary (where tools are rendered
-into the system text) and the model→harness boundary (where JSON is
-parsed back into a tool call). Both live in `GemmaModelProvider`.
+  OUTBOUND (harness → model)   render tool schemas into system text     gemma-provider.ts:133-165
+                               "respond with {"tool":...,"arguments":...}"
+  ───────────────── ★ SEAM: the model replies with text ★ ─────────────────
+  INBOUND (model → harness)    parse the model's JSON back to a tool_use  gemma-provider.ts:168-182
+                               registry executes it, records durationMs   tool-registry.ts:50-64
+```
+
+The seam is the model's text reply. Everything before it is buffr *teaching* the model the tool
+contract in plain prose; everything after is buffr *parsing* the model's attempt back into a
+structured call. With a native-tool model, the provider does both halves for you. With Gemma,
+buffr does them by hand — and that's the whole emulated JSON path.
 
 ## How it works
 
-#### Move 1 — the mental model
+### Move 1 — mental model
 
-A native-tool model is like an API with typed endpoints — you hand it a
-tool schema and it calls it. Gemma is like an API that only speaks plain
-text, so you *describe* the endpoints in the request and *parse* the
-response to figure out which one it meant. That's emulation: tools by
-convention, not by protocol.
-
-```
-  Pattern — emulated tool calling (Gemma)
-
-  OUTBOUND:  render tool schema INTO the system prompt
-             "respond with ONLY {"tool": "...", "arguments": {...}}"
-                   │
-                   ▼
-  MODEL:     emits JSON text (no native tool_use block)
-                   │
-  INBOUND:   parse the JSON back into { name, input }
-                   │ retry once with a nudge if malformed
-                   ▼
-             harness runs the tool
-```
-
-#### Move 2 — the walkthrough
-
-**Outbound: tools rendered into the system text.** `GemmaModelProvider`
-can't take a native `tools` array, so `buildSystemText` serializes each
-tool's schema into the prompt (`gemma-provider.js:82-104`):
-
-```js
-parts.push([
-  'You can call the following tools:', '',
-  rendered,  // JSON.stringify of {name, description, input_schema}
-  '',
-  'When a tool is needed, respond with ONLY a single JSON object, no prose:',
-  '{"tool": "<tool name>", "arguments": { ...arguments... }}',
-  'Otherwise, answer the user directly in natural language.',
-].join('\n'));
-```
-
-So the tool "API" is literally instructions in the prompt. This is why
-the system prompt's "always call search_knowledge_base first" matters so
-much — it's the only thing making Gemma use the tool.
-
-**Inbound: parse the JSON back, retry once if botched.** After Gemma
-responds, the provider tries to parse a tool call out of the raw text
-(`gemma-provider.js:33-41, 107-125`). If it's valid JSON with a `tool`
-and `arguments`, it's converted into a synthetic `tool_use` block — the
-same shape a native-tool model would emit, so `runAgentLoop` is none the
-wiser. If the text *looks* like a botched tool attempt (contains a `{`)
-but doesn't parse, it retries once with a corrective nudge
-(`RETRY_NUDGE`, `gemma-provider.js:2-3, 25`). Plain prose is treated as
-a real answer, not a failed tool call.
-
-**The registry runs the handler, the model never does.** The parsed
-tool call goes to `InMemoryToolRegistry.callTool`
-(`tool-registry.js:14-24`), which looks up the handler and times it. The
-model emitted *intent*; the registry executed it. That boundary is the
-safety story from `02-agent-loop-skeleton.md`, made concrete: even an
-emulated tool call is data the harness interprets, never code the model
-runs.
-
-**No MCP — one in-process tool.** buffr wires its single tool directly
-into the registry (`src/session.ts:43-44`). MCP exists to standardize
-tool connections *across* agents and processes so a tool defined once is
-usable everywhere without per-agent integration. With one tool in one
-process, MCP would be pure overhead. The day buffr's two-brain design
-needs the phone and laptop to share tools, MCP (or a tool gateway) is
-what would standardize that — a future concern, not a current one.
+A tool call is a typed request-response: the model says "run `search_knowledge_base` with
+`{query: "x"}`," the harness runs it and hands back the result. Bridge from frontend: it is
+exactly a `fetch()`. The model writes the request body (the tool name + args), the harness is the
+server that executes it, and the result comes back to be rendered into the next prompt. The
+registry is your API router — it maps a name to a handler.
 
 ```
-  Layers-and-hops — an emulated tool call, end to end
+  THE SHAPE — tool calling is a fetch() the model authors
 
-  ┌─ Gemma ──────┐ hop 1: JSON text     ┌─ GemmaProvider ──────┐
-  │ emits        │ ───────────────────► │ parseToolCall        │
-  │ {"tool":...} │                      │ → synthetic tool_use │
-  └──────────────┘                      └──────────┬───────────┘
-                                          hop 2     │ {name, input}
-                                                    ▼
-                                         ┌─ InMemoryToolRegistry ─┐
-                                         │ callTool → handler     │
-                                         │ → retrieval pipeline   │
-                                         └────────────────────────┘
+  model authors the request ──▶ {"tool":"search_knowledge_base","arguments":{"query":"x"}}
+                                          │
+                              harness = the server  ─▶ registry.callTool(name, args)
+                                          │                    │ runs handler → pgvector
+                                          ▼                    ▼
+                              result fed back into prompt ◀── {hits: [...]}, durationMs
 ```
 
-#### Move 3 — the principle
+### Outbound: render the tools as JSON into the system text
 
-Tool calling is the substrate every agent pattern runs on, and it
-doesn't require a native tool API — it can be emulated by rendering
-schemas into the prompt and parsing JSON back out. The cost of emulation
-is fragility (a weak model botches the JSON, hence the retry-with-nudge)
-and prompt-token overhead (the schema lives in every system prompt). The
-benefit is that a stock local model with zero tool training becomes an
-agent. MCP standardizes this *across* agents; with one in-process tool,
-buffr rightly skips it.
+Gemma2 has no `tools` parameter, so buffr writes the tool catalog *into the prose* of the system
+prompt and instructs the model on the exact reply format. Bridge from known: it's like documenting
+an API endpoint inline and asking the caller to hand-write the request body, because there's no
+typed client.
+
+```ts
+// @aptkit/providers/gemma — gemma-provider.ts:133-165 — OUTBOUND half of emulation.
+function buildSystemText(request) {
+  const parts = [];
+  if (request.system) parts.push(request.system);          // profile + instructions go first
+  if (request.tools?.length) {
+    const rendered = request.tools.map((tool) =>
+      JSON.stringify({ name: tool.name, description: tool.description, input_schema: tool.inputSchema }, null, 2),
+    ).join('\n\n');                                          // each tool schema → JSON text
+    parts.push([
+      'You can call the following tools:', '', rendered, '',
+      'When a tool is needed, respond with ONLY a single JSON object, no prose:',
+      '{"tool": "<tool name>", "arguments": { ...arguments... }}',   // ← the demanded contract
+      'Otherwise, answer the user directly in natural language.',
+    ].join('\n'));
+  }
+  return parts.join('\n\n');
+}
+```
+
+```
+  OUTBOUND — the tool schema becomes prose the model must obey
+
+  ModelTool {name, description, inputSchema}
+        │ JSON.stringify into system text
+        ▼
+  "You can call the following tools: { ...schema... }
+   respond with ONLY {"tool":...,"arguments":...}"   ─▶ Gemma reads it as instructions
+```
+
+Annotation: this is why "strip the tools on the budget exit" (file 05, and
+`02-agent-loop-skeleton.md`) works so cleanly — with no tools rendered into the system text,
+there's simply no contract for the model to fulfill, so it can only answer in prose.
+
+### Inbound: parse the model's JSON back into a tool call
+
+The model replies with text. buffr parses it: if it's valid tool-call JSON, it becomes a
+structured `tool_use` block; if it's prose, it's a real answer. And if it *looks* like a botched
+attempt, buffr nudges once and retries. Bridge from known: it's `JSON.parse` on a response body,
+with a retry on a malformed payload.
+
+```ts
+// gemma-provider.ts:168-182 — INBOUND half: messy text → {name, input} or null.
+function parseToolCall(text) {
+  let parsed;
+  try { parsed = parseAgentJson(text); } catch { return null; }   // not JSON → prose, a real answer
+  const obj = parsed;
+  const name = obj.tool ?? obj.name ?? obj.tool_name;             // tolerate naming variants
+  const input = obj.arguments ?? obj.input ?? obj.args;
+  if (typeof name !== 'string') return null;
+  if (!input || typeof input !== 'object') return null;
+  return { name, input };                                         // → becomes a tool_use block
+}
+```
+
+```ts
+// gemma-provider.ts:35-37 — the retry nudge when the JSON is botched.
+const RETRY_NUDGE =
+  'Your previous reply was not a valid tool call. Respond with ONLY a single JSON object: ' +
+  '{"tool": "<tool name>", "arguments": { ...arguments... }}';
+// the loop only retries if the reply "looked like" a tool attempt (had a '{'); plain prose is a real answer.
+```
+
+```
+  INBOUND — model text becomes a structured call, or a real answer
+
+  model text ─▶ parseAgentJson
+                  │
+        ┌─────────┴──────────┐
+        ▼                    ▼
+   valid JSON?           not JSON / prose
+   {tool,arguments}      → it's a REAL answer (success exit)
+        │
+        ▼  looked like a botched call? → RETRY_NUDGE once, then fall back to prose
+   tool_use block ─▶ registry executes
+```
+
+Annotation: the asymmetry matters. Prose is never retried — only a reply that *looked* like a
+failed tool call (it contained a `{`) gets the nudge. This keeps a genuine prose answer from being
+mistaken for a malformed tool call.
+
+### Execution: the registry maps name → handler and times it
+
+Once buffr has a structured call, the registry runs it. `InMemoryToolRegistry` is a `Map` from
+name to handler — your API router, in-process. It also records wall-clock duration for the
+trajectory (which feeds file 04's evaluation story).
+
+```ts
+// @aptkit/tools — tool-registry.ts:33-64 — the registry: name → handler, timed.
+export class InMemoryToolRegistry implements ToolRegistry {
+  private readonly handlers = new Map();
+  constructor(definitions, handlers) {                       // definitions = catalog, handlers = impls
+    for (const [name, h] of Object.entries(handlers)) this.handlers.set(name, h);
+  }
+  listTools() { return this.definitions; }                   // what the model is told it can call
+  async callTool(name, args, options) {
+    const handler = this.handlers.get(name);
+    if (!handler) throw new Error(`tool not found: ${name}`);
+    const start = performance.now();
+    const result = await handler(args, options);
+    return { result, durationMs: Math.round(performance.now() - start) };  // ← timing for traces
+  }
+}
+```
+
+```
+  EXECUTION — the registry is the in-process API router
+
+  listTools()  ─▶ catalog rendered into system text (outbound)
+  callTool(name, args)
+        │ Map.get(name) → handler
+        ▼
+   handler(args) → pgvector → result   +   durationMs (recorded for the trajectory)
+```
+
+Annotation: `listTools` and `callTool` are the two methods that define a tool registry anywhere —
+one to advertise, one to execute. buffr's is in-memory and in-process. That's the no-MCP baseline.
+
+### Move 3 — the principle, and where MCP fits
+
+**Tool calling is a request-response contract; the only question is whether that contract is
+in-process or over a wire.** buffr's contract is in-process: tools are defined directly,
+registered in a `Map`, and called by a function call. There is **no MCP**. MCP (Model Context
+Protocol) is the standardization layer that would turn buffr's in-process contract into a *network
+protocol* — so any agent could connect to any tool server without bespoke wiring, and tools could
+live in separate processes owned by separate teams. buffr doesn't have it, and that's a real
+tradeoff to name, not hide.
+
+```
+  THE SPECTRUM — buffr's in-process registry vs MCP
+
+  buffr TODAY (no MCP)                      MCP (NOT in buffr)
+  ┌──────────────────────────┐             ┌──────────────────────────────┐
+  │ tools defined in-process │             │ tools = separate MCP servers │
+  │ InMemoryToolRegistry Map │             │ standard protocol over a wire│
+  │ one process, one team    │             │ any agent ↔ any tool server  │
+  │ + simplest, zero overhead│             │ + reusable, cross-team       │
+  │ - bespoke, not shareable │             │ - protocol + transport cost  │
+  └──────────────────────────┘             └──────────────────────────────┘
+```
+
+The tradeoff: buffr's in-process registry is the *simplest possible* tool wiring — zero protocol
+overhead, one process, total control. The cost is that its one tool isn't reusable by another
+agent without re-wiring. For a single agent with one read-only tool, in-process is correct. MCP
+earns its keep when you have *many* agents sharing *many* tools across process and team
+boundaries — which is the multi-agent shape buffr doesn't have yet.
 
 ## Primary diagram
 
-```
-  buffr's emulated tool calling (gemma-provider.js)
+Full recap: the emulated round trip, execution, and where MCP would slot in.
 
-  system prompt: base + RENDERED tool schema + "respond ONLY JSON"
-        │
-        ▼
-  Gemma emits JSON text ──► parseToolCall ──► synthetic tool_use block
-        │ (retry once with nudge if malformed)        │
-        │ plain prose? → treat as final answer        ▼
-        ▼                                    InMemoryToolRegistry.callTool
-   runAgentLoop (unaware it was emulated)    → search_knowledge_base handler
 ```
+  buffr's tool calling — the emulated JSON path (gemma-provider.ts:133-182, tool-registry.ts:33-64)
+
+  OUTBOUND  buildSystemText (:133-165): render tool schemas as JSON into system text
+                │  "respond with {"tool":...,"arguments":...}"
+                ▼
+  MODEL     replies with text
+                │
+  INBOUND   parseToolCall (:168-182): JSON? → tool_use block. prose? → real answer.
+                │  botched? RETRY_NUDGE once (:35-37)
+                ▼
+  EXECUTE   InMemoryToolRegistry.callTool (:50-64): Map name→handler, run, record durationMs
+                │
+                ▼  result fed back into messages → next turn
+  ── MCP (NOT YET) would replace the in-process registry with a wire protocol ──
+```
+
+Two halves to emulate the contract, one registry to run it, no MCP. That's tool calling in buffr.
 
 ## Elaborate
 
-Emulated tool calling is what makes aptkit model-agnostic: the
-`runAgentLoop` works with a native-tool provider or an emulated one
-because the provider normalizes both to the same `tool_use` shape. The
-emulation's fragility is real — the `maxToolCallAttempts: 2` retry
-(`gemma-provider.js:13`) exists precisely because Gemma sometimes wraps
-its JSON in prose. MCP is the next layer up: a protocol so tools defined
-once are reusable across agents and processes — relevant only when buffr
-goes multi-process (the two-brain design). The tool-calling *mechanics*
-(schema design, validation) would be detailed in a future
-`study-ai-engineering` tool-calling file.
+The emulated JSON path is a workaround for a model limitation, but it exposes the *real* shape of
+tool calling more honestly than a native-tool model does. A native model hides the contract inside
+the provider; Gemma forces buffr to write the contract in plain text, which makes it obvious that
+tool calling is "ask the model to produce a structured string, then parse it." The retry nudge
+(`:35-37`) and the `looksLikeToolAttempt` check are the reliability tax of emulation — a native
+model would not need them, but they cost almost nothing and make a 9B model usably reliable at
+emitting JSON.
+
+The multi-agent shape of tool calling is precisely MCP: a fleet of agents needs a *standard* way to
+discover and call tools they didn't define, owned by other teams, possibly on other machines. MCP
+is the protocol that makes a tool a network service instead of a function call. buffr is
+single-agent with one in-process tool, so it correctly skips the protocol. Name MCP as the thing
+you'd reach for the moment a *second* agent needs to share buffr's `search_knowledge_base` — not
+before.
+
+Cross-ref `study-ai-engineering` for tool-calling mechanics (schema design, argument validation,
+parallel tool calls) — this file covers only the substrate-and-protocol angle and buffr's emulated
+path.
 
 ## Interview defense
 
-**Q: How does buffr call tools if Gemma has no native tool API?**
-It emulates them. The provider renders each tool's schema into the
-system prompt and instructs Gemma to "respond with ONLY a JSON object"
-(`gemma-provider.js:82-104`), then parses that JSON back into a
-synthetic `tool_use` block so the loop is provider-agnostic. If Gemma
-botches the JSON, it retries once with a corrective nudge. Plain prose is
-treated as a real answer.
+**Q: "Your model has no native tool calling. How do tools work? And why no MCP?"**
+
+Model answer: "I emulate the tool contract in two halves. Outbound, `buildSystemText`
+(`gemma-provider.ts:133-165`) renders each tool's schema as JSON into the system text and demands
+the model reply with `{"tool":...,"arguments":...}`. Inbound, `parseToolCall` (`:168-182`) parses
+the reply: valid JSON becomes a structured tool-use block, prose is treated as a real answer, and a
+botched attempt gets one retry nudge (`:35-37`). Execution is `InMemoryToolRegistry.callTool`
+(`tool-registry.ts:50-64`) — a `Map` from name to handler that also records `durationMs` for the
+trajectory. There's no MCP: tools are defined in-process. That's the right call for a single agent
+with one read-only tool — MCP is a wire protocol that earns its keep when many agents share many
+tools across process and team boundaries, which I don't have yet. I'd adopt MCP the moment a second
+agent needed to call my `search_knowledge_base`."
 
 ```
-  render schema → prompt | Gemma emits JSON | parse → tool_use (retry once)
+  The defense in one picture
+
+  no native tools  →  EMULATE: render schemas as JSON (out) + parse JSON (in)
+  no MCP           →  in-process registry (Map name→handler); correct for 1 agent, 1 tool
+                      MCP = the wire protocol you adopt when a 2nd agent needs the tool
 ```
 
-**Anchor:** "Tool calling is emulated in the prompt — a stock model with
-no tool training becomes an agent, at the cost of JSON fragility."
-
-**Q: Why no MCP?**
-One in-process tool. MCP standardizes tool connections across agents and
-processes; with a single tool wired directly into the registry, it'd be
-pure overhead. It becomes relevant if the two-brain design needs the
-phone and laptop to share tools.
+Anchor: *Tool calling is a request-response contract — emulated in JSON for Gemma
+(`gemma-provider.ts:133-182`), executed by an in-process registry (`tool-registry.ts:33-64`); no
+MCP, because one agent with one tool doesn't need a wire protocol.*
 
 ## See also
 
-- `02-agent-loop-skeleton.md` — the execute step this implements
-- `01-reasoning-patterns/03-react.md` — the pattern this substrate runs
-- `05-agent-infrastructure → 05-guardrails-and-control.md` — the
-  model-emits-intent safety boundary
-- `.aipe/study-security/04-least-privilege-tool-scope.md` — the
-  single-tool scope from the security angle
+- `../01-reasoning-patterns/02-agent-loop-skeleton.md` — the loop that calls the registry;
+  stripping the tools on the budget exit relies on the outbound emulation here.
+- `../02-agentic-retrieval/01-agentic-rag.md` — the one tool buffr wires is retrieval.
+- `05-guardrails-and-control.md` — capability scoping filters which tools the registry exposes.
+- `04-agent-evaluation.md` — `durationMs` recorded by `callTool` feeds the trajectory.
+- `study-ai-engineering` → tool-calling mechanics (schema design, argument validation).

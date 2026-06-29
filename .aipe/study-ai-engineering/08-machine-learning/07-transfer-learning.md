@@ -1,264 +1,247 @@
-# Transfer learning — fine-tuning a pretrained backbone
+# Transfer Learning
 
-*Industry standard (transfer learning / fine-tuning). buffr does NO fine-tuning — but it already consumes transfer learning twice (gemma2:9b, nomic-embed-text), and its trajectory corpus is exactly the small target set a future fine-tune would use. This is buffr's ceiling — Not yet implemented.*
+### *industry: transfer learning · type: reusing a model pretrained on large public data, then adapting it to a small domain set*
 
-## Zoom out, then zoom in
+## Zoom out
 
-Almost nobody trains a model from scratch anymore. You take a backbone someone else paid millions to pretrain on a huge general corpus, and you adapt it to your tiny target task with a fraction of the data and compute. buffr already lives on the *consume* side of this: `gemma2:9b` and `nomic-embed-text:v1.5` are pretrained backbones it uses as-is, with zero adaptation — the pure feature-extraction case. What it hasn't done is the *adapt* side, and it's sitting on the exact ingredient that would make it possible: `agents.messages`, the full-signal trajectory of every conversation, is the small target set a future fine-tune of gemma would learn from. That's buffr's ceiling.
+You will almost never train a serious model from scratch — you can't afford the data or the compute, and you don't need to. Modern ML is mostly *adaptation*: take a model that already learned general structure from a giant public corpus, and bend it toward your small, specific task. This is the most quietly important file in the section, because buffr is already standing on its output. See where it lands in the pipeline:
 
+**The supervised pipeline, with the stage transfer learning replaces marked**
 ```
-  Zoom out — buffr consumes transfer learning; the FT step is the ceiling
-
-  ┌─ Pretrained backbones (CONSUMED as-is — feature extraction) ─┐
-  │  gemma2:9b (generation)   ·   nomic-embed-text:v1.5 (embed)  │
-  │  ★ zero fine-tuning — pure transfer, used off the shelf ★    │ ← we are here
-  └───────────────────────────────┬─────────────────────────────┘
-                                  │ trajectories logged ↓
-  ┌─ Trajectory corpus (EXISTS) ─▼──────────────────────────────┐
-  │  agents.messages — 6 event types, replay-ordered            │
-  │  src/supabase-trace-sink.ts persists every run              │
-  └───────────────────────────────┬─────────────────────────────┘
-                                  │ would be the TARGET SET for ↓
-  ┌─ Fine-tune (NOT DONE — the ceiling) ─▼──────────────────────┐
-  │  adapt gemma on buffr's trajectories (SFT / LoRA)           │
-  │  ★ the genuine rhyme: the corpus already exists ★           │
-  └──────────────────────────────────────────────────────────────┘
+┌────────┐  ┌──────────┐  ┌───────┐  ┌──────────────────────────┐  ┌────────┐
+│  Data  │─►│ Features │─►│ Split │─►│ ★ TRAIN (from a PRETRAINED │─►│ Deploy │ ◄── this file
+│ (SMALL │  │ (learned │  │       │  │   base, not from scratch) ★│  │        │
+│  domain│  │  by base)│  │       │  │   feature-extract / FT / LoRA│  │       │
+│  set)  │  │          │  │       │  └──────────────────────────┘  └────────┘
+└────────┘  └──────────┘  └───────┘            ▲
+                                    a giant PUBLIC pretrain already happened
+                                    upstream; you start from its weights
 ```
-
-Zoom in: **transfer learning** is reusing the representations a model learned on a big general task to bootstrap a small target task. You don't relearn "what language looks like" or "what bodies look like" — that's frozen in the backbone. You adapt only the part that's task-specific. This file teaches the mechanism (frozen backbone + new head, feature extraction vs full fine-tune vs LoRA), then makes the buffr connection the centerpiece: buffr is already a transfer-learning *consumer*, and its trace corpus is the missing target set for the adapt step it hasn't taken.
+Transfer learning swaps "fit from zero on my data" for "start from a model that already knows a lot, then nudge it" — and that nudge needs orders of magnitude less data.
 
 ## Structure pass
 
-**Layers:** the pretrained backbone (general knowledge) → the adaptation layer (frozen vs unfrozen split) → the new task head (your specific output).
+One axis governs every transfer-learning decision: **how many of the pretrained weights you allow to move.** That single dial spans the whole method space.
 
-**Axis — "is this layer reused as-is, or relearned for the target task?"**
-
+**The one axis: fraction of pretrained weights you let update**
 ```
-  trace "reused or relearned?" up the stack
+   weights you allow to change during adaptation
+   0% ──────────── tiny % ──────────────────────── 100%
+   │               │                                │
+   FEATURE         LoRA / ADAPTERS                  FULL FINE-TUNE
+   EXTRACTION      (freeze base, train a few        (every weight moves)
+   (freeze base,    small inserted matrices)
+    train only a
+    new head)
 
-  ┌─ task head (top) ───────┐   RELEARNED — always trained on target data
-  │  classifier / output    │   the only part feature-extraction touches
-  └─────────────────────────┘
-  ┌─ upper backbone layers ─┐   SOMETIMES unfrozen (full fine-tune)
-  │  high-level features    │   adapt if target differs from source
-  └─────────────────────────┘
-  ┌─ lower backbone layers ─┐   REUSED as-is — edges, syntax, primitives
-  │  low-level features     │   frozen; generic, transfer everywhere
-  └─────────────────────────┘
-
-  the deeper you go, the more general (and more reusable) the features
+   ┌──────────────────────────── THE SEAM ──────────────────────────────┐
+   │ more weights moving = more capacity to adapt, BUT more data needed  │
+   │ and more risk of catastrophic forgetting + overfitting your small   │
+   │ domain set. The right point is set by HOW MUCH LABELED DATA YOU HAVE.│
+   └─────────────────────────────────────────────────────────────────────┘
 ```
-
-**The seam:** the frozen/unfrozen boundary is where the axis flips — below it, weights are reused unchanged; above it, weights are relearned on your data. *Where you draw that line* is the entire design decision of transfer learning. Draw it at the very top (freeze everything but the head) and you get feature extraction; draw it lower (unfreeze upper layers) and you get fine-tuning; insert tiny trainable adapters *between* frozen layers and you get LoRA. buffr's current line is drawn at the absolute top — it freezes the *whole* backbone and doesn't even train a head. The ceiling is moving that line down.
+The seam: the amount of labeled domain data you have decides how far right on this dial you're allowed to go — too far right with too little data and you destroy the general knowledge you were trying to keep.
 
 ## How it works
 
-### Move 1 — the mental model
+### Move 1 — Mental model
 
-You already know this shape from extending a class instead of rewriting it. You don't re-implement everything `EventEmitter` does — you inherit it and override the one method you need. Transfer learning is inheritance for neural networks: the pretrained backbone is the base class with all the general behavior already implemented, and you override only the top layer for your specific task. The strategy in one sentence: keep the expensive general representations, adapt only the cheap task-specific part.
+The mental model: **a pretrained network's early layers learned general structure; only its last layers are task-specific.** Edges and textures, or in language general syntax and semantics, live in the lower layers and transfer almost everywhere. The task-specific decision lives near the top. Transfer learning keeps the reusable bottom and replaces or lightly adjusts the top. Hold contrl pose-landmarking in mind: that's the from-scratch shape; transfer learning is "don't start at zero — start from a vision backbone that already sees."
 
+**General-bottom, specific-top — keep the bottom, swap the top**
 ```
-  the pattern — frozen backbone + new head (inheritance for nets)
-
-  ┌─ PRETRAINED BACKBONE (frozen) ──────────────┐
-  │  layer 1 ──► layer 2 ──► ... ──► layer N     │  ← weights REUSED as-is
-  │  (general representations, learned once)     │     (the "base class")
-  └──────────────────────────┬───────────────────┘
-                             │ features out
-                             ▼
-  ┌─ NEW HEAD (trained on YOUR small target set) ┐
-  │  fresh layer(s) → your task's output          │  ← the only part you train
-  └───────────────────────────────────────────────┘     (the "override")
+   ┌───────────────────────────┐
+   │  HEAD (task-specific)      │  ◄── REPLACE / RETRAIN this (your classes)
+   ├───────────────────────────┤
+   │  upper layers (specific)   │  ◄── maybe fine-tune (if you have data)
+   ├───────────────────────────┤
+   │  middle layers (mixed)     │  ◄── usually FREEZE
+   ├───────────────────────────┤
+   │  lower layers (general:    │  ◄── almost always FREEZE — edges, syntax,
+   │  edges / syntax / texture) │       general structure transfer everywhere
+   └───────────────────────────┘
+        ▲ keep the reusable bottom, it was the expensive part to learn
 ```
+You're buying the lower layers for free and paying only to teach the top your specific task.
 
-### Move 2 — the step-by-step walkthrough
+### Move 2 — Walk the mechanism
 
-**Why it works — reuse the representations, adapt only the top.** A deep model trained on a huge corpus learns a hierarchy: the bottom layers capture generic primitives (in language: subword patterns, syntax; in vision: edges, textures), and only the top layers are task-specific. Those bottom-layer features are *general* — they're useful for almost any related task — so there's no reason to relearn them. You inherit them and spend your scarce target data adapting just the top. That's why transfer works with tiny datasets: you're not learning from zero, you're nudging an already-competent model.
+**Part 1 — The base model is pretrained on a giant public corpus.** This already happened, off your machine, at a scale you can't match. nomic-embed-text and gemma2 both arrive this way.
 
+**Pretrain happened upstream — you inherit the weights**
 ```
-  the feature hierarchy — general at the bottom, specific at the top
-
-  TOP    ┌─ task-specific ──┐  "is this run a failure?"   ← relearn
-         ├──────────────────┤
-         │  high-level      │   phrases, intents           ← maybe adapt
-         │  mid-level       │   syntax, structure          ← reuse
-  BOTTOM │  low-level       │   subwords, tokens           ← reuse
-         └──────────────────┘
-  general knowledge is at the bottom → frozen → that's the free lunch
+   billions of public tokens / images  ──►  [ PRETRAIN, weeks of GPUs ]  ──► W₀
+                                                                            │
+                          you START HERE, downloading W₀ ◄──────────────────┘
+                          (you did NOT pay for any of the above)
 ```
 
-**Three strategies — how much of the backbone you let move.** The frozen/unfrozen line gives you a spectrum, and where you put it trades data-hunger against adaptation power.
+**Part 2 — You choose how much to thaw.** This is the central decision. Illustrative pseudocode, not buffr code:
 
-```
-  three strategies along the frozen/unfrozen line
+**The three regimes, as a dial on what's frozen (illustrative)**
+```python
+# ILLUSTRATIVE ONLY — not buffr code. The three transfer regimes.
 
-  ┌─ FEATURE EXTRACTION ────────────────────────────────────────┐
-  │  freeze ALL backbone · train only a new head                │
-  │  least data, fastest, least adaptation                      │
-  │  ← buffr is HERE (and freezes the head too: zero training)  │
-  └──────────────────────────────────────────────────────────────┘
-  ┌─ FULL FINE-TUNE ────────────────────────────────────────────┐
-  │  unfreeze upper (or all) layers · train with LOW lr         │
-  │  most data, most compute, most adaptation                   │
-  └──────────────────────────────────────────────────────────────┘
-  ┌─ LoRA / ADAPTERS (parameter-efficient) ─────────────────────┐
-  │  freeze backbone · inject small trainable low-rank matrices │
-  │  ~0.1–1% of params train · cheap · stackable · swappable    │
-  └──────────────────────────────────────────────────────────────┘
-```
+# (1) FEATURE EXTRACTION — freeze everything, train a fresh head.
+for p in base.parameters(): p.requires_grad = False
+head = LinearClassifier(base.output_dim, n_classes)   # only this trains
 
-*Feature extraction* freezes the whole backbone and trains only a fresh head on top — cheapest, least data, least adaptation. *Full fine-tune* unfreezes some or all of the backbone and trains with a deliberately *low* learning rate (so you nudge, not clobber, the pretrained weights — the classic bug is a high learning rate that erases everything the backbone knew, called catastrophic forgetting). *LoRA* (Low-Rank Adaptation) is the modern default for LLMs: freeze the giant backbone entirely and inject tiny trainable low-rank matrices alongside the frozen weights, so you train ~1% of the parameters and can swap adapters in and out.
+# (2) FULL FINE-TUNE — unfreeze all, tiny learning rate.
+for p in base.parameters(): p.requires_grad = True
+optimizer = Adam(base.parameters(), lr=1e-5)          # small LR = don't forget
 
-```
-  LoRA — train a tiny low-rank delta beside the frozen weight
-
-  frozen weight W (huge, d×d)        trainable A (d×r) · B (r×d), r ≪ d
-        │                                   │
-        ▼                                   ▼
-  output = W·x  +  (B·A)·x      ← only A,B update; W never moves
-                  └── low-rank delta ──┘     ~0.1–1% of params trained
+# (3) LoRA / ADAPTERS — freeze base, inject + train small matrices.
+#     W_eff = W_frozen + (B @ A)   where A,B are tiny, low-rank, trainable
+inject_lora(base, rank=8)                              # ~0.1% of params train
 ```
 
-In pseudocode, fine-tuning is the same loop you know, with two new lines — freeze, and low learning rate:
+**Part 3 — The data-vs-method match decides which regime is correct.** This is the rule you defend in interviews.
 
+**Pick the regime from your data size and domain distance**
 ```
-  // INPUT: pretrained_backbone, small target set (x, y) pairs
-  backbone = load_pretrained()              // gemma2:9b / nomic — the free lunch
-  freeze(backbone.lower_layers)             // REUSE: don't touch general features
-  head = new_trainable_head()               // RELEARN: your task's output
-  for epoch in epochs:
-    for (x, y) in target_set:
-      features = backbone(x)                // forward through frozen layers
-      pred = head(features)
-      loss = loss_fn(pred, y)
-      // low lr is load-bearing — high lr = catastrophic forgetting:
-      update(head, loss, lr = 1e-4)         // (and unfrozen layers, if any)
-  // OUTPUT: adapted model — backbone's knowledge kept, top specialized
+                    small labeled set        large labeled set
+   close to        ┌────────────────────┐   ┌────────────────────┐
+   pretrain        │ FEATURE EXTRACTION │   │ fine-tune upper few │
+   domain          │ (freeze, train head)│   │ layers              │
+                   └────────────────────┘   └────────────────────┘
+   far from        ┌────────────────────┐   ┌────────────────────┐
+   pretrain        │ LoRA / adapters     │   │ FULL FINE-TUNE      │
+   domain          │ (cheap, low-risk)   │   │ (you can afford it) │
+                   └────────────────────┘   └────────────────────┘
 ```
 
-**The economics — why a tiny target set is enough.** From-scratch training needs millions of examples because the model learns everything, including the generic representations. Transfer learning amortizes that: the backbone already paid for the generic part, so your target set only has to teach the *difference* between the general task and yours. That's why people fine-tune useful models on hundreds or a few thousand examples — buffr's trajectory corpus territory — instead of millions.
+**Part 4 — Full fine-tuning risks catastrophic forgetting; LoRA sidesteps it.** Moving every weight on a small set can erase the general knowledge. LoRA freezes the base entirely, so the original capability is structurally preserved.
 
+**Why LoRA is the safe default for small domain sets**
 ```
-  the economics — target set teaches only the DELTA
+   FULL FINE-TUNE on small data:
+     W₀ ──drift──► W'   general knowledge can be OVERWRITTEN (forgetting)
 
-  from scratch:  ████████████████████  millions of examples
-                 (learns generic + specific from zero)
-
-  transfer:      ░░░░░░░░░░░░░░░░  ██   backbone (paid) + tiny target set
-                 reused for free       teaches only your task's difference
-```
-
-### Move 2.5 — current state vs future state (the buffr ceiling)
-
-This is the load-bearing part of the file. buffr's *current* state is the leftmost strategy taken to its limit: it consumes two frozen backbones and trains *nothing*. Its *future* state — the ceiling — is using `agents.messages` as the small target set for a fine-tune of gemma.
-
-```
-  Phase A (today)                      Phase B (the ceiling — NOT done)
-  ─────────────                        ──────────────────────────────────
-  gemma2:9b consumed as-is             gemma fine-tuned on buffr's runs
-  nomic-embed consumed as-is           (SFT, then maybe LoRA)
-  zero training                        target set = agents.messages
-  feature-extraction case, no head     trajectories → prompt/response pairs
-  src/supabase-trace-sink.ts           same sink keeps logging the new runs
-    just LOGS trajectories               → the corpus that feeds the FT
+   LoRA:
+     W₀ (FROZEN) + ΔW(tiny, trainable)  ──►  base intact, adaptation additive
+     │                                         ┌──────────────────────────┐
+     └─ original capability cannot be lost     │ ~0.1–1% of params train; │
+        because W₀ never moves                 │ adapters are swappable    │
+                                               └──────────────────────────┘
 ```
 
-The migration cost is real and worth stating honestly: `agents.messages` captures the full-signal trajectory — all six `CapabilityEvent` types, replay-ordered by `event.timestamp` — which is what makes it usable for supervised fine-tuning at all. But it has *no preference labels and no reward signal*. So the honest ceiling is SFT (supervised fine-tuning on prompt→response pairs extracted from the trajectory), not RLHF. What doesn't change: the backbones stay pretrained, the sink keeps logging, the retrieval pipeline is untouched. You're adding an export + a fine-tune, not rebuilding buffr.
+### Move 2.5 — current vs future
 
+**The biggest honest hook in this whole section, drawn straight**
 ```
-  why agents.messages is a usable target set (and what's missing)
-
-  ┌─ src/supabase-trace-sink.ts — emit() over 6 event types ────┐
-  │  step · tool_call_start · tool_call_end · model_usage ·     │
-  │  warning · error    → persistMessage() into agents.messages │
-  │  event.timestamp → created_at = DETERMINISTIC replay order  │
-  └───────────────────────────────┬─────────────────────────────┘
-                                  │ extract prompt→response pairs
-                                  ▼
-  ┌─ SFT-ready dataset ─────────────────────────────────────────┐
-  │  HAVE: full trajectory, replay order, tool calls + results  │
-  │  MISSING: preference labels, reward signal → no RLHF, SFT   │
-  └──────────────────────────────────────────────────────────────┘
+   ALREADY TRUE (real, shipping)                  THE CEILING (Case B — not built)
+   ┌──────────────────────────────────┐           ┌──────────────────────────────────┐
+   │ the EMBEDDINGS buffr serves ARE   │           │ FINE-TUNE gemma2 (LoRA/QLoRA) on  │
+   │ the output of a transfer-learned  │           │ buffr's CAPTURED TRAJECTORIES.    │
+   │ model:                            │           │                                   │
+   │   nomic PRETRAIN (web text)       │           │ corpus lives in agents.messages   │
+   │        │ contrastive TUNE         │           │ ── "capture every conversation as │
+   │        ▼                          │           │    a trajectory NOW so fine-tuning │
+   │   nomic-embed-text:v1.5  ◄─buffr  │           │    is ANSWERABLE later"            │
+   │   consumes this every retrieval   │           │    (agent-layer-plan.md, verbatim) │
+   └──────────────────────────────────┘           └──────────────────────────────────┘
+        ▲ buffr STANDS ON transfer learning            ▲ it is a DATASET that does
+          but trained none of it                          NOT yet train anything
 ```
+Two honest truths at once: buffr is *already built on* a transfer-learned model (the embeddings), and its realistic *ceiling* is fine-tuning gemma on `agents.messages` — a corpus that exists to make fine-tuning answerable, while training nothing today.
 
-### Move 3 — the principle
+### Move 3 — The principle
 
-Don't relearn what's already learned. Transfer learning is the recognition that general representations are expensive to acquire and cheap to reuse, so the entire game is deciding *where to draw the frozen/unfrozen line* for your data budget. buffr is the clean illustration of both ends: it already lives at the frozen extreme (two backbones, zero adaptation), and its ceiling is moving that line down by one fine-tune — with the target set, `agents.messages`, already sitting in the database. The data exists; the adaptation doesn't. That gap *is* buffr's ceiling.
+The principle: **start from the most knowledge you can inherit, and move the fewest weights that get the job done.** Every weight you thaw costs data and risks erasing what you were trying to keep. From-scratch training is the exception you justify, not the default you reach for — and the cheaper the adaptation that hits your bar, the better the engineering.
 
 ## Primary diagram
 
+**The whole picture: inherit, choose how much to thaw, adapt**
 ```
-  Transfer learning — backbone reuse, the frozen line, buffr's ceiling (recap)
-
-  ┌─ PRETRAINED BACKBONE (general corpus, paid once) ───────────┐
-  │  gemma2:9b · nomic-embed-text   ← buffr CONSUMES both as-is │
-  │  lower layers: generic primitives (reuse / freeze)          │
-  └───────────────────────────────┬─────────────────────────────┘
-                          frozen/unfrozen LINE = the design choice
-                                  │
-        ┌─────────────────────────┼──────────────────────────┐
-        ▼                         ▼                          ▼
-  FEATURE EXTRACTION        FULL FINE-TUNE              LoRA / ADAPTERS
-  freeze all + new head     unfreeze upper, low lr      tiny low-rank delta
-  ★ buffr is here ★         (catastrophic-forget risk)  ~1% params trained
-        │
-        │ buffr's CEILING (not done): adapt gemma on its own runs
-        ▼
-  ┌─ TARGET SET (EXISTS) ───────────────────────────────────────┐
-  │  agents.messages — full-signal trajectory, replay-ordered   │
-  │  via src/supabase-trace-sink.ts                             │
-  │  → SFT prompt/response pairs · MISSING: preference/reward   │
-  └──────────────────────────────────────────────────────────────┘
+   PUBLIC PRETRAIN (upstream, not yours)
+   ┌────────────────────────────────────┐
+   │  giant corpus ──► W₀ (general)      │   nomic, gemma2 both arrive here
+   └──────────────────┬─────────────────┘
+                      │ you download W₀
+                      ▼
+   ┌──────────────────────────────────────────────────────────────────────┐
+   │  ADAPT — turn the dial by how much labeled DOMAIN data you have:       │
+   │                                                                        │
+   │   none of base moves ◄──── FEATURE EXTRACT ──── LoRA ──── FULL FT ────► all moves │
+   │     (tiny data, close)        (cheap, safe)            (lots of data)   │
+   └──────────────────┬─────────────────────────────────────────────────────┘
+                      ▼
+   ┌────────────────────────────────────┐
+   │  DEPLOY adapted model               │   ★ buffr's ceiling: LoRA gemma on
+   │  (small domain set, big knowledge)  │     agents.messages — dataset only, today
+   └────────────────────────────────────┘
 ```
+Inherit the expensive general knowledge for free, then spend the minimum adaptation that clears your bar.
 
 ## Elaborate
 
-Transfer learning is the dominant paradigm in modern ML, and it's why a single lab's pretraining run (gemma, the nomic encoders) becomes infrastructure thousands of apps build on without retraining — buffr included. It started in vision (ImageNet-pretrained backbones fine-tuned on small task datasets, ~2014) and became total in NLP after the pretrain-then-fine-tune recipe (ULMFiT, BERT, then the GPT/Llama/Gemma generation). LoRA (Hu et al., 2021) is the piece that made fine-tuning a billion-parameter model affordable on commodity hardware: freeze the giant matrix, learn a low-rank delta beside it, train ~1% of the weights. The adjacent concept is domain adaptation (`06-domain-gap.md`) — fine-tuning *is* domain adaptation when your target set is in-domain data the backbone underperforms on, which is precisely buffr's mild embedder gap. And the trigger question — *when is the trajectory corpus big enough to fine-tune?* — is the retraining-pipeline question (`16-retraining-pipelines.md`). The genuine buffr rhyme is worth restating plainly: buffr is *already* doing transfer learning every single query (consuming two frozen backbones), and the only step between it and a custom model is an export of `agents.messages` plus an SFT run. This rhymes with contrl too, but more loosely — MediaPipe's pose model is itself a pretrained backbone you consumed as-is, the feature-extraction case in a vision medium; buffr just has the corpus to take the *next* step that contrl never had.
+The sharp edges:
+
+- **Embeddings are applied transfer learning.** The 768-dim vectors buffr retrieves over (`03-retrieval-and-rag/01-embeddings.md`) are produced by a model that was pretrained then contrastively tuned. When you use those vectors, you are consuming transfer learning's output — this file is the upstream of that one.
+- **LoRA is the default for one developer.** Full fine-tuning a 9B model needs serious GPUs and risks forgetting. LoRA/QLoRA trains ~0.1–1% of parameters, fits on modest hardware, and keeps the base intact and swappable. For buffr's ceiling exercise, it's the only realistic option — and `agent-layer-plan.md` already names LoRA/QLoRA as the furthest it would go.
+- **Catastrophic forgetting is real and quiet.** Full fine-tune on a small domain set and the model can get better at your task while getting worse at everything else — and your domain eval won't show the loss. Test general capability after fine-tuning, not just domain capability.
+- **A fine-tuning dataset is not a trained model.** This is the honesty line for the whole section: `agents.messages` accumulating trajectories is a *latent corpus*. It makes fine-tuning *answerable*; it trains nothing. Saying "we capture trajectories so we could fine-tune later" is accurate; saying "buffr fine-tunes gemma" is not.
+- **Fine-tune only when evidence demands it.** Per `agent-layer-plan.md`, the decision to fine-tune is gated on Phase-4 eval evidence — you fine-tune because P@1/faithfulness numbers told you to, not because it's the exciting option.
 
 ## Project exercises
 
-> No curriculum file present; exercises derived from the codebase.
+### Build a LoRA fine-tune harness over captured trajectories (the ceiling)
 
-### Design the SFT dataset export from agents.messages
+- **Exercise ID:** [B2C.7] Phase 3 (gated on trajectory volume)
+- **What to build:** Not yet implemented — buffr trains nothing. Build a `ml/` harness that turns `agents.messages` into a supervised fine-tuning dataset (prompt → preferred response pairs) and runs a LoRA/QLoRA fine-tune of a small base model on it. Start tiny: prove the data-prep and training loop end-to-end on a few hundred trajectories before scaling. This is the *first time buffr would train anything* — implement it honestly as new code, gated on having enough captured trajectories.
+- **Why it earns its place:** It is buffr's stated ceiling, drawn directly from `agent-layer-plan.md`. Owning the data-prep → LoRA → eval loop is exactly the "trained one, not just consumed one" signal interviews reward, and it forces the catastrophic-forgetting and regime-choice lessons into your hands.
+- **Files to touch:** new `ml/trajectory_dataset.py` (reads `agents.messages`, emits SFT pairs), new `ml/lora_finetune.py`, new `ml/eval_finetuned.py` reusing `eval/queries.json` for before/after numbers.
+- **Done when:** a tiny LoRA adapter trains to completion on a real trajectory slice; an eval compares base vs adapted on `eval/queries.json` AND on a held-out general-capability probe (to catch forgetting); a note states whether the evidence would justify shipping it.
+- **Estimated effort:** 3–5 days; the data-prep and the honest before/after eval are the bulk.
 
-- **Exercise ID:** XFER-1 (Case B — fine-tuning not done; this is the ceiling's first step). **The lead exercise — buffr's strongest ML connection.**
-- **What to build:** an exporter that reads the replay-ordered trajectory out of `agents.messages` and turns each conversation into supervised fine-tuning pairs — prompt (user turn + retrieved context + tool results) → response (the assistant's `step` content). Honestly document what's *present* (full trajectory, tool calls and results, deterministic order) and what's *missing* (no preference labels, no reward signal → SFT only, not RLHF).
-- **Why it earns its place:** this is the single step that moves buffr off the feature-extraction extreme. The target set already exists in the database; this exercise proves you can shape it into a real SFT corpus and that you understand the honest limits of what that corpus can train.
-- **Files to touch:** new `src/cli/export-sft.ts`; read the trajectory via the same DB pool pattern as `src/cli/eval-cmd.ts`; rely on the column semantics and replay order established in `src/supabase-trace-sink.ts` (`event.timestamp → created_at`, the six event types).
-- **Done when:** the exporter emits a JSONL file of prompt/response pairs in replay order, with a written note on the missing preference/reward signal.
-- **Estimated effort:** 1–2 days.
+### Feature-extraction baseline: embeddings + a trained head
 
-### Prototype a LoRA fine-tune plan with a corpus-size trigger
-
-- **Exercise ID:** XFER-2 (Case B — fine-tuning not done).
-- **What to build:** a written plan (not a training run) for a LoRA fine-tune of gemma over the XFER-1 export: which layers stay frozen, the adapter rank, the learning rate (low, to avoid catastrophic forgetting), and — the key part — the *trigger*: how many trajectories in `agents.messages` make the corpus "big enough" to bother, and how you'd measure that the fine-tune actually helped (eval against the held-out trajectories / the existing IR eval).
-- **Why it earns its place:** it forces the economics and the trigger question — the same "when is it worth retraining?" decision that drives the retraining pipeline — applied to buffr's real, growing corpus. It connects transfer learning to the operational reality of *when* you pull the trigger.
-- **Files to touch:** new `docs/lora-finetune-plan.md`; reference the export from `src/cli/export-sft.ts` (XFER-1) and the row count in `agents.messages`; tie the success metric to `src/cli/eval-cmd.ts`.
-- **Done when:** the plan names the frozen/unfrozen split, the adapter config, the low learning rate, and a concrete corpus-size trigger with a success metric.
-- **Estimated effort:** 1 day.
+- **Exercise ID:** [B2C.7b] Phase 2C
+- **What to build:** Not yet implemented — buffr trains nothing. The cheap, correct first rung of transfer learning: freeze `nomic-embed-text`, use its embeddings as fixed features, and train only a small classifier head on top (e.g. query-intent from [B2C.5]). This is feature-extraction transfer learning with zero fine-tuning — you adapt a pretrained model by training nothing in it, only a head on its output.
+- **Why it earns its place:** It's the lowest-risk, highest-ratio form of transfer learning and the honest entry point: it teaches that "using embeddings as features and training a head" *is* transfer learning, which most people don't realize they're already doing.
+- **Files to touch:** new `ml/feature_extract_head.py` (embeds corpus via nomic, trains a head), reuses `ml/labels.json`, results to `ml/README.md`.
+- **Done when:** a head trains on frozen nomic embeddings and beats a bag-of-words baseline; a one-line note frames this explicitly as feature-extraction transfer learning and names what it would cost to thaw the base instead.
+- **Estimated effort:** 1 day (a natural extension of [B2C.5]).
 
 ## Interview defense
 
-**Q: Walk me through fine-tuning a pretrained model on a small dataset.**
-Answer: I load the pretrained backbone and freeze the lower layers — those hold general representations I don't want to relearn. I attach a new head for my task, and I either train just the head (feature extraction) or unfreeze the upper layers and fine-tune them with a *low* learning rate so I nudge the weights instead of clobbering them. For a large model I'd use LoRA — freeze the backbone entirely, train a small low-rank delta beside it, ~1% of the parameters. The target set only has to teach the difference between the general task and mine, which is why a few thousand examples can be enough.
+Most candidates have only *consumed* transfer-learned models (every embedding API is one). Having run feature-extraction or LoRA yourself — and chosen the regime from your data — is the signal.
 
+**Q: You have 500 labeled examples in a niche domain. Train from scratch, fine-tune, or feature-extract?**
 ```
-  load backbone → freeze lower → new head → train (low lr / LoRA)
-                  └─ reuse general ─┘   └─ relearn only the delta ─┘
+   500 examples = TINY ─► never from scratch
+        │
+        ├─ domain close to pretrain? ─► FEATURE EXTRACTION (freeze, train head)
+        │
+        └─ domain far?               ─► LoRA (cheap, low-risk adaptation)
+                                         full fine-tune would overfit + forget
 ```
+Anchor: data size and domain distance pick the regime; 500 examples never earns a from-scratch run.
 
-**Q: buffr trains nothing. How is it related to transfer learning at all?**
-Answer: two ways. First, it's already a transfer-learning *consumer* — `gemma2:9b` and `nomic-embed-text` are pretrained backbones it uses frozen, the pure feature-extraction case. Second, and this is the ceiling: `agents.messages` captures the full-signal trajectory of every run — all six event types, replay-ordered by timestamp via `src/supabase-trace-sink.ts` — which is exactly the small target set a future SFT of gemma would learn from. **The part people forget: the corpus already exists in the database; the only thing missing is the fine-tune step and a reward signal. So it's SFT-able, not RLHF-able — the data is real but it has no preference labels.**
+**Q: What's the risk of full fine-tuning, and how does LoRA reduce it?**
+```
+   full FT on small data ─► catastrophic forgetting (base knowledge overwritten)
+        │
+   LoRA: W₀ frozen + small ΔW trainable
+        └─► base CANNOT be lost (it never moves); adaptation is additive
+            and the adapter is swappable
+```
+Anchor: full fine-tuning can erase what you were keeping; LoRA freezes the base so it structurally can't.
 
+**Q: Does buffr do transfer learning?**
 ```
-  consume backbones (now)  ──►  SFT on agents.messages (the ceiling, not done)
-                                └─ corpus exists · no reward signal → SFT only
+   honest, two-part answer:
+     ① it CONSUMES it — its embeddings are a transfer-learned model's output
+     ② its CEILING is LoRA-fine-tuning gemma on agents.messages
+        ── that corpus exists to make fine-tuning ANSWERABLE; it trains
+           nothing today (agent-layer-plan.md frames it exactly this way)
 ```
+Anchor: buffr stands on transfer learning's output and captures the dataset for more — but trains none of it yet.
 
 ## See also
 
-- `06-domain-gap.md` — fine-tuning is domain adaptation; the same frozen/adapt decision closes a domain gap.
-- `16-retraining-pipelines.md` — the "when is the corpus big enough to fine-tune?" trigger (XFER-2).
-- `14-training-run-logging.md` — the trace sink is the per-run logging the FT corpus is built from.
-- `05-class-imbalance.md` — a fine-tuned run-classifier head still faces imbalance at eval.
-- `../05-evals-and-observability/04-llm-observability.md` — the trajectory trace that is the FT corpus.
+- `./06-domain-gap.md` — fine-tuning on a small in-domain set is the heavyweight mitigation for a measured domain gap.
+- `./08-confusion-matrices.md` — how you'd read a before/after fine-tune comparison per class.
+- `../03-retrieval-and-rag/` — `01-embeddings.md`: the transfer-learned model buffr consumes every retrieval.
+- `../05-evals-and-observability/` — `eval/queries.json` as the before/after harness; `agents.messages` as the latent fine-tuning corpus.
+- `../09-ml-system-design-templates/` — where "do we fine-tune?" becomes a gated, evidence-driven system decision.

@@ -1,62 +1,31 @@
-# 01 — LLM Foundations
+# 01 · LLM Foundations
 
-**Anchor:** LLM application engineering · **Curriculum:** Phase 1.
+**Phase 1 of the AI-engineering curriculum.** This is the floor everything else stands on: what the model *is*, what flows in and out, and where the load-bearing constraints live. Before retrieval (03) or the agent loop (04) make sense, you have to see the LLM as a single function with a fixed-size mouth and no memory of its own.
 
-This is the floor everything else stands on. buffr is a local-first RAG agent: Ollama serves `gemma2:9b` for generation and `nomic-embed-text:v1.5` for embeddings, Postgres + pgvector does retrieval, and the agent is a bounded tool-calling loop. These nine files cover what an LLM *is* as an engineering primitive — a function from tokens to tokens — and the machinery buffr wraps around it before you ever get to retrieval or agents.
-
-No curriculum file (`aieng-curriculum.md`) is present, so no `[Bx.y]` IDs are cited. Exercises are derived directly from the buffr codebase.
+This sub-section is anchored to **buffr-laptop** — a local RAG agent: `gemma2:9b` for generation, `nomic-embed-text:v1.5` (768-dim) for embeddings, Postgres + pgvector for retrieval. Generation runs through `GemmaModelProvider` (in aptkit), wrapped by `ContextWindowGuardedProvider`, wired together in `src/session.ts`.
 
 ## Reading order
 
-```
-  Foundations, in dependency order
+Read top to bottom — each file assumes the one before it.
 
-  01 what-an-llm-is ─────► the function: tokens in, tokens out
-        │
-        ▼
-  02 tokenization ───────► what a "token" is, and the ~3 chars/token guard
-        │
-        ▼
-  03 sampling-parameters ► temperature / top-p / top-k (the dials buffr leaves default)
-        │
-        ▼
-  04 structured-outputs ─► schema-as-contract (buffr's is the tool-call JSON)
-        │
-        ▼
-  05 streaming ──────────► token-at-a-time vs await-the-whole-answer (buffr awaits)
-        │
-        ▼
-  06 token-economics ────► the cost ledger: model_usage → messages.tokens_used
-        │
-        ▼
-  07 heuristic-before-llm ► route cheap checks before the model (buffr doesn't)
-        │
-        ▼
-  08 provider-abstraction ► the factory/interface seam + Gemma tool-call emulation
-        │
-        ▼
-  09 user-override-locks ► _overridden_at so a re-run doesn't erase a human edit
-```
+| # | File | What it locks in |
+|---|------|------------------|
+| 01 | `01-what-an-llm-is.md` | The model is a pure function: tokens in → tokens out. Most LLM bugs are treating it as more. |
+| 02 | `02-tokenization.md` | Text is chopped into tokens; context is a token budget. Buffr reads Ollama's counts, doesn't tokenize itself. |
+| 03 | `03-sampling-parameters.md` | Temperature/top-p/top-k shape the output distribution. Buffr sets *none* — Ollama defaults. **Not yet exercised.** |
+| 04 | `04-structured-outputs.md` | A typed contract at the LLM boundary. Buffr's only structured path is the emulated tool-call JSON. No Zod. |
+| 05 | `05-streaming.md` | Token-by-token vs whole-answer-at-once. Buffr is `stream:false`; the TUI shows a spinner. **Not yet exercised.** |
+| 06 | `06-token-economics.md` | The cost ledger. Buffr captures per-call token counts; Ollama is local so $ = 0. No cost dashboard. |
+| 07 | `07-heuristic-before-llm.md` | Route cheap before paying the model. Buffr always calls the LLM. **Not yet implemented.** |
+| 08 | `08-provider-abstraction.md` | The port/adapter pattern. Swap a provider via one constructor. The **768 one-way door** lives here. |
+| 09 | `09-user-override-locks.md` | `_overridden_at` so re-runs don't clobber user edits. Buffr upserts blindly. **Not yet implemented.** |
 
-Read 01→04 in order — each builds on the last. 06 and 08 are the load-bearing files for buffr and deserve the most time. 05, 07, and 09 describe patterns buffr does *not* yet have; read them for the gap and the Case-B exercise.
+## The honest map
 
-## The files
+Four of these concepts are **built and active** in buffr (01, 02, 06, 08). The other five are either **not yet exercised** (03, 05 — the capability exists in the stack but buffr doesn't drive it) or **not yet implemented** (07, 09 — no code path at all). Each file says which, plainly, and turns the gap into a buildable exercise. Do not let a polished diagram fool you into thinking a thing ships.
 
-| # | File | What it covers | Exercised in buffr? |
-|---|------|----------------|---------------------|
-| 1 | `01-what-an-llm-is.md` | LLM as a pure-ish function, not a DB or a reasoner | **Yes** — `gemma2:9b` is the brain in the loop |
-| 2 | `02-tokenization.md` | text → tokens, ~4 chars/token; the guard's ~3 chars/token estimate | **Partial** — buffr logs real Ollama counts, estimates for the guard |
-| 3 | `03-sampling-parameters.md` | temperature / top-p / top-k | **No** — Gemma defaults, no temp set (Case B) |
-| 4 | `04-structured-outputs.md` | schema-as-contract; tool-call JSON vs validated `generateStructured` | **Yes (emulated)** — tool boundary unvalidated |
-| 5 | `05-streaming.md` | streaming vs non-streaming | **No** — Ink TUI awaits the full string (Case B) |
-| 6 | `06-token-economics.md` | the cost ledger; token persistence | **Yes (partial)** — tokens captured, $0 local |
-| 7 | `07-heuristic-before-llm.md` | route cheap deterministic checks first | **No** — every question hits the loop (Case B) |
-| 8 | `08-provider-abstraction.md` | factory/interface pattern + Gemma emulation | **Yes (deeply)** — the load-bearing file |
-| 9 | `09-user-override-locks.md` | `_overridden_at` so re-runs don't clobber edits | **No** — no LLM-written user fields (Case B) |
+## Cross-links
 
-## See also
-
-- `../00-overview.md` — the whole system in one diagram.
-- `../ai-features-in-this-codebase.md` — the AI-feature ledger.
-- `../04-agents-and-tool-use/02-tool-calling.md` — the tool-call reliability seam (heavily cross-linked from 04 and 08).
-- `../06-token-economics.md` lives here as `06-token-economics.md`; the broader cost story continues in `../06-production-serving/`.
+- **`../03-retrieval-and-rag/`** — where the 768-dim embeddings from 08 actually get used; the other half of the model boundary.
+- **`../04-agents-and-tool-use/`** — the agent loop that *consumes* the tool-call structured output from 04 and the non-streaming completion from 05.
+- **`../00-overview.md`** — the whole system in one frame, including the two paths and the emulated-tool-calling ceiling.

@@ -1,255 +1,218 @@
-# Embeddings — text as points in 768-space
+# Embeddings
 
-*Industry standard. The substrate under all of buffr's retrieval.*
+### *industry: text embeddings / dense vector representations · type: the geometric primitive under retrieval*
 
-## Zoom out, then zoom in
+## Zoom out
 
-Pull up the whole RAG stack and find the one thing every other box depends on: the embedding. It's not a feature you call — it's the *coordinate system* the entire retrieval layer measures distance in. Both halves of buffr (index and query) reduce to "turn text into a 768-dim point, then compare points."
+This is the bottom of the retrieval stack. Everything above it — chunking, the vector store, RAG itself — is plumbing that moves these vectors around. Get this one wrong and nothing above it can be right.
+
+**buffr's retrieval stack, this concept marked**
 
 ```
-  Zoom out — where embeddings live
-
-  ┌─ Agent layer (aptkit) ─────────────────────────────────────┐
-  │  RagQueryAgent.answer()  →  search_knowledge_base(query)    │
-  └───────────────────────────┬────────────────────────────────┘
-                              │  raw query string
-  ┌─ Retrieval layer ─────────▼────────────────────────────────┐
-  │  pipeline: embed → search → rank                            │
-  └──────────────┬───────────────────────────┬─────────────────┘
-                 │ embed                      │ search(vector,k)
-  ┌─ Provider ───▼────────────────┐  ┌─ Storage ▼──────────────┐
-  │ ★ EMBEDDING ★                 │  │ pgvector compares the   │
-  │ nomic-embed-text:v1.5 (Ollama)│  │ 768-dim points (cosine) │
-  │ text → [768 floats]           │  │ agents.chunks.embedding │
-  └───────────────────────────────┘  └─────────────────────────┘
-                ▲ we are here
+┌──────────────────────────────────────────────────────────────┐
+│  RAG pipeline           answer grounded in retrieved chunks    │
+├──────────────────────────────────────────────────────────────┤
+│  search_knowledge_base  ranked hits + citations                │
+├──────────────────────────────────────────────────────────────┤
+│  PgVectorStore          ANN search over agents.chunks          │
+├──────────────────────────────────────────────────────────────┤
+│  chunker                512-char windows                       │
+├──────────────────────────────────────────────────────────────┤
+│  ★ EMBEDDINGS ★         text → 768-dim vector (nomic)          │  ◄── this file
+└──────────────────────────────────────────────────────────────┘
 ```
 
-Zoom in. You've shipped pgvector RAG before, so you know the shape: text goes in, a list of floats comes out, and "similar text" means "nearby vectors." The thing worth slowing down on is *why* that works — what the 768 numbers actually encode, and what `cosine distance` is really measuring. That's the concept this file builds: an **embedding** is a learned map from text to a fixed-length vector where geometric closeness means semantic closeness. Get that, and every other file in this folder is just plumbing around it.
+You shipped a pgvector RAG app before, so you already know the shape: text goes in, a vector comes out, you compare vectors with cosine. This file slows down on the *mechanism* — what that vector actually is geometrically, and why cosine similarity is the only comparison that makes sense for it. The shape lands fast; the geometry is what you under-thought last time.
 
 ## Structure pass
 
-Before the mechanics, read the skeleton. Embeddings touch three layers; trace one axis across them and watch where it flips.
+The axis is **representation**: a string on one side, a fixed-length array of floats on the other. The seam is the embedding model — the one place where human-meaning collapses into geometry.
 
-**Layers:** provider (produces the vector) → pipeline (carries the vector) → storage (compares vectors).
-
-**Axis traced — "what does this layer treat the 768 numbers AS?"**
+**The collapse from text to geometry**
 
 ```
-  one axis: what is a vector, to each layer?
-
-  ┌─ provider ──────────────┐   MEANING — the model packed semantics
-  │  nomic-embed-text:v1.5  │   into 768 floats; it knows what they mean
-  └────────────┬────────────┘
-               │  seam: meaning → opaque array
-  ┌─ pipeline ─▼────────────┐   PAYLOAD — just number[]; it never
-  │  embed() → number[]     │   interprets, only routes and length-checks
-  └────────────┬────────────┘
-               │  seam: array → pgvector literal "[0.1,0.2,...]"
-  ┌─ storage ──▼────────────┐   GEOMETRY — a point to measure angles
-  │  embedding vector(768)  │   against; cosine distance, nothing else
-  └─────────────────────────┘
+   "how does the author take their coffee"
+                  │
+                  ▼  the embedding (768-dim nomic vector)
+   ┌────────────────────────────────────────────────┐
+   │  [0.013, -0.041, 0.255, … 768 floats … 0.008]   │
+   └────────────────────────────────────────────────┘
+                  │
+                  ▼  a point in 768-dimensional space
+        ★ meaning is now DIRECTION, not words ★
 ```
 
-**The seam that matters:** provider → pipeline. On the provider's side the numbers *mean* something (a learned semantic encoding); the moment they cross into the pipeline they're an opaque `number[]` whose only enforced property is `length === 768`. Everything downstream — pgvector, the SQL, the index — operates purely on geometry and never re-derives meaning. That's the whole trick: meaning is computed *once*, at the provider, and from then on "is this relevant?" becomes "is this vector close?" Hold that seam; it's why the dimension (768) is load-bearing everywhere downstream (see `02-embedding-model-choice.md`).
+The string before the seam: discrete tokens, no notion of distance. The array after: a point in a 768-dimensional space where *direction* encodes meaning. Two texts that mean the same thing point the same way, even with zero shared words. That is the whole trick. Consequence: "coffee" and "espresso with oat milk" can sit close together while sharing no characters — which is exactly why dense retrieval finds the coffee doc for a query that never says "coffee.md".
 
 ## How it works
 
-### Move 1 — the mental model
+### Move 1 — Mental model: meaning is a direction
 
-You've built BST and graph code, so you already own the right intuition: **k-nearest-neighbor**. Picture every chunk of your corpus as a point scattered in space. A query is also a point. Retrieval is "find the k points nearest the query." The only twist versus the k-NN you've coded in 2-D is that the space has 768 dimensions instead of 2, and "nearest" is measured by *angle* (cosine), not straight-line distance. The embedding model is the thing that decides *where* each point lands — it's the coordinate-assigner.
+Forget the 768 numbers for a second. Picture a 2-D map where every sentence is a pin. Sentences about coffee cluster in one corner; sentences about your work stack cluster in another. The embedding model is the cartographer: it places each pin so that *semantic* closeness becomes *spatial* closeness.
+
+**Meaning-as-direction (drawn in 2 of 768 dims)**
 
 ```
-  the embedding kernel — text becomes a point, queries find neighbors
-
-   "renew passport"        ●  query point (768-dim)
-                            ╲   small angle = similar
-                             ╲
-   corpus points:    ● ●   ●  ◀── nearest neighbors (top-k)
-   (each a chunk)   ●     ●
-                  ●    ●          ● ◀ large angle = unrelated
-                                     ("how to bake bread")
-
-   embedding model = assigns each text its coordinates
-   cosine          = the angle between two coordinate vectors
-   retrieval       = k smallest angles to the query point
+        ▲ dim_2
+        │        ● "how I take my coffee"
+        │       ● "espresso, oat milk, no sugar"
+        │      ●  "morning pour-over ritual"
+        │                              ● "TypeScript + Postgres stack"
+        │                             ● "the tools I build with"
+        └──────────────────────────────────────► dim_1
+         angle between clusters = semantic distance
 ```
 
-Strip it to the kernel: a function `text → point`, plus a distance that's *angle-based*, plus "return the k closest." Lose the model and you can't place points. Lose cosine and "close" is undefined. Lose top-k and you have a coordinate system but no retrieval.
+Frontend bridge: you've normalized a color to an `[r,g,b]` vector and computed distance between two colors. An embedding is that, with 768 channels instead of 3, and the channels encode meaning instead of light. Distance between two color vectors tells you how similar the colors look; distance between two embeddings tells you how similar the texts *mean*.
 
-### Move 2 — the step-by-step walkthrough
+### Move 2 — Walk the mechanism
 
-**Step 1 — the provider turns text into 768 floats.** This is the one box that understands language. buffr uses Ollama's `nomic-embed-text:v1.5`, a local embedding model that maps any string to a 768-dimensional vector. You ask for it by handing the embedder a list of strings; you get back a list of equal-length arrays.
+**Part A — The provider turns text into vectors**
+
+buffr embeds through Ollama, locally, with nomic-embed-text. The provider's contract is dead simple: a batch of strings in, a batch of equal-length float arrays out.
+
+**The embed call**
+
+```
+  ["chunk text", "query text", …]
+            │
+            ▼  POST /api/embed  { model, input: texts }
+     ┌──────────────────┐
+     │  Ollama + nomic  │
+     └──────────────────┘
+            │
+            ▼
+  [[768 floats], [768 floats], …]   one vector per input
+```
 
 ```ts
-// src/cli/index-cmd.ts:18-20  — the embedder is constructed here
-const embedder = new OllamaEmbeddingProvider({ model: 'nomic-embed-text:v1.5', host: cfg.ollamaHost });
-const store = new PgVectorStore({ pool, appId: cfg.appId, dimension: embedder.dimension });
-const pipeline = createRetrievalPipeline({ embedder, store });
-```
-
-Notice `embedder.dimension` — the provider *advertises* its output length (768). buffr never hardcodes 768 at this call site; it reads it off the provider and hands it to the store. That's the source of the dimension that gets asserted four times downstream. The model is the authority on its own output size.
-
-```
-  Layers-and-hops — one embed call
-
-  ┌─ buffr ───────┐  hop 1: embed(["renew passport"])   ┌─ Ollama ────────┐
-  │ embedder.embed│ ──────────────────────────────────► │ nomic-embed     │
-  └──────▲────────┘  hop 2: [[0.013, -0.04, ... ×768]] ◄ │ text:v1.5       │
-         │                                               └─────────────────┘
-         └── returns number[][], one 768-vector per input string
-```
-
-**Step 2 — the same model embeds documents AND queries.** This is the rule people forget: the query and the corpus must be embedded by the *same* model, or their coordinate systems don't line up and "nearest" is garbage. buffr enforces this structurally — there's exactly one `embedder` in the pipeline, used by both the index path and the query path.
-
-```ts
-// aptkit packages/retrieval/src/pipeline.ts:40 (index)  and :56 (query)
-const vectors = await wiring.embedder.embed(texts);   // index: many chunk vectors
-const [vector] = await wiring.embedder.embed([query]); // query: one query vector
-```
-
-Same `wiring.embedder` both times. If you embedded the corpus with `nomic` and queries with OpenAI's model, both would be vectors, both might even be the right *length* by coincidence — but they'd live in unrelated spaces and cosine would return noise. One model, two call sites: that's the invariant.
-
-```
-  Pattern — symmetric embedding (the load-bearing invariant)
-
-  INDEX TIME                          QUERY TIME
-  chunk text ─┐                       query text ─┐
-              ▼                                    ▼
-        [same embedder]  ◀────────────────► [same embedder]
-              │                                    │
-         768-vector                           768-vector
-              │   ── must share a space ──         │
-              └──────────► cosine compares ◄───────┘
-```
-
-**Step 3 — cosine similarity is `1 - distance`, and it's just normalized dot product.** Here's the math you can fully derive. Cosine similarity between two vectors is `dot(a,b) / (|a|·|b|)` — the cosine of the angle between them. It runs from `1` (identical direction) through `0` (orthogonal) to `-1` (opposite). pgvector's `<=>` operator gives cosine *distance*, which is `1 - cosine_similarity`. So buffr inverts it back:
-
-```ts
-// src/pg-vector-store.ts:69-77
-// <=> is cosine DISTANCE; cosine similarity score = 1 - distance.
-const { rows } = await this.pool.query(
-  `select id, content, chunk_index, document_id, meta,
-          1 - (embedding <=> $1::vector) as score      -- back to similarity in [-1,1]
-   from agents.chunks
-   where app_id = $2
-   order by embedding <=> $1::vector                   -- ascending distance = nearest first
-   limit $3`,
-  [toVectorLiteral(vector), this.appId, k],
-);
-```
-
-Why angle and not Euclidean distance? Because embedding magnitude often tracks text length, not meaning — a long passage and a short one about the same topic should still match. Normalizing to the unit sphere (which cosine does) throws away length and keeps direction, and *direction* is where the model encodes topic. You've computed dot products before; cosine is that, divided by the two lengths. Nothing exotic.
-
-```
-  Comparison — why cosine, not Euclidean
-
-  Euclidean: |a - b|             cosine: angle(a, b)
-  ┌──────────────────┐           ┌──────────────────┐
-  │ short ●          │           │      ●╲ short     │
-  │       │ far      │           │       ╲ ╲ same    │
-  │       │          │           │        ╲ ╲ angle  │
-  │ long  ●          │           │         ╲●  long  │
-  └──────────────────┘           └──────────────────┘
-  length pulls them apart        same topic → same direction
-  (wrong for retrieval)          (right for retrieval)
-```
-
-**Step 4 — every vector is length-checked before it touches geometry.** A 768-dim corpus can only be searched by a 768-dim query. buffr guards this on every single vector, in and out, before the SQL runs:
-
-```ts
-// src/pg-vector-store.ts:32-36
-private assertDim(v: number[]): void {
-  if (v.length !== this.dimension) {
-    throw new Error(`dimension mismatch: got ${v.length}, store is ${this.dimension}`);
+// aptkit ollama-embedding-provider.ts:38-58 — the provider
+export class OllamaEmbeddingProvider implements EmbeddingProvider {
+  readonly id = 'nomic-embed-text';
+  readonly dimension = 768;                       // fixed by the model
+  async embed(texts: string[]): Promise<number[][]> {
+    return this.embedTransport({ model: this.model, texts, … });
   }
 }
 ```
 
-`upsert` calls it per chunk (`:39`), `search` calls it on the query vector (`:68`). The boundary condition this catches: a provider swap that changes output length. Without the check, a wrong-dimension vector either errors deep in pgvector with a cryptic message or — worse — silently mismatches. With it, you fail fast at the buffr boundary with a readable error. This is one of the four dimension checks `02` walks in full.
+`dimension = 768` is not a config knob — it's a fact about nomic. The model emits 768 floats per text, always. That number being a constant is what makes the rest of the system able to assert on it (next file).
 
-### Move 3 — the principle
+**Part B — Cosine similarity compares directions, not magnitudes**
 
-An embedding turns "do these two pieces of text mean the same thing?" — an unanswerable NLP question — into "is the angle between these two vectors small?" — a cheap arithmetic one. The model does the hard part once, at index time, and bakes the answer into geometry. Everything else in retrieval is k-NN over points. The deep idea: **you move the intelligence to the coordinate-assignment step, so search itself can stay dumb and fast.**
+Two vectors are "similar" when they point the same way. Cosine similarity measures the angle between them: 1.0 = identical direction, 0 = orthogonal (unrelated), -1 = opposite. buffr never computes raw distance between points — it cares about direction, because magnitude (how long the vector is) carries no reliable meaning here.
+
+**Cosine: the angle is the signal**
+
+```
+        ▲
+        │   q (query vector)
+        │  ╱
+        │ ╱  θ small  ──► cos θ ≈ 1  ──► very similar
+        │╱___________ d1 (a coffee chunk)
+        │╲
+        │ ╲  θ large  ──► cos θ ≈ 0  ──► unrelated
+        │  ╲_________ d2 (a stack chunk)
+        └────────────────────────────────►
+   similarity = cos θ ;  buffr stores it as 1 - cosine_distance
+```
+
+```ts
+// src/pg-vector-store.ts:67-77 — cosine, in SQL
+// <=> is pgvector's cosine DISTANCE operator; similarity = 1 - distance.
+`select id, content, …,
+        1 - (embedding <=> $1::vector) as score
+   from agents.chunks
+   where app_id = $2
+   order by embedding <=> $1::vector
+   limit $3`
+```
+
+Here's the load-bearing detail Rein should pin: pgvector's `<=>` returns cosine *distance* (0 = identical, 2 = opposite). buffr flips it to a *similarity score* with `1 - (embedding <=> $1::vector)` so a higher number means "more relevant," and orders by raw distance so the nearest chunk comes first. Distance for ordering, similarity for the score you read. Same geometry, two conveniences.
+
+### Move 3 — The principle
+
+**An embedding is a lossy compression of meaning into a fixed direction, and retrieval is angle comparison.** That single sentence explains every design choice downstream: the dimension is fixed (so you can assert on it), the comparison is cosine (so magnitude can't lie to you), and "relevant" means "points the same way" (so word overlap stops mattering). You don't search text in buffr. You search geometry, and the embedding model is the only thing that decides whether the geometry is any good.
 
 ## Primary diagram
 
-The full embedding story, both paths, one frame:
+The full text-to-comparison path, both the index side and the query side meeting at the same geometry.
+
+**Two texts, one space, one angle**
 
 ```
-  buffr embeddings — meaning computed once, geometry forever after
-
-  ┌─ Provider (Ollama) ──────────────────────────────────────────┐
-  │  nomic-embed-text:v1.5    text ──► [768 floats]               │
-  │  ▲ knows MEANING; output advertised as embedder.dimension=768 │
-  └──┼──────────────────────────────────────┼───────────────────┘
-     │ index: chunk texts                    │ query: one string
-     ▼                                       ▼
-  [v0][v1][v2]...  (one 768-vec/chunk)   [qv]  (one 768-vec)
-     │  assertDim each (768)                 │  assertDim (768)
-     ▼                                       ▼
-  ┌─ Storage (pgvector) ─────────────────────────────────────────┐
-  │  agents.chunks.embedding vector(768)                          │
-  │  score = 1 - (embedding <=> qv)   ← cosine sim = norm dot prod │
-  │  order by embedding <=> qv  limit k  ← k smallest angles       │
-  └──────────────────────────────────────────────────────────────┘
-                      │
-                      ▼  top-k nearest chunks → ground the answer
+  INDEX TIME                         QUERY TIME
+  ──────────                         ──────────
+  chunk text                         user question
+      │  embed (nomic, 768)              │  embed (nomic, 768)
+      ▼                                  ▼
+  [768 floats] ─────► stored in ◄──── [768 floats]
+                    agents.chunks
+                  embedding vector(768)
+                         │
+                         ▼
+              1 - (embedding <=> query) = score
+                         │
+                         ▼
+              high score = small angle = same meaning
 ```
+
+After the box: both sides must use the *same* 768-dim provider, or the angle is meaningless — which is the one-way door the next file is entirely about.
 
 ## Elaborate
 
-Embeddings come from the same lineage as word2vec (2013): train a model so that text used in similar contexts lands in similar places, and arithmetic on the vectors starts encoding meaning. Modern sentence/document embedders like `nomic-embed-text` extend that from single words to whole passages, and they're trained specifically so that a *question* and the *passage that answers it* land near each other — which is exactly the property RAG needs.
-
-The dimension count (768 here) is a fixed property of the trained model, not a tunable. It's a budget: more dimensions can encode finer distinctions but cost more storage and slower comparison. 768 is a common sweet spot. The thing that makes it consequential for buffr is that it's a *one-way door* — once you've embedded a corpus at 768, switching to a model with a different dimension means re-embedding everything. That's `02`'s whole subject.
-
-What embeddings *don't* do: they're weak at exact-string matching. "Error code E4017" and "error code E4018" are nearly identical vectors, and a rare identifier that the model barely saw in training gets a mushy, uninformative embedding. That's the gap sparse retrieval (BM25) fills — see `05-dense-vs-sparse.md`. buffr is dense-only today, so it inherits this blind spot.
+- **Why 768 specifically.** It's nomic-embed-text's output width — a published property of the model, not a buffr choice. Bigger embedding models emit 1024 or 1536; smaller ones 384. More dimensions can carry more nuance but cost more storage and slower search. 768 is a solid mid-size default for a local model.
+- **Magnitude vs. direction.** Some embedding models return un-normalized vectors where length varies. Cosine ignores length by construction, which is why buffr can use `<=>` (cosine) safely without normalizing first. If buffr used L2/Euclidean distance instead, magnitude would suddenly matter and you'd need to normalize.
+- **Batch in, batch out.** `embed(texts: string[])` takes an array because embedding is cheaper in batches — one HTTP round-trip for many chunks at index time. The query path passes a one-element array (`embed([query])`) and takes `[0]`.
+- **The vector is opaque.** You can't read float 412 and say "this is the coffee dimension." The dimensions are entangled; meaning lives in the *whole* vector's direction, not in any single axis. This is why you can't hand-edit an embedding or debug one by inspection — you can only compare it to others.
 
 ## Project exercises
 
-> No `aieng-curriculum.md` is present in this repo, so Build-item IDs are not cited. Exercises are derived directly from the codebase and the spec's concept set.
+### Visualize buffr's actual embedding space
 
-### Inspect a real embedding
-
-- **Exercise ID:** EMB-1 (Case A — embeddings implemented; inspect what ships).
-- **What to build:** a tiny script that embeds two related strings and one unrelated one, prints all three 768-vectors' first few dims, and computes pairwise cosine similarity by hand (dot / norms) — proving `1 - distance` matches what pgvector returns.
-- **Why it earns its place:** you can't defend "cosine is normalized dot product" until you've watched the same number fall out of your own arithmetic and out of `<=>`.
-- **Files to touch:** new `scripts/embed-inspect.ts` using `OllamaEmbeddingProvider` (import as in `src/cli/index-cmd.ts:4`); compare against `1 - (embedding <=> $1::vector)` from `src/pg-vector-store.ts:72`.
-- **Done when:** your hand-computed cosine matches pgvector's `score` to floating-point tolerance for the same two texts.
+- **Exercise ID:** [B2A.1] (cite [C2.1], Phase 2A) — Case A: embeddings are implemented (`OllamaEmbeddingProvider`, stored in `agents.chunks`). This is the *next step* — make the geometry visible.
+- **What to build:** A script that pulls every chunk's embedding from `agents.chunks`, runs a 2-D projection (PCA or UMAP), and plots the points colored by `document_id`. Confirm coffee/work/stack chunks form visible clusters.
+- **Why it earns its place:** You reasoned about meaning-as-direction abstractly. Seeing your own 3 eval docs separate into clusters turns the abstraction into evidence — and surfaces any doc whose chunks scatter (a chunking smell).
+- **Files to touch:** a new script under buffr's CLI surface reading from `src/pg-vector-store.ts`'s table; reuse `src/db.ts` for the pool.
+- **Done when:** A plot shows work.md / stack.md / coffee.md chunks in separable clusters, and you can name one chunk that sits between clusters and explain why.
 - **Estimated effort:** 1–4hr.
 
-### Add a magnitude/NaN sanity check to the embed boundary
+### Measure cosine score spread on the eval set
 
-- **Exercise ID:** EMB-2 (Case A — hardening the embed seam).
-- **What to build:** extend the per-vector guard so it also rejects vectors containing `NaN`/`Infinity` or an all-zero vector (which collapses cosine to undefined), not just wrong length.
-- **Why it earns its place:** a degenerate embedding silently poisons retrieval; catching it at the boundary is the same defense-in-depth instinct as the dimension check.
-- **Files to touch:** `src/pg-vector-store.ts:32-36` (`assertDim` → a broader `assertVector`), called from `upsert` (`:39`) and `search` (`:68`).
-- **Done when:** an all-zero or `NaN`-containing vector throws a readable buffr-side error before any SQL runs, covered by a unit test.
-- **Estimated effort:** 1–4hr.
+- **Exercise ID:** [B2A.2] (cite [C2.1], Phase 2A) — Case A: scoring exists in `src/cli/eval-cmd.ts`; this adds the score distribution.
+- **What to build:** For each of the 3 eval queries, log the cosine score (`1 - distance`) of the top-3 hits. Build intuition for what "relevant" scores look like vs. "noise" scores in buffr's space.
+- **Why it earns its place:** Every threshold decision downstream (when is a hit good enough?) needs you to know the score distribution. You can't set a floor you've never measured.
+- **Files to touch:** `src/cli/eval-cmd.ts` (it already calls `pipeline.query`; log `h.score`).
+- **Done when:** You can state the typical score of a correct top-1 hit vs. an irrelevant filler hit in buffr's corpus.
+- **Estimated effort:** 1–2hr.
 
 ## Interview defense
 
-**Q: What is an embedding, and what does cosine distance actually measure?**
-Answer: an embedding is a learned function mapping text to a fixed-length vector — 768 floats here, from `nomic-embed-text:v1.5` — where semantic similarity becomes geometric proximity. Cosine similarity is the normalized dot product, `dot(a,b)/(|a||b|)`, i.e. the cosine of the angle between the two vectors; it ignores magnitude and keeps direction, which is where topic lives. pgvector gives cosine *distance* via `<=>`, so buffr computes `1 - (embedding <=> v)` to get similarity back.
+**Q: "What is an embedding, concretely?"**
+
+A fixed-length vector — 768 floats for buffr's nomic model — that places a piece of text as a point in space so that semantic similarity becomes geometric closeness. Same meaning, same direction, regardless of shared words.
 
 ```
-  cosine = normalized dot product = angle
-  sim =  dot(a,b) / (|a|·|b|)   ∈ [-1, 1]
-  pgvector <=> = 1 - sim  (distance)  →  buffr: score = 1 - <=>
+  text ──► [768 floats] ──► a direction in space
+  similar meaning = similar direction
 ```
 
-**Q: Why must the corpus and the query use the same embedding model?**
-Answer: two models produce coordinates in unrelated spaces, so cosine between a `nomic` doc-vector and an OpenAI query-vector is meaningless even when the lengths happen to match. buffr enforces it structurally — one `embedder` instance feeds both `indexDocument` and `queryKnowledgeBase` in the pipeline — and length-checks every vector with `assertDim`. The anchor: **the load-bearing invariant people forget is that index-time and query-time embeddings must come from the same model, in the same space.**
+Anchor: *"Meaning is a direction, not a string."*
+
+**Q: "Why cosine similarity and not Euclidean distance?"**
+
+Because direction carries the meaning and magnitude doesn't. Cosine measures the angle and ignores length, so two vectors that point the same way score as similar even if one is longer. buffr stores it as `1 - (embedding <=> query)`.
 
 ```
-  index ─[same embedder]─► space S ◄─[same embedder]─ query
-  different model = different space = cosine returns noise
+  small angle ──► cos ≈ 1 ──► relevant
+  magnitude ──► ignored
 ```
+
+Anchor: *"Compare the angle, not the length."*
 
 ## See also
 
-- `02-embedding-model-choice.md` — why `nomic-embed-text:v1.5`, and why 768 is a one-way door asserted four times.
-- `04-vector-databases.md` — where the 768-vectors live and how `<=>` hits the HNSW index.
-- `05-dense-vs-sparse.md` — the exact-match blind spot embeddings have.
-- `.aipe/study-dsa-foundations/` — k-NN, dot products, cosine similarity from first principles.
-- `.aipe/study-database-systems/` — cosine distance and HNSW at the storage-engine layer.
+- `./02-embedding-model-choice.md` — why nomic, and the 768 one-way door that both sides of this geometry must obey.
+- `./04-vector-databases.md` — where these 768-dim vectors live and how pgvector searches them.
+- `../01-llm-foundations/` — tokens and the model that produces these vectors.
+- `../../study-dsa-foundations/` — vectors, distance metrics, and the search structures (HNSW) that make angle comparison fast.

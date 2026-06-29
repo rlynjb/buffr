@@ -1,109 +1,155 @@
-# The App ↔ Postgres Boundary
+# 01 — The app↔Postgres boundary
 
-**Industry names:** client/server boundary · connection pooling · fail-fast on a remote dependency. **Type:** Industry standard.
+## Subtitle
+
+The **client/server boundary** over a **connection pool** — *Industry
+standard*. In buffr the client/server boundary is the `pg.Pool`
+(`src/db.ts:4`); everything the process knows about its database, it knows
+through that pool.
 
 ## Zoom out, then zoom in
 
-This is the one place in `buffr-laptop` where two things with **separate failure domains** exchange state over a wire. The Node process is one failure domain; Postgres is another. Everything that makes this a distributed-systems topic — partial failure, timeouts, retries, "is the other side even there" — lives at this single seam. Here's where it sits.
+This is the only place in buffr-laptop where the process talks to something it
+doesn't control. Ollama is the other remote, but aptkit owns that client — buffr
+just hands it a host string. The database boundary is buffr's own, and it's the
+one seam where the distributed-systems questions actually bite.
 
 ```
   Zoom out — where the Postgres boundary lives
 
-  ┌─ Process layer (one Node process) ───────────────────────┐
-  │  createChatSession()                                      │
-  │    persistMessage() · startConversation() · pipeline.index│
-  │                         │                                 │
-  │                  ★ pg.Pool ★   ← THIS CONCEPT             │ ← we are here
-  └─────────────────────────┼─────────────────────────────────┘
-                            │  SQL over TCP (the only client/server seam)
-                            ▼
-  ┌─ Storage layer (separate failure domain) ────────────────┐
-  │  reindb — Postgres + pgvector, schema agents              │
-  │  documents · chunks · conversations · messages · profiles │
-  └───────────────────────────────────────────────────────────┘
+  ┌─ Client (one Node process) ───────────────────────────────┐
+  │  chat.tsx → session.ts → ask()                            │
+  │     │                                                      │
+  │     ├── RagQueryAgent ── HTTP ──► Ollama  (aptkit's client)│
+  │     │                                                      │
+  │     └──►  ★ pg.Pool (src/db.ts) ★   ← we are here          │
+  └─────────────────────────────────┬──────────────────────────┘
+                                    │  pooled TCP connection
+  ┌─ Storage layer ─────────────────▼──────────────────────────┐
+  │  Postgres  reindb / schema agents                          │
+  └─────────────────────────────────────────────────────────────┘
 ```
 
-Zoom in: the pattern is a **connection pool fronting a remote database, configured to fail fast.** The question it answers — the distributed-systems question — is *"what happens to the one user when the other side is slow or gone?"* In this repo the answer is: it throws immediately, with one deliberate exception (the best-effort memory write). There's no retry, no backoff, and — the gap worth naming — no acquire or statement timeout.
+Zoom in: the pattern is a **connection pool** — a bounded set of reusable TCP
+connections to Postgres, handed out per query and returned after. The question
+it answers in a distributed context: *what happens to a request when the thing
+on the other side of this boundary is slow, busy, or gone?*
 
-## The structure pass
+## Structure pass — layers, one axis, the seam
 
-**Layers.** Two: the process (caller) and Postgres (callee), joined by the pool. The pool is itself a thin layer — it owns a set of TCP connections and hands them out.
-
-**The axis: failure — where does it originate, propagate, get contained?** Trace that one question across the seam.
+Three layers stack here. Trace **one axis — failure containment — down through
+them** and watch where the answer flips.
 
 ```
-  One axis — "what happens on failure?" — traced across the seam
+  axis traced = "where does a slow/unavailable Postgres get contained?"
 
-  ┌─ Process side ─────┐   the pg.Pool seam    ┌─ Postgres side ────┐
-  │  pool.query(...)   │ ═══════╪════════════►  │  executes or fails │
-  │  awaits a Promise  │   (failure flips here) │  (down / slow /    │
-  │                    │ ◄══════╪════════════   │   constraint)      │
-  └────────────────────┘   reject propagates    └────────────────────┘
-         ▲                   up the call stack
-         │  contained ONCE:  memory.remember() try/catch (session.ts:64)
-         │  everywhere else: throws, no retry
+  ┌─ caller: session.ask() ───────────────┐   → NOT contained:
+  │  await persistMessage(...)            │     awaits, surfaces a throw
+  └───────────────────┬───────────────────┘
+                      │  seam — the pool boundary
+  ┌─ pool: pg.Pool (src/db.ts:4) ─────────┐   → NOT bounded:
+  │  acquire a conn, run query, release   │     no acquire/connection timeout
+  └───────────────────┬───────────────────┘
+                      │  TCP
+  ┌─ server: Postgres ────────────────────┐   → owns the real work;
+  │  parse, plan, execute, return rows    │     can be slow or unreachable
+  └────────────────────────────────────────┘
+
+  the axis answer never flips to "contained" — nothing on the buffr side
+  bounds the wait. that's the finding.
 ```
 
-**The seam is load-bearing because the failure axis flips across it.** On the process side, a failure is a rejected `Promise` you can catch. On the Postgres side, a failure is a connection reset or a constraint error you can't see until the round-trip comes back. The contract at this seam — what `pool.query` promises the caller — is *"I resolve with rows or I reject; I will not retry for you, and right now I will not time out the acquire."* That contract is the whole lesson; the mechanics below hang off it.
+The **seam is the pool boundary** (`pg.Pool`). That's where you *could*
+intercept: impose an acquire timeout, a connection timeout, a per-statement
+deadline. Right now nothing does — the seam exists but carries no deadline
+contract.
 
 ## How it works
 
 ### Move 1 — the mental model
 
-You already know the shape from any `fetch()` you've written: you call across a network, you get back a promise, and that promise has a success path and an error path — and if the server hangs, your `fetch` hangs unless *you* gave it an `AbortController` deadline. A `pg.Pool` is the same shape, plus one thing a bare `fetch` doesn't have: it keeps a handful of TCP connections warm and hands one to each query so you don't pay the TCP+TLS+auth handshake every time.
+A connection pool is the same shape as a `fetch()` you've written a hundred
+times, with one twist: instead of opening a fresh connection per call (slow —
+TCP + TLS + auth handshake every time), you keep a small set of warm
+connections and lend one out per query. You already know the loading / success
+/ error states of a `fetch()`; a pool adds a fourth state *before* loading:
+**waiting for a free connection**. That fourth state is where the
+distributed-systems risk lives.
 
 ```
-  The pattern — a pool fronting a remote dependency
+  the pool kernel — four states per query
 
-        pool.query(sql, params)
-               │
-               ▼
-        ┌─────────────┐   acquire a warm connection
-        │  pg.Pool    │── (or open one, up to a cap) ──┐
-        │  [ c1 c2 c3]│                                 ▼
-        └─────────────┘                          ┌────────────┐
-               ▲                                 │ Postgres   │
-               │  resolve(rows)  OR  reject(err) │ executes   │
-               └─────────────────────────────────└────────────┘
-          no retry · no acquire timeout · fail-fast
+   query arrives
+        │
+        ▼
+   ┌──────────────┐   free conn?
+   │  acquire     │──── yes ──► run on conn ──► release back to pool
+   └──────┬───────┘
+          │ no free conn
+          ▼
+   ┌──────────────┐   waits until one frees up
+   │  WAIT        │   ◄── no deadline here in buffr ──► can wait forever
+   └──────────────┘
 ```
 
-The kernel: **acquire → execute → resolve-or-reject → release.** Everything else (timeouts, retries, statement deadlines) is hardening layered on top — and this repo has deliberately layered almost none of it.
+The kernel is: **a bounded set + an acquire step + a release step.** Strip the
+bound and it's not a pool (you'd open unbounded connections and crush
+Postgres). Strip the release and connections leak until the pool starves. The
+WAIT state is implied by the bound — and **the deadline on that wait is the
+optional hardening buffr hasn't added.**
 
-### Move 2 — the step-by-step walkthrough
+### Move 2 — the walkthrough
 
-**The pool factory — bare by design.** This is the entire boundary constructor:
+**The pool is created bare.** Here's the entire database boundary
+(`src/db.ts:1-7`):
 
 ```ts
-// src/db.ts:1
 import pg from 'pg';
 
 /** A pg Pool for reindb. Callers load DATABASE_URL via dotenv before this. */
 export function createPool(databaseUrl: string): pg.Pool {
-  return new pg.Pool({ connectionString: databaseUrl });   // ← nothing but the URL
+  return new pg.Pool({ connectionString: databaseUrl });   // ← only a conn string
 }
 ```
 
-Read it line by line. `new pg.Pool({ connectionString })` constructs a pool with **all pg defaults**: default max connections (10), `idleTimeoutMillis` default, and crucially **no `connectionTimeoutMillis`** (the acquire deadline) and **no `statement_timeout`** (the per-query deadline). The comment is honest about what the caller owes it — `DATABASE_URL` loaded first — but says nothing about timeouts, because there are none. On a local or near-local Postgres this is the right amount of code: the handshake is sub-millisecond and the DB is either up or it isn't.
+Annotate the one load-bearing line: `new pg.Pool({ connectionString })` passes
+*nothing else*. No `max` (defaults to 10), no `connectionTimeoutMillis` (so
+acquiring a connection waits indefinitely if all 10 are busy), no
+`statement_timeout` (so a runaway query runs until Postgres or the OS kills it),
+no `idleTimeoutMillis`. The pool's behavior is entirely pg's defaults.
 
-**Where the seam is actually crossed — autocommit inserts.** `persistMessage` (`src/supabase-trace-sink.ts:19`) is a representative crossing:
+**Every query goes through this one pool.** The pool is created once in
+`createChatSession` (`src/session.ts:39`) and threaded into the store, the
+trace sink, and the bare `persistMessage` calls. Trace one request:
 
-```ts
-// src/supabase-trace-sink.ts:27
-await pool.query(
-  `insert into agents.messages
-     (conversation_id, role, content, tool_calls, tool_results, model, tokens_used, created_at)
-   values ($1, $2, $3, $4, $5, $6, $7, coalesce($8::timestamptz, now()))`,
-  [ conversationId, role, content, /* ... */ createdAt ],
-);
+```
+  Layers-and-hops — one ask() turn against the boundary
+
+  ┌─ Client ─────────────┐                       ┌─ Storage ──────────┐
+  │ session.ask()        │                       │ Postgres (agents)  │
+  │                      │  hop 1: INSERT user    │                    │
+  │ persistMessage ──────┼──────────────────────► │ messages row       │
+  │                      │  hop 2: agent.answer()  │  (also hits Ollama │
+  │ agent.answer() ──────┼── (HTTP to Ollama) ──── │   over HTTP)       │
+  │                      │  hop 3: flush() inserts │                    │
+  │ trace.flush() ───────┼──────────────────────► │ messages rows ×N   │
+  │                      │  hop 4: memory.remember │                    │
+  │ memory.remember() ───┼──────────────────────► │ chunks row (best-   │
+  │  (try/catch)         │                         │  effort)           │
+  └──────────────────────┘                       └────────────────────┘
 ```
 
-`pool.query` is the crossing. It acquires a connection, sends the SQL, awaits the round-trip. There's no transaction wrapping it — it's autocommit — and no `try/catch` here, so a rejection propagates straight up to whoever awaited `persistMessage`. That's fail-fast: the error surfaces at the call site, not swallowed.
+Each hop borrows a connection from the pool, runs, releases. They're
+*sequential within a turn* — `await` chains them (`src/session.ts:61-66`) — so
+one turn never needs more than a couple of connections at once. That's *why*
+the missing acquire timeout doesn't bite on one device: with one user, the pool
+is never exhausted.
 
-**The one deliberate containment.** Compare with the single place the repo *chooses* to absorb a failure:
+**The one deliberate failure classification.** Most of `ask()` lets errors
+propagate — a failed `persistMessage` or `agent.answer` throws straight to the
+CLI. The single exception is the memory write (`src/session.ts:65-69`):
 
 ```ts
-// src/session.ts:64
 try {
   await memory.remember({ conversationId, question, answer });
 } catch {
@@ -111,93 +157,97 @@ try {
 }
 ```
 
-Here's the boundary-condition reasoning that makes this not-sloppy. By the time `memory.remember` runs, the user already has `answer` in hand. A memory-write failure (a `pool.query` rejection inside `remember`) must not turn a successful turn into a thrown error. So this *one* crossing is contained; every other crossing fails loud. That's failure **classification** done by hand — "this write is best-effort, that write is required" — even though there's no formal retryable/terminal taxonomy in the code.
-
-**The layers-and-hops view of one `ask()`** — watch which hops can fail and what happens:
-
-```
-  Layers-and-hops — one ask() turn across the Postgres seam
-
-  ┌─ Process ──────────┐
-  │ session.ask()      │
-  └─────┬──────────────┘
-   hop 1│ persist user turn (pool.query)      → throws on failure (required)
-        ▼
-  ┌─ Storage ──────────┐
-  │ agents.messages    │
-  └─────┬──────────────┘
-   hop 2│ agent.answer() → trace.flush()       → throws on failure (required)
-        │ (many pool.query inserts, raced)
-        ▼
-  ┌─ Storage ──────────┐
-  │ agents.messages    │
-  └─────┬──────────────┘
-   hop 3│ memory.remember (pool.query)          → SWALLOWED (best-effort)
-        ▼
-        return answer
-```
-
-Hops 1 and 2 are required and fail-fast. Hop 3 is contained. That asymmetry *is* the repo's partial-failure policy — there's no config flag for it, it's encoded in where the `try/catch` sits.
+This is the only place buffr *classifies* a failure rather than surfacing it:
+a memory-write failure must not lose the answer the user already holds. Every
+other database failure is fail-fast-and-surface.
 
 ### Move 3 — the principle
 
-A boundary to a remote dependency is defined less by how it succeeds than by **what it promises on failure**. This seam promises: reject-or-resolve, no retry, fail-fast — with exactly one write classified as best-effort. That's a coherent policy for a single device and a single user, where a hung retry is worse than a visible error. The principle that generalizes: *name your failure policy at every boundary, even when the policy is "do nothing fancy" — because "we never decided" and "we chose fail-fast" produce identical code and opposite levels of confidence.*
+A connection pool is a **bounded resource with an implicit WAIT state**, and the
+distributed-systems discipline is to *put a deadline on every wait that crosses
+a boundary you don't control.* buffr-laptop hasn't — and that's the right call
+*today*, because one user never exhausts the pool, and a deadline you can't
+test under load is a deadline you'll tune wrong. The principle to carry: the
+deadline isn't missing because it was forgotten; it's missing because the
+condition that makes it load-bearing (contention) doesn't exist yet. Add it
+with the load that justifies it.
 
 ## Primary diagram
 
-The whole boundary, recapped — the pool, the crossings, and the failure policy at each.
+The full boundary, recapped — the seam, the missing deadline, the one
+classified failure.
 
 ```
-  The app ↔ Postgres boundary — full recap
+  The app↔Postgres boundary — the complete picture
 
-  ┌─ Process layer (one failure domain) ─────────────────────────────┐
-  │                                                                   │
-  │  createChatSession (session.ts:34)                                │
-  │    ├─ persistMessage()      ─┐                                    │
-  │    ├─ startConversation()    │ required crossings → throw on fail │
-  │    ├─ trace.flush() inserts ─┘                                    │
-  │    └─ memory.remember()      → contained crossing → swallow       │
-  │                          │                                        │
-  │                   createPool (db.ts:4)                            │
-  │                   new pg.Pool({ connectionString })               │
-  │                   • no connectionTimeoutMillis (acquire)          │
-  │                   • no statement_timeout (per query)              │
-  │                   • no retry / backoff / jitter                   │
-  └──────────────────────────┼────────────────────────────────────────┘
-                             │ SQL over TCP — the ONE client/server seam
-                             ▼
-  ┌─ Storage layer (separate failure domain) ────────────────────────┐
-  │  reindb — Postgres + pgvector (schema: agents)                    │
-  └───────────────────────────────────────────────────────────────────┘
+  ┌─ Client: one Node process ─────────────────────────────────┐
+  │                                                            │
+  │  session.ask()                                             │
+  │    ├─ persistMessage ─────┐                                │
+  │    ├─ agent.answer ──┐    │   (errors here: SURFACE)       │
+  │    ├─ trace.flush ───┤    │                                │
+  │    └─ memory.remember┼────┤   (error here: SWALLOW, :65)   │
+  │                      │    │                                │
+  │              ┌───────▼────▼────────┐                       │
+  │              │ pg.Pool (db.ts:4)   │  ← SEAM               │
+  │              │ max=10 (default)    │    no acquire timeout │
+  │              │ no statement_timeout│    no conn timeout    │
+  │              └─────────┬───────────┘                       │
+  └────────────────────────┼───────────────────────────────────┘
+                           │ pooled TCP
+  ┌─ Storage: Postgres reindb/agents ──▼───────────────────────┐
+  │  documents · chunks · conversations · messages · profiles  │
+  └────────────────────────────────────────────────────────────┘
 ```
 
 ## Elaborate
 
-Connection pooling exists because opening a Postgres connection is expensive (TCP, TLS, auth, backend process fork) and you don't want to pay it per query. The pool amortizes it. The *failure* questions a pool raises — acquire timeout, statement timeout, retry — come from the fact that the thing on the other end can fail independently of you, which is the founding observation of distributed systems.
-
-The gap this repo carries is the **missing acquire timeout**. With `connectionTimeoutMillis` unset, if Postgres accepts the TCP connection but never completes the handshake (a half-open connection — common on flaky networks, NAT timeouts, a paused container), `pool.connect()` waits with no deadline. On a local socket this never happens. Against a remote Supabase over the public internet — exactly where the deferred design (`agent-layer-plan.md`) takes this — it can, and it would hang the user's *first* turn with no error to show. The fix is one option object key. It's listed Rank 1 in `audit.md`'s red-flags table for that reason: cheapest possible change, prevents the worst single-device failure mode the future design introduces.
-
-The single-node transaction mechanics behind `pool.query` (autocommit, isolation, what `commit` actually guarantees) are not this guide's to teach — see `study-database-systems/05-transactions-isolation-and-anomalies.md`. The Ollama HTTP boundary's timeout/retry story belongs to `study-networking`.
+Connection pooling exists because the per-connection handshake to Postgres
+(TCP + auth, and over a network, TLS) costs more than most queries do; pooling
+amortizes it. `pg`'s pool is a simple one — fixed max, FIFO-ish acquire — versus
+something like PgBouncer that pools *server-side* across many clients. buffr
+doesn't need PgBouncer: one client, one pool. The interesting boundary to read
+next is what Postgres itself guarantees once a query lands — isolation,
+durability, the HNSW index scan — which is `study-database-systems`. The
+*shape* decision of "direct `pg` now, HTTP/Edge Functions later" is a
+system-design call, walked in `study-system-design` and in the design spec
+(direct-pg rationale, lines 54-64).
 
 ## Interview defense
 
-**Q: "Walk me through how this app handles the database being down."**
+**Q: Your database client has no timeout. Isn't that a bug?**
 
-> It fails fast. `createPool` (`src/db.ts:4`) builds a bare `pg.Pool` with no retry layer, so a rejected `pool.query` propagates straight to the call site. There's exactly one deliberate exception — the post-turn `memory.remember()` write is wrapped in a try/catch that swallows (`src/session.ts:64`), because by then the user already has the answer and a best-effort memory write shouldn't destroy a successful turn. So the policy is: required writes throw, the one best-effort write is contained.
+Verdict first: on one device, no — it's a deliberate fail-fast with the deadline
+deferred to the load that justifies it. Here's the boundary:
 
 ```
-  required write ──► throws ──► user sees error    (correct: DB is gone)
-  memory write   ──► swallowed ──► turn still succeeds (correct: best-effort)
+  acquire → [WAIT: unbounded] → run → release
+            ▲
+            └─ the deadline goes HERE (connectionTimeoutMillis)
+               + statement_timeout for the run step
 ```
 
-> The load-bearing part people skip: **there's no acquire timeout.** `connectionTimeoutMillis` is unset, so against a remote DB a half-open connection hangs the first turn forever. On a local socket it never matters, which is why it was the right call to ship — but it's the first thing I'd add before pointing this at a remote Supabase.
+The load-bearing part people forget: a pool has an *acquire* wait *before* the
+query even starts. With one user and `max=10`, that wait is always zero — the
+pool is never contended — so a `connectionTimeoutMillis` would only ever fire
+on a real outage, where surfacing the error is already the behavior I want. The
+day this crosses a network under concurrent load, two deadlines go in:
+`connectionTimeoutMillis` on the acquire and `statement_timeout` on the run.
+Anchor: `src/db.ts:4` — the pool is one line, and adding those two options is
+the whole fix.
 
-**Anchor:** *"Fail-fast pool, one best-effort write contained, no acquire timeout — fine on a local socket, fix it before going remote."*
+**Q: What's the one thing you'd watch as this scales?**
+
+Pool exhaustion → the unbounded acquire WAIT turning into a hang. Today
+sequential per-turn `await`s (`src/session.ts:61-66`) keep concurrency at ~1.
+Under many concurrent turns, all 10 connections get borrowed and turn 11 waits
+forever. Anchor: the WAIT state in the pool kernel diagram.
 
 ## See also
 
-- `02-trace-sink-write-buffering.md` — the other side of this seam: how the buffered writes that cross it are ordered.
-- `audit.md` — lens 2 (partial failure) and the Rank-1 red flag.
-- `study-database-systems/05-transactions-isolation-and-anomalies.md` — what `pool.query` actually guarantees on the Postgres side.
-- `study-networking/` — the Ollama HTTP boundary's timeout/retry behavior.
-- `study-system-design/04-long-lived-chat-session.md` — the session that owns this pool across turns.
+- `00-overview.md` — finding #1.
+- `02-trace-sink-write-buffering.md` — the write path that fans across this
+  boundary inside one `flush()`.
+- `audit.md` — lens 2 (timeouts/retries), lens 1 (the map).
+- `study-database-systems` — what Postgres guarantees once a query lands.
+- `study-system-design` — why direct-`pg` over an HTTP gateway this phase.

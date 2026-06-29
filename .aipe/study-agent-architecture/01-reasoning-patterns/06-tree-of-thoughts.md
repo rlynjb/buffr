@@ -1,140 +1,189 @@
-# Tree of Thoughts — branch, score, pick the best
+# Tree-of-Thoughts
 
-**Industry name(s):** Tree of Thoughts (ToT) · branch-and-score
-reasoning · deliberate search over thoughts. **Type label:** Industry
-standard.
-
-**In this codebase: Not yet implemented — and shouldn't be.** buffr
-runs one linear ReAct path. ToT multiplies token cost by the branch
-factor, and on a local Gemma2:9b answering personal-knowledge
-questions, it would buy nothing over a well-prompted single path. This
-file exists so you can recognize ToT and say *why you didn't use it* —
-which is the more common interview answer.
+*Industry names: **Tree-of-Thoughts (ToT)** / **deliberate search over reasoning** / **branch-and-evaluate**. Type label: Industry standard. In this codebase: **Not yet implemented — and correctly so.** (buffr runs a single linear path; ToT is rarely worth its cost in production.)*
 
 ## Zoom out, then zoom in
 
-ToT is the far end of the reasoning-pattern escalation ladder, and
-mostly a place you point at to explain why you stopped earlier.
+This is the top rung of the escalation ladder — and the one to be blunt about. Here is where
+it would sit, and why the box is drawn faint.
 
 ```
-  Zoom out — ToT at the far end of the ladder
+  Where ToT would sit (faint = NOT YET, and probably never for buffr)
 
-  ReAct → plan-and-execute → reflexion → ★ tree-of-thoughts ★
-   cheap        ↑                ↑            most expensive,    ← we are here
-                └── escalate only on measured failure ──┘ rarely worth it
+  ┌╌ ★ TREE-OF-THOUGHTS (this file) ╌╌╌╌╌╌ 5-15x cost ╌╌╌╌╌╌╌┐
+  ╎  branch into N candidate thoughts                        ╎
+  ╎  evaluate each · prune · expand the survivors            ╎
+  └╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┬╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┘
+  ┌─ reflexion (05) · plan-execute (04) ──── also NOT YET ────┐
+  ├─ ★ ReAct (buffr) ★ — a SINGLE linear path ── IMPLEMENTED ─┤
+  │  run-agent-loop.ts:98-190 — one trajectory, no branching  │
+  └────────────────────────────────────────────────────────────┘
 ```
 
-Zoom in: where ReAct commits to one reasoning path, ToT explores
-several branches, scores each, and keeps the best. It's deliberate
-search over reasoning steps. The cost is the branch factor multiplied
-across the depth — which is exactly why it rarely beats a good linear
-loop in production.
+The verdict up front: **ToT explores multiple reasoning branches in parallel, evaluates
+them, and prunes — and it is rarely worth its 5-15x cost in production. buffr runs one
+linear path, and that's correct.** This file exists so you can explain *why you didn't* use
+it, which is the question that actually comes up.
 
 ## Structure pass
 
-**Layers.** A search tree: a root question, branches (candidate
-reasoning paths), and a scorer at the leaves. Where ReAct is a line,
-ToT is a tree.
+One axis: **cost** — how many reasoning paths does one answer pay for?
 
-**Axis — "cost per answer."** ReAct is one path; ToT is `branches ^
-depth` paths. That multiplier is the axis that decides it — it's the
-reason ToT is a last resort.
+```
+  Axis = COST · paths explored per answer
 
-**Seam.** The scoring function. ToT lives or dies on whether you can
-cheaply and reliably score a partial reasoning path. If you can't, the
-branching is just expensive noise.
+  ReAct (buffr)        1 path        decide, act, observe, repeat — linear
+  reflexion            ~2-5 passes   one path, re-run on critique
+  ─────── ★ SEAM: a SINGLE answer now funds MANY parallel paths ★ ───────
+  tree-of-thoughts     5-15x         branch × evaluate × prune × expand
+```
+
+The seam is the jump from re-running *one* path to exploring *many in parallel*. ToG/ToT
+doesn't just retry — it forks the reasoning into N candidates at each step, scores them, and
+keeps the best. Every fork is more model calls. For an open-ended search problem (a puzzle,
+a proof) that breadth finds answers a linear path misses. For grounded Q&A, it burns 5-15x
+the tokens to arrive at the same place.
 
 ## How it works
 
-#### Move 1 — the mental model
+### Move 1 — mental model
 
-You've done BFS over a graph, scoring frontier nodes to decide which
-to expand — your `PG.ts` river-crossing search is exactly this shape.
-ToT is BFS/DFS where the nodes are *reasoning steps* and the score is
-"how promising is this line of thinking."
-
-```
-  Pattern — Tree of Thoughts
-
-           root question
-          ┌──────┼──────┐
-          ▼      ▼      ▼
-        path A  path B  path C
-          │      │      │
-        score  score  score
-          └──────┼──────┘
-                 ▼
-            best path wins
-```
-
-#### Move 2 — the walkthrough (why buffr doesn't)
-
-To run ToT in buffr you'd generate several candidate answers (or
-candidate search strategies), score each — probably with another model
-call — and keep the best. The branch factor multiplies every model
-call: 3 branches at depth 2 is ~9x the inference of one linear path.
-
-**The blunt verdict.** For buffr's task — retrieve from a personal
-knowledge base and answer — there's no rugged search space that
-branching explores better than one well-prompted ReAct loop. The
-queries aren't puzzles with many viable solution paths; they're
-retrievals. ToT shines on tasks with genuine combinatorial search
-(game-of-24, constrained planning), not on "what did my notes say
-about X." Add the local-Gemma cost and it's a clear no.
+ToT turns reasoning from a *path* into a *search over a tree*: generate several candidate
+next-thoughts, score them, expand the promising ones, prune the rest. Bridge from frontend:
+it's a breadth-first search where each node is a model call, and the heuristic is *another*
+model call grading the node.
 
 ```
-  Comparison — buffr's linear path vs ToT
+  THE SHAPE — branch, evaluate, prune (the literal tree)
 
-  buffr (linear):              ToT (would-be):
-    search → answer              gen 3 strategies
-    1 path, capped 4 calls       × score each (3 more calls)
-                                 × expand best (3 more)
-                                 = ~9x cost, no better answer
+                  ┌── thought A ──▶ score 0.8 ──▶ expand ──▶ ...
+   question ──────┼── thought B ──▶ score 0.3 ──▶ PRUNE
+                  └── thought C ──▶ score 0.6 ──▶ expand ──▶ ...
+                       ▲                              ▲
+                       │ N branches per node          │ each expansion = N more calls
+                       │ each = a model call           │ → cost compounds
 ```
 
-#### Move 3 — the principle
+### Pseudocode first — the language-agnostic logic
 
-ToT is the right tool only when the task has a real search space *and*
-you can score partial paths cheaply. Most production tasks have
-neither. Recognizing that — and choosing the cheaper linear pattern —
-is the skill. The senior move is naming why you *didn't* branch.
+```
+frontier = [ question ]
+for depth in 0..maxDepth:
+    candidates = []
+    for node in frontier:
+        for i in 0..branchFactor:            # FORK: N thoughts per node
+            candidates.append( model.think(node) )    # model call
+    scored = [ (c, model.evaluate(c)) for c in candidates ]   # model call PER candidate
+    frontier = topK(scored, beamWidth)        # PRUNE to the best few
+return best(frontier)
+# cost ≈ branchFactor * depth * beamWidth model calls — the 5-15x lives here
+```
+
+Annotation: two nested loops of model calls (`think`, then `evaluate`) per depth level. That
+double-multiply is why ToT is the most expensive rung — and why it's reserved for problems
+where a single path genuinely fails.
+
+### What buffr does instead — and why it's right
+
+buffr explores exactly one path. The model picks one next move per turn; there is no
+branching, no candidate scoring, no beam.
+
+```ts
+// run-agent-loop.ts:98-135 (condensed) — ONE linear trajectory, no branching
+for (let turn = 0; turn < maxTurns; turn += 1) {
+  const response = await model.complete({ messages, tools, ... });  // ONE candidate, not N
+  messages.push({ role: 'assistant', content: response.content });  // commit to it, no scoring
+  const toolUses = toolUsesFromContent(response.content);
+  if (toolUses.length === 0) { finalText = text; break; }           // linear exit
+  // ...execute, accumulate, loop — still ONE path
+}
+```
+
+```
+  buffr (linear)              vs    ToT (tree)
+
+  q → ● → ● → ● → answer            q ─┬─ ● ─┬─ ●  (prune)
+      one move per turn,             │  └─ ●  └─ ● → answer
+      committed                       └─ ● (prune)
+                                      many moves, scored, pruned
+```
+
+Annotation: buffr commits to each move and never reconsiders alternatives — one trajectory,
+captured in the trace. ToT would fork at every `●`. For buffr's task — retrieve grounded
+passages and answer — there is no combinatorial search space that a tree would help explore.
+The right answer is in the retrieved chunks; you don't need to *deliberate over branches* to
+find it. **buffr correctly doesn't use ToT.**
+
+### Move 3 — the principle
+
+**Tree-of-Thoughts is breadth-first search over reasoning, and you pay one model call per
+node — so it's only worth it when a single linear path genuinely cannot find the answer.**
+That's puzzles, planning, proofs — problems with a real search space and a cheap evaluator.
+Grounded retrieval Q&A is not one of those. The senior move is to recognize ToT as a
+specialized tool and *not* reach for it because it sounds sophisticated.
 
 ## Primary diagram
 
-```
-  Tree of Thoughts (recognized, not used in buffr)
+Full recap: the tree, the cost, the verdict.
 
-  root → [path A | path B | path C] → score each → keep best
-   cost = branches ^ depth   ← the reason buffr stays linear
 ```
+  Tree-of-Thoughts — the rung buffr correctly skips
+
+  ┌╌ NOT WORTH IT for buffr ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┐
+  ╎ branch (N) × evaluate (per node) × prune × expand        ╎
+  ╎ cost: 5-15x   ·  fits: puzzles/planning/proofs           ╎
+  ╎ buffr's task: grounded Q&A → NO search space to explore  ╎
+  └╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┬╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┘
+  ┌─ RUNNING: ONE linear path ──▼────────────────────────────┐
+  │ q → ● → ● → answer    run-agent-loop.ts:98-135            │
+  └────────────────────────────────────────────────────────────┘
+```
+
+Verdict in one line: **ToT is breadth-first search over thoughts at 5-15x cost; buffr's
+grounded Q&A has no search space worth a tree, so a single linear path is correct — not a
+gap.**
 
 ## Elaborate
 
-ToT (Yao et al., 2023) generalized chain-of-thought into a search:
-instead of one chain, explore a tree and use a search algorithm (BFS,
-DFS, beam) over thoughts. It's powerful for puzzle-like tasks and
-expensive everywhere else. Its honest place in a single-agent guide is
-as the ladder's top rung — the thing you escalate to last, if ever.
+Tree-of-Thoughts (Yao et al., 2023) beat chain-of-thought on Game-of-24, creative writing,
+and mini-crosswords — tasks with a clear branching search space and a usable evaluator. The
+production reality is that those conditions are rare: most agent work is retrieval, tool
+orchestration, or code, where a linear ReAct path plus good tools wins on cost. ToT's
+descendants (Graph-of-Thoughts, beam-search agents) inherit the same cost profile and the
+same narrow fit. Knowing *when not to use* a flashy technique is the more valuable signal in
+an interview than knowing how it works.
+
+This is the last rung. After this, file `07-routing.md` turns sideways: not "how does the
+one model think harder" but "how does control pick between *handlers*" — the bridge from
+single-agent reasoning to multi-agent orchestration.
 
 ## Interview defense
 
-**Q: Why not use Tree of Thoughts in buffr?**
-Because there's no search space to explore. buffr's tasks are
-retrievals, not puzzles with many viable reasoning paths — one
-well-prompted ReAct loop covers them. ToT multiplies cost by the
-branch factor, which on a local Gemma is wall-clock the user waits
-through, for no quality gain. I'd reach for it only on a task with
-genuine combinatorial search and a cheap path scorer.
+**Q: "Why doesn't buffr use Tree-of-Thoughts?"**
+
+Model answer: "Because there's no search space worth searching. ToT forks reasoning into N
+branches per step, scores each with another model call, and prunes — 5-15x the tokens. It
+pays off on puzzles and planning where a single path fails and you have a cheap evaluator.
+buffr's task is grounded retrieval Q&A: the answer is in the retrieved chunks, found by one
+linear ReAct path (`run-agent-loop.ts:98-135`). There's nothing to deliberate over in a
+tree. Using ToT here would be paying 10x to arrive at the same answer — so not using it
+isn't a gap, it's the correct call."
 
 ```
-  cost = branches ^ depth   |   buffr's tasks: 1 path is enough
+  The defense in one picture
+
+  search space exists?  ── no ──▶  linear path (buffr) — ToT would just burn tokens
+        │ yes (puzzle/plan/proof)
+        ▼
+  ToT may pay off (5-15x, needs a cheap evaluator)
 ```
 
-**Anchor:** "ToT needs a real search space and a cheap scorer —
-buffr's retrieval tasks have neither."
+Anchor: *ToT is breadth-first search over thoughts; with no search space, buffr's single
+linear path is correct, not a missing feature.*
 
 ## See also
 
-- `03-react.md` — the linear pattern buffr keeps instead
-- `04-plan-and-execute.md` · `05-reflexion-self-critique.md` — the
-  cheaper escalation rungs to try first
+- `03-react.md` — the linear floor; the escalation discipline that says "don't climb on spec."
+- `05-reflexion-self-critique.md` — the cheaper rung below; also not yet implemented.
+- `07-routing.md` — the sideways turn from "think harder" to "pick a handler."
+- `../00-overview.md` — lists ToT among the not-yet/design-only patterns.

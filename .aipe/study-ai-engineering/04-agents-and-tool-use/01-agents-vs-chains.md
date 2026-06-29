@@ -1,235 +1,277 @@
-# Agents vs Chains — the bounded loop
+# Agents vs Chains
+### *The control axis: who decides the next step — your code or the model?*
+**Type label:** control-flow pattern (orchestration)
 
-*Industry standard. buffr's `RagQueryAgent` is the agent side, bounded.*
+## Zoom out
 
-## Zoom out, then zoom in
-
-Here's the whole control story of buffr in one frame. The question is: who decides what happens next — your code, or the model?
+Before we name anything, look at where this decision lives in the stack. Every LLM application has to answer one question: *who picks the next step?* That answer is a layer, and it sits between the model and the tools.
 
 ```
-  Zoom out — where the control decision lives
-
-  ┌─ Session ───────────────────────────────────────────────────┐
-  │  src/session.ts — fixed wrapper: persist → run → remember    │  ← CODE decides
-  └───────────────────────────┬─────────────────────────────────┘
-                              │  agent.answer(question)
-  ┌─ Agent loop (aptkit) ─────▼─────────────────────────────────┐
-  │  ★ runAgentLoop — LLM decides: call tool again, or answer ★  │  ← LLM decides  ← we are here
-  └───────────────────────────┬─────────────────────────────────┘
-                              │  callTool(name, args)
-  ┌─ Tool ────────────────────▼─────────────────────────────────┐
-  │  search_knowledge_base — just runs                          │  ← TOOL runs
-  └─────────────────────────────────────────────────────────────┘
+The orchestration layers in buffr
+┌───────────────────────────────────────────────────────────┐
+│  Application      session.ask(question) → answer            │  fixed: persist, run, flush, remember
+├───────────────────────────────────────────────────────────┤
+│  ★ ORCHESTRATION  agent vs chain — WHO decides next step?   │  ← this file
+│                   runAgentLoop / RagQueryAgent              │
+├───────────────────────────────────────────────────────────┤
+│  Model            model.complete({messages, tools})         │  one forward pass
+├───────────────────────────────────────────────────────────┤
+│  Tools            search_knowledge_base → pgvector          │  deterministic
+└───────────────────────────────────────────────────────────┘
 ```
 
-The verdict first: buffr is a **hybrid** — a fixed pipeline *outside* (session always does persist → run → remember in that order) wrapping a *loop inside* (the agent freely decides how many times to retrieve). That nesting is the thing to understand. The session is a chain; the agent is an agent; they compose.
+The orchestration layer (★) is the only one with a *choice* about flow. The model is a pure function of its input; the tool is deterministic; the application is a fixed script. Everything interesting about "is this an agent?" happens in that one band.
+
+Here's the conversational version. You came from frontend. You already know the two shapes of control flow — you've written both. A **chain** is a `.then().then().then()` promise pipeline: the steps are written down in advance, in order, by you. An **agent** is an event loop with a `while` and a `switch`: the loop runs, something inside *decides* what happens next, and you don't know the sequence until runtime. The question this file answers is which one buffr is. The honest answer is: both, and the seam between them is the whole point.
 
 ## Structure pass
 
-**Layers:** session (fixed order) → agent loop (variable iterations) → tool (deterministic).
-
-**Axis — "who decides control flow?" — traced down the layers:**
+There's exactly one axis that separates a chain from an agent, and it's worth stating precisely because the whole industry blurs it: **who decides the next step.**
 
 ```
-  one question, held constant down the layers
-
-  ┌───────────────────────────────┐
-  │ session: persist→run→remember │   → CODE decides (always this order)
-  └───────────────────────────────┘
-      ┌─────────────────────────────┐
-      │ agent loop: retrieve? again?│   → LLM decides (per turn, up to 6)
-      └─────────────────────────────┘
-          ┌─────────────────────────┐
-          │ tool: embed+ANN search  │   → TOOL runs (no choices)
-          └─────────────────────────┘
-
-  the answer flips at each altitude — that contrast IS the lesson
+The control axis (the one that matters)
+   CODE DECIDES                                    LLM DECIDES
+   (fixed, you wrote it)                           (dynamic, runtime)
+   ├─────────────────────────────────────────────────────────────┤
+   chain                          hybrid                     pure agent
+   prompt→parse→done       fixed outside, loop inside     loop all the way down
+                                    ▲
+                                    │
+                              buffr lives HERE
 ```
 
-**The seam:** session→agent is where control flips from code to model. The session can't predict how many model turns a question needs; it just calls `agent.answer()` and waits. That's the definition of an agent: unpredictable step count, decided by the model.
+A **chain** puts the decision in your code: step 1 runs, then step 2, then step 3, always, regardless of content. A **pure agent** puts the decision in the model: the model emits a tool call, you run it, you feed the result back, the model decides again — for as long as it wants. buffr is the **hybrid**, and the seam where control flips is the heart of the design:
+
+```
+Where control flips in buffr
+  ┌──────────────────────────────────────────────────────────┐
+  │  OUTER: code decides   (session.ask, RagQueryAgent.answer)│
+  │  ┌────────────────────────────────────────────────────┐  │
+  │  │  INNER: LLM decides   (runAgentLoop: tool? or done?)│  │  ← the flip
+  │  │  ┌──────────────────────────────────────────────┐  │  │
+  │  │  │  TOOL: deterministic  (search_knowledge_base)│  │  │
+  │  │  └──────────────────────────────────────────────┘  │  │
+  │  └────────────────────────────────────────────────────┘  │
+  └──────────────────────────────────────────────────────────┘
+```
+
+The flip is at the inner boundary: outside the loop, your code is in charge (build agent once, persist turn, run, flush, remember); inside the loop, the model is in charge (call a tool or stop). The tool below is deterministic again. Control hands off, then hands back.
 
 ## How it works
 
 ### Move 1 — the mental model
 
-A chain is a `Promise` chain you wrote: `summarize().then(caption).then(post)` — you fixed the steps. An agent is a `while` loop where the *model* writes the loop body each iteration: it looks at what it has, decides "I need to search again" or "I can answer now," and you keep looping until it stops or you cut it off.
+The kernel is a loop with a model in the condition. That's it. A chain has no loop; an agent's loop has the model deciding when to break.
 
 ```
-  the agent loop kernel
-
-  ┌─────────┐  decide
-  │ Thought │ ─────────► call tool? ── yes ──┐
-  └─────────┘                                 ▼
-       ▲                              ┌──────────────┐
-       │ observe result               │ Action       │ run tool
-       └──────────────────────────────│ Observation  │◄─┘
-                                       └──────┬───────┘
-                                  no tool-call │
-                                              ▼
-                                          final answer
-
-  guardrail: hard stop at maxTurns / maxToolCalls (never trust the model to stop)
+The agent loop in one frame
+  messages = [user question]
+  ┌──────── for turn in 0..maxTurns ───────────────────────┐
+  │  response = model.complete(messages, tools)             │
+  │  does response contain a tool_use block?                │
+  │     NO  → finalText = text; BREAK ───────────────► done │
+  │     YES → run each tool, push result, loop again        │
+  └─────────────────────────────────────────────────────────┘
 ```
 
-The load-bearing part — the one people forget — is the **hard iteration budget**. The model is not trusted to terminate. If it never emits a final answer, the loop must stop anyway.
+The model decides the exit. If it emits prose, the loop breaks and that prose is the answer. If it emits a tool call, the loop runs the tool and goes around again. Your code never decides "now we're done" — it only decides "you may go around at most `maxTurns` times."
 
-### Move 2 — the step-by-step walkthrough
+### Move 2 — step by step
 
-**Step 1 — buffr constructs the agent once, with model, tools, profile, trace.** The session builds it a single time and reuses it across every turn.
+#### The outer shell: code decides the boundaries (`RagQueryAgent.answer`)
+
+Bridge from what you know: this is the parent component that owns the `<AgentLoop/>`'s props. It doesn't render the loop's internals; it sets the budget and hands over control. In React terms, the outer shell is a controlled wrapper that configures a child it doesn't micromanage.
+
+```
+The outer shell sets the rules, then hands off
+  RagQueryAgent.answer(question)
+    │  filter tools to policy   ─────►  [search_knowledge_base]  (least privilege)
+    │  set maxTurns: 6, maxToolCalls: 4
+    │  set synthesisInstruction
+    └─►  runAgentLoop(...)  ──── control flips to the model ────►
+                                 finalText.trim() || FALLBACK_ANSWER
+```
+
+Real code, `aptkit packages/agents/rag-query/src/rag-query-agent.ts:62`:
 
 ```ts
-// src/session.ts:57
-const agent = new RagQueryAgent({ model, tools, profile, trace });
+async answer(question: string, runOptions: RagQueryRunOptions = {}): Promise<string> {
+  const allTools = await this.options.tools.listTools();
+  const toolSchemas = filterToolsForPolicy(allTools, ragQueryToolPolicy);   // ← code decides: ONE tool allowed
+
+  const { finalText } = await runAgentLoop({
+    capabilityId: RAG_QUERY_CAPABILITY_ID,
+    model: this.options.model,
+    tools: this.options.tools,
+    system: this.system,
+    userPrompt: question,
+    toolSchemas,
+    maxTurns: 6,          // ← code decides: at most 6 turns
+    maxToolCalls: 4,      // ← code decides: at most 4 tool calls
+    synthesisInstruction: buildSynthesisInstruction(
+      'Now answer the question directly and concisely, citing the sources you retrieved.',
+    ),
+  });
+
+  return finalText.trim() || FALLBACK_ANSWER;   // ← code decides: never return empty
+}
 ```
 
-**Step 2 — `answer()` delegates to the bounded loop with explicit budgets.** This is where the limits live. aptkit's `RagQueryAgent.answer()` calls `runAgentLoop` with hard caps and a synthesis instruction.
+The consequence of each line being code-decided: the model can never run forever, can never see a tool it isn't policy-allowed (`ragQueryToolPolicy.allowedTools = [search_knowledge_base]`), and can never return an empty string to the user. Those are *guardrails*, and they exist precisely because the inner loop is not trusted to set its own limits.
 
-```ts
-// aptkit packages/agents/rag-query/src/rag-query-agent.ts:62-83 (answer)
-const { finalText } = await runAgentLoop({
-  capabilityId: RAG_QUERY_CAPABILITY_ID,
-  model: this.options.model,
-  tools: this.options.tools,
-  system: this.system,                 // profile already injected at construction
-  userPrompt: question,
-  toolSchemas,
-  trace: this.options.trace,
-  maxTurns: 6,                         // ← hard turn cap
-  maxToolCalls: 4,                     // ← hard tool-call cap
-  synthesisInstruction: buildSynthesisInstruction(
-    'Now answer the question directly and concisely, citing the sources you retrieved.'),
-});
+#### The inner loop: the LLM decides each step (`runAgentLoop`)
+
+Bridge: this is the event loop. You've written `while (running) { const event = await next(); dispatch(event); }`. Same shape. `model.complete` is `await next()`; "does it have a tool_use block" is the `dispatch`; the budget is the kill switch.
+
+```
+One turn of the inner loop
+  ┌─ turn ────────────────────────────────────────────────┐
+  │  forceFinal = lastTurn OR budget spent                  │
+  │  response = model.complete(messages, forceFinal?none:tools)
+  │  push assistant content                                 │
+  │  toolUses = tool_use blocks in response                 │
+  │     empty?  → finalText = text; BREAK                    │
+  │     else    → for each: callTool, push tool_result      │
+  │              push {role:user, content: toolResults}      │
+  └────────────────────────────────────────────────────────┘
 ```
 
-**Step 3 — the loop body: complete, check for a tool-call, run it or stop.** Inside `runAgentLoop`, each turn computes whether this is the forced-final turn, then completes.
+#### LOAD-BEARING SKELETON — the agent loop
+
+This is the kernel every other file in this section leans on. Memorize this shape; the rest is detail. Real code, `aptkit packages/runtime/src/run-agent-loop.ts:98`:
 
 ```ts
-// aptkit packages/runtime/src/run-agent-loop.ts:98-135 (condensed)
-for (let turn = 0; turn < maxTurns; turn += 1) {
+const messages: ModelMessage[] = [{ role: 'user', content: userPrompt }];   // ← short-term memory: this array
+const toolCalls: ToolCallRecord[] = [];
+let finalText = '';
+
+for (let turn = 0; turn < maxTurns; turn += 1) {            // ← HARD STOP: turn budget
+  signal?.throwIfAborted();                                 // ← cancellation seam
+
   const budgetSpent = maxToolCalls !== undefined && toolCalls.length >= maxToolCalls;
-  const forceFinal = turn === maxTurns - 1 || budgetSpent;          // ← the hard stop
+  const forceFinal = turn === maxTurns - 1 || budgetSpent;  // ← THE GATHER→SYNTHESIZE GATE
+
   const response = await model.complete({
     system: forceFinal && synthesisInstruction ? `${system}\n\n${synthesisInstruction}` : system,
-    tools: forceFinal ? undefined : toolSchemas,                    // ← no tools on final turn
-    ...
+    messages,
+    tools: forceFinal ? undefined : toolSchemas,             // ← forceFinal STRIPS the tools
+    maxTokens,
+    signal,
   });
+
+  messages.push({ role: 'assistant', content: response.content });
+
   const toolUses = toolUsesFromContent(response.content);
-  if (toolUses.length === 0) { finalText = text; break; }           // ← model chose to answer
-  // ... else run each tool, feed results back, loop
+  if (toolUses.length === 0) {                              // ← LLM DECIDES: no tool → done
+    finalText = textFromContent(response.content);
+    break;
+  }
+
+  const toolResults: ModelToolResultBlock[] = [];
+  for (const toolUse of toolUses) {
+    try {
+      const { result, durationMs } = await tools.callTool(toolUse.name, toolUse.input, { signal });
+      // ...record result, push tool_result (truncated to 16k chars)...
+    } catch (error) {
+      // ...record error, push tool_result with isError: true...  ← recovery seam (see 06)
+    }
+  }
+  messages.push({ role: 'user', content: toolResults });    // ← observation fed back as next input
 }
 ```
 
-The **forced-synthesis turn** is the most important and most surprising mechanic. When the budget is spent (or it's the last turn), the loop strips the tools and appends "You have NO more tool calls available. Now answer..." This forces the model to produce an answer instead of looping forever trying to retrieve. The tradeoff it buys: bounded latency and guaranteed termination, at the cost of sometimes answering with imperfect context.
-
-```ts
-// aptkit packages/runtime/src/run-agent-loop.ts:72-74
-export function buildSynthesisInstruction(middle: string): string {
-  return `You have NO more tool calls available. ${middle} Do not say you need more queries.`;
-}
-```
-
-**Step 4 — the session wraps the loop in fixed order.** Back out at buffr's layer, the agent loop is one step in an unchanging sequence.
-
-```ts
-// src/session.ts:60-71 (the fixed outer chain)
-await persistMessage(pool, conversationId, 'user', question);  // 1. always first
-const answer = await agent.answer(question);                   // 2. the loop (variable inside)
-await trace.flush();                                           // 3. always
-try { await memory.remember({ conversationId, question, answer }); } catch {} // 4. best-effort
-return answer;
-```
-
-```
-  Layers-and-hops — one buffr turn
-
-  ┌─ Session ────┐ hop1: agent.answer(q)  ┌─ Loop ──────────┐ hop2: complete  ┌─ Model ──┐
-  │ persist→...  │ ──────────────────────►│ turn 0..6       │ ───────────────►│ gemma2:9b│
-  │ →remember    │ hop4: finalText ◄──────│ tool? or stop   │ hop3: tool-call ◄── └────────┘
-  └──────────────┘                        │ run tool ───────┼──► search_knowledge_base
-                                          └─────────────────┘
-```
-
-### Move 2 variant — the load-bearing skeleton
-
-The irreducible kernel of buffr's agent: **model.complete → check for tool-call → (run tool, append result, loop) OR (stop) + a hard turn/tool budget that forces termination.**
-
-- Drop the **tool-call check** → the loop can't tell "keep going" from "done"; it never terminates correctly.
-- Drop the **budget / forceFinal** → a model that loops on the tool burns turns forever (or until the provider errors). This is the part interview candidates omit.
-- Drop the **synthesis instruction** → at the budget cap the model still tries to call a tool that isn't there, producing a non-answer.
-
-Optional hardening on top: the trace sink (observability, not correctness), the context-window guard (skips a turn that would overflow). Skeleton vs hardening — saying which is which is the lesson.
+The four load-bearing parts, named so you don't forget them:
+- **`for (turn < maxTurns)`** — the hard iteration cap. Without it, a model that keeps emitting tool calls runs forever.
+- **`forceFinal`** — the gather→synthesize gate (`03-react-pattern.md`). When the budget is spent, the *next* call gets no tools, so the model *must* answer.
+- **`if (toolUses.length === 0) break`** — the only natural exit. The model decides the loop is over by speaking prose.
+- **`messages.push(toolResults)`** — the observation. The tool's output becomes the model's next input. This is the entire feedback mechanism.
 
 ### Move 3 — the principle
 
-An agent trades predictability for flexibility. The moment you let the model decide the steps, you must also decide what happens when it never decides to stop. Every production agent loop is "model freedom inside, hard budget outside." buffr's is `maxTurns=6, maxToolCalls=4`.
+A chain trades flexibility for predictability; an agent trades predictability for flexibility. The hybrid buys back predictability by *bounding* the agent: the LLM gets to decide *what* and *when*, but your code decides *how many times* and *which tools exist*. buffr is an agent you can reason about precisely because the outer shell refuses to let the inner loop be unbounded.
 
 ## Primary diagram
 
-```
-  buffr RagQueryAgent.answer() — full loop
+The whole thing, end to end — one frontend `ask()` through the hybrid and back.
 
-  question ─► system (profile injected) ─┐
-                                         ▼
-  ┌─ for turn 0..5 ──────────────────────────────────────────┐
-  │  budgetSpent = toolCalls >= 4                              │
-  │  forceFinal  = (turn == 5) || budgetSpent                 │
-  │       │                                                    │
-  │       ▼                                                    │
-  │  model.complete(system [+synthesis if forceFinal],         │
-  │                 tools = forceFinal ? none : [search])      │
-  │       │                                                    │
-  │   ┌───┴────────────┐                                       │
-  │   ▼ tool-call?      ▼ no tool-call                         │
-  │  run search_kb    finalText = text ; break                 │
-  │  append result                                             │
-  │  toolCalls++                                               │
-  └────────────────────────────────────────────────────────────┘
-       │
-       ▼
-   answer  ─► (session: trace.flush + memory.remember)
+```
+buffr's hybrid control flow, one question end to end
+  session.ask("what did I read about X?")          [CODE]
+    │ persist user turn
+    ▼
+  RagQueryAgent.answer(question)                    [CODE] sets budget, filters tools
+    │
+    ▼
+  runAgentLoop — for turn 0..5                       ── control flips ──►
+    ┌──────────────────────────────────────────────────────────┐
+    │ turn 0:  model.complete(msgs, tools)            [LLM]      │
+    │          → emits {"tool":"search_knowledge_base"...}       │
+    │          → callTool → pgvector                  [TOOL]     │  ◄ deterministic
+    │          → push results as observation                     │
+    │ turn 1:  model.complete(msgs, tools)            [LLM]      │
+    │          → emits prose answer (no tool)                    │
+    │          → BREAK, finalText = answer                       │
+    └──────────────────────────────────────────────────────────┘
+    │                                               ◄── control returns ──
+    ▼
+  finalText.trim() || FALLBACK_ANSWER               [CODE]
+    │ flush trace, best-effort remember
+    ▼
+  answer to user
 ```
 
 ## Elaborate
 
-The agent/chain distinction comes from the ReAct line of work (`03-react-pattern.md`): instead of a fixed prompt template, the model interleaves reasoning and tool use. aptkit's `runAgentLoop` is a minimal, bounded ReAct executor. buffr is the simplest useful instance — one tool, so the "routing" decision is binary (retrieve or answer). That simplicity is why buffr is a clean place to *see* the loop without multi-agent noise. Scaling up would mean more tools (then `04-tool-routing.md` matters) or a planner/sub-agent split (then `study-agent-architecture` matters).
+The reason this hybrid is the right call for buffr — not a compromise — is the model. `gemma2:9b` is small and local. A pure agent with this model would wander: emit a tool call, get results, emit another nearly-identical tool call, never converge. The bound (`maxTurns: 6`, `maxToolCalls: 4`) isn't a limitation grafted onto a weak model; it's the design that makes a weak model usable. A frontier model could tolerate a looser leash. buffr's leash is short on purpose.
+
+The other thing worth internalizing: the messages array *is* the agent's working memory, and it lives entirely inside one `runAgentLoop` call. When `answer()` returns, that array is gone. There is no conversation history carried into the next `answer()` (`05-agent-memory.md`). The agent is stateful within a question and stateless across questions. That's a real architectural fact, not an oversight — and where you'd change it.
 
 ## Project exercises
 
-> No curriculum file present; exercises derived from the codebase.
+### Make the budget configurable and observable
 
-### Surface turn-count and tool-call-count to the trace
+- **Exercise ID:** [B4.1], Phase 4.
+- **What to build:** Lift `maxTurns` and `maxToolCalls` out of the hardcoded `answer()` call into `RagQueryAgentOptions`, defaulting to the current 6/4. Emit a trace event when `forceFinal` first flips so the budget exhaustion is visible in the trajectory.
+- **Why it earns its place:** The budget is the single most important guardrail in the hybrid, and right now it's invisible and unconfigurable. Making it a typed option forces you to understand *why* 6 and 4 were chosen, and the trace event lets you see how often real questions hit the ceiling.
+- **Files to touch:** `aptkit packages/agents/rag-query/src/rag-query-agent.ts`, `aptkit packages/runtime/src/run-agent-loop.ts` (add a `budget_exhausted` trace emit), `buffr src/session.ts` (pass the option through).
+- **Done when:** `answer()` accepts `{ maxTurns?, maxToolCalls? }`, defaults match today's behavior, and a question that spends the tool budget produces a visible trace event in `SupabaseTraceSink`.
+- **Estimated effort:** 1–2 hours.
 
-- **Exercise ID:** AGENT-1 (Case A — loop implemented; observability next step).
-- **What to build:** persist per-answer `turns_used` and `tool_calls_used` so you can see how close real questions run to the budget.
-- **Why it earns its place:** "I measured how often the loop hits its cap" is concrete evidence you understand the budget tradeoff.
-- **Files to touch:** `src/supabase-trace-sink.ts` (aggregate from events), `src/session.ts`, possibly a new `messages` column or a summary row.
-- **Done when:** each conversation row records how many turns and tool-calls it used.
-- **Estimated effort:** 1–4hr.
+### Add loop detection for repeated identical tool calls
 
-### Add a second tool to force a routing decision
-
-- **Exercise ID:** AGENT-2 (Case B — routing not yet exercised).
-- **What to build:** add a `list_documents` tool so the model must choose between listing and searching, exercising `04-tool-routing.md`.
-- **Why it earns its place:** a single-tool agent never demonstrates routing; two tools make the LLM-routing pattern real and testable.
-- **Files to touch:** new tool definition + handler, registered in `src/session.ts:44` (`InMemoryToolRegistry`).
-- **Done when:** an eval shows the model picking the right tool for "list everything" vs "what does X say".
-- **Estimated effort:** 1–2 days.
+- **Exercise ID:** [B4.2], Phase 4.
+- **What to build:** Inside `runAgentLoop`, hash each `(toolName, input)` pair; if the same pair repeats, force `forceFinal` early instead of burning the remaining budget on a duplicate search.
+- **Why it earns its place:** A small local model's most common failure is re-issuing the *same* query and expecting a different answer. The hybrid's budget catches it eventually, but wastes turns. Detecting the duplicate converts wasted turns into an immediate synthesize.
+- **Files to touch:** `aptkit packages/runtime/src/run-agent-loop.ts`.
+- **Done when:** A model that emits the identical `search_knowledge_base` call twice triggers forced synthesis on the second, with a trace event recording the short-circuit. Covered by a unit test feeding a scripted duplicate.
+- **Estimated effort:** 2–3 hours.
 
 ## Interview defense
 
-**Q: Is buffr an agent or a chain?**
-Answer: both, nested. The session is a chain — persist, run, remember, always that order. The agent inside is a true loop: the model decides whether to retrieve again, up to `maxTurns=6` and `maxToolCalls=4`. Verdict first: "hybrid, pipeline outside, loop inside."
+**Q: "Is buffr an agent or a chain?"**
 
-**Q: How does the loop terminate if the model keeps calling the tool?**
-Answer: it can't loop forever — `forceFinal = turn == maxTurns-1 || toolCalls >= maxToolCalls` strips the tools and injects a synthesis instruction ("no more tool calls, answer now"). **The load-bearing part people forget is the hard budget**; without it an agent that loops on its tool burns until the provider errors.
+Neither, exactly — it's a bounded hybrid. The outer shell is a chain: `session.ask` does persist → run → flush → remember in fixed order, every time. The inner shell is an agent: `runAgentLoop` lets the model decide, turn by turn, whether to call a tool or answer. The seam is `runAgentLoop`'s entry: control flips from my code to the model there and flips back when the loop returns.
 
 ```
-  the budget sketch:  turn==5 OR toolCalls>=4  →  drop tools + "answer now"
+   chain shell  ──►  [ agent loop ]  ──►  chain shell
+   (fixed)            (LLM-decided)        (fixed)
 ```
+
+*Anchor: outside the loop my code decides how many turns; inside, the model decides each turn.*
+
+**Q: "What stops the agent looping forever?"** — the part people forget.
+
+Two hard stops, both in `runAgentLoop`. The `for (turn < maxTurns)` cap (6) bounds *iterations*; the `maxToolCalls` check (4) bounds *tool spend*. Whichever trips first sets `forceFinal`, which strips the tools from the next `model.complete` call — so the model physically cannot call a tool and is forced to answer. The load-bearing part people forget is that `forceFinal` doesn't just *ask* the model to stop; it *removes the tools*, so stopping is the only option.
+
+```
+  budget spent → forceFinal = true → model.complete(tools: undefined) → must answer
+```
+
+*Anchor: the budget doesn't ask the model to stop — it takes the tools away.*
 
 ## See also
 
-- `02-tool-calling.md` — the contract the loop runs, and where it's fragile.
-- `06-error-recovery.md` — the budget hard-stop as a recovery mechanism.
-- `05-agent-memory.md` — what the loop remembers between sessions.
-- `.aipe/study-agent-architecture/` — deeper reasoning and orchestration.
+- **`02-tool-calling.md`** — what happens inside `model.complete` when tools are present (the emulated path) and why there's no arg validation.
+- **`03-react-pattern.md`** — `forceFinal` and `buildSynthesisInstruction` as the gather→synthesize structure.
+- **`06-error-recovery.md`** — the try/catch around `callTool` and the hard stops as a recovery table.
+- **`../03-retrieval-and-rag/`** — what `search_knowledge_base` does once the loop calls it.

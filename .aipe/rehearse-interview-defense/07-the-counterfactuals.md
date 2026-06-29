@@ -1,326 +1,253 @@
 # Chapter 7 — The Counterfactuals
 
-"What would you do differently?" is the question where seniors separate
-themselves by *volunteering* the answer. The senior-engineer move is to
-name what you'd reconsider before being asked — it signals you're still
-evaluating your own decisions, not defending them as finished. This
-chapter walks the three or four most reconsiderable decisions in buffr
-and shows what the strong counterfactual sounds like for each. The
-anti-pattern, which this chapter actively guards against: fabricating
-regrets for decisions that were obviously right. A counterfactual for a
-correct decision reads as insecurity. Only reconsider what's genuinely
-reconsiderable.
-
-The discipline: a real counterfactual names the decision, the *trigger*
-that would change it, and what you'd do instead — and it does *not*
-disown a call that was right for the phase. "I'd add RLS" is wrong if
-you say it as a regret; it's right if you say it as "RLS was correctly
-deferred, here's the trigger that turns it on."
+"What would you do differently?" is where senior engineers separate themselves, and the move is
+counterintuitive: you volunteer the answer before being asked. Naming what you'd reconsider —
+unprompted, specifically, with the cost you'd pay either way — signals that you evaluate your own
+decisions continuously, which is exactly the judgment a senior role is hiring for. The
+anti-pattern is fabricating regret for decisions that were obviously right (don't "reconsider"
+pgvector — it was correct). The skill is distinguishing the decisions that genuinely could have
+gone another way from the ones that couldn't.
 
 ## The counterfactuals matrix
 
-The chapter's anchor: each reconsiderable decision, what you'd change,
-and — the column that keeps you honest — whether it's a genuine
-reconsideration or a deferral that was correct for the phase.
+This is the chapter's anchor: each reconsiderable decision, what you'd change, and — critically —
+whether the change is worth it. The last column is what keeps this honest.
 
 ```
-  counterfactuals — decision vs what you'd change
+  buffr — what you'd reconsider, and whether it's worth it
 
-  DECISION                  WOULD YOU CHANGE IT?       VERDICT
-  ────────────────────────  ─────────────────────────  ──────────────────
-  faithfulness eval         YES — wire it now, not     genuine
-  left unwired              later. cuts against the    reconsideration
-                            project's own thesis.       (do it sooner)
-
-  trace flush durability    YES — make it atomic or    genuine
-  (Promise.all, no retry)   retried. the trajectory     reconsideration
-                            is the portfolio artifact.  (real gap)
-
-  no timeouts / retries     YES — cheapest reliability  genuine
-  on model + DB calls       win, bites even at modest   reconsideration
-                            remote use.                 (pull forward)
-
-  app_id without RLS        NO — correctly deferred.    NOT a regret
-                            naming a trigger (2nd       (right for phase,
-                            writer), not a regret.       trigger named)
-
-  pgvector / local Gemma    NO — right for the goals.   NOT a regret
-                            would re-make both at this  (would re-decide
-                            scale.                       the same)
+  ┌─ DECISION ────────────┬─ WHAT YOU'D CHANGE ──────┬─ VERDICT ────────────┐
+  │ faithfulness eval     │ wire RubricJudge          │ DO IT FIRST — the    │
+  │ (precision@k only)    │ against the labeled set   │ measurement gap that │
+  │                       │                           │ matters most         │
+  ├───────────────────────┼───────────────────────────┼──────────────────────┤
+  │ emulated tool call    │ add arg-schema validation │ DO IT — closes the   │
+  │ (no arg validation)   │ on the parsed JSON call   │ silent-failure hole; │
+  │                       │ (aptkit-side)             │ but it's aptkit's    │
+  ├───────────────────────┼───────────────────────────┼──────────────────────┤
+  │ two-transaction index │ one transaction for doc + │ DO IT — cheap, same  │
+  │ write (non-atomic)    │ chunks                    │ DB, removes an       │
+  │                       │                           │ orphan-on-crash hole │
+  ├───────────────────────┼───────────────────────────┼──────────────────────┤
+  │ no streaming          │ stream tokens to the TUI  │ MAYBE — better UX,   │
+  │ (await full answer)   │                           │ but loses the clean  │
+  │                       │                           │ no-partial-state win │
+  ├───────────────────────┼───────────────────────────┼──────────────────────┤
+  │ pgvector colocated    │ — nothing —               │ DON'T — was correct; │
+  │                       │                           │ faking regret here   │
+  │                       │                           │ would be a tell      │
+  ├───────────────────────┼───────────────────────────┼──────────────────────┤
+  │ build aptkit          │ — nothing, for THIS goal —│ DON'T — right for a  │
+  │                       │                           │ portfolio/learning   │
+  │                       │                           │ project; buy on a    │
+  │                       │                           │ team                 │
+  └───────────────────────┴───────────────────────────┴──────────────────────┘
 ```
 
-The first three are genuine. The last two are *not* — and saying so,
-when asked, is itself the senior move. Walk them.
+The bottom two rows are as important as the top three. Knowing which decisions you would NOT
+change — and being able to say why faking a regret there would be dishonest — is part of the
+signal.
 
----
-
-### Counterfactual 1 — wire the faithfulness eval sooner
+## "What would you do differently if you started today?"
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │ THEY ASK                                                        │
-│   "If you were starting this over today, what would you do      │
+│   "If you were starting this over, what would you do             │
 │    differently?"                                                │
 │                                                                 │
-│ WHAT THEY'RE TESTING                                           │
-│   Do you have a genuine, prioritized list of reconsiderations  │
-│   — or do you either claim "nothing, it's great" (no           │
-│   reflection) or list everything (no judgment)? They want the  │
-│   ONE you'd change first and why.                               │
+│ WHAT THEY'RE TESTING                                            │
+│   Can you evaluate your own work critically without trashing    │
+│   it? They want a SPECIFIC reconsideration with a real cost,    │
+│   not "I'd write more tests" (generic) and not "nothing, it     │
+│   was perfect" (no self-awareness). The best answer is          │
+│   volunteered, ordered by leverage.                            │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-The strong answer:
+> "Three things, in order of leverage. First and most important: I'd wire the faithfulness eval
+> before I added a single new feature. Right now I measure retrieval — precision@k and recall@k —
+> but not whether the answer is actually grounded in what was retrieved. aptkit has a `RubricJudge`
+> for exactly this and it's unwired in buffr. That's the gap I'd close first, because everything
+> else I'd build is unmeasurable for faithfulness until it's in.
+>
+> Second, I'd add argument-schema validation to the emulated tool-call path. Today a wrong key from
+> the model produces an empty query and silent garbage retrieval, with no error. That's the worst
+> failure in the system and it's invisible. The fix lives in aptkit, but I'd prioritize it.
+>
+> Third, smaller: the index write spans two transactions, so a crash between the document write and
+> the chunk write orphans a document. Both writes hit the same Postgres — I'd wrap them in one
+> transaction. Cheap fix, removes a real consistency hole.
+>
+> What I would *not* change: pgvector colocated in Postgres, and building aptkit. Those were the
+> right calls for this project, and I'd be making up a regret if I pretended otherwise."
 
-> "The first thing I'd change: I'd wire the faithfulness eval before I
-> built any user-facing feature. The whole argument of this project is
-> 'measure, don't vibe-check' — and I shipped the retrieval eval but left
-> the generation side unmeasured. So I have a project whose thesis is
-> rigorous measurement, with half the quality signal missing. If I were
-> sequencing it again, the `RubricJudge` — grading answers against their
-> retrieved chunks — would come before memory, before profile injection,
-> before any feature, because an unmeasured generation path undercuts the
-> reason the project exists. It's not that the features are wrong; it's
-> that I built outward when I should have built the measurement spine
-> first."
-
-This is the strongest counterfactual to lead with because it's a
-*prioritization* regret, not an implementation one — you'd reorder the
-work, not undo it. And it cuts against your own thesis, which makes it
-credible: you're not picking a safe regret.
+That last paragraph is the senior move. Volunteering the boundary of your regret — "these I'd keep"
+— proves the reconsiderations above are reasoned, not reflexive self-flagellation.
 
 ```
-  ┃ The strongest counterfactual reorders the work, it doesn't
-  ┃ undo it. "I built outward before I built the measurement
-  ┃ spine" is a judgment regret, not a mistake.
+┌─────────────────────────┬─────────────────────────┐
+│ WEAK ANSWER             │ STRONG ANSWER           │
+├─────────────────────────┼─────────────────────────┤
+│ "I'd probably write     │ "I'd wire the           │
+│ more tests and clean    │ faithfulness eval        │
+│ up the code a bit.      │ first — I measure        │
+│ Maybe use a different   │ retrieval but not        │
+│ database."              │ grounding. Then add      │
+│                         │ arg-schema validation    │
+│                         │ to the tool-call path.   │
+│                         │ Then make the index      │
+│                         │ write atomic. I would    │
+│                         │ NOT change pgvector or   │
+│                         │ building aptkit — those  │
+│                         │ were right."             │
+├─────────────────────────┼─────────────────────────┤
+│ Why it's weak:          │ Why it works:           │
+│ "More tests" is the     │ Specific, ordered by    │
+│ generic non-answer.     │ leverage, each with a   │
+│ "Maybe a different      │ real cost, AND it       │
+│ database" with no       │ names what it would     │
+│ reason invents a regret │ NOT change — proving    │
+│ for a decision that was │ the regrets are         │
+│ correct. Both signal no │ reasoned, not           │
+│ real reflection.        │ reflexive.              │
+└─────────────────────────┴─────────────────────────┘
 ```
 
----
+> ┃ The senior-engineer move is to volunteer what you'd
+> ┃ reconsider before being asked — and to name what you'd keep.
 
-### Counterfactual 2 — make the trajectory capture durable
+```
+"What would you do differently?"
+      │
+      ▼
+You give the three-reconsiderations-and-two-keeps answer.
+      │
+      ├─► IF THEY ASK "why didn't you do the faithfulness eval already?"
+      │     "Sequencing. Retrieval eval is unambiguous — did the right
+      │      chunk come back? Faithfulness needs a judge I have to
+      │      validate against human labels first. I built the
+      │      measurable half and deferred the half that needs more
+      │      scaffolding. Reasonable order, but it left a gap."
+      │
+      ├─► IF THEY PROBE A 'KEEP' ("sure pgvector was right?")
+      │     "At my scale, yes. The day the vector count dwarfs the
+      │      relational data, I'd revisit. That day hasn't come, so
+      │      changing it now would be solving a problem I don't have."
+      │
+      └─► IF THEY ASK "what about the bigger architecture?"
+            "The deferred two-brain split — laptop + phone. I'd design
+             the phone brain's auth and RLS boundary up front rather
+             than retrofit it. The app_id column is already shaped for
+             it; I just haven't built the enforcement." (ch 8 / scale)
+```
+
+## "Would you change the architecture itself?"
+
+The deeper counterfactual is structural, and it ties to the deferred roadmap.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │ THEY ASK                                                        │
-│   "Anything in the implementation you'd build differently?"    │
+│   "Is there a structural decision you'd revisit, not just a     │
+│    feature?"                                                    │
 │                                                                 │
-│ WHAT THEY'RE TESTING                                           │
-│   Can you find a real implementation weakness in your OWN       │
-│   code, and is the weakness one that actually matters — or do  │
-│   you pick a cosmetic one to look self-aware without exposing  │
-│   anything real?                                                │
+│ WHAT THEY'RE TESTING                                            │
+│   Can you reconsider at the architecture level, not just the    │
+│   bug level? And do you know which structural choices were      │
+│   deferred deliberately versus made wrong?                     │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-The strong answer:
+> "The honest one is the security boundary for the deferred phone brain. buffr ships with `app_id`
+> on every table — it *looks* like multi-tenant isolation, but it's shape-only: the value comes from
+> an environment variable, not from an authenticated identity, and there's no row-level security
+> enforcing it. At single-operator scale that's correct — the OS user account is the auth boundary,
+> there's no second tenant to isolate. But the moment the phone brain appears as a second device,
+> that column has to become a real security boundary: `app_id` and `user_id` derived from a token,
+> enforced by RLS.
+>
+> What I'd do differently is design that enforcement up front instead of leaving it as shape. Not
+> *build* it early — that'd be premature for a single-device tool — but at least decide the auth
+> model before the second device exists, so I'm not retrofitting RLS onto a schema that grew
+> assuming one tenant. The column being there already is the right instinct; the enforcement plan
+> being absent is the gap."
 
-> "The trajectory capture's durability. Right now the trace sink queues
-> the per-turn events and awaits them all in one `Promise.all` at flush
-> time. If any one of those inserts fails, that turn's trajectory is
-> partially captured and there's no retry — I get a hole. For most apps
-> that'd be a minor logging gap, but here it's pointed: the trajectory IS
-> the portfolio artifact, the whole 'capture everything now so fine-tuning
-> is answerable later' bet. A silently-partial trajectory corrupts the
-> exact dataset the project is built to produce. So I'd make the flush
-> durable — either write the trace events inside the same transaction as
-> the answer so they're atomic with it, or add a bounded retry on the
-> queued inserts. It's the implementation gap where the failure mode
-> directly undercuts the project's own goal, which is why it's the one I'd
-> fix."
+This is a strong structural counterfactual because it's *not* a regret about something broken —
+it's a deferred decision you'd sequence differently. That distinction is itself the senior signal.
 
-This works because the weakness you picked is *real and consequential*
-(`src/supabase-trace-sink.ts:91`), not cosmetic — and you tie it
-specifically to why it matters more here than elsewhere (the trajectory
-is the product of the project). That tie is what proves you understand
-your own system's stakes.
-
-#### Weak vs strong — the implementation counterfactual
+## When they push past your depth
 
 ```
-┌─────────────────────────────┬─────────────────────────────┐
-│ WEAK ANSWER                 │ STRONG ANSWER               │
-├─────────────────────────────┼─────────────────────────────┤
-│ "I'd probably refactor some │ "The trace flush. It's a    │
-│ of the code to be cleaner   │ Promise.all over queued      │
-│ and add more tests and      │ inserts with no retry, so   │
-│ better error messages."     │ one failed insert leaves a  │
-│                             │ partial trajectory. That     │
-│                             │ matters HERE because the     │
-│                             │ trajectory is the portfolio │
-│                             │ artifact — a partial one     │
-│                             │ corrupts the dataset the     │
-│                             │ project exists to build.     │
-│                             │ I'd make it atomic or         │
-│                             │ retried."                    │
-├─────────────────────────────┼─────────────────────────────┤
-│ Why it's weak:              │ Why it works:               │
-│ "Cleaner code, more tests"  │ A specific mechanism         │
-│ is the universal non-answer.│ (Promise.all, no retry), a   │
-│ It applies to every         │ specific consequence         │
-│ codebase ever written and   │ (partial trajectory), and a │
-│ reveals nothing. It's       │ specific reason it matters   │
-│ self-awareness theater.     │ MORE here than elsewhere.    │
-│                             │ Concrete and consequential.  │
-└─────────────────────────────┴─────────────────────────────┘
+╔═══════════════════════════════════════════════════════════╗
+║ WHEN YOU DON'T KNOW                                       ║
+║                                                           ║
+║   They push the RLS thread: "Walk me through the RLS      ║
+║   policies you'd write. How do you stop a tenant from     ║
+║   forging the app_id? How does the policy interact with   ║
+║   the connection pool and the role the app connects as?"  ║
+║                                                           ║
+║   You understand RLS conceptually and the app_id/user_id  ║
+║   shape. You have NOT written and operated RLS policies    ║
+║   with pooled connections and role separation in           ║
+║   production. This is past your built experience.          ║
+║                                                           ║
+║   Say:                                                    ║
+║   "I know the shape: RLS policies keyed on app_id and     ║
+║    user_id, with the tenant identity set from a verified  ║
+║    token — not a value the client supplies — so the       ║
+║    database enforces the filter instead of trusting the   ║
+║    app to ask only for its own rows. The interaction with ║
+║    a pool and the connecting role is exactly the part I'd  ║
+║    have to get right carefully and haven't operated —      ║
+║    setting the tenant context per-checkout so a pooled    ║
+║    connection doesn't leak one tenant's context into the  ║
+║    next request. I understand WHY that's the hard part; I  ║
+║    haven't shipped it, so I'd want to build it against     ║
+║    real tests rather than claim I've run it."             ║
+║                                                           ║
+║   What this signals: you understand the trust model and    ║
+║   the specific hard part (per-checkout context on a pool), ║
+║   and you draw the line at production operation honestly.  ║
+║                                                           ║
+║   Do NOT say:                                             ║
+║   "RLS just handles it automatically once you turn it on." ║
+║   — that ignores the pool-context leak the question is     ║
+║   specifically probing and signals you've only read about  ║
+║   RLS, never wired it.                                     ║
+╚═══════════════════════════════════════════════════════════╝
 ```
 
----
+## What you'd change about how you reconsider
 
-### Counterfactual 3 — the decisions you would NOT change
+The meta-reconsideration: early on you'd have answered "what would you do differently?" by listing
+everything imperfect, which reads as low confidence. The stronger discipline you'd apply now is to
+*rank by leverage and name the keeps* — three real reconsiderations ordered by impact, plus the
+decisions you'd defend unchanged. A flat list of regrets undersells the work; a ranked list with
+explicit keeps shows judgment.
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│ THEY ASK                                                        │
-│   "Would you have used a managed vector DB instead of           │
-│    pgvector? Or a cloud model instead of local?"                │
-│                                                                 │
-│ WHAT THEY'RE TESTING                                           │
-│   Will you cave and "reconsider" a decision that was actually   │
-│   correct, just because they nudged? Conviction under a leading │
-│   question is a signal. So is knowing the difference between a  │
-│   real regret and a nudge.                                      │
-└─────────────────────────────────────────────────────────────────┘
-```
+## One-page summary
 
-This is the trap, and the senior move is to *hold ground gracefully*:
+**Core claim:** Volunteer your reconsiderations before being asked, ranked by leverage, each with
+a real cost — and name the decisions you would NOT change, because faking regret for a correct
+decision is a tell. The skill is distinguishing genuinely-reconsiderable choices from obviously-
+right ones.
 
-> "Honestly, no — I'd make both of those calls the same way at this
-> scale. pgvector was right because colocating vector and relational data
-> in one Postgres gave me single-transaction consistency and no second
-> system to sync, and at a few thousand chunks a managed vector DB buys
-> me nothing for the network hop and the bill. Local Gemma was right for
-> a privacy-first personal agent I wanted to own end-to-end. I'm happy to
-> name the cost of each — pgvector's HNSW defaults degrade past ~10k
-> chunks, Gemma is the reliability ceiling — but the costs were the right
-> trades for the goals. I'd only revisit pgvector at a scale I don't have,
-> and I'd only revisit local models if reliability became the product
-> instead of privacy. So those aren't on my counterfactual list; the eval
-> wiring and the trace durability are."
-
-That's the answer that demonstrates conviction. You acknowledged the
-cost of each decision (so you're not blindly defensive), but you held
-that the decision was right for the phase, and you redirected to your
-*real* counterfactuals. Caving to a leading question — "well, maybe
-Pinecone would've been better" — when the decision was sound reads as
-having no spine on your own choices.
-
-```
-  ┃ Holding ground on a right decision under a leading
-  ┃ question is as much a signal as volunteering a real
-  ┃ regret. Don't manufacture a counterfactual to seem humble.
-```
-
-#### The follow-up tree
-
-```
-  They nudge: "Are you sure pgvector was the right call?"
-        │
-        ├─► IF THEY PRESS ON SCALE
-        │     → "At MY scale, yes. Past ~10k chunks I'd tune the HNSW
-        │       index first, and only consider a switch if tuning ran
-        │       out — but I'm nowhere near that, so it's not a regret,
-        │       it's a watch item."
-        │
-        ├─► IF THEY PRESS ON FEATURES (hybrid search, reranking)
-        │     → "Fair — pgvector is dense-only here, so it misses
-        │       exact-term queries. Hybrid retrieval (BM25 + dense) is
-        │       a real future add. But that's a feature gap, not a
-        │       wrong-database call — I'd add hybrid IN Postgres."
-        │
-        └─► IF THEY ACCEPT AND MOVE ON
-              → Good. You held a sound decision and named its real
-                cost. Redirect to the eval-wiring counterfactual,
-                which is the one you actually want on the table.
-```
-
----
-
-### Where you'll get pushed past your depth
-
-```
-╔═══════════════════════════════════════════════════════════════╗
-║ WHEN YOU DON'T KNOW                                          ║
-║                                                              ║
-║   The counterfactual push that can corner you: "If you were  ║
-║   redesigning for the multi-device future — laptop AND       ║
-║   phone sharing memory — how would you architect the sync?"  ║
-║   That's the deferred two-brain problem, and it's            ║
-║   distributed state reconciliation, which you haven't built. ║
-║                                                              ║
-║   Say:                                                       ║
-║   "That's the deferred piece I'm most aware of and least     ║
-║    experienced with. The shape is clear — two brains         ║
-║    sharing one memory plane becomes a sync-and-merge         ║
-║    problem, the same canonical-local-with-cloud-mirror       ║
-║    pattern I used in another project. What I HAVEN'T solved   ║
-║    is the conflict resolution: two devices writing memory    ║
-║    independently, then reconciling. That's real distributed  ║
-║    state, and I'd be designing it for the first time. I made ║
-║    it the SECOND thing to solve deliberately, not the first  ║
-║    — but I won't pretend I've designed the merge. The thing  ║
-║    I CAN defend is that the VectorStore contract means each  ║
-║    brain injects its own store with zero library change."     ║
-║                                                              ║
-║   What this signals: you know the shape and the deferral was ║
-║   deliberate, you can name the unsolved hard part (conflict  ║
-║   resolution) precisely, and you anchor to what DOES hold     ║
-║   (the contract). You're honest about designing it for the   ║
-║   first time.                                                ║
-║                                                              ║
-║   Do NOT say:                                                ║
-║   "I'd use CRDTs and a last-write-wins clock and..." — name  ║
-║   -dropping conflict-resolution primitives you haven't       ║
-║   implemented. One "why a CRDT over an op-log?" and you're   ║
-║   exposed.                                                   ║
-╚═══════════════════════════════════════════════════════════════╝
-```
-
----
-
-### What you'd change about how you present counterfactuals
-
-The thing I'd refine in my own counterfactual delivery is leading with
-them *unprompted*. The senior move is to volunteer "here are the two
-things I'd change" near the end of the architecture walk, before anyone
-asks — but my instinct is still to wait for the question. Pulling the
-counterfactual forward, into the pitch even, would make the
-self-evaluation read as a habit rather than a response. That's a
-delivery change, not a content one — the counterfactuals themselves are
-the right two.
-
----
-
-## One-page summary — Chapter 7
-
-**Core claim:** Volunteer what you'd reconsider before being asked — but
-only what's genuinely reconsiderable. Fabricating a regret for a correct
-decision reads as insecurity.
-
-**The counterfactuals:**
-
-- **Wire faithfulness eval sooner** — genuine; a prioritization regret
-  (build the measurement spine before features), cuts against the
-  project thesis.
-- **Make trajectory capture durable** — genuine; `Promise.all` over
-  queued inserts → partial trajectory, and the trajectory is the
-  portfolio artifact.
-- **pgvector / local Gemma** — NOT regrets; right for the phase, hold
-  ground under the leading question, redirect to the real two.
+**Questions covered:**
+- *"What would you do differently?"* → (1) wire the faithfulness eval first, (2) add arg-schema
+  validation to the tool-call path, (3) make the index write atomic; would NOT change pgvector or
+  building aptkit.
+- *"Why not done already?"* → sequencing: built the measurable half (retrieval), deferred the half
+  needing a validated judge (faithfulness).
+- *"A structural decision you'd revisit?"* → design the phone-brain auth/RLS boundary up front
+  rather than retrofit onto a shape-only `app_id`.
+- *"Walk me through the RLS policies?"* → name the trust model and the per-checkout-context-on-a-
+  pool hard part; admit you haven't operated it.
 
 **Pull quotes:**
+- "The senior-engineer move is to volunteer what you'd reconsider before being asked — and to name
+  what you'd keep."
+- "Faking regret for a decision that was correct is a tell. Naming the keeps is part of the signal."
 
-```
-  ┃ The strongest counterfactual reorders the work, it doesn't
-  ┃ undo it.
-
-  ┃ Holding ground on a right decision under a leading question
-  ┃ is as much a signal as volunteering a real regret.
-```
-
-**The "I don't know":** Multi-device memory sync — name the shape
-(canonical-local + mirror), name the unsolved part (conflict
-resolution), anchor to the `VectorStore` contract that survives.
-Never name-drop CRDTs you haven't built.
-
-**What you'd change:** Lead with the counterfactuals unprompted — make
-self-evaluation a habit in the delivery, not just a response.
+**What you'd change:** Rank reconsiderations by leverage and name the keeps explicitly — a flat
+list of regrets undersells the work; a ranked list with defended keeps shows judgment.

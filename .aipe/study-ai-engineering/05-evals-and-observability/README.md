@@ -1,38 +1,52 @@
-# 05 — Evals and Observability (LLM side)
+# 05 · Evals and Observability
 
-**Anchor:** LLM application engineering. buffr measures retrieval offline and traces every run; it does not yet measure answer faithfulness.
+> How buffr knows whether retrieval is any good — and how it records what the agent actually did, run by run.
+
+Everything upstream of this folder *produces* behavior: the embedding picks chunks, the agent calls tools, the model writes an answer. This folder is where that behavior gets **measured** and **recorded**. The eval harness is the connective tissue — it's the one place that runs the whole pipeline against a fixed input set and turns "feels better" into a number. The trace sink is the other half: it captures, per request, the exact trajectory the agent took so you can read it back later.
+
+You already own the testing primitives — assertions, fixtures, CI gates. An eval *is* a test whose oracle is fuzzy: the assertion isn't `===`, it's a score against a labeled set. This sub-section teaches the eval-specific parts on top of what you know, and is brutally honest about the two things buffr records but does **not** yet judge.
 
 ```
-  what buffr measures vs what it doesn't
+05-evals-and-observability/
+│
+│  WHAT TO MEASURE ──► HOW TO MEASURE ──► JUDGE BIAS ──► WHAT TO RECORD
+│
+├── 01-eval-set-types.md      ★ golden set (eval/queries.json, 3 items)
+│                               ◇ no adversarial set, no regression set (Case B)
+│
+├── 02-eval-methods.md        ★ EXACT-MATCH on docIds: precision@k / recall@k
+│                               ◇ no rubric / no judge method wired (Case B → 03)
+│
+├── 03-llm-as-judge-bias.md   ◇ THE UNWIRED RubricJudge — exists in aptkit,
+│                               buffr never calls it → FAITHFULNESS unmeasured (Case B)
+│
+└── 04-llm-observability.md   ★ SupabaseTraceSink: all 6 events → agents.messages
+                                ◇ replay-runner exists, unwired; no dashboard (Case B)
 
-  ┌─ MEASURED (wired) ──────────────────────────────────────────┐
-  │  precision@k / recall@k over eval/queries.json              │
-  │   → src/cli/eval-cmd.ts (npm run eval)                       │
-  │  full-signal trajectory trace → agents.messages             │
-  │   → src/supabase-trace-sink.ts (all 6 CapabilityEvent types) │
-  │  per-call token usage → messages.tokens_used                │
-  └─────────────────────────────────────────────────────────────┘
-  ┌─ NOT MEASURED (the gap) ────────────────────────────────────┐
-  │  FAITHFULNESS — did the answer use the retrieved chunks?     │
-  │   RubricJudge exists in aptkit, wired into NOTHING here.     │
-  │   A hallucinated answer over perfect chunks scores 1.0.      │
-  └─────────────────────────────────────────────────────────────┘
+  ★ = implemented in buffr (Case A)   ◇ = named gap, primary build target (Case B)
 ```
 
 ## Reading order
 
-1. `02-eval-methods.md` — precision@k/recall@k (wired) and the faithfulness gap (unwired RubricJudge). **The core file.**
-2. `04-llm-observability.md` — the full trajectory trace, the 6 event types, token persistence. **buffr-specific.**
-3. `01-eval-set-types.md` — golden (the 3-row set), adversarial, regression — mostly study + Case B.
-4. `03-llm-as-judge-bias.md` — position/verbosity/self-preference bias, relevant the moment RubricJudge is wired.
+Read in number order. They go: what you measure against, how you measure it, why the fancier "how" lies to you, and how you record what happened.
 
-## Exercised vs not
+1. **`01-eval-set-types.md`** — the three kinds of eval set (golden, adversarial, regression). buffr has exactly one: the **golden set** (`eval/queries.json`, 3 hand-labeled queries). Small, high-signal, honest — and the only one. The adversarial and regression sets are named gaps you build.
+2. **`02-eval-methods.md`** — the method ladder from exact-match up through human eval. buffr sits on the bottom rung and stays there *on purpose*: **exact-match on docIds** via `scorePrecisionAtK` / `scoreRecallAtK`, driven by `src/cli/eval-cmd.ts`. This rung measures **retrieval**, not the answer.
+3. **`03-llm-as-judge-bias.md`** — the rung buffr skipped, and why it's load-bearing. The **LLM-as-judge** (the unwired `RubricJudge`) exists in aptkit and is never constructed in buffr, so buffr **does not measure faithfulness** — whether the answer stays grounded in the retrieved chunks. This is the headline gap. Read it with the judge's known biases (position, verbosity, self-preference) in hand, because the fix is the exercise.
+4. **`04-llm-observability.md`** — what buffr *does* record well. The **trace sink** (`SupabaseTraceSink`) persists all six event types into `agents.messages`: traces (per request) and spans (tool calls, `durationMs`, tokens). The replay runner exists in aptkit but is unwired; there's no dashboard, no dollar cost.
 
-**Exercised:** offline retrieval eval (P@1, R@3), full-signal trajectory observability, token usage capture.
+## Phase 3 anchor
 
-**Not yet exercised:** faithfulness / LLM-as-judge eval (RubricJudge unwired), adversarial + regression eval sets, judge-bias mitigation (no judge running), replay (traces are captured but no replay harness in buffr). Each file is honest about the gap.
+The driving exercises for this sub-section are **Phase 3 — measure and observe** ([B3.x], cite [C3.1]–[C3.12]). The work splits cleanly along the ★/◇ line:
 
-## See also
+> **Strengthen what's measured** ([B3.1]–[B3.5]) — grow the golden set past 3 items, add a per-query failure view, and add a tokens/latency summary query over the traces buffr already captures.
 
-- `.aipe/study-testing/` — the eval seam, `node:test`, DB-gated tests, RubricJudge as the missing faithfulness test.
-- `../04-agents-and-tool-use/02-tool-calling.md` — the silent failure the current evals don't catch.
+> **Close the named gaps** ([B3.6]–[B3.12]) — add an **adversarial set** (prompt-injection queries that must refuse), freeze production failures into a **regression set**, **wire the `RubricJudge`** into a faithfulness eval over `eval/queries.json`, and wire the **replay runner** so a recorded trajectory can be re-run and re-asserted.
+
+**The honest state, stated plainly:** buffr *measures retrieval* (precision@k / recall@k over a 3-item golden set) and *records trajectories* (all six events, with durations and tokens, in a local table). buffr does **not** measure generation faithfulness — the `RubricJudge` is built in aptkit and never wired — and it does **not** replay or visualize what it records. Those aren't apologies; they're the clean seams Phase 3 fills.
+
+## Cross-links
+
+- **`../03-retrieval-and-rag/`** — what the golden set measures. `11-rag.md` is the pipeline `eval-cmd.ts` runs; `02-embedding-model-choice.md` is why a docId-level golden set is the right granularity. The faithfulness gap named here is the same one flagged in `03`'s [B2A.8].
+- **`../06-production-serving/`** — the trace sink's tokens/latency data is the raw material for cost tracking and rate limiting; observability is the precondition for serving anything you can't see.
+- **`study-testing/`** — the eval seam in detail: `node:test`, fixtures, the `DATABASE_URL`-gated suite. An eval is a test with a fuzzy oracle; that sub-section covers the harness, this one covers the oracle.

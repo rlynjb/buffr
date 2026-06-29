@@ -1,81 +1,97 @@
-# Study — Runtime Systems · buffr-laptop
+# Study — Runtime Systems · Overview
 
-The execution model *inside* one machine: where work runs, what resources it holds, and what breaks under concurrency or overload. Not "where the services live" (that's `study-system-design`) and not "how we verify behavior deterministically" (that's `study-testing`). This guide is the question:
+> The execution model inside `buffr-laptop`: where work runs, what resources it owns, and what breaks under concurrency or overload — grounded in the real files.
+
+This is a **curriculum-style** guide. The eight concept files below teach the runtime fundamentals (event loop, tasks, synchronization, memory, resource lifecycle, bounded work) and anchor each to where the repo does — or pointedly does *not* — exercise it. Where the repo hasn't built a mechanism yet, you'll see `not yet exercised`, said plainly, with the trigger that would make it relevant.
+
+---
+
+## The repo in one runtime picture
+
+The whole system is a **single-threaded Node.js process** (NodeNext ESM) driving an **event loop**, holding one **connection pool (`pgPool`)** open to Postgres, and talking to Ollama over HTTP. There are two process *shapes* sharing this code: one **long-lived interactive process (the chat session)** and three **one-shot batch CLIs (migrate / index / eval)**.
 
 ```
-  where does work execute, what does it own, and what breaks under load?
+  buffr-laptop — the runtime map, one frame
+
+  ┌─ Process layer (one OS process, one V8 thread) ───────────────────┐
+  │                                                                   │
+  │   the event loop (libuv)                                          │
+  │   ┌──────────────────────────────────────────────────────────┐   │
+  │   │  microtask queue (Promise .then / await continuations)    │   │
+  │   │  macrotask queues (timers, I/O callbacks, check)          │   │
+  │   └──────────────────────────────────────────────────────────┘   │
+  │                                                                   │
+  │   shape A: chat (long-lived)        shape B: migrate/index/eval   │
+  │   ┌───────────────────────────┐     ┌──────────────────────────┐  │
+  │   │ Ink render loop (React)   │     │ top-level await script   │  │
+  │   │ raw-mode TTY stdin        │     │ run → pool.end() → exit  │  │
+  │   │ warm pool across turns    │     │ pool opened per process  │  │
+  │   └───────────────────────────┘     └──────────────────────────┘  │
+  └──────────────────────────────┬────────────────────────────────────┘
+                                 │ async I/O (non-blocking sockets)
+            ┌────────────────────┼─────────────────────┐
+            ▼                                          ▼
+  ┌─ Storage (Postgres) ──────┐          ┌─ Provider (Ollama, HTTP) ──┐
+  │ connection pool (`pgPool`)│          │ gemma2:9b · nomic-embed    │
+  │ pgvector / agents schema  │          │ (fetch over event loop)    │
+  └───────────────────────────┘          └────────────────────────────┘
 ```
 
-## The repo in one frame
+Every box here is a real file. The pool is `createPool` (`src/db.ts:4`). The chat process is `src/cli/chat.tsx` + `src/session.ts`. The batch CLIs end with `await pool.end()` (`src/migrate.ts:30`, `src/cli/index-cmd.ts:27`, `src/cli/eval-cmd.ts:34`).
 
-buffr-laptop is a single Node process, single-threaded event loop, talking to two out-of-process resources over sockets: Postgres (via a `pg.Pool`) and Ollama (over HTTP). There are two *shapes* of process here, and the whole runtime story splits along that seam.
+---
 
-```
-  buffr-laptop — one runtime, two process shapes
+## Top findings — ranked by consequence
 
-  ┌─ LONG-LIVED ────────────────────────────────┐   ┌─ ONE-SHOT BATCH ──────────────────┐
-  │  npm run chat                                │   │  npm run migrate / index / eval   │
-  │                                              │   │                                   │
-  │  Ink render loop (React-in-terminal)         │   │  top-level await, linear:         │
-  │  raw-mode TTY stdin held open                │   │   load env → open pool → do work  │
-  │  ONE pg Pool warm across every turn          │   │   → pool.end() → process exits    │
-  │  ONE conversation, agent built once          │   │                                   │
-  │  process stays up until /exit                │   │  lifetime = one batch             │
-  └──────────────────────┬───────────────────────┘   └──────────────────┬────────────────┘
-                         │  both sit on the same event loop                │
-                         ▼                                                  ▼
-  ┌─ shared runtime: Node event loop (single thread) ──────────────────────────────────┐
-  │  pg.Pool ──socket──► Postgres (reindb)        fetch ──socket──► Ollama (gemma2:9b)  │
-  └─────────────────────────────────────────────────────────────────────────────────────┘
-```
+**1. The two process shapes have different lifetime contracts, and the repo gets the pool lifecycle right for both.** The chat session opens one pool and holds it across every turn (`src/session.ts:39`); `close()` is the only thing that ends it (`src/session.ts:72-74`), wired to `/exit` in the UI (`src/cli/chat.tsx:18-21`). The batch CLIs open a pool, do the work under top-level `await`, then `pool.end()` so the event loop drains and the process exits on its own. The single most load-bearing runtime fact in this repo is that **the chat pool's lifetime is tied to a user typing `/exit`, not to a signal** — see finding 3.
 
-Everything in this guide is a detail you can hang on that picture: the event loop is the engine, the pool is the resource that outlives a turn, and the chat process is the thing that holds it all open.
+**2. The trace sink is the one place the repo separates sync emission from async work.** `emit()` is synchronous because aptkit's `CapabilityTraceSink` contract demands it (`src/supabase-trace-sink.ts:53`); the actual DB writes are fire-and-collect into a `pending[]` array and awaited once via `flush()` after the agent run (`src/supabase-trace-sink.ts:50,91-93`). This is the repo's only hand-rolled async-queue pattern. → `03-event-loop-and-async-io.md`, `07-backpressure-bounded-work-and-cancellation.md`.
 
-## The ranked findings — what to look at first
+**3. There is no SIGINT handler and no graceful shutdown.** Ctrl-C on the chat process kills it without calling `session.close()`, so the warm pool is never drained — the OS reclaims the sockets, but there's no flush of in-flight trace writes and no clean Postgres disconnect. This is a deliberate single-device tradeoff, not a bug, but it's the first thing that changes if buffr ever runs unattended. → `07`.
 
-1. **The warm pool held across turns is the single most consequential runtime decision.** `createChatSession()` opens one `pg.Pool` and keeps it alive for the entire chat session; every `ask()` borrows a connection and returns it. The one-shot CLIs do the opposite — open, drain, `pool.end()`, exit. Same `createPool()` factory (`src/db.ts:4`), opposite lifecycle. → `01-runtime-map.md`, `06-filesystem-streams-and-resource-lifecycle.md`.
+**4. Cancellation and deadlines are entirely absent.** No `AbortSignal`, no query timeout, no per-turn deadline. A wedged Ollama call or a slow Postgres query hangs the turn forever; the `busy` flag in the UI (`src/cli/chat.tsx:13,16`) just blocks new input while it hangs. `not yet exercised` — and the honest one to flag in an interview. → `07`.
 
-2. **The trace sink's sync-emit / async-flush split is the cleanest concurrency pattern in the repo.** `emit()` is synchronous (aptkit's contract forces it), so each event *starts* a DB write and pushes the promise into a `pending[]` array; `flush()` awaits them all after the run (`src/supabase-trace-sink.ts:53-93`). That's a fan-out of unbounded concurrent inserts with a single join point. → `03-event-loop-and-async-io.md`, `07-backpressure-bounded-work-and-cancellation.md`.
+**5. Shared mutable state is real but single-threaded-safe.** React state in the Ink component (`turns`, `busy` — `src/cli/chat.tsx:11-13`) and the `pending[]` array in the sink are mutated across `await` points, but because Node runs one callback to completion before the next, there are no data races. The one genuine concurrency hazard — `await` interleaving on the `busy` guard — is closed by the synchronous `if (busy) return` check at the top of `onSubmit`. → `04`.
 
-3. **There is no cancellation anywhere.** No `AbortSignal`, no timeouts, no SIGINT handler. A turn that hangs on Ollama hangs the whole chat with no way out but Ctrl-C killing the process — and that kill skips `pool.end()`. This is *not yet exercised*, and the guide says so plainly rather than inventing a shutdown path. → `07-backpressure-bounded-work-and-cancellation.md`.
-
-4. **The single-threaded event loop never blocks on CPU — every heavy operation is I/O.** Embedding, generation, and vector search all happen out-of-process (Ollama, Postgres). The Node thread is almost always idle, waiting on a socket. That's why one thread serves the whole app without a worker pool. → `02-processes-threads-and-tasks.md`, `03-event-loop-and-async-io.md`.
-
-5. **State ownership is clean because there's no shared mutable state across concurrent tasks.** The chat UI serializes turns with a `busy` flag (`src/cli/chat.tsx:18,27`); only one `ask()` runs at a time. The one place with genuine concurrency — the trace sink's parallel inserts — shares nothing but an append-only array. → `04-shared-state-races-and-synchronization.md`.
+---
 
 ## `not yet exercised` — named honestly
 
-- **Cancellation / deadlines / timeouts.** No `AbortSignal`, no `Promise.race` against a timer, no per-turn deadline. → `07`.
-- **Graceful shutdown / signal handling.** No `SIGINT`/`SIGTERM` handler; Ctrl-C kills the process without `pool.end()`. → `06`, `07`.
-- **Worker threads / child processes / clustering.** Single thread, single process. No `worker_threads`, no `cluster`. → `02`.
-- **Locks / atomics / shared-memory concurrency.** No `Atomics`, no `SharedArrayBuffer`, no mutex. Concurrency is task-level (promises), not thread-level. → `04`.
-- **Backpressure / bounded queues.** The trace sink's `pending[]` is unbounded; nothing caps in-flight inserts. → `07`.
-- **Explicit GC / memory tuning / streams.** No manual heap management, no Node `stream` plumbing, no `--max-old-space-size`. → `05`, `06`.
-- **Connection-pool tuning.** `pg.Pool` runs on library defaults (max 10); no `max`/`idleTimeoutMillis` set. → `06`.
+| Mechanism | Status | When it becomes relevant |
+|---|---|---|
+| Worker threads / `child_process` | not yet exercised | CPU-bound work off the main loop (embedding is offloaded to Ollama, so never local) |
+| `AbortSignal` / cancellation | not yet exercised | a turn needs a deadline or a cancel key |
+| Query / request timeouts | not yet exercised | Ollama or Postgres can wedge a turn |
+| SIGINT / SIGTERM handler | not yet exercised | unattended runs, or guaranteeing trace flush on exit |
+| Bounded concurrency / queue limits | not yet exercised | concurrent turns or batch indexing of large corpora |
+| Backpressure on streams | not yet exercised | streaming model output token-by-token to the TTY |
+| Explicit GC / heap tuning | not yet exercised | long sessions accumulating `turns[]` unboundedly |
+| Pool size limits / saturation handling | not yet exercised (defaults) | multiple concurrent agents on one pool |
+| File streaming (`createReadStream`) | not yet exercised | indexing files too large for `readFile` into memory |
+
+---
 
 ## Reading order
 
 ```
-  00-overview ······· you are here
-  01-runtime-map ···· the process/resource map as-built — read this next
-  02-processes ······ one thread, why it's enough, where work actually runs
-  03-event-loop ····· async/await, microtasks, the I/O that keeps the thread idle
-  04-shared-state ··· why there are almost no races here (and the one spot to watch)
-  05-memory ········· V8 heap, closures that outlive a turn, the embedding arrays
-  06-filesystem ····· the pool as a descriptor pool, TTY raw mode, cleanup
-  07-backpressure ··· bounded work, cancellation, shutdown — mostly the gaps
-  08-red-flags ······ ranked execution-model risks with evidence
+  00-overview            ← you are here
+  01-runtime-map         the process/task/resource map as-built
+  02-processes-threads   one V8 thread; two process shapes; no workers
+  03-event-loop          microtasks, await, the sync-emit/async-flush queue
+  04-shared-state        React state + pending[] across await; the busy guard
+  05-memory              heap, the unbounded turns[], V8 GC, closures
+  06-filesystem          readFile, the pool as a descriptor pool, cleanup
+  07-bounded-work        no cancellation, no timeout, no SIGINT — the honest gaps
+  08-red-flags-audit     ranked execution-model risks with evidence
 ```
 
-Each concept file is self-contained and follows the same shape: zoom out to the map, read the skeleton, walk the mechanism against real `file:line` code, then a primary recap diagram and interview defense.
+Start at `01` for the map, then read in order. `08` is the verdict file — ranked risks with `file:line` evidence for each.
 
-## Partition — what this guide does NOT cover
+---
 
-```
-  study-runtime-systems  ← HOW code executes inside this one Node process
-  study-system-design       WHERE buffr / Postgres / Ollama live, how requests cross
-  study-testing             HOW the node:test suite verifies behavior deterministically
-  study-database-systems    HOW Postgres stores/indexes/isolates underneath the pool
-```
+## Cross-links to neighboring guides
 
-When a finding is really about *the boundary* (buffr → Postgres → Ollama topology), it belongs to `study-system-design`; this guide cross-links rather than re-teaches.
+- **`study-system-design`** owns *where* components live and how requests cross the Postgres/Ollama boundaries. This guide owns *how* the code executes inside one machine. The pool-as-a-boundary belongs there; the pool-as-a-runtime-resource belongs here.
+- **`study-networking`** owns the transport mechanics of the pool (DNS, TCP, TLS, HTTP keep-alive to Ollama). This guide treats the pool as a *runtime resource with a lifecycle*, not as a network connection.
+- **`study-database-systems`** owns transactions, isolation, and pgvector internals. This guide owns the `BEGIN/COMMIT/ROLLBACK` only as *which client holds which connection for how long*.
+- **`study-testing`** owns how the `--test-concurrency=1` flag makes runtime behavior deterministic in tests.

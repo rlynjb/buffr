@@ -1,258 +1,287 @@
 # 01 — Vector Store Adapter
 
-**Industry name(s):** Adapter pattern / Ports-and-Adapters (Hexagonal) storage binding.
-**Type:** Industry standard.
+**Industry name(s):** Ports & Adapters / Hexagonal Architecture · the Adapter pattern · dependency inversion. **Type:** Industry standard.
 
-## Zoom out, then zoom in
+The standard role-vocabulary used below — *port* (the contract), *adapter* (an implementation
+of it), *client* (code depending on the port), *seam* (the swap boundary), *dependency
+inversion* (depending on the port, not the adapter) — is owned at the code altitude by
+`study-software-design` → PATTERN VOCABULARY. This file uses those terms and binds them to
+buffr's local names. The deep code-level treatment of the port lives there; here it's the
+*architectural* consequence — what swapping the adapter buys the system.
 
-Here's the whole system. The retrieval pipeline that the agent uses to find passages
-doesn't know what a database is. It knows one contract — `VectorStore` — and calls
-`upsert` and `search` on whatever you hand it. buffr's job is to hand it a box backed by
-Postgres pgvector.
+## Zoom out — where this concept lives
+
+The whole RAG side of buffr runs on one swap point. aptkit's retrieval pipeline depends on a
+**port** — the `VectorStore` contract — and never on any concrete store. buffr supplies the
+**adapter** (`PgVectorStore`) that fills it. That single seam is what lets the same agent run
+against an in-memory array in dev and Postgres+pgvector in production with **zero agent changes**.
 
 ```
-  Zoom out — where the adapter lives
+  Zoom out — the VectorStore seam in the system
 
-  ┌─ aptkit (library, never edited) ────────────────────────────────────┐
-  │  createRetrievalPipeline({ embedder, store }) ── speaks VectorStore  │
-  │  RagQueryAgent → search_knowledge_base tool → pipeline.query         │
-  └───────────────────────────────┬──────────────────────────────────────┘
-                                  │ store.search(vector, k)
-                                  │ store.upsert(chunks)
-  ┌─ buffr adapter layer ─────────▼──────────────────────────────────────┐
-  │  ★ PgVectorStore implements VectorStore ★   (src/pg-vector-store.ts) │ ← we are here
-  └───────────────────────────────┬──────────────────────────────────────┘
-                                  │ pg Pool · SQL
-  ┌─ Storage layer ───────────────▼──────────────────────────────────────┐
-  │  agents.chunks (embedding vector(768), HNSW vector_cosine_ops)        │
-  └───────────────────────────────────────────────────────────────────────┘
+  ┌─ Library layer (aptkit, never edited here) ──────────────────┐
+  │  createRetrievalPipeline ─ depends on the PORT, not a store   │
+  │  RagQueryAgent ─ asks the pipeline, never sees SQL            │
+  └───────────────────────────────┬──────────────────────────────┘
+                                  │  the PORT: VectorStore contract
+                                  │  upsert(chunks) · search(vec,k)
+  ┌─ Adapter layer (buffr owns) ──▼──────────────────────────────┐
+  │  ★ PgVectorStore implements VectorStore ★   ← we are here     │
+  │  src/pg-vector-store.ts                                       │
+  └───────────────────────────────┬──────────────────────────────┘
+                                  │  node-postgres (pg)
+  ┌─ Storage layer ───────────────▼──────────────────────────────┐
+  │  agents.chunks — embedding vector(768), HNSW cosine index     │
+  └───────────────────────────────────────────────────────────────┘
 ```
 
-Zoom in. The pattern is an **adapter**: one class implements an interface the caller
-already speaks, translating the caller's vocabulary (`upsert(chunks)`,
-`search(vector, k)`) into a foreign system's vocabulary (SQL over pgvector). The
-question it answers: *how do you swap the in-memory toy store for a durable Postgres
-store without touching a single line of the agent or pipeline?*
+Zoom in: the pattern is **ports & adapters**. The port is an interface aptkit owns; the adapter
+is a class buffr owns that satisfies it. The question it answers: *how do you change the
+database without touching the agent?* Answer — you don't depend on the database, you depend on
+the contract, and the database is a detail behind it.
 
-## Structure pass
+## Structure pass — layers, axis, seam
 
-**Layers:** caller (aptkit pipeline) → contract (`VectorStore`) → adapter
-(`PgVectorStore`) → driver (`pg`) → storage (pgvector).
+**Layers:** library (aptkit) → port (`VectorStore`) → adapter (`PgVectorStore`) → engine (pgvector).
 
-**Axis — who knows about Postgres?** Trace it down. The pipeline: *doesn't know.* The
-`VectorStore` contract: *doesn't know* — it's pure types. `PgVectorStore`: **this is the
-only layer that knows.** The `pg.Pool`: knows the wire protocol. pgvector: is Postgres.
-The axis-answer flips exactly once — at the adapter. That flip is why this is a clean
-seam: everything above it is database-agnostic, everything at-and-below is
-Postgres-specific.
+**Axis — trace *dependency direction* down the stack:**
 
-**Seam:** the `VectorStore` interface (`src/pg-vector-store.ts:2`, imported from aptkit).
-It's a horizontal seam — the lower layer (PgVectorStore) promises the upper layer
-(pipeline) exactly two methods with exact shapes. Get the shapes right and the agent
-can't tell it's talking to Postgres instead of an array.
+```
+  axis = "which way does the dependency arrow point?"
+
+  aptkit pipeline ──depends on──► VectorStore (port)   ◄──implements── PgVectorStore
+       (high-level policy)          (abstraction)            (low-level detail)
+
+  both sides point AT the port. neither points at the other.
+  → that's dependency inversion: the detail depends on the contract,
+    the policy depends on the contract, the contract depends on nothing.
+```
+
+**The seam, and why it's load-bearing:** the boundary is the `VectorStore` interface. An axis
+*flips* across it — above the seam, code knows nothing about SQL or pgvector; below it,
+`PgVectorStore` knows nothing about agents or retrieval ranking. Control, knowledge, and the
+SQL dialect all change side at that line. That's the test for a real seam (`format.md` structure
+pass): an axis-answer changes across it. Swap, mock, and test all happen here.
 
 ## How it works
 
 ### Move 1 — the mental model
 
-You've done this exact move in React: a component takes `props` of a known shape and
-doesn't care whether the parent computed them from a `fetch`, a context, or a literal.
-Same idea here — the pipeline takes a `store` of a known shape (`{ dimension, upsert,
-search }`) and doesn't care whether it's an array in memory or a Postgres table. The
-strategy: **conform to the contract exactly, hide everything else.**
+You already know this shape from frontend: a `<DataProvider>` exposes a `useData()` hook and the
+component never knows whether the data came from `fetch`, localStorage, or a mock. The component
+codes against the *hook's contract*; the source is swappable underneath. The `VectorStore` port
+is that hook's contract, one layer down in the stack.
+
+The plain-English strategy: **define the operations as an interface, depend on the interface, and
+make the database one implementation of it.**
 
 ```
-  the adapter shape — one class, two translated methods
+  The adapter pattern — one port, many possible adapters
 
-   caller speaks ──►  VectorStore contract  ──► PgVectorStore translates
-   ───────────────    ───────────────────       ──────────────────────
-   store.upsert(cs)   upsert(StoredChunk[])      → BEGIN; INSERT…ON CONFLICT×N; COMMIT
-   store.search(v,k)  search(vec,k):Hit[]        → SELECT … ORDER BY embedding <=> v LIMIT k
-   store.dimension    dimension: number          → 768 (must match embedder)
+                 ┌──────────────────────────┐
+   client  ────► │  VectorStore (the port)  │ ◄──── many adapters can fill it
+   (aptkit)      │  upsert(chunks)          │
+                 │  search(vector, k)       │
+                 │  dimension               │
+                 └──────────────────────────┘
+                        ▲            ▲
+        ┌───────────────┘            └───────────────┐
+   InMemoryVectorStore                          PgVectorStore
+   (aptkit, dev/test)                           (buffr, production)
+   array + cosine loop                          pgvector + HNSW + SQL
+
+   the client calls the SAME two methods; the adapter is swapped, not the call site
 ```
 
 ### Move 2 — the walkthrough
 
-**The dimension guard — what breaks without it.** Every vector that enters the store is
-length-checked against `this.dimension` *before* any SQL runs
-(`src/pg-vector-store.ts:32-36`). Drop this and a 1536-dim OpenAI vector would get
-written into a `vector(768)` column — Postgres would reject it with a cryptic error, or
-worse, a future embedder swap would silently corrupt the corpus. The guard makes the
-embedding-dimension one-way door a *loud* failure.
+**The contract buffr promises to honor.** The port is three things: a `dimension`, an `upsert`,
+and a `search`. buffr's class declares it implements the contract and nothing more
+(`pg-vector-store.ts:19-30`):
 
 ```ts
-// src/pg-vector-store.ts:32-36 — fail before the write, not during it
-private assertDim(v: number[]): void {
-  if (v.length !== this.dimension) {
-    throw new Error(`dimension mismatch: got ${v.length}, store is ${this.dimension}`);
-  }
+// src/pg-vector-store.ts:19
+export class PgVectorStore implements VectorStore {
+  readonly dimension: number;                 // the port requires this
+  private readonly pool: pg.Pool;             // the adapter's private detail
+  // ...
+  this.dimension = opts.dimension ?? 768;     // 768 = nomic-embed-text:v1.5
 }
 ```
 
-**The upsert — a transaction, not a loop of inserts.** All chunks are dim-checked first,
-then a single `begin` … `commit` wraps the whole batch
-(`src/pg-vector-store.ts:38-65`), with `rollback` on any error.
+The `implements VectorStore` is the load-bearing word. It's a compile-time promise: if aptkit's
+contract gains a method, this class fails to build until it's satisfied. The `pool` is `private`
+— the port exposes none of it, so no client can reach through the adapter to the database.
+
+**`upsert` — translate the contract's vocabulary into SQL.** The port speaks in `{id, vector,
+meta}`; pgvector speaks in rows and a vector literal. The adapter is the translator
+(`pg-vector-store.ts:38-65`):
 
 ```ts
-// src/pg-vector-store.ts:38-65 (condensed) — atomic batch with rollback
+// src/pg-vector-store.ts:38
 async upsert(chunks: Chunk[]): Promise<void> {
-  for (const c of chunks) this.assertDim(c.vector);   // guard all, then write
+  for (const c of chunks) this.assertDim(c.vector);   // guard the 768 one-way door first
   const client = await this.pool.connect();
   try {
-    await client.query('begin');
+    await client.query('begin');                      // all-or-nothing: no partial index
     for (const c of chunks) {
+      const docId = typeof c.meta.docId === 'string' ? c.meta.docId : null;  // soft link, may be null
       await client.query(
         `insert into agents.chunks (...) values (...$6::vector...)
          on conflict (id) do update set ...`,          // idempotent re-index
-        [c.id, docId, this.appId, chunkIndex, content,
-         toVectorLiteral(c.vector), this.embeddingModel, c.meta]);
+        [c.id, docId, this.appId, ..., toVectorLiteral(c.vector), ...]);
     }
     await client.query('commit');
   } catch (err) { await client.query('rollback'); throw err; }
-  finally { client.release(); }
+  finally { client.release(); }                        // always return the connection
 }
 ```
 
-What breaks without each part: drop the transaction → a mid-batch failure leaves a
-half-indexed document. Drop `on conflict do update` → re-indexing the same file throws
-on the primary key instead of refreshing it (re-index is a first-class operation here).
-Drop `::vector` cast → pgvector can't parse the text literal `[0.1,0.2,...]` built by
-`toVectorLiteral` (`src/pg-vector-store.ts:15-17`).
+Three boundary conditions live here. `assertDim` (line 39) makes a wrong-dimension vector a loud
+throw, not a silent truncate — the storage edge guards the 768-dim one-way door. The `begin/commit/
+rollback` makes a multi-chunk index atomic. The `on conflict (id) do update` makes re-indexing the
+same doc idempotent — run the index twice, get one set of rows. The `docId` can be `null` because
+the FK was deliberately dropped (see below).
 
-**The search — cosine distance, score reconstruction.** The query orders by pgvector's
-`<=>` cosine-distance operator and converts distance to a similarity score with
-`1 - distance` (`src/pg-vector-store.ts:67-78`).
-
-```
-  Layers-and-hops — a search call crossing the seam
-
-  ┌─ aptkit pipeline ─┐  hop 1: search(queryVec, k)   ┌─ PgVectorStore ─┐
-  │  pipeline.query   │ ─────────────────────────────► │  search()       │
-  └───────────────────┘  hop 4: Hit[] (meta rebuilt) ◄ └────────┬────────┘
-                                                          hop 2  │ SQL: ORDER BY
-                                                                 │ embedding <=> $1
-                                                                 ▼
-                                                        ┌─ pgvector ──────┐
-                                                        │ HNSW cosine scan│
-                                                        │ hop 3: rows ────┤
-                                                        └─────────────────┘
-```
-
-**The meta reconstruction — the subtle load-bearing part.** The in-memory store returned
-hits with `meta.docId`, `meta.chunkIndex`, `meta.text`. The `search_knowledge_base`
-tool's citation logic reads those keys. So after the SQL returns flat columns,
-`PgVectorStore` *rebuilds* the in-memory meta shape (`src/pg-vector-store.ts:80-84`):
+**`search` — and the most important detail in the file.** The cosine query is straightforward;
+the subtle part is line 80-84, where the adapter *reconstructs the meta shape the in-memory store
+produced* (`pg-vector-store.ts:67-85`):
 
 ```ts
-// src/pg-vector-store.ts:80-84 — rebuild the shape the tool expects
-return rows.map((r) => ({
-  id: r.id,
-  score: Number(r.score),
-  meta: { ...(r.meta ?? {}), docId: r.document_id, chunkIndex: r.chunk_index, text: r.content },
-}));
+// src/pg-vector-store.ts:67
+async search(vector: number[], k: number): Promise<Hit[]> {
+  this.assertDim(vector);
+  const { rows } = await this.pool.query(
+    `select id, content, chunk_index, document_id, meta,
+            1 - (embedding <=> $1::vector) as score    -- <=> is cosine DISTANCE; sim = 1 - dist
+     from agents.chunks where app_id = $2
+     order by embedding <=> $1::vector limit $3`,
+    [toVectorLiteral(vector), this.appId, k]);
+  return rows.map((r) => ({
+    id: r.id, score: Number(r.score),
+    meta: { ...(r.meta ?? {}), docId: r.document_id, chunkIndex: r.chunk_index, text: r.content },
+  }));                                                  // ← rebuild the in-memory meta shape
+}
 ```
 
-Skip this and the agent's citations break even though search "works" — the rows come
-back but the tool can't find `meta.text`. This is the part of an adapter that's easy to
-forget: matching the *output* shape, not just the method signature.
+Why line 82 is load-bearing: the `search_knowledge_base` tool downstream builds citations from
+`meta.docId` and `meta.text`. The in-memory store returned those keys; if `PgVectorStore` returned
+raw DB columns (`document_id`, `content`) instead, **the same tool would break** when you swapped
+stores. The adapter's job isn't just "run SQL" — it's "make the SQL *indistinguishable* from the
+reference adapter at the contract surface." That's what makes the swap truly zero-change.
 
-**The dropped FK — where the contract forced a schema decision.** `chunks.document_id`
-has **no foreign key** (`sql/001_agents_schema.sql:18-27`). A hard FK would give the
-store a hidden precondition: a `documents` row must exist before any chunk. But the
-`VectorStore` contract upserts chunks with no notion of a documents row — and memory
-chunks have no documents row at all. So the FK was dropped to preserve drop-in parity
-(`docs/superpowers/specs/2026-06-19-laptop-supabase-graduation-design.md:204`). The
-contract reached down and shaped the schema. → schema-integrity analysis lives in
-`study-data-modeling`.
+### Move 2 variant — the load-bearing skeleton
+
+Strip the adapter to its kernel and name each part by what breaks without it:
+
+```
+  PgVectorStore kernel:
+    1. implements VectorStore        — the compile-time contract bond
+    2. dimension + assertDim         — the dimension one-way-door guard
+    3. upsert: serialize → INSERT    — write side of the contract
+    4. search: cosine → meta rebuild — read side, shaped like the reference adapter
+```
+
+- Drop **#1** and it's just a class — aptkit can't accept it where a `VectorStore` is required.
+- Drop **#2** and a 1536-dim OpenAI vector silently lands in a 768 column → corrupt search forever.
+- Drop **#4's meta rebuild** and citations break on swap → the "drop-in" claim is a lie.
+
+Optional hardening *not* in the kernel: connection pooling (could be a single client), the
+`on conflict` idempotency (could be delete-then-insert), the `app_id` scoping (a second tenant's
+concern). The transaction in `upsert` is closer to kernel than hardening — without it a partial
+index leaves orphan chunks.
 
 ### Move 3 — the principle
 
-An adapter earns its keep when the thing on the other side of the contract can change
-without the caller noticing. Here the capability it buys is concrete: buffr swapped an
-in-memory array for durable Postgres pgvector and the agent loop, the pipeline, and the
-tool did not change one line. The contract is the unit of evolution — and a faithful
-adapter matches not just the method signatures but the *data shapes* flowing back
-through them.
+**Depend on contracts, not implementations, and the implementation becomes a Tuesday-afternoon
+swap instead of a rewrite.** buffr proves it twice over: the design spec says `PgVectorStore`
+"drops into `createRetrievalPipeline` with zero agent changes" (`...graduation-design.md:132-134`),
+and the *reason* the FK was dropped (`sql/001:26-27`) was to preserve that drop-in parity — the
+schema bent to keep the contract honest, not the other way around. When the schema yields to the
+contract, you know the port is real.
 
-## Primary diagram
+## Primary diagram — the whole pattern in one frame
 
-The full adapter, both methods, both directions, every layer labelled.
+Everything Move 2 walked, on one map.
 
 ```
-  PgVectorStore — the full adapter
+  Vector Store Adapter — full picture
 
-  ┌─ aptkit (agnostic) ─────────────────────────────────────────────────┐
-  │  RagQueryAgent → search_knowledge_base → createRetrievalPipeline      │
-  └───────────────┬───────────────────────────────┬──────────────────────┘
-        upsert(chunks)                       search(vector, k)
-                  │                                 │
-  ┌─ VectorStore contract (types only) ─────────────────────────────────┐
-  │  { dimension; upsert(StoredChunk[]); search(vec,k):Hit[] }            │
-  └───────────────┬───────────────────────────────┬──────────────────────┘
-                  ▼                                 ▼
-  ┌─ PgVectorStore (the only Postgres-aware layer) ─────────────────────┐
-  │  assertDim → BEGIN/INSERT…ON CONFLICT/COMMIT     SELECT … <=> … LIMIT │
-  │  toVectorLiteral([..])                            rebuild meta shape   │
-  └───────────────┬───────────────────────────────┬──────────────────────┘
-                  ▼ pg Pool                         ▼ pg Pool
-  ┌─ Postgres agents.chunks · vector(768) · HNSW vector_cosine_ops ──────┐
-  └───────────────────────────────────────────────────────────────────────┘
+  ┌─ aptkit (library) ────────────────────────────────────────────┐
+  │  createRetrievalPipeline({ embedder, store })                  │
+  │    index: store.upsert(chunks)   query: store.search(vec, k)   │
+  └───────────────────────────┬───────────────────────────────────┘
+                  the PORT ────┤  VectorStore { dimension, upsert, search }
+                  (contract)   │
+  ┌─ buffr adapter ────────────▼───────────────────────────────────┐
+  │  PgVectorStore implements VectorStore   (src/pg-vector-store.ts)│
+  │   upsert  → assertDim → begin → INSERT…ON CONFLICT → commit     │
+  │   search  → cosine `<=>` → 1-dist score → REBUILD in-mem meta   │
+  └───────────────────────────┬───────────────────────────────────┘
+                  pg driver ───┤  node-postgres, direct TCP
+  ┌─ Postgres `agents` ────────▼───────────────────────────────────┐
+  │  chunks(embedding vector(768), HNSW vector_cosine_ops, app_id)  │
+  └─────────────────────────────────────────────────────────────────┘
 ```
 
 ## Elaborate
 
-Ports-and-adapters comes from hexagonal architecture (Alistair Cockburn): the
-application core defines ports (interfaces), and adapters bind them to the outside
-world. aptkit is the core with the `VectorStore` port; `PgVectorStore` and the in-memory
-store are two adapters on the same port. The pattern is the same shape as a
-`ModelProvider` (Gemma / OpenAI / Anthropic side by side) — `me.md`'s "pattern over
-vendor" made structural: *embedding + ANN + retrieval* is the pattern; pgvector is
-incidental. You've shipped this exact shape before — AdvntrCue colocated pgvector with
-relational data in one Postgres; this is the same colocation, now behind a clean
-contract.
+Ports & adapters is Alistair Cockburn's hexagonal architecture; the narrower idea here is the
+Gang-of-Four Adapter plus Robert Martin's Dependency Inversion Principle. The thing that makes it
+*system design* and not just a code pattern: the seam is where the architecture's evolution money
+is. buffr's whole deferred-body plan rides on this one port — the in-memory store was "built and
+fully tested now", `PgVectorStore` was "a second adapter, deferred to the body decision"
+(`aptkit-packages-design.md:202-205`). The port let the team ship a working laptop brain *before*
+deciding anything about the database, then fill it in.
 
-What to read next: `06-retrieval-as-memory.md` (the same store serving two roles),
-`02-library-as-dependency-boundary.md` (why the contract lives in aptkit, not buffr).
+You've shipped this shape before: AdvntrCue colocated pgvector + relational in one Postgres, and
+the lesson there (`me.md`) was that welding OpenAI into the embedding path was vendor lock-in. The
+`VectorStore` + `EmbeddingProvider` port pair is the structural fix for exactly that mistake.
+
+Read next: `02-retrieval-pipeline.md` (what flows *through* the port), `04-library-as-dependency-
+boundary.md` (the aptkit boundary this port sits on). Engine internals of `<=>` and HNSW →
+`study-database-systems`. The schema behind `chunks` → `study-data-modeling`.
 
 ## Interview defense
 
-**Q: Why implement a `VectorStore` interface instead of just calling pgvector directly
-from the agent?**
-Because the agent and pipeline must stay database-agnostic. The in-memory store was the
-first adapter; pgvector is the second; an Edge-Function-backed store is the third, later.
-Each swap is zero agent change. The contract is the unit of evolution.
+**Q: Why not just call pgvector directly from the agent?**
+Because then the agent depends on Postgres, and you can't run it in a test, in dev, or against a
+different store without standing up a database. The port inverts that — the agent depends on a
+contract; the database is a detail you inject. The proof it's real: buffr swapped an in-memory
+array for pgvector with *zero agent changes* (`...graduation-design.md:132`).
 
 ```
-  in-memory  ─┐
-  pgvector   ─┼──► same VectorStore port ──► zero agent change on swap
-  edge-fn    ─┘
+  with port:     agent ──► VectorStore ◄── [InMemory | Pg | Qdrant | …]   swap = inject
+  without port:  agent ──► pgvector SQL                                    swap = rewrite
 ```
-Anchor: `src/pg-vector-store.ts:19` implements the aptkit contract; the swap from
-in-memory required no agent edits.
+Anchor: `PgVectorStore implements VectorStore` — `src/pg-vector-store.ts:19`.
 
-**Q: What's the load-bearing part people forget when writing an adapter like this?**
-Matching the *output shape*, not just the method signature. `search` rebuilds
-`meta.docId / chunkIndex / text` (`src/pg-vector-store.ts:80-84`) because the citation
-tool reads those keys. Get the signature right but the meta shape wrong and search
-"works" while citations silently break.
+**Q: What's the part of the adapter people forget?**
+The meta reconstruction in `search` (`pg-vector-store.ts:80-84`). Anyone can write the SQL. The
+load-bearing part is returning `{docId, chunkIndex, text}` — the *in-memory store's shape* — so the
+citation tool downstream doesn't know the store changed. An adapter that returns raw DB columns
+technically implements the interface but breaks the drop-in promise.
 
 ```
-  signature match  ✓ ── necessary
-  output-shape match ✓ ── the part people forget
-       └─ meta.{docId,chunkIndex,text} rebuilt from flat columns
+  contract surface must be IDENTICAL across adapters:
+    in-mem  → meta: { docId, chunkIndex, text }
+    pg      → meta: { docId, chunkIndex, text }   ← rebuilt from document_id, chunk_index, content
+                                                     ↑ THIS is the work, not the SELECT
 ```
-Anchor: the row→hit mapping at `src/pg-vector-store.ts:80-84`.
+Anchor: the `.map` rebuild — `src/pg-vector-store.ts:80-84`.
 
-**Q: Why no foreign key on `chunks.document_id`?**
-Deliberate. A hard FK adds a hidden precondition (documents row must exist first) that
-breaks the contract — the store upserts chunks with no documents row, and memory chunks
-have none at all. Soft link preserves drop-in parity.
-Anchor: `sql/001_agents_schema.sql:18-27`; tradeoff documented at
-`...graduation-design.md:204`.
+**Q: The schema dropped a foreign key for this. Defend that.**
+The FK from `chunks.document_id` to `documents.id` gave the store a hidden precondition: a document
+row must exist before any chunk. But the `VectorStore` contract's `upsert` takes chunks alone — it
+has no concept of a documents row. A hard FK would make `PgVectorStore` reject a valid contract call
+that `InMemoryVectorStore` accepts, breaking parity. So the FK is a soft link; integrity is traded
+for contract fidelity, and it's documented as an as-built deviation (`sql/001:26-27`,
+`...graduation-design.md:199-208`). The cost — an orphan chunk is possible — is real and accepted.
 
 ## See also
 
-- `02-library-as-dependency-boundary.md` — why the contract is aptkit's, not buffr's
-- `06-retrieval-as-memory.md` — the second role this same store plays
-- `study-database-systems` — HNSW, the `<=>` operator, transaction isolation
-- `study-data-modeling` — the dropped FK, jsonb meta, chunk-id design
+- `02-retrieval-pipeline.md` — the index/query flow that drives this port.
+- `04-library-as-dependency-boundary.md` — why the port lives in aptkit, not buffr.
+- `audit.md` lens 1 (boundaries), lens 5 (storage), red-flag #4 (the soft FK).
+- `study-software-design` → ports & adapters / PATTERN VOCABULARY (code-altitude treatment).
+- `study-database-systems` → how `<=>` and HNSW execute. `study-data-modeling` → the `chunks` schema.

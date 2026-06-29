@@ -1,149 +1,177 @@
-# Chapter 04 — The build story   (8:00–8:45, 45 seconds)
+# Chapter 4 — The Build Story   (8:00–8:45, 45 seconds)
 
 ## Opening hook
 
-Forty-five seconds to prove this is a working build, not a mockup, and to show you cracked one genuinely hard thing. The temptation is to list every feature you shipped. Don't — you don't have the time and the room doesn't care about the feature count. Name what actually shipped in one breath, then spend the rest on the *one hard part* and how you got it to work. The hard part is the proof: anyone can paste a UI together; cracking a real problem under a clock is the signal that you built the thing.
+Forty-five seconds to prove this is real software, not a mockup with a happy
+path. You do it by naming the one hard part you cracked — the genuine
+obstacle that almost killed the demo, and what you did about it. Judges have
+seen a hundred demos that work *only* on the rehearsed click. The fastest
+way to read as real is to name the rough edge yourself, with the confidence
+of someone who shipped it under a clock.
 
-For buffr the honest hard part is the best part of the story, because it's where you own a rough edge with confidence. Gemma — the local model you're running — has no native tool-calling. So the agent loop needs the model to call a search tool, and the stock model literally can't, the way Anthropic's or OpenAI's API can. The crack was making tool-calling work anyway, on an emulated path, and then choreographing the demo around the failure mode it leaves. That's a real engineering story and you tell it straight.
+Your hard part is honest and specific: stock `gemma2:9b` has no native
+tool-calling, so the search-and-recall tool is *emulated*. That's the same
+thing that makes Beat 2 risky — and owning it here, before a judge digs for
+it, turns a weakness into a credibility signal. You're not hiding it; you
+shipped around it.
 
 ## The time-budget bar
 
-You own 8:00 to 8:45. One breath on what shipped, the rest on the one hard part — then move.
+You own 8:00 to 8:45. One obstacle, one sentence on the fix. That's the
+whole chapter.
 
 ```
   ┌──────────────────────────────────────────────────────┐
-  │ ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░▓▓░░░░░░░░░░░░ │
-  │ 8:00 ─ 8:45 ──────────────────────────────────────── 10:00 │
-  │       THE BUILD STORY — you own 8:00 to 8:45 (45 sec) │
+  │ ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░▓▓▓░░░░░░░░░░░░ │
+  │ 0:00 ──────────── 8:00 ─ 8:45 ──────────────── 10:00  │
+  │      THE BUILD STORY — you own 8:00 to 8:45 (45 sec)  │
   └──────────────────────────────────────────────────────┘
 ```
 
-## The chapter-opening diagram — what shipped, and the one hard part
+## What actually shipped — the proof diagram
 
-The visual is a quick inventory with the hard part flagged. You don't read it out — it's the shape behind your forty-five seconds.
-
-```
-  WHAT SHIPPED — and the crack
-
-  ┌─ shipped, working on the happy path ──────────────────────────┐
-  │  npm run migrate   transactional schema runner                │
-  │  npm run index     embed a corpus into pgvector (768-dim)     │
-  │  npm run chat      long-lived Ink session, one conversation   │
-  │  npm run eval      precision@k / recall@k over the retrieval  │
-  │  + retrieval-based memory across sessions (the money shot)    │
-  └───────────────────────────────────────────────────────────────┘
-
-  ┌─ THE HARD PART ★ ─────────────────────────────────────────────┐
-  │  Gemma (gemma2:9b) has NO native tool-calling.                │
-  │  The agent loop needs a tool call out of the model.           │
-  │  → aptkit EMULATES it: render the tool schema into the prompt,│
-  │    parse a JSON tool-call back out of free text.              │
-  │  → cost owned honestly: it can occasionally skip the tool and │
-  │    answer ungrounded. The demo is choreographed around that.  │
-  └───────────────────────────────────────────────────────────────┘
-```
-
-## The body — the two beats
-
-### Beat 1 — what shipped (8:00–8:15): one breath
-
-Say it fast, as a single list, so the room registers "this is a real, runnable system" and you move on.
+This is real, working code, not slideware. Four commands, each doing a real
+thing against a real Postgres. Show this so "is it real?" answers itself.
 
 ```
-┃ "This actually runs: one command migrates the schema, one indexes
-┃  a corpus, one opens the chat, one scores the retrieval. And on top,
-┃  cross-session memory — the thing you just saw."
+  What shipped — four real commands, one local stack
+
+  npm run migrate   ─►  transactional SQL migration runner
+                        creates agents schema, chunks(vector 768),
+                        conversations/messages, profiles
+        │
+  npm run index ──  ─►  embeds a corpus into pgvector
+   -- <file.md>          (real documents rows + chunk rows)
+        │
+  npm run chat      ─►  the Ink terminal UI — the demo surface
+                        long-lived session, RagQueryAgent,
+                        retrieval + recall + trajectory capture
+        │
+  npm run eval      ─►  precision@k over a labeled query set
+                        (real retrieval-quality numbers)
+
+  consumed as a library: @rlynjb/aptkit-core — the agent loop,
+  retrieval pipeline, tools, and @aptkit/memory engine.
+  buffr adds the persistence (PgVectorStore) + the chat CLI.
 ```
 
-You're naming the four scripts (`migrate`, `index`, `chat`, `eval` — all real in `package.json`) plus the memory feature. That's the "it's real" proof in fifteen seconds. Resist adding more.
+The detail that sells "real" to a technical judge: the conversation-memory
+engine was extracted *up* from buffr into the aptkit toolkit and re-consumed
+as a published dependency. That's not hackathon glue — that's a real library
+boundary you designed.
 
-### Beat 2 — the one hard part (8:15–8:45): the emulated tool-calling crack
+## The hard part — own it, don't hide it
 
-This is the story. Tell it as a problem you hit and solved, and own the rough edge in the same breath — that's what confidence under a clock looks like.
-
-```
-  SHOW (on screen / slide)            SAY (out loud)
-  ────────────────────────────────    ─────────────────────────────────
-  the "hard part" box from the        "The hard part: I'm running a
-  diagram                              local model, Gemma, that has no
-                                       native tool-calling — it can't
-                                       call my search tool the way a
-                                       cloud API can."
-  (no live action — you're telling     "So tool-calling is emulated — the
-   a story)                            schema goes into the prompt, and I
-                                       parse the model's reply back into a
-                                       tool call. It works."
-                                       "The honest rough edge: sometimes
-                                       it skips the tool and answers
-                                       ungrounded. So I built the demo to
-                                       recover from exactly that — re-ask,
-                                       and it grounds."
-```
-
-That last line does double duty: it owns the limitation *and* it explains why your demo had a recovery built in. You're not hiding the rough edge — you're showing you engineered around it on purpose. That reads as someone who shipped under a clock and knew exactly where the bodies were buried.
+Say this plainly. The structure is: here was the wall, here's why it's hard,
+here's what I did.
 
 ```
-┃ "I knew tool-calling was the weak seam, so I built the demo to
-┃  recover from it. That's the difference between a build and a slide."
+  ┃ "The hard part: the model runs locally — Gemma via Ollama — and
+  ┃  stock Gemma has no native tool-calling. So I had to EMULATE the
+  ┃  tool interface to get it to call the search tool at all."
 ```
 
-Here's the contrast, because the apologetic version of this story is the failure mode.
+Then the honest edge, named before a judge finds it:
 
 ```
-  WEAK build story                    STRONG build story
-  ──────────────────────────────      ──────────────────────────────────
-  "Unfortunately Gemma doesn't        "Gemma has no native tool-calling,
-   really support tools so it's        so I emulated it — and choreographed
-   a bit unreliable, sorry, it         the demo around the one failure
-   mostly works though…"               mode it leaves. It's a known seam,
-                                       not a surprise."
-  → sounds like an excuse             → sounds like an engineer
+  ┃ "It's not perfect — sometimes it answers without searching. So I
+  ┃  built around it: a reliable corpus indexed up front, and the
+  ┃  retrieval-as-memory design so recall rides the tool it already
+  ┃  has. That's the engineering — making an on-device model behave
+  ┃  like an agent."
 ```
 
-This anchors to real, shipped work: on-device AI is your lane (dryrun runs Gemini Nano on-device; contrl runs MediaPipe on-device, no cloud). buffr is the local-first evolution — and you've shipped classic cloud RAG too (AdvntrCue, pgvector + GPT-4). If a judge asks "have you done this before," that's your answer: buffr composes the on-device thread and the RAG thread you've each shipped separately.
+That second line is the whole point of this chapter. You're not apologizing
+for the emulation — you're presenting it as the problem you solved. The
+recovery design (chapter 2's ladder) and the same-store memory design
+(chapter 3) *are* the answer to the hard part. They connect.
+
+## Anchor it to your track record — if it fits
+
+You've shipped on-device AI before, and it makes the emulation story read as
+a pattern you know, not a one-off. One optional line:
+
+```
+  ┃ "I've shipped on-device AI before — Gemini Nano on Android, a
+  ┃  MediaPipe pose pipeline at frame-rate. buffr is the same
+  ┃  instinct: keep the compute local, work around what the
+  ┃  on-device model can't do natively."
+```
+
+Only say this if you have the seconds. The hard part itself is the
+load-bearing content; the track-record anchor is a bonus.
+
+## Strong vs weak — the build-story move
+
+The instinct under time pressure is to hide the rough edge. Resist it. The
+named edge is what makes you credible.
+
+```
+  WEAK build story                   STRONG build story
+  ──────────────────────────         ──────────────────────────────
+  "everything works great, it's      "the hard part: on-device Gemma
+  all running smoothly"              has no native tools — I emulated
+                                     them and built around the gaps"
+
+  hide the emulated tool-calling     name it first, before a judge
+  and hope no one asks               digs it out of you
+
+  list every feature you built       ONE obstacle, ONE fix — the
+                                     thing that almost broke the demo
+
+  "we used a lot of cool tech"       "I extracted the memory engine
+                                     into a library and re-consumed it"
+```
 
 ## The IF-IT-BREAKS box
 
-No live beat here — it's a told story. The failure mode is a judge challenging the honesty mid-story ("so it's broken?"). Don't retreat.
+No live action here, so the only failure is overrunning into your close — or
+getting defensive about the emulation if a judge reacts.
 
 ```
-╔══════════════════════════════════════════════════════════════════╗
-║ IF IT BREAKS (challenged on the rough edge)                       ║
-║                                                                    ║
-║ "So it doesn't actually work reliably?" → "It works — the seam is  ║
-║ the emulated tool-calling, which is a known property of running    ║
-║ tools on a model with no native tool API. The fix is argument-     ║
-║ schema validation on the parsed call; that's the next commit." Own ║
-║ it, name the fix, don't flinch. (Detail: study-ai-engineering/     ║
-║ 04-agents-and-tool-use/02-tool-calling.md.)                       ║
-╚══════════════════════════════════════════════════════════════════╝
+  ╔══════════════════════════════════════════════════════════════╗
+  ║ IF IT BREAKS (verbal, not technical)                         ║
+  ║ A judge jumps in with "so it's not really tool-calling?" →   ║
+  ║ don't get defensive. Say: "right — stock Gemma can't, so I    ║
+  ║ emulated the interface. The design works around the gaps."    ║
+  ║ Then move to the close. Candor reads better than a defense.  ║
+  ║ Do NOT spend your 45 seconds litigating it — punt depth to   ║
+  ║ Q&A and protect the close.                                    ║
+  ╚══════════════════════════════════════════════════════════════╝
 ```
 
-## The "tighten it" cut
+## The "tighten it" treatment
 
-Under a tight slot, cut beat 1 to a half-sentence ("it's four real commands plus the memory") and keep the hard-part story, because the hard part is the proof and the feature list isn't. The floor: the room hears *one* genuine engineering obstacle you cracked. If you cut the hard part, you've cut the only thing in this chapter that separates you from a pitch deck.
+Running long? Drop the proof diagram and the track-record anchor; say only
+the two hard-part script lines (emulated tools + how you built around it).
+**Floor: the room hears the one hard part and that you solved it under a
+clock.** That single honest sentence does more for "this is real" than the
+whole feature list. If you're truly out of time, fold this into one
+sentence on your way into the close: "the hard part was making a local model
+act like an agent — I emulated tool-calling and designed the memory to ride
+the tool it already had."
 
-## The one-page run sheet — CHAPTER 04
+## The one-page run sheet — Chapter 4
 
 ```
-  ┌─ BUILD STORY ─ 8:00–8:45 ─ 45 sec ──────────────────────────┐
-  │                                                              │
-  │  BEAT 1 (8:00–8:15) what shipped — one breath:               │
-  │    ┃ "runs: migrate, index, chat, eval — plus cross-session  │
-  │    ┃  memory."                                               │
-  │                                                              │
-  │  BEAT 2 (8:15–8:45) the hard part:                           │
-  │    "Gemma has no native tool-calling → I emulated it →       │
-  │     it can skip the tool → so I built the demo to recover."  │
-  │    ┃ "I knew tool-calling was the weak seam, so I built the  │
-  │    ┃  demo to recover from it. Build, not slide."            │
-  │                                                              │
-  │  NAIL THIS LINE: "build, not a slide."                       │
-  │  IF CHALLENGED: "known seam — fix is arg-schema validation,  │
-  │                  that's the next commit."                    │
-  │  TIGHTEN: cut beat 1 to half a sentence. Floor: one real     │
-  │           obstacle you cracked.                              │
-  └──────────────────────────────────────────────────────────────┘
+  ┌─ THE BUILD STORY ────────── 8:00–8:45 (45 sec) ──────────────┐
+  │                                                               │
+  │  SHOW (optional): four real commands — migrate / index /      │
+  │   chat / eval — against real Postgres. Real, not slideware.   │
+  │                                                               │
+  │  THE HARD PART (say plainly):                                 │
+  │   "Gemma runs local and has no native tool-calling — I        │
+  │    emulated the tool interface to make it call search."       │
+  │   "It's not perfect; sometimes it skips search. So I built    │
+  │    around it — reliable corpus up front, memory rides the     │
+  │    same tool. That's the engineering."                        │
+  │                                                               │
+  │  OPTIONAL: "I've shipped on-device AI before — same instinct."│
+  │                                                               │
+  │  IF A JUDGE PUSHES: "right, I emulated it" — no defense, move.│
+  │  TIGHTEN: two hard-part lines only.                           │
+  │   FLOOR: the room hears the hard part + that you solved it.   │
+  └───────────────────────────────────────────────────────────────┘
 ```
 
-On to chapter 05 — the close.
+Next: chapter 5 — the close, the ask, the last line.

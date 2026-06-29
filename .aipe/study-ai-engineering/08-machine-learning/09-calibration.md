@@ -1,233 +1,220 @@
-# Calibration — predicted probability matching observed frequency
+# Calibration
 
-*Industry standard (probability calibration / reliability). buffr trains no probabilistic classifier, and its cosine scores are uncalibrated similarity, not probabilities — not yet implemented.*
+### *industry: calibration (reliability of predicted probabilities) · type: whether a score that says 0.9 is actually right 90% of the time*
 
-## Zoom out, then zoom in
+## Zoom out
 
-Any time downstream code reads a score as if it were a probability — thresholds it, ranks on it, plugs it into an expected-value decision — you've quietly assumed the score is *calibrated*. Calibration is the property that makes that assumption safe: of everything the model stamps "0.7", about 70% are actually positive. buffr never trains a classifier, so it has no calibrated model. But it *does* produce a number that looks like a confidence — the cosine score out of pgvector — and the moment any code treats that number as a probability, calibration is the thing it's missing.
+You've spent this section getting a model to *rank* well — pose-landmarking in contrl ordered candidate keypoints, buffr's retrieval orders chunks by cosine. But ranking is only half the story. The moment a *downstream* system reads the raw score — compares it to a threshold, multiplies it into an expected value — you need the score to *mean* something. Calibration is the property that makes a 0.9 trustworthy. See where it sits in the pipeline:
 
+**The supervised pipeline, with the stage calibration corrects**
 ```
-  Zoom out — where a "confidence" number enters buffr
-
-  ┌─ Provider layer (Ollama, local) ───────────────────────────┐
-  │  nomic-embed-text:v1.5 → 768-d embedding                    │
-  └─────────────────────────┬───────────────────────────────────┘
-                            │  vector
-  ┌─ Storage layer (Postgres + pgvector) ───────────────────────┐
-  │  agents.chunks.embedding                                     │
-  │  ★ 1 - (embedding <=> $1) AS score  ← cosine similarity ★    │ ← we are here
-  └─────────────────────────┬───────────────────────────────────┘
-                            │  hits[].score (0..1, UNCALIBRATED)
-  ┌─ Service layer (pipeline / agent) ──────────────────────────┐
-  │  any code that thresholds/ranks on score   ← WOULD attach   │
-  │  e.g. "if best score < 0.6 → refuse"        calibration here │
-  └──────────────────────────────────────────────────────────────┘
+┌────────┐  ┌──────────┐  ┌───────┐  ┌───────┐  ┌─────────────────────────────────────┐
+│  Data  │─►│ Features │─►│ Split │─►│ Train │─►│ DEPLOY                               │
+│        │  │          │  │       │  │       │  │  raw scores ─► ★ CALIBRATE ★ ─► use  │ ◄── this file
+└────────┘  └──────────┘  └───────┘  └───────┘  └─────────────────────────────────────┘
+                                                          │
+                          the model RANKS fine here ──────┤
+                          but a downstream THRESHOLD/EV ───┘ needs the score
+                          to equal an actual frequency
 ```
-
-Zoom in: a model is **calibrated** when its predicted probability equals the empirical frequency of the event. The diagnostic is a **reliability diagram** — bucket predictions by their stated probability, plot observed frequency against stated probability, and a perfectly calibrated model lands on the diagonal. buffr's cosine score is *not* on any such diagonal, because it was never fit to one: it's a geometric similarity, not a probability. A 0.8 cosine does not mean "80% relevant." This file teaches the real mechanism, then shows the exact line in buffr where pretending otherwise bites.
+Calibration is a post-training adjustment on the scores — it never touches how the model ranks, only what the numbers are worth.
 
 ## Structure pass
 
-**Layers:** the model (or scorer) that emits a number → the number itself → the downstream code that consumes it.
+The whole concept turns on one axis: **predicted probability vs the actual observed frequency at that probability.** A calibrated model lies on the diagonal where those two agree; a miscalibrated one drifts off it.
 
-**Axis — "is the number a probability you can act on, or just an ordering?"** Hold that one question down the stack.
-
+**The one axis: predicted vs observed, with the seam where they diverge**
 ```
-  trace "can I act on this number as a probability?" across the layers
+  observed
+ frequency
+   1.0 ┤                                    ● perfectly calibrated lies HERE
+       │                              .·'        (predicted == observed)
+   0.6 ┤- - - - - - - - - - - ○ ·'              ○ = a model that SAYS 0.9
+       │                  .·'  ▲                     but is right only 0.6 ─► OVERCONFIDENT
+       │              .·'      │
+   0.0 ┤··········'            │
+       └────┬─────────┬────────┬────────┬──► predicted probability
+           0.2       0.6      0.9      1.0
 
-  ┌─ scorer ─────────────┐   emits a real number      (buffr: cosine, 0..1)
-  │  cosine / softmax     │   "what does 0.8 mean?"
-  └──────────────────────┘
-  ┌─ the number ─────────┐   ordering vs probability  (buffr: ORDERING only)
-  │  monotone? metric?    │   "0.8 > 0.6, but is it 80%?"  → NO
-  └──────────────────────┘
-  ┌─ consumer ───────────┐   what it does with it      (buffr: ranks → fine;
-  │  argmax / rank / thresh│  "argmax? safe. threshold?    thresholds → BITES)
-  └──────────────────────┘   needs calibration."
+   ┌──────────────────────────────── THE SEAM ───────────────────────────────┐
+   │ RANKING quality and CALIBRATION are INDEPENDENT. A model can order every  │
+   │ example perfectly (great AUC) and still sit far off the diagonal. Fixing  │
+   │ calibration does NOT change the order — it only rescales the numbers.      │
+   └───────────────────────────────────────────────────────────────────────────┘
 ```
-
-**The seam:** between *the number* and *the consumer*. If the consumer only does `argmax` or top-k ranking, calibration is irrelevant — a monotone score is enough, and cosine is monotone in relevance for a single query. The axis-answer flips the instant the consumer thresholds or does expected-value math: now it needs `score = P(relevant)`, and an uncalibrated 0..1 number silently fails the contract. That seam is exactly where a refusal threshold like `if best score < 0.6 → "not in sources"` lives. Pick the wrong side of this seam and you've hard-coded a guess onto a scale that has no fixed meaning.
+The seam is the whole point: a model can rank perfectly and still lie about its confidence. Calibration repairs the lie without disturbing the order.
 
 ## How it works
 
-### Move 1 — the mental model
+### Move 1 — Mental model
 
-You already know the shape from a weather app. When the app says "70% chance of rain," the honest test isn't "did it rain today" — it's "across all the days it said 70%, did it rain about 70% of the time?" That's calibration: not per-prediction correctness, but *frequency matching in aggregate*. A model can be accurate and badly calibrated (right answers, wrong confidence) or calibrated and inaccurate (humble and often wrong, but honest about it). The reliability diagram is the picture that exposes the gap.
+The mental model: **bin the predictions by their stated confidence, then check what actually happened in each bin.** Take every example the model scored ~0.9, look at the true labels, and ask "were 90% of these actually positive?" If yes, that bin is calibrated. The reliability diagram is just that check, plotted bin by bin.
 
+**The reliability diagram — one bin, one honesty check**
 ```
-  Pattern — the reliability diagram (the calibration x-ray)
-
-  observed
-  frequency
-   1.0 ┤                              ╱  ← perfect calibration
-       │                          ╱       (diagonal: stated = observed)
-   0.7 ┤- - - - - - - - - -●- ╱
-       │                ╱   ↑ this model: stated 0.9, observed 0.7
-   0.5 ┤            ╱      → OVERCONFIDENT (curve sags BELOW diagonal)
-       │        ╱  ●
-       │    ╱   ↑ stated 0.5, observed 0.4
-   0.0 ┼────────────────────────────────►
-       0.0      0.5      0.9     1.0
-              predicted probability (bucketed)
-
-  on the diagonal = calibrated · below = overconfident · above = underconfident
+  bin "predicted ≈ 0.9"
+  ┌─────────────────────────────────────────────────┐
+  │ examples the model scored 0.9: ● ● ● ● ● ● ● ● ● ● │  (10 examples)
+  │ how many were ACTUALLY positive? ● ● ● ● ● ● ○ ○ ○ ○ │  (6 of 10 = 0.6)
+  └─────────────────────────────────────────────────┘
+        stated 0.9   vs   observed 0.6   ─►  gap = 0.3   OVERCONFIDENT bin
 ```
+Each bin contributes one point to the reliability diagram; the gaps across all bins are what you summarize next.
 
-Read it left to right: take every prediction, drop it into a bucket by its stated probability (0.0–0.1, 0.1–0.2, …), and for each bucket plot the fraction that were actually positive. Hug the diagonal and you're calibrated. Sag below it and you're overconfident — the classic failure of modern neural nets, which push softmax outputs toward 0 and 1 far harder than the true frequencies warrant.
+### Move 2 — Walk the mechanism
 
-### Move 2 — the step-by-step walkthrough
+**Part 1 — Bin the predictions.** Sort every scored example into confidence buckets. This is the raw material for everything downstream.
 
-**Why models miscalibrate.** Bridge from something you've seen: a softmax with a low temperature spikes one class to 0.99 even when the evidence is weak. Modern deep nets do this structurally — high capacity plus training to minimize log-loss drives outputs to the extremes, so a net that's 80% accurate routinely reports 99% confidence. The accuracy can be fine while the *probabilities* are fiction. That's why you measure calibration separately from accuracy.
-
+**Binning: scores fall into confidence buckets**
 ```
-  Why nets are overconfident — softmax pushed to the rails
-
-  weak evidence ─► logits [2.1, 1.9] ─► softmax/T(low) ─► [0.98, 0.02]
-                                                            ↑
-                          stated 0.98, but true frequency for
-                          this logit gap is more like 0.65
-                          → overconfident; reliability curve sags
+   scores ─►  0.05  0.12 │ 0.31  0.44 │ 0.62  0.68 │ 0.91  0.97
+              └────┬────┘ └────┬────┘ └────┬────┘ └────┬────┘
+               bin [0,.25)  bin [.25,.5)  bin [.5,.75)  bin [.75,1]
+                  ▼            ▼             ▼            ▼
+            each bin gets a (mean predicted, observed frequency) pair
 ```
 
-**Fix 1 — Platt scaling (fit a logistic on the scores).** You already know logistic regression. Platt scaling is *just that*, fit on top of a frozen model: take the model's raw scores `s`, and learn two scalars `A`, `B` so that `P(positive) = sigmoid(A·s + B)`. You fit `A` and `B` on a held-out calibration set by minimizing log-loss against the true labels. It's a one-dimensional logistic regression whose only input is the score. Cheap, needs little data, but it assumes the miscalibration has a sigmoid shape — it can't fix arbitrary wiggles.
+**Part 2 — Compute observed frequency per bin and compare.** For each bin, the gap between mean predicted confidence and actual positive rate is the per-bin calibration error.
 
+**Per-bin gap = |mean predicted − observed frequency|**
 ```
-  Platt scaling — a logistic squashes the score onto a probability
-
-  raw score s ──► [ sigmoid(A·s + B) ] ──► calibrated P(positive)
-                       ▲   ▲
-                  fit A,B on held-out (score, label) pairs
-                  by minimizing log-loss
-                  → assumes ONE sigmoid-shaped correction
-```
-
-```
-  // Platt scaling — fit, then apply
-  fit_platt(scores, labels):
-    A, B = 1.0, 0.0
-    repeat until converged:                  // gradient descent on log-loss
-      for (s, y) in zip(scores, labels):
-        p = sigmoid(A*s + B)                 // current calibrated estimate
-        grad_A += (p - y) * s                // logistic gradient
-        grad_B += (p - y)
-      A -= lr * grad_A ; B -= lr * grad_B
-    return (A, B)
-
-  calibrate(s, A, B):
-    return sigmoid(A*s + B)                   // raw score → probability
+   bin            mean pred   observed   gap
+   [0.75, 1.0]      0.90        0.60     0.30  ◄── overconfident
+   [0.50, 0.75]     0.62        0.61     0.01      well calibrated
+   [0.25, 0.50]     0.40        0.55     0.15  ◄── UNDERconfident
+   [0.00, 0.25]     0.12        0.10     0.02
 ```
 
-**Fix 2 — isotonic regression (a monotone step fit).** When the miscalibration isn't sigmoid-shaped, fit a free-form *monotone non-decreasing* function instead. Isotonic regression sorts predictions by score, then fits the best step function that never goes down — implemented by pool-adjacent-violators (merge any adjacent buckets where the observed frequency would decrease, averaging them). It can model any monotone distortion, which is more flexible than Platt, but it needs more data and will overfit on a tiny calibration set.
+**Part 3 — Collapse the gaps into one number: ECE.** Expected Calibration Error is the bin-size-weighted average of those gaps — a single scalar for how far off the model's confidence is. Illustrative, not buffr code:
 
-```
-  Isotonic regression — monotone step fit via pool-adjacent-violators
-
-  sort by score →   buckets:  [.1][.3][.2][.6][.5]   ← observed freq per bucket
-  enforce monotone:           [.1][ .25 ][.55]        ← merge the two violations
-                                   (.3,.2)→.25  (.6,.5)→.55
-  result: a non-decreasing step function  score → P(positive)
-  → fits ANY monotone shape, but needs more labels than Platt
-```
-
-```
-  // Isotonic — pool adjacent violators (PAV)
-  fit_isotonic(scores, labels):
-    pairs = sort_by_score(zip(scores, labels))      // ascending score
-    blocks = [ {sum:y, n:1, lo:s, hi:s} for (s,y) in pairs ]
-    repeat:
-      find adjacent blocks where mean(left) > mean(right)   // a violation
-      if none: break
-      merge them: sum += ; n +=                              // pool → average
-    return step_function(blocks)   // score range → block mean = P(positive)
+**Expected Calibration Error (illustrative)**
+```python
+# ILLUSTRATIVE ONLY — not buffr code. Weighted average of per-bin gaps.
+ece = 0.0
+for b in bins:
+    weight = len(b.examples) / N                 # how much of the data sits in this bin
+    gap    = abs(b.mean_predicted - b.observed_frequency)
+    ece   += weight * gap
+# ece near 0 = honest scores; large ece = the numbers don't mean what they say
 ```
 
-**The part that decides whether any of this matters.** Calibration is *only* worth doing when downstream code uses the probability as a probability. If your consumer takes `argmax` (pick the top class) or ranks the top-k, calibration changes nothing — the *ordering* is untouched by a monotone transform, and both Platt and isotonic are monotone. The moment you threshold (`if p > 0.6`), compare against a fixed bar, or compute an expected value (`p · value`), you're reading the number's *magnitude*, and an uncalibrated magnitude is a guess. This is the test to apply before spending a day calibrating: does anything downstream read the magnitude?
+**Part 4 — Fix it with a post-hoc map.** Fit a monotonic function that maps raw scores to calibrated ones, on a held-out set. Two standard choices:
 
+**Two calibrators — Platt (sigmoid) vs isotonic (step function)**
 ```
-  The deciding question — does the consumer read magnitude or just order?
-
-  ┌─ argmax / top-k rank ──┐   uses ORDER only   → calibration irrelevant
-  │  monotone-invariant     │   (cosine ranking is fine as-is)
-  └─────────────────────────┘
-  ┌─ threshold / EV math ──┐   uses MAGNITUDE    → calibration REQUIRED
-  │  "p > 0.6", "p · value" │   (uncalibrated = arbitrary cutoff)
-  └─────────────────────────┘
+   PLATT SCALING                          ISOTONIC REGRESSION
+   fit a sigmoid: p = σ(a·s + b)          fit a monotonic STEP function
+   ┌───────────────────────┐              ┌───────────────────────┐
+   │        .·············  │              │           ┌──────────  │
+   │     .·'                │              │      ┌────┘            │
+   │  .·'                   │              │  ┌──┘                  │
+   │·'                      │              │─┘                      │
+   └───────────────────────┘              └───────────────────────┘
+   2 params, needs less data,             non-parametric, fits any
+   assumes sigmoid shape                  monotonic shape, needs MORE data
 ```
+Both are monotonic, so neither changes the ranking — they only relabel the scores. Pick Platt when calibration data is scarce, isotonic when it's plentiful.
 
-**Where this bites buffr.** buffr's cosine score is computed in `src/pg-vector-store.ts:70-78` as `1 - (embedding <=> $1::vector) AS score` — cosine *similarity*, a geometric quantity in 0..1, never fit to any frequency. Today buffr only *ranks* on it (the pipeline takes top-k, `K=3` in `src/cli/eval-cmd.ts:22`), so it sits on the safe side of the seam. The bug arrives the instant someone adds a **refusal threshold** — the very natural "if the best hit's score is below 0.6, answer *not in sources*." That 0.6 is an arbitrary point on an uncalibrated scale: it has no defensible meaning, it'll behave differently for short vs long queries, and it'll silently over- or under-refuse. The fix isn't a better-guessed constant; it's to calibrate the cosine→relevance mapping first, then read the threshold *off the calibrated curve*.
+### Move 3 — The principle
 
-### Move 3 — the principle
-
-A score is not a probability until you've proven it matches observed frequency. Ranking is free — any monotone score orders correctly — but the moment a single line of code compares that score to a fixed bar or multiplies it by a payoff, you've made a calibration claim, and an uncalibrated number turns that line into a guess wearing a decimal point.
+The principle: **calibration matters exactly when a downstream system consumes the score as a number, not when you only need the argmax label.** If all you do is take the top-ranked item, miscalibration is harmless — the order is untouched. But the instant you threshold ("act if confidence > 0.8"), or compute expected value ("0.7 chance × $100"), or route by confidence, the *value* of the number is load-bearing, and an uncalibrated 0.9 makes the wrong decision. Ask first: does anything read the raw score? If yes, calibrate.
 
 ## Primary diagram
 
-```
-  Calibration end to end — and the exact buffr line where it would attach
+The full picture — rank quality is fine, but the score is a lie until a calibrator repairs it.
 
-  ┌─ FIT (offline, needs labels) ───────────────────────────────────┐
-  │  (score, is_relevant) pairs  ──►  reliability diagram            │
-  │                                   │ sags below diagonal?         │
-  │                                   ▼                              │
-  │            Platt: sigmoid(A·s+B)   OR   isotonic: monotone steps │
-  │                                   │                              │
-  │                                   ▼  calibrator g(score)         │
-  └───────────────────────────────────┬──────────────────────────────┘
-                                      │
-  ┌─ SERVE (buffr today) ─────────────▼──────────────────────────────┐
-  │  pg-vector-store.ts:70  score = 1 - (embedding <=> v)            │
-  │     ├─ consumer = top-k RANK  → calibration IRRELEVANT (today)   │
-  │     └─ consumer = THRESHOLD   → needs P=g(score), not raw 0.6    │
-  │        "if best score < 0.6 → refuse"  ← the line that bites     │
-  └──────────────────────────────────────────────────────────────────┘
+**Calibration end to end: diagnose with the reliability diagram, summarize with ECE, fix with a monotonic map**
 ```
+   raw model scores
+        │
+        ▼
+   ┌──────────────────┐   bin by confidence    ┌────────────────────────┐
+   │ RELIABILITY      │ ─────────────────────► │ predicted vs observed   │
+   │ DIAGRAM          │                        │ per bin → see the gaps   │
+   └──────────────────┘                        └────────────────────────┘
+        │                                                  │
+        ▼ summarize                                        ▼ if gaps large
+   ┌──────────────────┐                        ┌────────────────────────┐
+   │ ECE = weighted   │                        │ PLATT or ISOTONIC fit    │
+   │ mean |pred−obs|  │                        │ (monotonic → rank kept)  │
+   └──────────────────┘                        └────────────────────────┘
+        │                                                  │
+        └──────────────► calibrated scores ◄───────────────┘
+                              │
+   ┌──────────────────────────────────────────────────────────────────────┐
+   │ buffr's retrieval `score = 1 - (embedding <=> query)` is an UNCALIBRATED│
+   │ cosine similarity used at an implicit threshold (order by + limit). It  │
+   │ is NOT a probability — a 0.82 does not mean "82% relevant".              │
+   └──────────────────────────────────────────────────────────────────────┘
+```
+Calibration is the one adjustment that changes what scores mean without changing which one wins.
 
 ## Elaborate
 
-Calibration comes out of forecasting (Brier, 1950; the weather-forecast verification literature) and re-entered ML attention when Guo et al. (2017) showed modern deep nets are systematically overconfident and that a one-parameter *temperature scaling* (Platt with `B=0`, a single divisor on the logits) fixes most of it. The standard summary metric is **Expected Calibration Error (ECE)** — the average gap between bucket confidence and bucket accuracy, i.e. the area between the reliability curve and the diagonal. Calibration connects directly to the rest of this guide: it's the honest underpinning of any **refusal / abstention** behavior (`../05-evals-and-observability`), and it's the precondition for turning a retrieval score into an **expected-value decision**. In a retrieval system specifically, the cleaner framing is often to skip calibrating the raw cosine and instead train a small **reranker** (`../03-retrieval-and-rag/07-reranking.md`) that outputs an actual relevance probability — a learned calibrator with features, not just the bare score. buffr has neither today; the data to fit one (query, retrieved chunk, was-it-relevant) would come from labeling against `eval/queries.json`.
+The sharp edges:
+
+- **Calibration ≠ accuracy ≠ ranking.** Three independent properties. A model can be accurate but miscalibrated, or well-calibrated but inaccurate. AUC measures ranking; ECE measures calibration; they do not predict each other.
+- **Modern neural nets are systematically overconfident.** Deep networks trained with cross-entropy tend to push scores toward 0 and 1, so the reliability curve bows *below* the diagonal. This is why temperature scaling (a one-parameter Platt variant) is a standard last step in deployed classifiers.
+- **Calibrate on held-out data, never on train.** Fitting the calibrator on the training scores leaks and gives you a flattering, useless map. Use a dedicated calibration split — same discipline as `03-train-val-test.md`.
+- **Bin count is a knob with a bias/variance tradeoff.** Too few bins hides the miscalibration; too many leaves each bin too sparse to estimate a frequency. ECE is sensitive to this — report the bin count alongside it.
+- **buffr's honest line.** buffr's retrieval returns `1 - (embedding <=> query)` — a cosine similarity in `src/pg-vector-store.ts`. It is a *score*, used at an implicit threshold via `order by` + `limit`, but it is **not a probability** and nothing calibrates it. There is no trained classifier in the repo, so there is no reliability diagram and no ECE today. The honest gap: the day buffr adds a downstream decision that reads that score as a confidence ("auto-answer if relevance > 0.8"), it would be acting on an uncalibrated number — and calibration becomes a real, buildable need.
 
 ## Project exercises
 
-> No curriculum file present; exercises derived from the codebase.
+### Measure whether buffr's cosine score behaves like a probability
 
-### Calibrate the cosine→relevance mapping
+- **Exercise ID:** [B2C.9] Phase 2C
+- **What to build:** Not yet implemented — buffr trains nothing. Treat buffr's retrieval `score` as if it were a relevance probability and *test that assumption empirically*. Over `eval/queries.json`, bin every retrieved chunk's cosine score, and in each bin compute the observed relevance frequency (using the labeled `relevant` sets). Plot a reliability diagram (ASCII is fine) and compute ECE. You will almost certainly find the score is not probability-like — that's the finding, and it's the point.
+- **Why it earns its place:** It turns the abstract "the score isn't a probability" claim into a measured fact about buffr's own data, using labels the repo already has. It also teaches the diagnostic half of calibration without needing a trained model.
+- **Files to touch:** new `ml/calibration_probe.py` (bin scores, compute observed frequency, ECE), reads `eval/queries.json` and retrieval output from `src/cli/eval-cmd.ts`, writes the reliability diagram to `ml/README.md`.
+- **Done when:** a reliability diagram and an ECE number print over the eval set; a one-line note states plainly whether buffr's cosine score is usable as a relevance probability and at what threshold the gap is worst.
 
-- **Exercise ID:** CAL-1 (Case B — no calibrator exists; cosine is raw similarity). **The foundational calibration exercise.**
-- **What to build:** an offline script that pulls cosine scores for every (query, retrieved-chunk) pair across `eval/queries.json`, labels each pair relevant / not-relevant (the `relevant` field gives you the ground truth), then fits **isotonic regression** mapping `cosine_score → P(relevant)`. Emit the reliability diagram (bucketed observed frequency vs cosine) so the miscalibration is visible.
-- **Why it earns its place:** it proves the cosine is *not* a probability and produces the one artifact — a calibrated curve — that every threshold or expected-value decision downstream needs. The "I showed our 0.8 cosine was actually ~50% relevant" story.
-- **Files to touch:** new `eval/calibrate.ts` (mirror the setup in `src/cli/eval-cmd.ts:13-16` for pool/embedder/store); read scores via `PgVectorStore.search` in `src/pg-vector-store.ts:67`; `eval/queries.json` for labels.
-- **Done when:** the script prints a reliability table (cosine bucket → observed relevance frequency) and writes the fitted isotonic mapping to disk.
-- **Estimated effort:** 1–2 days (labeling the pairs is most of it on 3 queries; widen the query set first).
+- **Estimated effort:** half a day.
 
-### Derive the refusal threshold from the calibrated curve
+### Calibrate a trained classifier's scores with Platt and isotonic
 
-- **Exercise ID:** CAL-2 (Case B — no refusal logic exists; depends on CAL-1).
-- **What to build:** instead of a guessed `if best_score < 0.6 → refuse`, use CAL-1's calibrator to pick the *cosine value* at which `P(relevant)` crosses a chosen target (say 0.5), and refuse below that. Document the cosine cutoff as a derived quantity, not a magic constant.
-- **Why it earns its place:** turns an arbitrary number into a defensible decision boundary tied to an actual relevance probability — exactly the seam where uncalibrated scores bite.
-- **Files to touch:** wherever the refusal check would live in the agent/pipeline path (none exists yet — add it at the consumer of `search()` results); read the calibrator from CAL-1.
-- **Done when:** the refusal cutoff is computed from `P(relevant)=target` via the calibrated curve, and changing the target moves the cosine cutoff automatically.
-- **Estimated effort:** 4–8 hr (assuming CAL-1 done).
+- **Exercise ID:** [B2C.9b] Phase 2C
+- **What to build:** Not yet implemented — buffr trains nothing. Take the query-intent classifier from the earlier confusion-matrix exercise ([B2C.5]/[B2C.8]), hold out a calibration split, and fit both Platt scaling and isotonic regression on its raw scores. Show the before/after reliability diagrams and ECE, and confirm the ranking (AUC) is unchanged by both maps.
+- **Why it earns its place:** It builds the *fix* half of calibration and proves the principle hands-on — that a monotonic map repairs the numbers without touching the order. That demonstration is exactly the interview signal.
+- **Files to touch:** new `ml/calibrate.py` (Platt + isotonic fit on held-out scores), reuses the [B2C.5] classifier and its scored test split, results to `ml/README.md`.
+- **Done when:** ECE drops measurably after each calibrator, AUC is unchanged to several decimals (proving rank preservation), and a note compares Platt vs isotonic and says which you'd ship given the calibration-set size.
+- **Estimated effort:** 1 day.
 
 ## Interview defense
 
-**Q: buffr's retrieval returns a cosine score in 0..1. Is that a probability? When does it matter?**
-Answer: no — it's `1 - (embedding <=> v)` in `src/pg-vector-store.ts:70`, a geometric cosine similarity, never fit to any frequency, so 0.8 doesn't mean "80% relevant." It only matters when downstream code reads the *magnitude*. Today buffr just ranks top-k, so the ordering is all that's used and calibration is irrelevant. The day someone adds a refusal threshold — `if best score < 0.6` — that 0.6 is an arbitrary point on an uncalibrated scale, and now it matters: I'd fit isotonic against labeled relevance and read the cutoff off the calibrated curve.
+Most candidates have only consumed pre-trained models and read their softmax outputs as probabilities without ever checking. Having measured ECE and fit a calibrator is the signal that you know a score isn't automatically a probability.
 
+**Q: A model has great AUC but its 0.9s are right only 60% of the time. Is it broken?**
 ```
-  rank on cosine → fine (order-invariant) · threshold on cosine → needs calibration
+   AUC (ranking) ─► EXCELLENT, order is right
+   ECE (calibration) ─► BAD, 0.9 means 0.6
+        │
+        └─ NOT broken for argmax/top-k use.
+           BROKEN for any threshold or expected-value decision.
 ```
+Anchor: ranking and calibration are independent — whether it's "broken" depends entirely on whether anything reads the raw number.
 
-**Q: Platt vs isotonic — pick one for a small calibration set, and why?**
-Answer: Platt scaling — it's a one-parameter (or two-parameter) logistic, `sigmoid(A·s+B)`, so it needs very little data and won't overfit. Isotonic fits a free-form monotone step function, which models any distortion but needs far more labeled points; on buffr's tiny eval set it'd overfit badly. **The part people forget: both are monotone, so neither changes your ranking — they only change the magnitudes. If all you do is argmax or top-k, you don't need either.**
+**Q: How do you fix overconfidence without retraining?**
+```
+   raw scores ─► fit a MONOTONIC map on HELD-OUT data ─► calibrated scores
+                 Platt (sigmoid, few params) OR isotonic (step, more data)
+                 monotonic ⇒ ranking UNCHANGED
+```
+Anchor: a post-hoc monotonic map relabels the scores and leaves the order intact — Platt when data is scarce, isotonic when it's plentiful.
 
+**Q: Does buffr need calibration today?**
 ```
-  Platt: sigmoid(A·s+B), few params, low data  ·  isotonic: monotone steps, flexible, data-hungry
+   buffr score = 1 - (embedding <=> query)   ◄── cosine similarity, NOT a probability
+        │
+        ├─ used only at order-by + limit (top-k) ─► calibration NOT needed
+        └─ the day a threshold reads it as "% relevant" ─► calibration becomes real
 ```
+Anchor: an uncalibrated score is fine for top-k retrieval; it only becomes a problem when a downstream threshold or EV decision treats it as a probability.
 
 ## See also
 
-- `08-confusion-matrices.md` — the other place a threshold turns scores into decisions; calibration is what makes that threshold meaningful.
-- `10-recommender-systems.md` — content-based recsys ranks on the same cosine; ranking is order-invariant, so it dodges calibration the way buffr does today.
-- `04-model-selection.md` — log-loss / Brier as the metrics that reward calibration, not just accuracy.
-- `../03-retrieval-and-rag/07-reranking.md` — a learned reranker is a calibrator with features; the cleaner fix than scaling raw cosine.
-- `../05-evals-and-observability/01-eval-set-types.md` — the labeled set you'd fit and validate a calibrator against.
+- `./08-confusion-matrices.md` — the matrix you read metrics off of once a threshold is chosen; calibration is what makes the threshold meaningful.
+- `./10-recommender-systems.md` — where ranked scores get consumed downstream, the regime where calibration starts to matter.
+- `../03-retrieval-and-rag/` — where buffr's cosine `score` is produced and used at a threshold.
+- `../05-evals-and-observability/` — `eval/queries.json` as the labeled set a reliability diagram would be measured over.
+- `../09-ml-system-design-templates/` — where "calibrate scores before a downstream decision consumes them" becomes a serving-design step.

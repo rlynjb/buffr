@@ -1,126 +1,179 @@
-# Chapter 03 — Under the hood   (6:00–8:00, 2 minutes)
+# Chapter 3 — Under the Hood   (6:00–8:00, 2 minutes)
 
 ## Opening hook
 
-The room just watched it remember a prior conversation. Now they're wondering whether it's real or smoke. This chapter earns the credibility — but you go exactly one level deep and stop. Two minutes, one diagram, three sentences of mechanism. Not an architecture tour. If you start explaining the embedding model, the HNSW index parameters, and the Ollama provider all at once, you lose the room and you blow past 8:00. Pick the single most impressive, least obvious thing and show only that.
+The room just watched buffr recall a past conversation. Now they want one
+thing: *is that real, or is it a trick?* You get two minutes to earn
+credibility — and you earn it with exactly one mechanism, drawn once,
+explained in three sentences. Not an architecture tour. One non-obvious
+design choice that makes the money shot work.
 
-The one thing worth showing: **memory and your documents live in the same table, served by the same vector index, recalled through the same tool.** That's why the recall in the demo wasn't a special "memory feature" bolted on the side — it's your existing retrieval, pointed at the conversation's own history. When a judge hears that, they understand the money shot was architecture, not a hack. That's the credibility beat.
+The choice is this: buffr stores past conversations in the *same* vector
+store as your documents (retrieval store — `chunks` table), tagged as
+memory. So recall isn't a separate memory system — it's the search tool the
+agent already has, pointed at exchanges instead of docs. That's the whole
+trick, and it's a genuinely clean one. Go exactly one level deep on it and
+stop. Going two levels deep loses the room you just won.
 
 ## The time-budget bar
 
-You own 6:00 to 8:00. One diagram, the one non-obvious mechanism, then hand off — do not overstay.
+You own 6:00 to 8:00. Inside it: one diagram, three sentences, done. Resist
+the urge to keep explaining.
 
 ```
   ┌──────────────────────────────────────────────────────┐
-  │ ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░ │
-  │ 6:00 ──────── 8:00 ──────────────────────────────── 10:00 │
-  │       UNDER THE HOOD — you own 6:00 to 8:00 (2 min)   │
+  │ ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░ │
+  │ 0:00 ──────── 6:00 ──── 8:00 ─────────────── 10:00    │
+  │      UNDER THE HOOD — you own 6:00 to 8:00 (2 min)    │
   └──────────────────────────────────────────────────────┘
 ```
 
-## The chapter-opening diagram — one store, two roles
+## The one diagram — memory rides the same store
 
-This is the only diagram you show in this chapter, and you point at it while you talk. It's the master demo diagram zoomed into the one part that matters: the shared store.
-
-```
-  WHY IT REMEMBERS — one store, one index, one tool
-
-  ┌─ Session layer (src/session.ts) ──────────────────────────────┐
-  │  every turn:  agent.answer(q)                                  │
-  │               then  memory.remember({ conv, question, answer })│  ← writes the
-  └───────────────────────────────┬───────────────────────────────┘    exchange back
-                                  │  embed → upsert (tagged kind=memory)
-  ┌─ Adapter layer ───────────────▼───────────────────────────────┐
-  │  PgVectorStore — the SAME instance documents use              │
-  └───────────────────────────────┬───────────────────────────────┘
-                                  │
-  ┌─ Storage (agents.chunks) ─────▼───────────────────────────────┐
-  │   documents  (kind absent)   +   memory  (kind=memory)        │
-  │   ─────────────────────────────────────────────────────────   │
-  │   ONE HNSW cosine index over vector(768) serves BOTH          │
-  └───────────────────────────────┬───────────────────────────────┘
-                                  │  next turn: search_knowledge_base
-                                  ▼  recalls documents AND memory, ranked
-                          relevant past exchange surfaces as a top hit
-```
-
-Read that bottom band out loud if you want — it's the whole insight in one line: *one index, two kinds of row, recalled by the same tool.*
-
-## The body — the three sentences
-
-You say roughly three sentences over this diagram. Rehearse them tight; this is where presenters ramble.
+Here is the single picture. Indexed documents and past exchanges live in one
+`chunks` table; both are embeddings; one search tool retrieves from both. The
+arrow that matters is the one labeled "same tool, same store."
 
 ```
-  SHOW (on screen / slide)            SAY (out loud)
-  ────────────────────────────────    ─────────────────────────────────
-  point at the "memory.remember"      "After every turn, buffr embeds
-  arrow                                the exchange and writes it back
-                                       into the same vector store the
-                                       documents live in."
-  point at the chunks band — two      "So a memory and a document are
-  kinds of row, one index             the same kind of thing — a row
-                                       with an embedding, one tagged
-                                       'memory'. One index over both."
-  point at the search arrow           "Which means recall isn't a new
-                                       feature — it's the search tool the
-                                       agent already had, now reaching
-                                       the conversation's own past."
+  Why recall works — memory in the document store
+
+  ┌─ A turn happens (npm run chat) ────────────────────────────────┐
+  │                                                                 │
+  │  you ask  ──►  RagQueryAgent  ──►  search_knowledge_base tool   │
+  │                                          │ embed query (768-dim)│
+  │                                          ▼                       │
+  │             ┌─ Postgres + pgvector: chunks table ───────────┐   │
+  │             │  one ANN search (HNSW, cosine) over BOTH:      │   │
+  │             │                                                │   │
+  │             │   • indexed docs   meta.kind = (doc)           │   │
+  │             │   • PAST EXCHANGES meta.kind = 'memory'        │   │
+  │             │                    id = "memory:<conv>:<n>"    │   │
+  │             └────────────────────┬───────────────────────────┘   │
+  │                                  │ top-k hits (docs OR memory)    │
+  │                                  ▼                                 │
+  │             Gemma answers, grounded in whatever ranked top        │
+  │                                                                   │
+  │  AFTER the turn:  memory.remember({question, answer})            │
+  │     embeds THIS exchange → writes it back as kind='memory'       │
+  │     ↑ so the NEXT session can retrieve it. The loop closes.      │
+  └─────────────────────────────────────────────────────────────────┘
 ```
 
-That's it. Three sentences, one diagram. If a judge wants the depth — how the engine over-fetches and filters by `kind`, why the foreign key was deliberately dropped to allow memory rows with no parent document — that's the Q&A (chapter 06) and the deep walk in `study-system-design/06-retrieval-as-memory.md`. On stage, you stop at "same store, same index, same tool."
+The thing to point at is that there is no separate "memory database." Past
+exchanges are rows in the same `chunks` table as the documents, tagged
+`kind='memory'`, retrieved by the same tool through one ANN search
+(approximate nearest neighbor over the HNSW index). That's why a paraphrase
+finds the old conversation: same embedding space, same retrieval, same tool.
 
-Here's the move, made explicit, because going too deep here is the classic credibility-beat failure:
+## The three sentences — say exactly this, then stop
+
+This is the whole explanation. Memorize these three lines. Do not add a
+fourth.
 
 ```
-  WEAK under-the-hood                 STRONG under-the-hood
-  ──────────────────────────────      ──────────────────────────────────
-  walk the whole stack: Ollama,       one diagram: memory rides the same
-  the embedding dims, HNSW params,    store as documents. Three sentences.
-  the agent loop, the trace sink…     "Want the depth? Happy to go there
-  → 4 minutes gone, room glazed       in Q&A." → 90 seconds, room impressed
+  ┃ "When buffr answers, after each turn it embeds the exchange and
+  ┃  writes it back into the SAME vector store as my documents —
+  ┃  just tagged as memory."
+
+  ┃ "So next time, a paraphrased question searches one store and the
+  ┃  past conversation surfaces by meaning — same retrieval, same
+  ┃  tool the agent already uses for docs."
+
+  ┃ "That's the whole trick: memory is just retrieval, pointed at
+  ┃  conversations instead of documents."
+```
+
+Three sentences, one diagram, two minutes. If a judge wants the depth —
+the conversation-memory engine, the deterministic chunk ids, the dropped
+foreign key that lets memory rows live without a documents row — that's the
+Q&A and the study guides, not the demo. You go one level deep here and
+hold.
+
+## The credibility anchor — this is your shape
+
+This pattern is not new to you, and saying so lands. You shipped classic RAG
+before (AdvntrCue — pgvector + GPT-4 + session memory). buffr is the
+local-first evolution of that same shape: the model moved on-device (Gemma
+via Ollama), and the memory became retrieval-based episodic recall over your
+own Postgres. One line, if it fits:
+
+```
+  ┃ "I've shipped RAG before in the cloud. buffr is the local-first
+  ┃  version — the model runs on my laptop, and memory is just
+  ┃  retrieval over my own database."
+```
+
+## Strong vs weak — the under-the-hood move
+
+Two minutes is enough for exactly one idea. Spend it on the one that's
+non-obvious, not on a layer-by-layer tour.
+
+```
+  WEAK under-the-hood                STRONG under-the-hood
+  ──────────────────────────         ──────────────────────────────
+  "let me walk the architecture:     ONE diagram: memory rides the
+  UI, then session, then the         same store as docs. That's it.
+  pipeline, then the store, then…"
+
+  explain embeddings, HNSW,          three sentences. name HNSW once
+  cosine distance, dimension         in passing, don't teach it.
+  mismatch handling, the FK…
+
+  six boxes, six arrows, the         one arrow that matters: "same
+  room's eyes glaze                  tool, same store" — the insight
+
+  go three levels deep, lose         go ONE level, hold, hand the
+  the room you just won              depth to Q&A
 ```
 
 ## The IF-IT-BREAKS box
 
-This chapter has no live beat — it's a diagram and three sentences, so nothing can crash. But it has a failure mode: a judge interrupts with a hard question mid-explanation and you get pulled into the weeds and lose the clock.
+There's no live action here — it's a diagram and three sentences — so the
+failure mode is verbal, not technical: you over-explain and run past 8:00,
+eating your close.
 
 ```
-╔══════════════════════════════════════════════════════════════════╗
-║ IF IT BREAKS (you get pulled into the weeds)                      ║
-║                                                                    ║
-║ A judge interrupts with a deep question here → DO NOT answer it    ║
-║ fully now. Say: "great question — let me finish the picture and    ║
-║ I'll take that in Q&A." Park it. The deep answer is in            ║
-║ study-system-design/06-retrieval-as-memory.md. Protect the clock; ║
-║ you still have the close to land.                                 ║
-╚══════════════════════════════════════════════════════════════════╝
+  ╔══════════════════════════════════════════════════════════════╗
+  ║ IF IT BREAKS (here, "breaks" = you run long)                 ║
+  ║ You feel yourself going a fourth sentence deep → STOP at      ║
+  ║ "memory is just retrieval pointed at conversations." Say:     ║
+  ║ "happy to go deeper in Q&A" and move to the build story.      ║
+  ║ The diagram alone, on screen, carries the credibility even    ║
+  ║ if you say less. Protect the close — it's only 45 seconds.    ║
+  ╚══════════════════════════════════════════════════════════════╝
 ```
 
-## The "tighten it" cut
+## The "tighten it" treatment
 
-Under a tight slot, this whole chapter compresses to one sentence said over the demo's afterglow: *"and the reason it remembers is that memory lives in the same vector store as the documents — same index, same search tool."* You can cut the diagram entirely if the clock demands it. The floor: the room hears *why* the recall is real (shared store), even if they don't see the diagram. This is a ceiling chapter, not a floor chapter — it's the first place to cut when you're running long.
+Running long? Cut this chapter to the diagram plus the *third* sentence only
+("memory is just retrieval, pointed at conversations instead of documents")
+and skip the AdvntrCue anchor. **Floor: the room sees the one diagram and
+hears the one-sentence why.** Below that, recall looks like magic instead of
+engineering — and "it's just retrieval over the same store" is exactly the
+line that makes a technical judge trust it.
 
-## The one-page run sheet — CHAPTER 03
+## The one-page run sheet — Chapter 3
 
 ```
-  ┌─ UNDER THE HOOD ─ 6:00–8:00 ─ 2 min ─ one level deep, STOP ──┐
-  │                                                              │
-  │  ONE DIAGRAM: memory + documents in the same chunks table,   │
-  │  one HNSW index, one search tool.                            │
-  │                                                              │
-  │  THREE SENTENCES (point at the diagram):                     │
-  │   1. "after each turn it embeds the exchange back into the   │
-  │       same store the documents live in"                      │
-  │   2. "a memory and a document are the same kind of row —     │
-  │       one index over both"                                   │
-  │   3. "so recall isn't a new feature — it's the search tool   │
-  │       the agent already had, reaching the past"              │
-  │                                                              │
-  │  NAIL THIS LINE: "same store, same index, same tool."        │
-  │  IF INTERRUPTED: "let me finish the picture, then Q&A."      │
-  │  TIGHTEN: cut to ONE sentence, drop the diagram. First place │
-  │           to cut when long.                                  │
-  └──────────────────────────────────────────────────────────────┘
+  ┌─ UNDER THE HOOD ──────────── 6:00–8:00 (2 min) ──────────────┐
+  │                                                               │
+  │  SHOW: the one diagram — memory rides the SAME chunks store   │
+  │   as documents, tagged kind='memory', one ANN search.         │
+  │                                                               │
+  │  SAY (three sentences, then STOP):                            │
+  │   1. "after each turn it embeds the exchange, writes it back  │
+  │       into the same store as my docs — tagged as memory."     │
+  │   2. "so a paraphrase searches one store and the past chat    │
+  │       surfaces by meaning — same tool as docs."               │
+  │   3. "memory is just retrieval, pointed at conversations."    │
+  │                                                               │
+  │  OPTIONAL anchor: "I shipped cloud RAG before; buffr is the   │
+  │   local-first version."                                       │
+  │                                                               │
+  │  IF YOU RUN LONG: stop at sentence 3, "deeper in Q&A," move.  │
+  │  TIGHTEN: diagram + sentence 3 only.                          │
+  │   FLOOR: one diagram + one why.                               │
+  └───────────────────────────────────────────────────────────────┘
 ```
 
-On to chapter 04 — proof it's real.
+Next: chapter 4 — proof it's real, and the hard part you cracked.

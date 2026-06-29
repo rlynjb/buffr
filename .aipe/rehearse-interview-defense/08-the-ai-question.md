@@ -1,375 +1,281 @@
 # Chapter 8 — The AI Question
 
-This is the 2026 question every senior interviewer now asks: "Did you
-use AI to build this?" And its sharper follow-ups: "Can you explain this
-section line by line?" "What did the AI get wrong?" The interviewer
-already knows the answer to the first one is yes — that's the default in
-2026, and they know it. What they're actually testing is whether you
-understand what you shipped well enough to *own it*. The worst possible
-answer is defensive or evasive. The best possible answer is grounded:
-matter-of-fact about the AI's role, matter-of-fact about your role,
-ending with a genuine reflection on what the tools have taught you.
+This is the 2026 meta-question, and every senior interviewer asks some version of it: "Did you
+use AI to build this?" "Can you explain this section line by line?" "What did the AI get wrong?"
+The interviewer already assumes you used AI heavily — everyone does. They're not testing *whether*
+you used it. They're testing whether you understand what you shipped well enough to own it. The
+worst possible answer is defensive or evasive. The best possible answer is grounded: matter-of-
+fact about the AI's role, matter-of-fact about yours, ending on what the tools actually taught you.
 
-This chapter is the capstone because the AI-honest posture runs through
-the whole book. Every "I evaluated and accepted" in chapter 3, every "I
-took the default" in the HNSW box — those were practice for this. Here
-it gets explicit.
+The posture that wins runs through all three modes of decision-making. Some choices you made
+deliberately. Some the AI suggested and you evaluated and accepted. A couple you defaulted to —
+the tool's default, never independently evaluated. Naming which mode each decision was, honestly,
+is the whole game. The defaulted-to ones are the riskiest to own and the most senior-positive
+when owned cleanly.
 
-## What AI did, what you did — the split
+## What AI did, what I did
 
-The anchor for this chapter: an honest split of the work into three
-modes of decision-making. This is the frame you carry into the question.
+This is the chapter's anchor: the split. Know which side of this line every part of buffr sits on.
 
 ```
-  the three modes of decision-making — own all three honestly
+  buffr — what AI did vs what I did, and the decision mode
 
-  ┌─ DELIBERATE (your call, you'd defend it cold) ──────────────────┐
-  │  the library boundary / contracts split                          │
-  │  build-vs-Hermes (own the judgment layer)                        │
-  │  local-first / privacy-first model choice                        │
-  │  the dropped-FK tradeoff (two named reasons)                     │
-  │  the Ink/React interface (your domain)                           │
-  │  capture-trajectories-now thesis                                 │
-  └──────────────────────────────────────────────────────────────────┘
+  ┌─ I DECIDED (deliberate) ───────────────────────────────────────────┐
+  │  build aptkit as a library, consume not edit it                     │
+  │  local-first / on-device — my data, own the stack                   │
+  │  the @aptkit/memory extraction & the engine-up/store-down boundary  │
+  │  the dropped chunks→documents FK (contract parity + memory rows)    │
+  │  full-signal trace capture — all 6 CapabilityEvent types            │
+  └─────────────────────────────────────────────────────────────────────┘
 
-  ┌─ EVALUATED-AND-ACCEPTED (AI suggested, you weighed it) ─────────┐
-  │  pgvector over a managed vector DB (weighed colocation)          │
-  │  the meta-rebuild shape in the adapter (you verified it)         │
-  │  the best-effort memory try/catch (you reasoned the asymmetry)   │
-  └──────────────────────────────────────────────────────────────────┘
+  ┌─ AI SUGGESTED, I EVALUATED & ACCEPTED ─────────────────────────────┐
+  │  pgvector over Pinecone (weighed: op-simplicity vs hosted)          │
+  │  HNSW with the cosine opclass (checked the operator alignment)      │
+  │  the jsonb-stringify fix for the array-literal bug (understood why) │
+  │  ContextWindowGuardedProvider wrapping the model (8192 cap)         │
+  └─────────────────────────────────────────────────────────────────────┘
 
-  ┌─ DEFAULTED-TO (AI's default, you didn't deeply evaluate) ───────┐
-  │  HNSW m / ef_construction (pgvector defaults, numbers held)      │
-  │  Postgres isolation level (took the default)                     │
-  │  the exact chunk-size / overlap in the pipeline                  │
-  │      ▲ the riskiest to own — and the most senior-positive        │
-  │        when owned WELL                                           │
-  └──────────────────────────────────────────────────────────────────┘
+  ┌─ DEFAULTED TO (AI's default, I didn't deeply evaluate) ────────────┐
+  │  HNSW index parameters — all defaults, never tuned                  │
+  │  connection pool sizing — pg.Pool defaults (max 10, no timeouts)    │
+  │  chunk size — fixed ~512 chars, never tuned against the eval        │
+  │  READ COMMITTED isolation — whatever Postgres defaults to           │
+  └─────────────────────────────────────────────────────────────────────┘
+
+  ┌─ WHAT AI GOT WRONG / I HAD TO FIX ─────────────────────────────────┐
+  │  array-as-jsonb: driver mis-cast arrays to PG array literals        │
+  │  created_at ordering: concurrent flush raced; I persist event ts    │
+  │  the silent empty-query path: still open — I know the fix           │
+  └─────────────────────────────────────────────────────────────────────┘
 ```
 
-The third band is the one that matters. Owning a "defaulted-to" decision
-honestly — "the AI picked this default, I didn't deeply evaluate it, the
-numbers held up, and here's what I'd revisit" — is the single most
-senior-signal-positive thing you can do in this chapter.
+The third box is the one that takes courage and earns the most credit. Name those out loud.
 
----
-
-### Question 1 — "Did you use AI to build this?"
+## "Did you use AI to build this?"
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │ THEY ASK                                                        │
-│   "Did you use AI to build this? Like, how much of it is        │
-│    yours?"                                                       │
+│   "Did you use AI to build this?"                              │
 │                                                                 │
-│ WHAT THEY'RE TESTING                                           │
-│   NOT whether you used AI — they assume you did. Whether you    │
-│   can be matter-of-fact about it without getting defensive,    │
-│   and whether "using AI" means you understand the output or    │
-│   you copy-pasted it. The defensiveness is the failure.        │
+│ WHAT THEY'RE TESTING                                            │
+│   Not whether you used it — they assume you did. They're        │
+│   testing your POSTURE. Defensive ("only for boilerplate")     │
+│   reads as insecure. Evasive reads as hiding something.         │
+│   Matter-of-fact, with a clear line between the AI's role and   │
+│   yours, reads as someone who owns their work.                 │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-The strong answer:
+> "Yes, heavily — like everyone shipping in 2026. I'll be precise about the split, because that's
+> the part that matters. The architecture decisions were mine: building aptkit as a consumable
+> library, going local-first, extracting the memory engine and injecting the store back into it,
+> dropping the documents foreign key to enable memory rows. Those are choices I can defend on their
+> merits because I made them on their merits.
+>
+> Some choices the AI suggested and I evaluated and accepted — pgvector over Pinecone is the clearest
+> one. The tool proposed it; I evaluated it against a hosted vector DB on operational simplicity and
+> cost at my scale, and accepted it. I'd make that call the same way by hand.
+>
+> And there are a couple I'll own honestly as *defaults* I didn't deeply evaluate: the HNSW index
+> parameters are all defaults, the connection pool is unconfigured, the chunk size is a fixed 512
+> characters I never tuned against my eval set. None of those bite at single-operator scale, but I
+> didn't make them as decisions — I took the defaults, and I know exactly which ones I'd have to turn
+> into real decisions the moment the system grew."
 
-> "Yeah, heavily — it's 2026, I'd be suspicious of anyone who says they
-> didn't. The way I'd frame it: AI was a fast pair-programmer, but the
-> decisions were mine and I can defend every one of them. There are three
-> modes. Some things were deliberate calls I drove — the library
-> boundary, building instead of using Hermes, going local-first. Some
-> things AI suggested and I evaluated and accepted — pgvector, for
-> instance, it proposed it and I weighed it against a managed vector DB,
-> decided colocation was worth more than a specialized engine at my
-> scale, and accepted it. And some things were defaults I took without
-> deeply evaluating — the HNSW index parameters, I ran pgvector's
-> defaults and my retrieval numbers held up, so I didn't go tune them.
-> I'm comfortable telling you which bucket any decision is in. The line I
-> hold is: I never shipped a line I couldn't explain. If AI wrote
-> something I didn't understand, I made myself understand it before it
-> stayed."
-
-This is the answer that wins because it's *matter-of-fact* (yes, heavily,
-no flinch), it *structures* the AI's role honestly (the three modes),
-and it lands the load-bearing principle: never shipped a line you
-couldn't explain. That principle is exactly what separates "I understand
-what I built" from "I generated something."
+That answer does the thing the question is actually fishing for: it shows you can sort your own
+codebase into the three modes without flinching, and the honesty about the defaults is what
+separates you from a candidate who claims they reasoned through every line.
 
 ```
-  ┃ The honest line isn't "I barely used AI." It's "I used it
-  ┃ heavily and I never shipped a line I couldn't explain."
-  ┃ The second is the one a senior interviewer trusts.
+┌─────────────────────────┬─────────────────────────┐
+│ WEAK ANSWER             │ STRONG ANSWER           │
+├─────────────────────────┼─────────────────────────┤
+│ "I used it a little,    │ "Yes, heavily. The      │
+│ mostly for boilerplate  │ architecture was mine.  │
+│ and autocomplete, but   │ Some choices the AI     │
+│ I wrote the important   │ suggested and I         │
+│ parts myself."          │ evaluated — pgvector.   │
+│                         │ And a few I'll own as   │
+│                         │ defaults I didn't       │
+│                         │ deeply evaluate — HNSW  │
+│                         │ params, pool sizing.    │
+│                         │ Here's which is which." │
+├─────────────────────────┼─────────────────────────┤
+│ Why it's weak:          │ Why it works:           │
+│ Defensive and almost    │ Matter-of-fact, no      │
+│ certainly untrue in     │ defensiveness, and it   │
+│ 2026. "Only boilerplate"│ sorts the codebase into │
+│ signals insecurity and  │ deliberate / evaluated /│
+│ invites the interviewer │ defaulted. Owning the   │
+│ to test the claim by    │ defaults is the         │
+│ asking you to explain a │ strongest part — it's   │
+│ line you can't.         │ what honesty looks like.│
+└─────────────────────────┴─────────────────────────┘
 ```
 
-#### Weak vs strong — the AI question
+> ┃ They're not testing whether you used AI. They're testing
+> ┃ whether you can sort your own codebase into what you decided,
+> ┃ what you evaluated, and what you defaulted to.
 
-```
-┌─────────────────────────────┬─────────────────────────────┐
-│ WEAK ANSWER                 │ STRONG ANSWER               │
-├─────────────────────────────┼─────────────────────────────┤
-│ "I mostly wrote it myself,  │ "Heavily — it's 2026. AI    │
-│ AI just helped with some    │ was a fast pair-programmer; │
-│ boilerplate and             │ the decisions were mine. I  │
-│ autocomplete here and       │ can tell you which mode any │
-│ there."                     │ decision was in: deliberate │
-│ — OR —                      │ (the library boundary),     │
-│ "AI wrote most of it, I'm   │ evaluated-and-accepted      │
-│ not totally sure how the    │ (pgvector over a managed    │
-│ retrieval part works         │ DB), or a default I took    │
-│ exactly."                   │ (HNSW params). I never      │
-│                             │ shipped a line I couldn't   │
-│                             │ explain."                   │
-├─────────────────────────────┼─────────────────────────────┤
-│ Why it's weak:              │ Why it works:               │
-│ First version: defensive,   │ No defensiveness, no        │
-│ minimizing — reads as       │ minimizing, no evasion. The │
-│ embarrassed, which signals  │ three-mode structure proves │
-│ you think AI use is a       │ you tracked your own        │
-│ problem. Second version:    │ decision-making, and "never │
-│ the fatal one — you don't   │ shipped a line I couldn't   │
-│ understand your own         │ explain" is the exact       │
-│ system. Either kills it.    │ ownership claim they want.  │
-└─────────────────────────────┴─────────────────────────────┘
-```
-
-Both weak versions fail, for opposite reasons. The minimizing one signals
-you think AI use is shameful (it isn't, in 2026). The "not sure how it
-works" one is the genuinely disqualifying answer — it means you can't own
-what you shipped, which is the *only* thing this question is actually
-testing.
-
----
-
-### Question 2 — "Explain this section line by line."
+## "Explain this section line by line"
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │ THEY ASK                                                        │
-│   "Pull up the retrieval code. Walk me through this function,   │
-│    line by line."                                                │
+│   "Pull up the PgVectorStore — explain the search method line   │
+│    by line."                                                    │
 │                                                                 │
-│ WHAT THEY'RE TESTING                                           │
-│   The direct ownership test. Can you explain code that AI      │
-│   likely helped write, at the line level, including WHY each   │
-│   line is there? This is where "I used AI but understand it"   │
-│   gets verified or exposed.                                     │
+│ WHAT THEY'RE TESTING                                            │
+│   The direct ownership test. Can you explain code you shipped   │
+│   in your own words, with the mechanism, not just read it       │
+│   aloud? This is where the "I only used AI for boilerplate"     │
+│   candidate falls apart and the grounded one shines.           │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-This is the moment the whole book has prepared you for. Pick the
-`PgVectorStore.search` method — you know it cold (it's in the SOLID band
-of your confidence map). The strong walkthrough:
+Pick the `search` method in `PgVectorStore` — it's small, it's yours, and you can walk it cold:
 
-> "Sure. This is the search method on my pgvector adapter. First line —
-> `assertDim(vector)` — it length-checks the query vector against 768
-> before any SQL runs; a wrong-dimension vector fails fast instead of
-> hitting a cryptic Postgres error. Then the query: I order by `embedding
-> <=> $1::vector` — that `<=>` is pgvector's cosine *distance* operator,
-> and I bind the query vector as a parameter and cast it to `vector`, so
-> it's never string-concatenated into the SQL. I filter by `app_id` and
-> limit to k. In the select I compute `1 - (embedding <=> $1)` as the
-> score, because `<=>` returns distance and I want similarity — so I
-> subtract from 1. Then the part that's easy to miss: the rows come back
-> as flat columns, but the citation tool expects the in-memory store's
-> meta shape, so I rebuild `meta.docId`, `meta.chunkIndex`, `meta.text`
-> from `document_id`, `chunk_index`, and `content`. If I got the
-> signature right but skipped that rebuild, search would 'work' but
-> citations would silently break. That meta rebuild is the load-bearing
-> part people forget when writing an adapter."
+> "Sure. `search` takes a query vector and a `k`. First line: `assertDim` — it throws if the vector
+> isn't 768-dimensional, because a dimension mismatch must fail loud, never silently truncate; that
+> assertion exists in four places as defense-in-depth.
+>
+> Then the query. I select the id, content, and meta, plus a computed score: `1 - (embedding <=> $1)`.
+> The `<=>` operator is pgvector's cosine *distance*, so I subtract from one to turn it into a
+> similarity score where higher is better. I filter `where app_id = $2` — that's the tenant
+> discriminator, shape-only today, no RLS behind it. I order by the same `<=>` distance and limit to
+> `k`. The order-by is what lets the HNSW index get used — and it only gets used because the index was
+> built with the matching `vector_cosine_ops` opclass. If those didn't align, this same query would
+> silently fall back to a sequential scan: correct, but slow.
+>
+> Last thing: I rebuild the meta shape on the way out — I fold `document_id`, `chunk_index`, and
+> content back into a `meta` object so the search tool's citations work, because the in-memory store
+> the contract is modeled on returns that shape. The vector goes in as a text literal — `toVectorLiteral`
+> joins the number array into pgvector's `[0.1,0.2,...]` format — bound as a parameter, so there's no
+> string-concatenation SQL injection path."
 
-That's line-level ownership (`src/pg-vector-store.ts:67-85`): you
-explained *what* each line does and *why* it's there, including the
-non-obvious cosine-distance-to-similarity conversion and the meta-rebuild
-that most people forget. Whether or not AI helped write it is now
-irrelevant — you demonstrably own it.
+That walkthrough names the mechanism (cosine distance → similarity), the load-bearing correctness
+fact (opclass alignment), the security property (parameterized), and the contract reason for the
+meta reshape. That's ownership, not recitation.
 
 ```
-  ┃ Whether AI wrote the line stops mattering the moment you
-  ┃ can explain why the line is there. Ownership is
-  ┃ understanding, not authorship.
+"Explain search line by line."
+      │
+      ▼
+You walk assertDim → cosine SELECT → opclass alignment → meta reshape.
+      │
+      ├─► IF THEY ASK "why 1 minus the distance?"
+      │     "<=> is cosine DISTANCE — 0 is identical, larger is farther.
+      │      I want a similarity score where higher is better, so I
+      │      subtract from one. It's a presentation choice; the ordering
+      │      is by raw distance either way."
+      │
+      ├─► IF THEY ASK "what if the opclass were wrong?"
+      │     "Silent sequential scan. No error — the query still returns
+      │      correct results, just without the index, so it's slow. It's
+      │      the single most important thing to get right in a pgvector
+      │      deployment, and the easiest to get silently wrong."
+      │
+      └─► IF THEY ASK "is this injection-safe?"
+            "Yes — every value is a bound parameter, $1 through $3. The
+             one serialized-to-text value is the vector literal, and that's
+             a number array the embedder produced, length-checked by
+             assertDim. No attacker-controlled string reaches the query."
 ```
 
----
-
-### Question 3 — "What did the AI get wrong?"
+## When they push past your depth
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│ THEY ASK                                                        │
-│   "Was there anything AI suggested that you had to push back    │
-│    on, or that was just wrong?"                                 │
-│                                                                 │
-│ WHAT THEY'RE TESTING                                           │
-│   Do you critically evaluate AI output, or accept it? A         │
-│   candidate who says "no, it was all great" either didn't use   │
-│   AI much or didn't review it. They want evidence of            │
-│   judgment applied to the tool's output.                        │
-└─────────────────────────────────────────────────────────────────┘
+╔═══════════════════════════════════════════════════════════╗
+║ WHEN YOU DON'T KNOW                                       ║
+║                                                           ║
+║   They ask: "You said HNSW. Explain how the HNSW graph    ║
+║   actually finds nearest neighbours — the layers, the     ║
+║   search descent, why it's approximate."                  ║
+║                                                           ║
+║   You picked HNSW on defaults and the numbers held up.    ║
+║   You have NOT gone deep on the graph internals — this is ║
+║   the thin-ice region from chapter 6.                     ║
+║                                                           ║
+║   Say:                                                    ║
+║   "I haven't gone deep into HNSW's internals — I picked   ║
+║    it on operational defaults and my retrieval numbers    ║
+║    held up. The shape I understand: it's a layered graph  ║
+║    where search starts coarse at the top and descends to  ║
+║    finer layers, and it's APPROXIMATE because it doesn't  ║
+║    visit every node — it trades a small recall loss for a ║
+║    huge speed win versus an exact scan. The exact         ║
+║    construction — the m and ef parameters and how they    ║
+║    trade recall against build time — I know are the knobs ║
+║    but I haven't tuned them, because I never had to. If   ║
+║    you want to dig into the descent, can you start me     ║
+║    off?"                                                  ║
+║                                                           ║
+║   What this signals: confidence about what you know (the  ║
+║   approximate-vs-exact tradeoff, that params exist), no   ║
+║   fake confidence about the internals, and willingness to ║
+║   learn in real time. The 2026 version of this is also    ║
+║   honest about WHY you didn't go deeper: you didn't have  ║
+║   to, and you know when you would.                        ║
+║                                                           ║
+║   Do NOT say:                                             ║
+║   "It's some kind of graph thing that finds close nodes,  ║
+║    I think." — vague hedging in territory you didn't go   ║
+║   deep on is the surest way to fail. Name the boundary    ║
+║   cleanly instead.                                        ║
+╚═══════════════════════════════════════════════════════════╝
 ```
 
-The strong answer — grounded in a real decision from this codebase:
+## What the tools actually taught you — the closer
 
-> "The clearest one: the foreign key on chunks. The natural,
-> textbook-correct suggestion is to put a foreign key from
-> `chunks.document_id` to `documents.id` — and AI assistance defaults to
-> that, because it's the 'right' relational hygiene. But it's wrong for
-> this system, for two reasons I had to reason through myself: the
-> `VectorStore` contract upserts chunks with no documents row, so a hard
-> FK breaks drop-in parity with the in-memory store; and conversation
-> memory rides the same chunks table with no parent document at all, so
-> the FK would reject every memory write. So I dropped it deliberately and
-> documented why. That's a case where the 'best practice' the tool
-> reaches for was exactly the wrong call for the architecture, and I had
-> to override it with a reason. More broadly, the thing AI is reliably
-> wrong about is *my specific tradeoffs* — it knows the general patterns,
-> it doesn't know that memory shares my chunks table, so it'll suggest the
-> textbook constraint that my design specifically can't have."
+End the chapter, and the interview, on reflection. This is the line that lands.
 
-This is a strong answer because the example is real and specific
-(`sql/001_agents_schema.sql:18-27`), and it names the *category* of thing
-AI gets wrong — your specific tradeoffs that override the general
-best-practice. That generalization shows you've got a working mental
-model of where the tool's judgment ends and yours begins.
+> "What building with AI heavily actually taught me is that the bottleneck moved. The bottleneck
+> isn't typing the code anymore — it's *judgment*: knowing which suggestion to accept, which to
+> push back on, and which default is about to bite you later. The pgvector suggestion was right and
+> I could tell it was right. The dropped foreign key, the AI would have flagged as a smell — and I
+> kept it deliberately because I understood what it bought me. The silent empty-query failure is one
+> the tools didn't catch and I had to find by reasoning about the system, not by reading the code
+> they wrote. Using AI well made me a better evaluator of decisions, because that's the part that's
+> left for me to do."
 
-#### The follow-up tree
+> ▸ The bottleneck moved from typing the code to judging the
+>   suggestions. Owning the judgment is the job now.
 
-```
-  You give the dropped-FK override example.
-        │
-        ├─► IF THEY ASK "how do you catch when AI is wrong like that?"
-        │     → I don't accept a suggestion I can't reason through.
-        │       The FK looked right; I asked "what does this assume?"
-        │       and the answer (a documents row must exist) collided
-        │       with what I knew about memory rows. The collision
-        │       caught it.
-        │
-        ├─► IF THEY ASK "doesn't that slow you down a lot?"
-        │     → For load-bearing decisions, yes, and it should. For
-        │       boilerplate I move fast. The judgment is knowing which
-        │       is which — a FK on a shared table is load-bearing, an
-        │       import statement isn't.
-        │
-        └─► IF THEY ASK "what else did it get wrong?"
-              → The faithfulness eval — AI will happily call
-                precision@k "your evals" and not flag that generation
-                is unmeasured. I had to know the retrieval/faithfulness
-                distinction myself to see the gap.
-```
+That closer reframes the whole AI question from defensive to forward-looking — it tells the
+interviewer you've thought about what your role *is* in an AI-assisted workflow, which is exactly
+the meta-skill a senior AI-engineering role is hiring for.
 
----
+## What you'd change about how you answer the AI question
 
-### Where you'll get pushed past your depth
+The reconsideration here is about your own instinct early in the pivot: the urge to *minimize* the
+AI's role to sound more competent. That instinct is backwards in 2026 — minimizing reads as
+insecurity, and it sets a trap, because the interviewer can always ask you to explain a line and
+expose the gap. The stronger posture, the one this chapter trains, is to *maximize honesty about
+the split* — be precise about what was deliberate, evaluated, and defaulted — because the precision
+itself is the competence signal.
 
-```
-╔═══════════════════════════════════════════════════════════════╗
-║ WHEN YOU DON'T KNOW                                          ║
-║                                                              ║
-║   The honest edge of this chapter: they point at a region    ║
-║   in the DEFAULTED-TO band and ask you to justify the        ║
-║   default as if it were a deliberate call. "Why these exact  ║
-║   HNSW parameters? Why this chunk size?" You didn't deeply   ║
-║   evaluate these — and the trap is pretending you did.       ║
-║                                                              ║
-║   Say:                                                       ║
-║   "Honest answer — that's a default I took, not a decision   ║
-║    I drove. I ran pgvector's default HNSW parameters and my  ║
-║    retrieval eval numbers held up, so I never went tuning.   ║
-║    If you asked me to justify the specific m and             ║
-║    ef_construction values as optimal, I can't — I didn't     ║
-║    sweep them. What I CAN tell you is the knob: higher       ║
-║    ef_construction trades build time for recall, and the     ║
-║    moment my eval scores dropped at scale, that's the first  ║
-║    thing I'd tune. So I'm owning it as a defaulted-to        ║
-║    choice that's worked, with a clear next move if it stops  ║
-║    working."                                                 ║
-║                                                              ║
-║   What this signals: you distinguish a decision you DROVE    ║
-║   from a default you TOOK, you don't retroactively dress a   ║
-║   default as deliberate, and you name the instrument         ║
-║   (eval scores) and the knob (ef_construction) for when      ║
-║   it'd need real attention. Owning the default cleanly is    ║
-║   the senior move — faking the analysis is the junior one.   ║
-║                                                              ║
-║   Do NOT say:                                                ║
-║   "I chose those parameters because they balance recall and  ║
-║    performance optimally for my workload" — a retroactive    ║
-║    justification for a sweep you never ran. The follow-up    ║
-║    ("what recall did you measure at each setting?") ends it. ║
-╚═══════════════════════════════════════════════════════════════╝
-```
+## One-page summary
 
-This is the chapter's keystone box and it ties the whole book together:
-the cleanest thing you can do with an AI-assisted, defaulted-to decision
-is *say it's a default*, name where it'd need real evaluation, and not
-pretend the analysis happened.
+**Core claim:** The interviewer assumes you used AI heavily; they're testing whether you can own
+what you shipped. Sort your codebase into three modes — deliberate, evaluated-and-accepted,
+defaulted-to — name the defaults honestly, explain your real code in your own words with the
+mechanism, and close on what the tools taught you about judgment.
 
----
-
-### What the tools have actually taught you — the close
-
-End the AI question — and the book — on genuine reflection, not a
-talking point. The strong close:
-
-> "What the tools have actually changed for me: they raised the floor on
-> how fast I can get something working, which means the bottleneck moved
-> from typing to *judgment*. The hard part of this project was never
-> producing code — AI made that fast. The hard part was the decisions:
-> what to colocate, where to draw the library boundary, what to measure,
-> what constraint to drop. AI doesn't make those for you — it'll suggest
-> the textbook default, and your job is knowing when the textbook is
-> wrong for your system. So if anything, building this with heavy AI
-> assistance made me *more* deliberate about decisions, not less —
-> because the code stopped being the scarce thing, and the judgment
-> became the whole job. That's the shift I'd want a senior interviewer to
-> see: I'm not afraid of the tools, and I know exactly which part of the
-> work is still mine."
-
-That close is grounded — it names a real change in how the work feels
-(judgment over typing) and ties it back to the project's actual hard
-parts (the decisions). It's the opposite of defensive, and it's the note
-that leaves the interviewer thinking "this person owns their work."
-
-```
-  ┃ AI moved the bottleneck from typing to judgment. The code
-  ┃ stopped being scarce; the decisions became the whole job.
-  ┃ That's the shift to show, and it's the truth.
-```
-
----
-
-## One-page summary — Chapter 8
-
-**Core claim:** The AI question tests ownership, not AI use. Be
-matter-of-fact about the tool's role, structure your decisions into
-three honest modes, and never claim a line you can't explain.
-
-**The questions covered:**
-
-- **"Did you use AI?"** — Yes, heavily, no flinch. Three modes:
-  deliberate / evaluated-and-accepted / defaulted-to. "Never shipped a
-  line I couldn't explain."
-- **"Explain line by line"** — Pick `PgVectorStore.search`: assertDim,
-  `<=>` cosine distance, `1 - distance` similarity, the meta rebuild most
-  people forget. Demonstrable ownership.
-- **"What did AI get wrong?"** — The dropped FK: AI defaults to the
-  textbook constraint; your design (memory in chunks, contract parity)
-  specifically can't have it. AI is wrong about your specific tradeoffs.
+**Questions covered:**
+- *"Did you use AI?"* → yes, heavily; architecture was mine, pgvector was evaluated-and-accepted,
+  HNSW params / pool sizing / chunk size were defaults I didn't deeply evaluate.
+- *"Explain search line by line."* → assertDim → cosine distance to similarity → opclass alignment
+  (the silent-seq-scan risk) → meta reshape for citations → parameterized, injection-safe.
+- *"How does HNSW work internally?"* → name the approximate-vs-exact tradeoff and the layered
+  descent shape; admit you picked it on defaults and didn't tune the params.
 
 **Pull quotes:**
+- "They're not testing whether you used AI. They're testing whether you can sort your own codebase
+  into what you decided, what you evaluated, and what you defaulted to."
+- "The bottleneck moved from typing the code to judging the suggestions. Owning the judgment is the
+  job now."
 
-```
-  ┃ "I used it heavily and never shipped a line I couldn't
-  ┃ explain" — that's the one a senior interviewer trusts.
-
-  ┃ Ownership is understanding, not authorship.
-
-  ┃ AI moved the bottleneck from typing to judgment.
-```
-
-**The "I don't know":** A defaulted-to choice (HNSW params, chunk size)
-— say it's a default you took, name the instrument (eval scores) and the
-knob (ef_construction), don't retroactively dress it as a deliberate
-sweep.
-
-**What you'd change:** Nothing about owning the AI use — but the
-defaulted-to band is where you'd do the most real evaluation next (start
-with the HNSW params the day the eval scores move).
+**What you'd change:** Stop the instinct to minimize the AI's role — in 2026 that reads as
+insecurity and sets a trap. Maximize honesty about the split instead; the precision is the
+competence signal.

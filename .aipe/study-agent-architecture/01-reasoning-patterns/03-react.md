@@ -1,207 +1,199 @@
-# ReAct — the pattern buffr actually runs
+# ReAct — Placement, Not Re-teaching
 
-**Industry name(s):** ReAct (Reason + Act) · the
-Thought–Action–Observation loop · the default single-agent pattern.
-**Type label:** Industry standard.
+*Industry names: **ReAct** (Reason + Act). Type label: Industry standard. IMPLEMENTED in buffr — buffr is plain ReAct.*
 
 ## Zoom out, then zoom in
 
-ReAct is the specific reasoning pattern buffr's loop instantiates.
-This file's job is *placement* — where ReAct sits in the family and
-why you start here before reaching for anything fancier — not to
-re-teach the Thought–Action–Observation mechanics (those are loop
-mechanics, walked in `02-agent-loop-skeleton.md`).
+ReAct is not a separate layer in buffr — it is the *name* for what the kernel's step does.
+Here is where it sits relative to the escalation patterns it's the floor of.
 
 ```
-  Zoom out — ReAct in the reasoning-pattern family
+  Reasoning patterns — ReAct is the FLOOR, the rest stack on it
 
-  ┌─ Reasoning patterns (SECTION A) ─────────────────────────┐
-  │                                                          │
-  │   ★ ReAct ★  ← the baseline; buffr is here               │ ← we are here
-  │      │ escalate only on a specific measured failure      │
-  │      ├──► plan-and-execute  (structured tasks)           │
-  │      ├──► reflexion         (quality via self-critique)  │
-  │      └──► tree-of-thoughts  (rarely worth it)            │
-  └──────────────────────────────────────────────────────────┘
+  ┌─ Escalation ladder (rungs above ReAct) ────────────────────┐
+  │   tree-of-thoughts   06  ── NOT YET                        │
+  │   reflexion          05  ── NOT YET                        │
+  │   plan-and-execute   04  ── NOT YET                        │
+  ├─ ★ ReAct (this file) ★ — the floor ────── IMPLEMENTED ─────┤
+  │   reason → act → observe, looped, bounded                 │
+  │   run-agent-loop.ts:98-190 · maxTurns:6 · maxToolCalls:4  │
+  └────────────────────────────────────────────────────────────┘
 ```
 
-Zoom in: ReAct interleaves reasoning and action — the model thinks,
-acts (calls a tool), observes the result, and repeats. buffr's
-`RagQueryAgent` is a textbook single-tool ReAct agent: the one action
-available is "search the knowledge base."
+buffr runs plain ReAct and stops there — deliberately. This file does **not** re-teach
+Thought-Action-Observation; that mechanic lives in `study-ai-engineering`. This file is
+about **placement**: where ReAct sits, why buffr defaults to it, and the discipline of
+escalating off it only on a *measured* failure, not a hunch.
 
 ## Structure pass
 
-**Layers.** ReAct is one layer of the stack — it's *how the step
-function is prompted* inside the loop kernel from the previous file.
+One axis: **cost** — what does each rung above ReAct buy, and what does it cost?
 
-**Axis — "what tells the model how to act?"** In a native-tool model,
-the provider's tool API does. In buffr, the *system prompt* does — the
-DEFAULT_SYSTEM_TEMPLATE says "Always call the search_knowledge_base
-tool first to retrieve relevant passages before answering"
-(`rag-query-agent.js:12-19`). That prompt is the ReAct scaffold.
+```
+  Axis = COST · trace it up the ladder, find the seam where cost stops paying
 
-**Seam.** The seam is between the model's emitted intent and the
-harness — already covered in the skeleton file. Here the interesting
-thing is the *prompt* seam: the system prompt is what makes Gemma
-behave as a ReAct agent at all, because Gemma has no native ReAct
-training for tools.
+  ReAct              1x tokens     reason+act, one path        ← buffr is here
+  plan-and-execute   ~1.2x         explicit plan, less drift
+  ───────── ★ SEAM: cost outruns benefit for buffr's workload ★ ─────────
+  reflexion          2-5x          self-critique retry
+  tree-of-thoughts   5-15x         branch + evaluate + prune
+```
+
+The seam is below reflexion. ReAct and plan-and-execute are roughly single-pass; everything
+above re-runs the model multiple times for one answer. buffr's workload — grounded Q&A over
+a personal knowledge base — has not produced the failure that would justify paying 2-5x.
+That's the whole escalation thesis: **measure a specific failure first, then climb one
+rung.**
 
 ## How it works
 
-#### Move 1 — the mental model
+### Move 1 — mental model
 
-You know how a `useEffect` with a dependency re-runs, observes the new
-state, and decides what to do next? ReAct is that loop with a brain in
-the middle: think → act → observe → think again, until the thinking
-concludes "I have my answer."
+ReAct interleaves *reasoning* and *acting* in one loop: the model thinks a little, takes one
+action (a tool call), observes the result, thinks again. Bridge from frontend: it's a
+state machine where each transition is "model emits next move," and the moves alternate
+between "think out loud" and "call the tool." buffr's version is that, bounded.
 
 ```
-  Pattern — ReAct interleave (buffr's single-tool variant)
+  THE SHAPE — ReAct as buffr runs it (one path, no branching)
 
-  Thought:  "the user asked about X; I should search for X"
-     │
-     ▼
-  Action:   search_knowledge_base({ query: "X" })
-     │
-     ▼
-  Observation: [ranked chunks with citations]
-     │
-     ▼
-  Thought:  "that's enough — I can answer"  ──► final answer
-            (or "not enough" ──► loop, capped at 4 calls)
+   ┌──────────────────────────────────────────────┐
+   │                                              │
+   ▼                                              │
+  REASON ──▶ ACT ──▶ OBSERVE ──────────────────────┘
+  (model    (call    (tool result
+   thinks)   search)  re-enters as user msg)
+   │
+   │ model reasons it's done (no act)
+   ▼
+  ANSWER  ═ exit ═
 ```
 
-#### Move 2 — the walkthrough
+### buffr DEFAULTS to ReAct — and that's the right default
 
-**buffr's ReAct is single-tool.** Most ReAct diagrams show a model
-choosing among many tools. buffr deliberately has *one*:
-`search_knowledge_base`, granted by `ragQueryToolPolicy`
-(`rag-query-agent.js:8-11`). So the "Action" half of ReAct collapses
-to a single choice: search, or stop and answer. That's the smallest
-possible ReAct — and it's correct, because the only external
-capability this agent needs is retrieval.
+The default is not laziness; it's the documented industry default (prefer the simplest loop
+that works). buffr's agent declares ReAct by what it passes the kernel: a system prompt that
+says "search first, then ground your answer," one tool, and bounds. No planner, no critic,
+no tree.
 
-**The prompt is the pattern.** Open `rag-query-agent.js:12-19`. The
-DEFAULT_SYSTEM_TEMPLATE is the ReAct instruction:
-
-```js
+```ts
+// rag-query-agent.ts:20-27 — the ReAct system prompt: reason→act is instructed, not branched
 const DEFAULT_SYSTEM_TEMPLATE = [
   'You are a personal knowledge assistant.',
   '',
   `Always call the ${SEARCH_KNOWLEDGE_BASE_TOOL_NAME} tool first to retrieve relevant`,
   'passages before answering. Ground every answer in the retrieved chunks and cite',
-  'their sources. If the knowledge base does not contain the answer, say so plainly',
-  'rather than guessing.',
+  'their sources. ...',
 ].join('\n');
 ```
 
-"Always call the tool first" is the Reason→Act nudge. "Ground every
-answer in the retrieved chunks" is the Observe→Reason nudge. This text
-*is* what makes Gemma do ReAct — there's no native loop in the model.
+Annotation: "call the tool first, then ground your answer" is literally Act-then-Reason
+spelled into the prompt. There is no plan step, no critique step. One straight ReAct path.
 
-**The Observation feeds back as a user message.** After the tool runs,
-its result is pushed back into the message array as a `tool_result`
-(`run-agent-loop.js:97-104`), so the model's next Thought sees the
-retrieved chunks. That's the Observe step, mechanically.
+### buffr's MEASURED controls — the bounds are the escalation discipline
 
-```
-  Layers-and-hops — one ReAct cycle in buffr
+Plain ReAct can still loop too long. buffr's two numbers are the measured controls that keep
+the default safe without escalating to a fancier pattern.
 
-  ┌─ Model (gemma2:9b) ─┐ hop 1: tool_use JSON  ┌─ Harness ───────────┐
-  │  Thought + Action   │ ───────────────────►  │  callTool           │
-  │                     │                       │  → retrieval pipeline│
-  │                     │ ◄───────────────────  │  → PgVectorStore     │
-  └─────────────────────┘ hop 2: chunks (Obs.)  └─────────────────────┘
-        next Thought loops on the observation, capped at 4 actions
+```ts
+// rag-query-agent.ts:75-76 — the measured bounds on plain ReAct
+maxTurns: 6,        // at most 6 reason/act passes
+maxToolCalls: 4,    // at most 4 searches — then forced synthesis (see file 02)
 ```
 
-#### Move 3 — the principle
-
-Default to ReAct. It's the baseline single-agent pattern, and the
-strong prior is to *start here* and escalate only when a measured
-failure demands it.
-
 ```
-  Pattern — the escalation gate
+  Why these numbers ARE the escalation answer
 
-  Default to ReAct.
-    │
-    ├─ measure: success rate, tool-call accuracy, latency, cost
-    │
-    └─ escalate ONLY when a specific failure ReAct can't fix is found
-       (a structured task ReAct re-plans badly → plan-and-execute;
-        a quality gap a second pass would catch → reflexion)
+  symptom you might see          buffr's plain-ReAct response
+  ─────────────────────────      ────────────────────────────────
+  "loops re-searching forever" → maxToolCalls:4 + budget exit    (no new pattern)
+  "never finishes"             → maxTurns:6 + forced synthesis   (no new pattern)
+  "drifts off the question"    → NOT SEEN yet → don't add plan-execute on spec
+  "confidently wrong"          → NOT SEEN yet → don't add reflexion on spec
 ```
 
-Most teams jump past ReAct prematurely. "I built a ReAct baseline,
-measured it, and escalated only when [specific failure]" is a stronger
-answer than reaching for multi-agent first. buffr is the disciplined
-case: it stays single-tool ReAct because nothing has measurably forced
-it past that.
+Annotation: the two failures a tuned bound *does* fix (runaway, never-finishing), buffr
+fixes with numbers, not new patterns. The two failures the *next* rungs fix (drift,
+confident-wrong) buffr hasn't measured — so it correctly hasn't escalated. This is the
+verdict-first take: **don't add plan-and-execute or reflexion until you have a logged
+failure those patterns specifically address.**
+
+### Move 3 — the principle
+
+**ReAct is the floor; escalation is a response to a measured failure, never a default
+ambition.** Each rung up the ladder multiplies token cost and latency. The senior move is to
+ship plain ReAct, instrument the trajectory, and climb exactly one rung when — and only
+when — a specific, logged failure mode demands it. buffr is at the floor on purpose, with
+the trajectory captured (Section D) so that *if* a failure shows up, the escalation is
+evidence-driven.
 
 ## Primary diagram
 
-```
-  buffr's ReAct agent (rag-query-agent.js + run-agent-loop.js)
+Full recap: buffr's ReAct, its bounds, and the un-taken rungs above it.
 
-  system prompt: "always search first, ground every answer"
-        │
-        ▼
-  ┌─ ReAct loop (capped 6 turns / 4 calls) ──────────────────┐
-  │  Thought ─► Action: search_knowledge_base ─► Observation  │
-  │     ▲                                            │        │
-  │     └──────────── loop on observation ───────────┘        │
-  │  forced synthesis on last turn ─► grounded final answer   │
-  └──────────────────────────────────────────────────────────┘
 ```
+  buffr — plain bounded ReAct, escalation rungs unspent
+
+  ┌─ NOT TAKEN (no measured failure justifies the cost) ───────┐
+  │  ToT  (5-15x)   ·  reflexion (2-5x)  ·  plan-execute (~1.2x)│
+  └──────────────────────────┬─────────────────────────────────┘
+                             │ would escalate IF logged failure
+  ┌─ ★ RUNNING: plain ReAct ★ ─────────────────────────────────┐
+  │  prompt: "search first, then ground"   rag-query:20-27     │
+  │  loop:   reason → act → observe        run-agent-loop:98-190│
+  │  bounds: maxTurns:6 · maxToolCalls:4   rag-query:75-76      │
+  │  exit:   no-tool (success) OR budget (forced synthesis)     │
+  └────────────────────────────────────────────────────────────┘
+```
+
+The one-liner: buffr is **plain ReAct with two measured bounds**, and the ladder above it is
+intentionally unclimbed.
 
 ## Elaborate
 
-ReAct (Yao et al., 2022) was the insight that interleaving reasoning
-traces with actions beats doing all the reasoning up front (pure
-chain-of-thought) or all the acting with no reasoning. buffr's variant
-is the retrieval specialization: the single action is search, which
-makes it indistinguishable from "agentic RAG" — see
-`02-agentic-retrieval/01-agentic-rag.md` for that framing (the reframe
-to hold: all agentic RAG is agentic AI; not all agentic AI does
-retrieval). Where buffr would escalate past ReAct: if a question
-needed a *plan* across many sub-retrievals, plan-and-execute
-(`04-plan-and-execute.md`) would beat re-deciding the whole approach
-every turn — but buffr hasn't hit that ceiling.
+ReAct (Yao et al., 2022, "ReAct: Synergizing Reasoning and Acting in Language Models")
+showed that interleaving chain-of-thought with tool calls beats either alone — the model
+grounds its reasoning in observations instead of hallucinating. It became the default agent
+loop precisely because it's the *minimal* thing that gives a model tools. Everything in this
+sub-section's files 04-06 is a strictly more expensive elaboration of it.
+
+The thing interviewers probe is whether you reach for ReAct reflexively or know when to
+leave it. The strong answer is buffr's: ReAct by default, bounds tuned to the observed loop
+behavior, and the trajectory logged so the *next* pattern (if any) is chosen from evidence.
+The detailed Thought-Action-Observation mechanics — how the model is prompted to emit a
+thought before an action, how observations are formatted — live in `study-ai-engineering`;
+this file deliberately doesn't duplicate them.
+
+Read next: `04-plan-and-execute.md` — the first rung up, and the honest "not yet" for buffr.
 
 ## Interview defense
 
-**Q: What reasoning pattern does buffr use, and why that one?**
-Single-tool ReAct. The model interleaves reasoning and one action —
-search the knowledge base — observing each result before deciding to
-search again or answer. It's the right baseline because the only
-external capability the agent needs is retrieval, so the action space
-is genuinely one tool.
+**Q: "Why just ReAct? Why not a planner or a self-critique loop?"**
+
+Model answer: "Because nothing measured justifies the cost yet. buffr runs plain bounded
+ReAct (`run-agent-loop.ts:98-190`) with `maxTurns:6` and `maxToolCalls:4`
+(`rag-query-agent.ts:75-76`). The two failures tuned bounds fix — runaway loops and
+never-finishing — I fix with those numbers plus the forced-synthesis budget exit. The
+failures the next rungs fix — task drift (plan-execute) and confident-wrong answers
+(reflexion, 2-5x tokens) — I haven't logged on this workload. I capture the full trajectory,
+so when one shows up I'll climb exactly one rung, on evidence. Escalating on spec is how you
+ship a slow, expensive agent that's no more correct."
 
 ```
-  Thought → Action(search) → Observation → Thought → answer
+  The defense in one picture
+
+  measured failure?  ── no ──▶ stay on ReAct (cheapest loop that works)
+        │ yes
+        ▼
+  climb ONE rung that targets THAT failure
 ```
 
-**Anchor:** "Single-tool ReAct — the action space is exactly one
-read-only search, the smallest correct shape."
-
-**Q: When would you escalate buffr past ReAct?**
-Only on a measured failure ReAct can't fix. If questions needed a plan
-across many sub-retrievals and ReAct kept re-deciding the approach
-every turn, I'd reach for plan-and-execute. If answer quality had a
-gap a second self-critique pass would catch, reflexion. Not before —
-escalating without a measured failure just buys cost and a bigger
-debug surface.
+Anchor: *ReAct is the floor; you climb only when a logged failure pays for the cost.*
 
 ## See also
 
-- `02-agent-loop-skeleton.md` — the loop ReAct runs inside
-- `04-plan-and-execute.md` — the first escalation target
-- `05-reflexion-self-critique.md` — the quality escalation target
-- `02-agentic-retrieval/01-agentic-rag.md` — ReAct-with-retrieval, the
-  same loop named from the retrieval side
-- `04-agent-infrastructure/03-tool-calling-and-mcp.md` — how the
-  Action half is emulated for Gemma
-- ReAct *mechanics* would live in
-  `study-ai-engineering/04-agents-and-tool-use/03-react-pattern.md`
+- `02-agent-loop-skeleton.md` — the kernel ReAct names (reason=step, act=execute, observe=accumulate).
+- `04-plan-and-execute.md` / `05-reflexion-self-critique.md` / `06-tree-of-thoughts.md` —
+  the rungs above ReAct, all *Not yet implemented* in buffr.
+- `study-ai-engineering` → ReAct Thought-Action-Observation *mechanics* (deliberately not re-taught here).
+- `../00-overview.md` — "Not yet exercised" lists these escalations as design-only.

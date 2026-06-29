@@ -1,99 +1,52 @@
-# Study — Testing & Correctness · buffr-laptop
+# Study — Testing & Correctness (buffr-laptop)
 
 > How do you *know* the code works — and will keep working after the next change?
 
-That's the whole question this guide answers. A test suite is the thing that
-tells you what a change broke before your users do. A suite that can't do that
-is decoration. So the audit below isn't a coverage percentage — it's a **risk
-map**: which paths in buffr fail loudly when broken, and which fail silently.
+This guide audits the test suite of `buffr-laptop` (the laptop "brain" of a self-hosted personal RAG agent: TypeScript ESM, `node:test` + `node:assert/strict`, Postgres + pgvector, an Ollama-served Gemma loop, and an Ink chat CLI). It is grounded in the real files — what's tested, how, and where the holes are.
 
-The verdict up front: **buffr's suite is small, honest, and well-isolated — and
-it tests the wrong half of the risk.** Six test files, nine tests, nine passing.
-Every test that touches Postgres is correct and deterministic. But the two files
-that carry the actual conversation — `src/session.ts` (per-turn orchestration)
-and `src/cli/chat.tsx` (the only interface) — have **zero tests**. The plumbing
-is proven; the product isn't.
+The verdict up front: **the suite is small but honest — 9 tests, 9 pass, and every test that touches the database says so by gating on `DATABASE_URL` and skipping cleanly when it's unset.** The test *design* is unusually disciplined for a personal project: the database-touching tests are real integration tests against a live Postgres, the embedder is faked deterministically so the model never enters the loop, and the persistence layer (`PgVectorStore`) is tested as a contract that mirrors aptkit's in-memory store. The single highest-leverage gap is that the one piece of code that orchestrates everything — `src/session.ts` — has **no test at all**.
+
+---
+
+## The seam that organizes this guide: deterministic vs eval
+
+There are two ways to check an AI system, and they are not the same job:
 
 ```
-  The buffr correctness map — where tests sit vs where the risk sits
+  The correctness seam — which half is a finding on?
 
-  ┌─ Interface layer ───────────────────────────────────────────┐
-  │  src/cli/chat.tsx        Ink TUI, the only entry point       │
-  │                          ★ ZERO TESTS — highest-leverage gap │
-  └───────────────────────────────┬─────────────────────────────┘
-                                  │ session.ask(question)
-  ┌─ Orchestration layer ─────────▼─────────────────────────────┐
-  │  src/session.ts          persist → answer → flush → remember │
-  │                          ★ ZERO TESTS — the ordering nobody  │
-  │                            asserts                           │
-  └───────────────────────────────┬─────────────────────────────┘
-                                  │ uses ↓
-  ┌─ Persistence layer ───────────▼─────────────────────────────┐
-  │  pg-vector-store.ts  ✓   trace-sink.ts  ✓   runtime.ts  ✓   │
-  │  migrate.ts  ✓           profile.ts  ✓                       │
-  │  config.ts  ✓ (pure, always runs)                            │
-  │  ← every test here SKIPS when DATABASE_URL is unset          │
-  └──────────────────────────────────────────────────────────────┘
+  ┌─ DETERMINISTIC correctness ────────────┐   ┌─ EVALUATION ──────────────────┐
+  │  given known input, assert known output│   │  is the OUTPUT good enough /   │
+  │  assert.equal(score, 123)              │   │  did it regress?               │
+  │                                        │   │  precision@k, recall@k,        │
+  │  unit · integration · contract         │   │  LLM-as-judge                  │
+  │                                        │   │                                │
+  │  ← THIS GUIDE                          │   │  → study-ai-engineering        │
+  └────────────────────────────────────────┘   └────────────────────────────────┘
+         the assertion is "=="                    the assertion is "good enough"
 ```
 
-## The seam that organizes everything: deterministic vs eval
+If a test asserts an **exact value** — `tokens_used === 123`, `hits[0].id === 'planted#0'`, replay order `=== ['tool_call','tool','model_usage','warning','error']` — it's a *testing* finding and it lives here. If it asserts a **threshold on a non-deterministic output** — "mean P@1 over the eval set didn't drop below 0.6" — it's an *evaluation* finding and it belongs to `study-ai-engineering`.
 
-There are two kinds of "is it right?" in an AI codebase, and they need
-different tools. This guide owns one of them.
+This repo has both, and the line is clean: `test/` is all deterministic (`==`), and `eval/queries.json` + `src/cli/eval-cmd.ts` is the eval seam (a reporting script, not a unit test — it prints precision@k, it never asserts). They **meet** in exactly one place: the trace-sink test wraps a deterministic harness around what would otherwise be a probabilistic agent run, by capturing synthetic `CapabilityEvent`s instead of running Gemma. That's the textbook shape — a deterministic harness around a probabilistic core — and this repo gets it right. See `audit.md` → lens 6.
 
-```
-  ┌─ DETERMINISTIC correctness ──────┐   ┌─ PROBABILISTIC evaluation ──────┐
-  │  given input X, assert output X  │   │  is the model output good       │
-  │  "equals the expected value"     │   │  enough / did it regress?       │
-  │                                  │   │  "scored above threshold"       │
-  │  → THIS GUIDE (study-testing)    │   │  → study-ai-engineering         │
-  │    config, pgvector ranking,     │   │    eval-cmd's precision@k,      │
-  │    trace capture, migration      │   │    recall@k over a labeled set  │
-  └──────────────────────────────────┘   └─────────────────────────────────┘
-        the assertion is ==                    the assertion is "good enough"
-```
-
-The line is **determinism**. `assert.equal(hits[0].id, 'planted#0')` is a test
-— a known input plants a known winner. `mean P@1 0.67` over a labeled query set
-is an eval — it measures a non-deterministic retrieval+model output against a
-"good enough" bar. buffr has both. `eval-cmd.ts` is the eval half and is
-covered in `study-ai-engineering`, not here. When you test an AI feature you
-build a **deterministic harness around a probabilistic core** — and buffr's
-single sharpest example of that is the `fakeEmbedder` injection that lets a DB
-test run without Ollama. That's where the two halves meet.
+---
 
 ## Reading order
 
-1. **`audit.md`** — Pass 1. The seven-lens audit. Start here. It walks
-   coverage, test design, design pressure, determinism, edge cases, the
-   AI-eval seam, and a consolidated red-flags checklist. Every finding is
-   grounded in a real `file:line`.
-2. The pattern files below — Pass 2. Each names one testing *technique* the
-   suite exercises deliberately. Read the one whose name you don't already
-   recognize.
+1. **`00-overview.md`** — the audit at a glance: coverage map, the three highest-leverage gaps, one-line verdict per lens.
+2. **`audit.md`** — Pass 1. The 7-lens walk, each lens grounded in `file:line` or marked `not yet exercised` honestly. The capstone lens consolidates the red-flag checklist.
+3. **Pass 2 — the discovered-pattern files.** Each names a testing *technique* this repo applies deliberately, walked with the full concept template:
+   - **`01-env-gated-integration-tests.md`** — the `DATABASE_URL`-gated suite that SKIPs instead of failing.
+   - **`02-fake-embedder-injection.md`** — the deterministic 768-dim test double that keeps Ollama out of the loop.
+   - **`03-contract-parity-test.md`** — `PgVectorStore` tested as the same contract aptkit's in-memory store satisfies.
+   - **`04-idempotent-migration-test.md`** — run the migration twice, assert no error.
+   - **`05-full-signal-trajectory-assertion.md`** — assert all 6 `CapabilityEvent` types land, with `created_at` ordering.
 
-```
-  .aipe/study-testing/
-    README.md   ← you are here
-    audit.md    ← the 7-lens risk map (read first)
-    01-env-gated-integration-tests.md   ← skip-by-default DB suite
-    02-fake-embedder-injection.md       ← deterministic core swap (the seam)
-    03-contract-parity-testing.md       ← PgVectorStore mirrors in-memory store
-    04-idempotent-migration-test.md     ← run-it-twice schema proof
-    05-full-signal-trajectory-test.md   ← all 6 events + replay ordering
-```
+---
 
-## Cross-links to other guides
+## Cross-links to sibling guides
 
-- **`study-software-design`** — "this code is hard to test" is a *design*
-  finding, not a testing one. `session.ts`'s top-level `await
-  createChatSession()` in `chat.tsx:62` and the all-in-one `ask()` are why the
-  product layer has no tests. The audit's lens 3 points there; the fix lives
-  there.
-- **`study-ai-engineering`** — owns the eval half: `eval-cmd.ts`'s
-  precision@k / recall@k, the labeled `eval/queries.json` set, and what a
-  regression gate on the model output should look like.
-- **`study-debugging-observability`** — the trace sink (`05-full-signal-
-  trajectory-test.md`) is the same artifact that powers replay-based
-  debugging. The test proves the trajectory is complete; that guide uses the
-  trajectory to debug a bad turn.
+- **`study-ai-engineering`** — the *eval* half of the seam: `eval/queries.json`, precision@k / recall@k scoring, where probabilistic output gets judged. This guide stops at the `==` boundary; that one picks up at "good enough."
+- **`study-software-design`** — "hard to test" is a *design* smell, not a testing finding. Where this guide notes a module is awkward to test (e.g. `chat.tsx`'s top-level `await createChatSession()` side effect), it cross-links there rather than re-auditing the design.
+- **`study-debugging-observability`** — the trace sink (`src/supabase-trace-sink.ts`) is the same artifact viewed from two angles: here it's a thing under test; there it's the production observability mechanism. The full-signal trajectory is the overlap.

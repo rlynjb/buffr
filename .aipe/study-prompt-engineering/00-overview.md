@@ -1,82 +1,81 @@
-# Overview — the prompt nobody fully owns
+# Overview — the prompt is assembled, not written
 
-One page to orient. The thing to internalize before anything else: in this repo
-there is no single file you can open and read "the prompt." The string that
-finally reaches Ollama is **assembled across three owners**, each appending to
-what the last one produced.
+> One-page orientation. Read before any concept file.
 
-I have debugged this exact shape in production more than once — a prompt that
-"looks fine" in your code because the part you wrote *is* fine, and the failure
-lives in a layer you don't own. So before mechanics, here's the whole machine.
+Here's the thing that trips up everyone who opens this repo looking for "the prompt." There isn't one. You will `grep -r "You are"` across `src/` and find nothing. That's not a bug in your search — the prompt buffr sends to the model is **assembled at runtime, every turn, by three different owners**, and the constant text of it lives in `node_modules`, not in this repo's source.
+
+I've shipped enough LLM features to tell you this is the normal shape, not an exotic one. The prompt-to-production pipeline almost never lives in one string literal. It lives in a chain of owners, each appending its piece. The skill this guide teaches is *seeing the assembly* — because once you can see it, you can reason about token budget, injection surface, and what breaks on a model upgrade. Until you can see it, you're debugging a string you can't find.
+
+## The whole path in one diagram
+
+The system prompt that reaches Gemma is built by stacking three contributions in a fixed order. The diagram below is the one to paraphrase six weeks from now.
 
 ```
-  Prompt assembly — three owners, one string
+  buffr-laptop — how one system prompt gets assembled, per turn
 
-  ┌─ Owner 1: buffr (this repo) ──────────────────────────────┐
-  │  loadProfile(pool, appId)         src/profile.ts:4         │
-  │    → reads me.md text from agents.profiles                 │
-  │  new RagQueryAgent({ profile })   src/session.ts:57        │  ← we start here
-  └───────────────────────────┬───────────────────────────────┘
-                              │ profile string handed in
-  ┌─ Owner 2: aptkit RagQueryAgent ──▼────────────────────────┐
-  │  injectProfile(BASE_SYSTEM, profile, {position:'start'})   │
-  │    rag-query-agent.js:29-31                                │
-  │    → "# About the person…\n<me.md>\n\n<BASE_SYSTEM>"       │
-  │  BASE_SYSTEM = "call search first, ground, cite sources"   │
-  └───────────────────────────┬───────────────────────────────┘
-                              │ system string + tool schemas
-  ┌─ Owner 3: Gemma provider ────────▼────────────────────────┐
-  │  buildSystemText(request)         gemma-provider.js:82     │
-  │    → system + "You can call the following tools:" +        │
-  │      JSON.stringify(each tool) + "respond ONLY a JSON      │
-  │      object {tool, arguments}"                             │
-  └───────────────────────────┬───────────────────────────────┘
-                              │ final messages[]
+  ┌─ App layer (buffr) ───────────────────────────────────────────┐
+  │  src/session.ts:47   loadProfile(pool, appId)  → me.md text    │
+  │  src/session.ts:57   new RagQueryAgent({ profile, ... })       │
+  └───────────────────────────┬───────────────────────────────────┘
+                              │  hop 1: profile string passed in
                               ▼
-                       Ollama /api/chat  (gemma2:9b)
+  ┌─ Toolkit layer (aptkit RagQueryAgent) ────────────────────────┐
+  │  injectProfile(BASE_SYSTEM, profile, {position:'start'})       │
+  │                                                                │
+  │     # About the person you are assisting   ← profile heading   │
+  │     <me.md contents>                        ← personalization  │
+  │                                                                │
+  │     You are a personal knowledge assistant. ← BASE_SYSTEM      │
+  │     Always call search_knowledge_base first…  grounding+cite   │
+  └───────────────────────────┬───────────────────────────────────┘
+                              │  hop 2: system string + toolSchemas
+                              ▼
+  ┌─ Provider layer (GemmaModelProvider) ─────────────────────────┐
+  │  buildSystemText(): system  +  rendered tool catalog (text)   │
+  │                                                                │
+  │     <everything above>                                         │
+  │     You can call the following tools:        ← tool-calling    │
+  │     { "name": "search_knowledge_base", … }     prompt (JSON    │
+  │     When a tool is needed, respond with ONLY    catalog as     │
+  │     a single JSON object…                       text)         │
+  └───────────────────────────┬───────────────────────────────────┘
+                              │  hop 3: POST /api/chat  (Ollama)
+                              ▼
+                        ┌─ Gemma 2 9B ─┐
+                        │  no native    │
+                        │  tool API     │
+                        └───────────────┘
 ```
 
-**Why this matters and not just "it's layered":** the load-bearing capability in
-this app — calling the search tool to retrieve knowledge — is decided entirely in
-Owner 3, and it's *emulated*. Gemma 2 9B served by Ollama has no native tool API.
-So aptkit doesn't pass a `tools` array to a tool endpoint; it renders the tool
-catalog into **text** inside the system prompt and asks the model to reply with a
-JSON object it then parses back (`gemma-provider.js:107`). Tool calling here is a
-prompt-engineering trick, not an API feature. If the model returns prose instead
-of JSON, there's exactly one retry, gated on a cheap `{`-tell.
+Read it top to bottom and you've got the spine of this entire guide. Three layers, three contributions, one string.
 
-The rest of the prompt machinery is comparatively calm:
+## The three owners, named
 
-- **Grounding + citation** is one instruction in `BASE_SYSTEM`
-  (`rag-query-agent.js:12-19`): *call search first, ground every answer, cite
-  sources.* It works not because the instruction is strong but because the search
-  tool returns **pre-formatted citations** (`[docId] snippet`,
-  `search-knowledge-base-tool.js`) that the model copies. Nothing validates that
-  it actually did.
-- **Profile injection** (`me.md` → system prompt) is the entire personalization
-  story — one prepend, no extra model call.
-- **Bounded synthesis** is a forced final turn ("you have NO more tool calls,
-  now answer and cite") that stops the agent loop from spinning
-  (`run-agent-loop.js:17,30`).
-- **Structured-output reprompt** (generate → validate → retry with a strict
-  JSON-only suffix) exists in aptkit (`structured-generation.js`) but is **not on
-  buffr's chat hot path** — it's the meta-agents' machinery, available to grow into.
+Each owner adds exactly one thing and nothing else. That separation is what makes the prompt reasoned-about instead of a mystery blob.
+
+- **buffr (the app)** owns the *personalization input*. It reads the profile out of Postgres (`loadProfile`, `src/profile.ts:4`) and hands it to the toolkit (`src/session.ts:57`). It does not write a single word of instruction text. Its whole prompt-engineering contribution is "here is who the user is."
+
+- **aptkit `RagQueryAgent` (the toolkit)** owns the *system prompt* (`BASE_SYSTEM`) and the *context injection* (`injectProfile`). The system prompt is the grounding-and-citation instruction — "search first, ground every answer, cite sources, say so plainly if you don't know." The injection prepends the profile in front of it under a heading.
+
+- **`GemmaModelProvider` (the provider)** owns the *tool-calling prompt* (the emulated JSON catalog). Gemma 2 9B has no native tool API, so the provider renders the tool definitions into the system text as JSON and asks the model to reply with a JSON object when it wants a tool. This is the single most load-bearing prompt-engineering decision in the repo.
+
+## The one axis that makes the structure pop
+
+If you trace one question — **"who decides the next move?"** — down the layers, the boundaries light up:
 
 ```
-  The five prompt patterns, by how load-bearing they are
+  axis: "who decides control flow?"
 
-  ┌────────────────────────────────┬──────────────┬─────────────────────┐
-  │ pattern                        │ load-bearing │ where it lives      │
-  ├────────────────────────────────┼──────────────┼─────────────────────┤
-  │ tool-call emulation            │ ★★★ critical │ gemma-provider.js   │
-  │ grounding + citation instr.    │ ★★           │ rag-query-agent.js  │
-  │ profile injection              │ ★★           │ profile-injector +  │
-  │                                │              │ rag-query-agent.js  │
-  │ bounded synthesis nudge        │ ★★           │ run-agent-loop.js   │
-  │ structured-output reprompt     │ ★ (off-path) │ structured-gen.js   │
-  └────────────────────────────────┴──────────────┴─────────────────────┘
+  ┌─ session.ts (fixed order)      → CODE decides   ┐ profile in, agent out
+  ├─ RagQueryAgent.answer (loop)   → the LOOP drives ┤ search → synthesize
+  ├─ Gemma (per turn)              → the MODEL picks ┤ "tool or prose?"
+  └─ search_knowledge_base (tool)  → the TOOL runs   ┘ returns citations
 ```
 
-Now read [`audit.md`](audit.md) for the full 13-concept walk, then the pattern
-files for the deep dives. The recommended deep-read order is in the
-[`README`](README.md).
+Control flips from code, to a bounded loop, to the model's free choice, to a deterministic tool. Every flip is a seam where a prompt-engineering contract lives. The tool-call-emulation seam (model picks "JSON tool call or prose?") is the one that carries the most weight and breaks in the most interesting ways — that's [02-structured-outputs.md](02-structured-outputs.md).
+
+## What grounding actually rides on
+
+One non-obvious thing worth stating up front, because it reframes "grounding & citation": the system prompt *asks* for citations, but nothing enforces them. Grounding works in practice because the search tool hands the model **pre-formatted citation strings** (`[docId] snippet…`, `search-knowledge-base-tool.js:61`) that the model copies into its answer. The instruction is the ask; the tool output is the mechanism. Recalled conversation memory enters the same way — past exchanges are embedded into the same vector store and surface through the same `search_knowledge_base` tool, so they arrive as retrieved context, not as a separate memory channel. Details in [02-structured-outputs.md](02-structured-outputs.md) and [05-eval-driven-iteration.md](05-eval-driven-iteration.md).
+
+Now go read [audit.md](audit.md) for the full lens-by-lens walk, or jump to [01-anatomy.md](01-anatomy.md) to start building the model.

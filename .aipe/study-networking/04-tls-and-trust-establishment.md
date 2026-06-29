@@ -1,250 +1,204 @@
-# TLS and Trust Establishment
+# 04 · TLS and Trust Establishment
 
-**Industry name(s):** transport encryption / TLS termination / connection
-trust. **Type:** Industry standard.
+> Encryption in transit, gated by connection string (`sslmode`) — Industry standard
+> · no TLS code, only the credential (`DATABASE_URL`)
 
 ## Zoom out, then zoom in
 
-buffr has exactly one connection that *can* be encrypted — Postgres on
-5432 — and the decision to encrypt it is made **entirely by the connection
-string**, never by code. The Ollama connection is plaintext loopback and
-has no TLS at all. The interesting thing here is an *absence in the code*
-that is a *presence in config*: buffr is deliberately TLS-agnostic.
+Here's the verdict up front: **buffr has zero TLS code.** Whether the pg-wire
+connection is encrypted is decided entirely by one parameter inside
+`DATABASE_URL` — `sslmode`. The model path is plain HTTP over loopback, no TLS at
+all. So "trust establishment" in this repo is a config story, not a code story.
 
 ```
-  Zoom out — where the TLS decision lives
+  Zoom out — TLS is decided in the credential, not in code
 
-  ┌─ Config layer ───────────────────────────────────────────┐
-  │  DATABASE_URL = postgres://…@host:5432/reindb?sslmode=X   │ ← ★ TLS
-  │                                          └────┬────┘      │   decided
-  │  ollamaHost  = http://localhost:11434  (no TLS, ever)    │   HERE
-  └─────────────────────────────┬─────────────────────────────┘
-                                │  string handed to pg.Pool
-  ┌─ Transport (pg / node) ─────▼────────────────────────────┐
-  │  reads sslmode → maybe TLS handshake → encrypted socket  │
-  └─────────────────────────────┬─────────────────────────────┘
-                                ▼
-  ┌─ Postgres ───────────────────────────────────────────────┐
-  │  TLS terminates HERE (at the DB, not at a proxy)          │
-  └──────────────────────────────────────────────────────────┘
+  ┌─ Config layer ──────────────────────────────────────────────┐
+  │  DATABASE_URL  ──►  postgres://…?sslmode=require             │
+  │                              ▲                               │
+  │                    ★ TLS policy lives HERE ★                 │
+  └───────┬──────────────────────────────────┬──────────────────┘
+          │ pg-wire: TLS iff sslmode says so  │ HTTP: plaintext
+          ▼                                   ▼
+   [ Postgres ]                         [ Ollama on localhost ]
+   STARTTLS-style upgrade per sslmode   no TLS (loopback)
 ```
 
-Zoom in. The concept is **trust establishment**: before sending a
-password and queries, the client wants assurance the bytes are encrypted
-and the server is who it claims. TLS does both. buffr's stance is that
-*the operator* decides this via `sslmode=` in the URL, and the code stays
-out of it.
+Zoom in: TLS establishes two things — that the bytes are encrypted, and that the
+peer is who it claims (certificate verification). For buffr, both are dialed by
+the `sslmode=` value, and node-postgres does all the work.
 
 ## Structure pass
 
-**Layers.** Config (the `sslmode` token) → pg (reads it, runs or skips the
-handshake) → TCP (carries the now-maybe-encrypted bytes).
+**Layers.** Credential (the URL) → Driver (node-postgres reads `sslmode`) →
+TLS handshake (if enabled) → encrypted pg-wire. buffr touches only the top layer
+(it holds the credential); everything below is the driver.
 
-**Axis — trust / "can a third party read or tamper with these bytes?"**
-Trace it across the two boundaries and watch it flip on `sslmode`:
+**Axis — trace `trust` across the two boundaries.**
 
 ```
-  axis: "can a third party read these bytes?"
+  axis = "is the peer authenticated and the channel encrypted?"
 
-  ┌─ Ollama (loopback) ─────────┐  → NO third party EXISTS
-  │ 127.0.0.1, kernel loopback  │     (bytes never leave the box)
-  └─────────────────────────────┘
-  ┌─ Postgres, sslmode=disable ─┐  → YES, plaintext on the wire
-  └─────────────────────────────┘
-  ┌─ Postgres, sslmode=require+ ┐  → NO, TLS-encrypted
-  └─────────────────────────────┘
-
-  the trust answer is set by a STRING, not by buffr's code
+  ┌─ pg-wire boundary ─────────┐   seam   ┌─ HTTP boundary ───────┐
+  │ depends on sslmode:         │ ════════►│ NO TLS                │
+  │  disable → none             │ (flips)  │ plaintext over        │
+  │  require → encrypted        │          │ loopback              │
+  │  verify-full → + cert check │          │ (no peer to verify)   │
+  └─────────────────────────────┘          └────────────────────────┘
 ```
 
-**Seam.** The seam is the `connectionString` handoff in `db.ts`. Above it
-buffr knows nothing about encryption; below it pg parses `sslmode` and
-decides. That seam is load-bearing precisely because the trust axis flips
-across it based on a value buffr passes through blindly.
+**Seam.** The load-bearing seam is `sslmode` itself — it's the one knob where the
+trust axis flips from "plaintext" to "encrypted" to "encrypted + verified." And
+critically: that knob is in a *secret*, not in source, so the same binary behaves
+differently per deployment.
 
 ## How it works
 
 ### Move 1 — the mental model
 
-TLS is the `https://` vs `http://` choice, pushed down to the database
-connection. Same as in the browser: you don't write the handshake, you
-just pick the scheme and the library does the rest. For Postgres the
-"scheme" is the `sslmode` query parameter in the URL, and pg is the
-library that acts on it.
+You know how `https://` vs `http://` in a URL flips a request from plaintext to
+encrypted without you writing any crypto? `sslmode` is that switch for Postgres —
+except it has *gradations*, not just on/off. The kernel is a negotiation: the
+driver asks Postgres "can we do TLS?", and based on `sslmode` it either insists,
+prefers, or skips.
 
 ```
-  The TLS decision — one token drives the whole handshake
+  Pattern — sslmode gradient (least → most trust)
 
-   DATABASE_URL ?sslmode=...
-        │
-        ├─ disable / (absent) ──► plaintext TCP, no handshake
-        │
-        ├─ require ─────────────► TLS handshake, encrypt,
-        │                          but DON'T verify the cert
-        │
-        └─ verify-full ─────────► TLS handshake, encrypt,
-                                   AND verify cert + hostname
+   disable      → plaintext only.            no encryption.
+   prefer       → TLS if server offers, else plaintext.   (silent downgrade)
+   require      → TLS required.              encrypted, but cert NOT verified.
+   verify-ca    → TLS + cert chains to a trusted CA.
+   verify-full  → TLS + CA + hostname matches cert.   ← strongest
 ```
 
-### Move 2 — walk the trust establishment
+Each step up the gradient closes one attack: `require` stops passive sniffing;
+`verify-full` stops an active man-in-the-middle presenting a valid-but-wrong cert.
 
-**The code is TLS-blind — and that's the whole design.** Look at the
-entire database entry point, `src/db.ts:4-6`:
+### Move 2 — the walkthrough
 
-```
-  src/db.ts:4-6 — no ssl object, by design
+**buffr never writes `ssl`.** The entire connection setup is the connection
+string, untouched (`src/db.ts:4`):
 
-  export function createPool(databaseUrl: string): pg.Pool {
-    return new pg.Pool({ connectionString: databaseUrl });
-  }
-  //                    ▲
-  //   NO { ssl: {...} } here. pg reads sslmode FROM the
-  //   connectionString. buffr never sees or sets a TLS flag.
+```ts
+return new pg.Pool({ connectionString: databaseUrl });
 ```
 
-There is no `ssl: { rejectUnauthorized: ... }`, no cert path, no CA
-bundle. node-postgres parses `sslmode` out of the URL itself and
-configures TLS accordingly. So the question "is buffr's DB connection
-encrypted?" has no answer in buffr's code — the answer lives in whatever
-`.env` ships. The project context confirms this is intentional: secrets
-(including the full `DATABASE_URL`) live in `.env`, gitignored, never
-committed.
-
-**What each `sslmode` actually buys.** This is the part to be precise
-about, because "I set sslmode=require, so I'm secure" is a common
-half-truth:
+There is no `ssl: { rejectUnauthorized: … }`, no `ca:`, no cert path — anywhere
+in the repo. node-postgres parses `sslmode` out of the connection string and runs
+the whole TLS handshake itself. So buffr's TLS posture is *exactly* whatever the
+operator put in `DATABASE_URL`, and buffr's code can't tell you what that is.
 
 ```
-  sslmode levels — encryption vs verification
+  Layers-and-hops — sslmode drives the handshake buffr never sees
 
-  ┌──────────────┬────────────┬───────────────────────────────┐
-  │ sslmode      │ encrypted? │ verifies server identity?     │
-  ├──────────────┼────────────┼───────────────────────────────┤
-  │ disable      │ no         │ no                            │
-  │ require      │ YES        │ NO ← encrypted but MITM-able  │
-  │              │            │      (accepts any cert)       │
-  │ verify-ca    │ YES        │ cert chain only               │
-  │ verify-full  │ YES        │ cert chain + hostname ★       │
-  └──────────────┴────────────┴───────────────────────────────┘
+  ┌─ buffr ────────────────────┐
+  │ new pg.Pool({connectionString})  ── src/db.ts:4
+  └──────────┬─────────────────┘
+             │ hop 1: driver parses sslmode= from the URL
+             ▼
+  ┌─ node-postgres driver ─────┐
+  │ if sslmode requires TLS:    │
+  │   hop 2: TCP connect        │ ──► ┌─ Postgres ─┐
+  │   hop 3: SSLRequest         │ ──► │            │
+  │   hop 4: TLS handshake      │ ◄─► │  cert +    │
+  │   hop 5: encrypted pg-wire  │ ◄─► │  key exch  │
+  └─────────────────────────────┘     └────────────┘
+   buffr sees none of hops 2–5; it only supplied the URL
 ```
 
-The trap: `require` encrypts but accepts *any* certificate, so a
-man-in-the-middle with any cert can sit between you and the DB and read
-everything. Only `verify-full` checks that the cert chains to a trusted CA
-*and* matches the hostname. For a remote managed Postgres,
-`verify-full` is the one you want. Whether buffr's `.env` uses it is a
-*security-posture* question — that verdict belongs to **`study-security`**.
-This file's job is to make clear that buffr's code imposes *no* floor:
-ship `sslmode=disable` and the code happily sends your DB password in
-plaintext.
+The pg-wire TLS upgrade is STARTTLS-style: the connection opens in plaintext, the
+driver sends an `SSLRequest` packet, and *then* the channel upgrades to TLS before
+auth credentials cross. That's why the password in `DATABASE_URL` is only as safe
+as the `sslmode` that precedes it — under `disable`, the password crosses in
+cleartext.
 
-```
-  Trust establishment — config decides, code carries
+**The model path has no TLS.** `ollamaHost` is `http://localhost:11434`
+(`src/config.ts:14`) — plain HTTP. There's no `https://`, no cert. That's
+defensible *because* it's loopback: the bytes never leave the machine, so there's
+no channel for an attacker to sit on and nothing remote to authenticate. The
+moment Ollama moved off-box, this plaintext path would become a real exposure —
+but today it's `not yet exercised` as a risk.
 
-  ┌─ .env ──────────┐ sslmode=verify-full   ┌─ pg.Pool ──────────┐
-  │ DATABASE_URL    │ ────────────────────► │ TLS handshake:     │
-  └─────────────────┘                       │  · key exchange    │
-                                            │  · verify cert+host│
-                                            └─────────┬──────────┘
-                                                      │ encrypted
-                                                      ▼ TCP 5432
-                                            ┌─ Postgres ─────────┐
-                                            │ TLS terminates HERE│
-                                            └────────────────────┘
-```
+### Move 2.5 — current vs future
 
-**Where TLS terminates: at the database.** There's no proxy, no edge, no
-TLS-terminating load balancer in buffr's path (file `02`). The encrypted
-tunnel runs process → Postgres directly. The DB is the termination point.
-(A managed provider may terminate at *their* pooler first, but that's
-their topology, transparent to buffr.)
+Phase A (now): TLS policy is whatever `sslmode` says, invisible to code; the
+model path is plaintext loopback. For a single-device local DB, `sslmode=disable`
+or no TLS is *fine* — nothing's on the wire to intercept.
 
-**Ollama: no TLS, and that's fine.** `http://localhost:11434` — `http`,
-not `https`, and `localhost`. The bytes never leave the machine (file
-`02`: kernel loopback). There is no third party on a loopback connection
-to encrypt against, so plaintext is correct, not negligent. The moment you
-point `OLLAMA_HOST` at a *remote* `http://` box on a LAN, that reasoning
-breaks — now it's plaintext over a real wire — but that's an operator
-choice the code doesn't guard against. `not yet exercised`: TLS to Ollama
-(`https://`), which Ollama would need a reverse proxy to even offer.
+Phase B (remote DB): `sslmode=verify-full` becomes mandatory, and buffr would
+likely need to ship a CA path. What *doesn't* change: `src/db.ts` stays one line —
+the new policy rides entirely in the credential. That's the payoff of pushing TLS
+into the connection string: the code is already remote-ready.
 
 ### Move 3 — the principle
 
-**Push the encryption decision to configuration and the code becomes
-portable across trust environments — at the cost of imposing no floor.**
-buffr runs unchanged against a plaintext local DB and a `verify-full`
-remote DB. The price: nothing in the code *forces* encryption, so the
-security of the DB connection is exactly as good as the `.env` it ships
-with. Portability bought, with a sharp edge left for the operator.
+Pushing transport security into the credential (`sslmode`) instead of code means
+one binary adapts from "local plaintext" to "verified remote TLS" by swapping a
+secret — no recompile, no code change. The cost: the code can't *enforce* a
+minimum. Nothing in buffr stops a deployment from running `sslmode=disable`
+against a remote DB. Whether that's acceptable is `study-security`'s call; this
+guide's job is to name precisely where the decision lives.
 
 ## Primary diagram
 
-The complete trust picture, both boundaries.
-
 ```
-  TLS & trust — both boundaries
+  buffr TLS — recap
 
-  ┌─ Config ─────────────────────────────────────────────────┐
-  │  DATABASE_URL ?sslmode=X   →  drives DB TLS               │
-  │  ollamaHost = http://localhost  →  no TLS, loopback       │
-  └───────┬───────────────────────────────────┬──────────────┘
-          │ pg reads sslmode                   │ plain HTTP
-   ┌──────▼───────────────────┐         ┌──────▼─────────────┐
-   │ sslmode=disable → plain  │         │ 127.0.0.1:11434    │
-   │ sslmode=require → enc,   │         │ no wire, no third  │
-   │   NO cert check (MITM!)  │         │ party, no TLS need │
-   │ sslmode=verify-full →    │         └────────────────────┘
-   │   enc + cert + hostname ★│
-   └──────────┬───────────────┘
-              ▼ encrypted TCP 5432
-        Postgres (TLS terminates here)
+  pg-wire (:5432):
+    policy = sslmode= inside DATABASE_URL   ── src/db.ts:4
+    no ssl/ca/cert code anywhere in the repo
+    handshake run entirely by node-postgres
+    STARTTLS-style: SSLRequest → upgrade → auth over TLS
+
+  HTTP (:11434):
+    http://localhost — NO TLS, plaintext over loopback   ── src/config.ts:14
+    defensible while local; a real exposure if Ollama moves off-box
+
+  termination point: Postgres itself (no TLS-terminating proxy in path)
 ```
 
 ## Elaborate
 
-The deeper point is *where* the encryption knob lives. Some apps hard-code
-`ssl: { rejectUnauthorized: true }` in the pool options — that bakes a
-trust policy into the binary. buffr does the opposite: zero TLS in code,
-all of it in the URL. That's the right call for a tool that runs against
-both a throwaway local DB and a real remote one, and it keeps the secret
-and its transport policy together in one place (`.env`). It does mean the
-code can't *enforce* `verify-full`, which is exactly the kind of finding
-`study-security` exists to rank.
+`sslmode` is the libpq-standard way every Postgres client expresses transport
+trust, which is why pushing the decision into the URL is idiomatic — the same
+string works across psql, drivers, and ORMs. The subtle trap is `sslmode=prefer`
+(the historical default in some setups): it *silently downgrades* to plaintext if
+the server doesn't offer TLS, giving a false sense of security. For anything
+remote, `verify-full` is the only mode that resists an active attacker. buffr,
+being local, sidesteps this — but the gradient is the thing to carry to your next
+remote-DB system.
 
 ## Interview defense
 
-**Q: "Is the database connection encrypted?"**
-
-> The code doesn't decide — it's TLS-agnostic. `db.ts` passes the raw
-> `connectionString` to `pg.Pool` with no `ssl` object, so pg reads
-> `sslmode` out of `DATABASE_URL`. Plaintext against a local DB,
-> encrypted against a remote one if the URL says `sslmode=require` or
-> better. The code imposes no floor, which is portable but means security
-> equals whatever `.env` ships.
+**Q: How does buffr configure TLS for the database?**
 
 ```
-  db.ts: new pg.Pool({ connectionString })   ← no ssl object
-  sslmode in URL → require = encrypted-but-unverified (MITM)
-                 → verify-full = encrypted + identity checked
+  DATABASE_URL  ──► ?sslmode=require ──► node-postgres runs TLS
+  buffr code: zero TLS lines (src/db.ts:4)
 ```
 
-Anchor: *"No `ssl` object in `db.ts`; `sslmode` in the URL is the only
-TLS control, and `require` ≠ verified."*
+Answer: "It doesn't, in code. The whole pg.Pool is `new pg.Pool({
+connectionString })` — no `ssl` object. TLS is gated by the `sslmode` parameter
+inside `DATABASE_URL`, which node-postgres parses and acts on. The policy lives in
+the credential; the code is TLS-agnostic." Anchor: `src/db.ts:4`.
 
-**Q: "Why is the Ollama connection not HTTPS?"**
+**Q: Is the model server connection encrypted?**
 
-> It's loopback — `http://localhost:11434`. The bytes never leave the
-> machine, so there's no third party to encrypt against. Plaintext is
-> correct on loopback. It would only become a problem if you pointed
-> `OLLAMA_HOST` at a remote plaintext box, which the code doesn't guard.
+Answer: "No — it's plain `http://localhost:11434` (`src/config.ts:14`). That's
+fine because it's loopback; the bytes never leave the machine. It would be a real
+exposure only if Ollama moved off-box, which isn't exercised."
 
-Anchor: *"`config.ts:14` — `http://localhost`; loopback has no wire to
-sniff."*
+**Q: What's the risk of `sslmode` living in the credential rather than code?**
+
+Answer: "The code can't enforce a floor. Nothing stops a deployment from running
+`sslmode=disable` — or worse, `prefer`, which silently downgrades to plaintext if
+the server doesn't offer TLS. For a remote DB you'd want `verify-full` and ideally
+a code-side assertion. Whether that's an acceptable risk is a security-audit
+question."
 
 ## See also
 
-- `02-dns-routing-and-addressing.md` — the host that `sslmode` and the
-  cert hostname-check apply to.
-- `03-tcp-udp-connections-and-sockets.md` — the TCP connection TLS wraps.
-- `study-security` — *whether* the chosen `sslmode` is safe, secret
-  handling for `DATABASE_URL`, the no-floor finding ranked as a risk.
+- `03-tcp-udp-connections-and-sockets.md` — the TCP socket the TLS upgrade rides on
+- `02-dns-routing-and-addressing.md` — why a remote host makes `verify-full` urgent
+- `study-security` — judging whether the sslmode posture is safe; secrets in `DATABASE_URL`

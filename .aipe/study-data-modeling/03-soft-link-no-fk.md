@@ -1,271 +1,267 @@
-# 03 · Soft link, no FK
+# Soft link, no foreign key
 
-**Subtitle:** a referential column with the foreign-key constraint deliberately
-dropped — relationship-by-convention instead of relationship-enforced —
-*Project-specific*.
+**Industry name(s):** soft reference / application-level (logical) foreign key
+— here the foreign key (the dropped `chunks.document_id` link). **Type:**
+Project-specific (a deliberate denormalization of referential integrity).
 
 ---
 
 ## Zoom out, then zoom in
 
-`chunks.document_id` points at `documents.id` — but there's no foreign key making
-that pointer mean anything to the database. It's a *soft link*: a column that
-*looks* like a relationship and is treated like one by app code, while the DB
-itself enforces nothing.
+You know what a foreign key does: `chunks.document_id references documents(id)`
+would make Postgres *guarantee* every chunk points at a real document, and
+refuse to delete a document that still has chunks. This file is about a schema
+that had exactly that foreign key — and then deliberately *dropped* it. The
+interesting part is why dropping a safety constraint was the right call.
 
 ```
-  Zoom out — where the (missing) constraint sits
+  Zoom out — where the (absent) foreign key would sit
 
-  ┌─ App layer ─────────────────────────────────────────────┐
-  │  runtime.indexDocumentRow  → writes documents + chunks   │
-  │  PgVectorStore.upsert      → writes chunks (any doc_id)   │
-  │  @aptkit/memory            → writes chunks (NO doc at all)│
-  └───────────────────────────┬─────────────────────────────┘
-                              │
-  ┌─ Storage: agents ─────────▼─────────────────────────────┐
-  │  documents.id  ◄- - - - - chunks.document_id              │
-  │                  ★ SOFT LINK — FK dropped ★               │ ← here
-  │  (compare: messages.conversation_id ═══► REAL FK below)   │
-  └─────────────────────────────────────────────────────────┘
+  ┌─ aptkit contract (VectorStore) ──────────────────────────┐
+  │  upsert(chunks)  ── knows nothing about a documents row   │ ← the reason
+  └───────────────────────────────┬───────────────────────────┘
+                                  │  PgVectorStore.upsert
+  ┌─ Postgres (agents schema) ────▼───────────────────────────┐
+  │  documents (id PK)                                        │
+  │      ╎  chunks.document_id ──► NO foreign key here         │ ← the seam
+  │      ╎  (constraint dropped, 001:26-27)                    │
+  │  chunks (document_id text, nullable)                      │
+  └────────────────────────────────────────────────────────────┘
 ```
 
-Zoom in: the question is "who guarantees that `chunks.document_id` points at a
-real document?" The answer here is *nobody* — and that's on purpose. The FK was
-present, then explicitly dropped, so that the `chunks` table can serve as a
-drop-in `VectorStore` whose contract has no notion of a `documents` row at all.
+Zoom in: the question is "should the database enforce that every chunk has a
+parent document?" The textbook answer is yes. The right answer *here* is no —
+because two things this repo needs would break under a hard foreign key: drop-in
+parity with aptkit's in-memory store, and memory chunks that legitimately have
+no document. The soft link keeps the *column* (you can still join on it) while
+dropping the *constraint* (the database stops enforcing it).
+
+---
 
 ## The structure pass
 
-One axis: **integrity guarantees** — what does the DB promise vs what does app
-code merely hope? Trace it across the two relationships in this schema and watch
-the promise flip.
-
 ```
-  axis = "does the DB enforce this relationship?"
+  One axis: "what enforces that document_id points at a real document?"
 
-  ┌─ chunks → documents ───────────┐   DB promise: NONE
-  │  document_id text  (soft link) │   → app code must keep it honest
-  └────────────────┬────────────────┘
-                   │ seam: this is where the design
-                   │       chose parity over enforcement
-  ┌─ messages → conversations ─────┐   DB promise: FULL
-  │  conversation_id uuid          │   → references + on delete cascade
-  │    references conversations    │
-  └─────────────────────────────────┘
-
-  same schema, two relationships, opposite guarantees — that contrast is the lesson
+  ┌─ documents ──────────────────────────────────────────────┐
+  │  id text primary key                                      │  the target
+  └─────────────────────────┬────────────────────────────────┘
+                            ╎  seam: the constraint that WOULD live here
+                            ╎  is DROPPED — axis answer flips to "nothing"
+  ┌─ chunks ────────────────▼────────────────────────────────┐
+  │  document_id text  (nullable, no FK)                      │  enforced by:
+  │   corpus chunk  → document_id = "<docId>"  (points real)  │  NOTHING in DB
+  │   memory chunk  → document_id = null       (no parent)    │  (app convention
+  └──────────────────────────────────────────────────────────┘   only)
 ```
 
-The seam is the deliberate asymmetry. The trajectory cluster gets a real FK with
-cascade (delete a conversation, messages vanish). The retrieval cluster
-*removes* its FK. Same database, opposite integrity contracts — and the reason is
-the `VectorStore` interface boundary.
+The axis is **what enforces referential integrity**. Across the seam at
+`chunks.document_id` the answer flips from "the database would" to "nothing
+does." That flip is the whole concept — it's a load-bearing boundary because the
+guarantee you'd assume (every chunk has a document) is *not* there, and code that
+assumes it would be wrong.
+
+---
 
 ## How it works
 
 ### Move 1 — the mental model
 
-The shape is a **pointer the runtime trusts but the type system doesn't check** —
-like a string id you pass around in app code where a typo compiles fine and only
-explodes at runtime. The DB *could* check it (that's what a FK is); the design
-chose not to let it.
+Think of a TypeScript `string` that *holds* a user id versus a branded
+`UserId` type the compiler *checks*. The soft link is the former: `document_id`
+is just a `text` column holding what is usually a real `documents.id`, but the
+database doesn't check it, the way a plain `string` doesn't prove the user
+exists. You keep the ability to join; you give up the guarantee.
 
 ```
-  soft link vs hard link (pattern)
+  Hard FK vs soft link — what the database promises
 
-  HARD (FK):   chunks ──[constraint]──► documents
-               insert with bad doc_id → DB REJECTS it
-               delete document → DB blocks or cascades
+  HARD FK:   chunks.document_id ──► documents.id   (CHECKED)
+             • insert chunk w/ missing doc → ERROR
+             • delete doc w/ live chunks   → ERROR (or cascade)
 
-  SOFT (here): chunks ──[just a column]─ documents
-               insert with bad doc_id → DB ACCEPTS it
-               insert with NULL doc_id → fine (memory chunks)
-               delete document → chunks dangle, DB silent
+  SOFT LINK: chunks.document_id ┄┄► documents.id   (NOT checked)
+             • insert chunk w/ missing doc → OK  ← needed for memory
+             • delete doc w/ live chunks   → OK, chunks orphan silently
+             • you can still JOIN on it when both exist
 ```
 
-### Move 2 — the walkthrough
+### Move 2 — the load-bearing skeleton
 
-**The constraint, explicitly removed.**
-The schema doesn't just *omit* the FK — it actively drops it, idempotently, so
-that databases created before this decision get repaired too.
+This concept has a kernel: one `alter table ... drop constraint` line and the
+two capabilities it unlocks. Isolate it, name each part by what breaks if it's
+missing.
 
-```
-  File: sql/001_agents_schema.sql
-  Lines: 14-27
+**Part 1 — the dropped constraint (the kernel).** One idempotent line:
 
-    create table if not exists agents.chunks (
-      id text primary key,
-      -- Soft link to documents.id (no FK): the VectorStore contract
-      -- upserts chunks with no notion of a documents row, so a hard
-      -- FK would break drop-in parity.
-      document_id text,              ← plain column, no `references`
-      ...
-    );
-    alter table agents.chunks
-      drop constraint if exists chunks_document_id_fkey;   ← repair old DBs
-```
-
-Line 19: `document_id text` — no `references agents.documents(id)`. The comment on
-17-19 is the *why* written into the schema. Line 27 is the migration carrying its
-own forward-fix: any DB that still has the old FK loses it on the next run.
-
-**Why the FK had to go: the `VectorStore` contract.**
-The aptkit `VectorStore` interface speaks in chunks with `id`, `vector`, `meta` —
-there is no `documents` row in its world. If `chunks.document_id` had a NOT-NULL
-FK, you couldn't upsert a chunk without first creating a document, and the
-in-memory store has no documents to create. The dropped FK is what keeps
-`PgVectorStore` a true drop-in.
-
-```
-  File: src/pg-vector-store.ts
-  Function: PgVectorStore.upsert
-  Lines: 43-56
-
-    const docId =
-      typeof c.meta.docId === 'string' ? c.meta.docId : null;  ← may be NULL
-    ...
-    insert into agents.chunks (id, document_id, ...) values ($1, $2, ...)
-                                                                   └─ no FK
-                                                                      to satisfy
+```sql
+-- sql/001_agents_schema.sql:14-27
+create table if not exists agents.chunks (
+  id text primary key,
+  -- Soft link to documents.id (no FK): the VectorStore contract upserts chunks
+  -- with no notion of a documents row, so a hard FK would break drop-in parity.
+  document_id text,                 // ← plain text, declared with NO references clause
+  ...
+);
+-- Drop the FK on databases migrated before this change (idempotent).
+alter table agents.chunks drop constraint if exists chunks_document_id_fkey;  // ← the kernel
 ```
 
-Line 44: `docId` is `null` when the chunk has no `meta.docId`. With a NOT-NULL
-FK this insert would fail. Without it, the chunk lands fine — which is exactly
-what the next part needs.
+The table is *created* with `document_id` as plain `text` (no `references`),
+and the `alter ... drop constraint if exists` cleans up any database that was
+migrated back when the FK existed. The `if exists` makes it safe to run on a
+fresh database (no constraint to drop) and an old one (drops it) alike. **What
+breaks if this line is missing:** databases migrated under the old schema keep
+the hard FK, and the two capabilities below start throwing.
 
-**The payoff: memory chunks with no document at all.**
-Conversation memory rides the *same* `chunks` table, tagged `meta.kind='memory'`,
-with ids like `"memory:<conv>:<n>"` and **no** `document_id`. There is no
-`documents` row for a remembered exchange — there never will be. The dropped FK
-is what lets these chunks exist.
-
-```
-  File: src/session.ts
-  Lines: 49-53
-
-    // memory chunks live with no documents row, which the dropped FK allows.
-    const memory = createConversationMemory({ embedder, store });
-                                                        └─ same PgVectorStore
-```
+**Part 2 — drop-in parity with the in-memory store (what the FK would break).**
+`PgVectorStore` implements aptkit's `VectorStore` interface
+(`pg-vector-store.ts:19`). That contract's `upsert(chunks)` receives chunks and
+nothing else — no documents row, no parent. The in-memory implementation just
+stores them. If the Postgres implementation demanded a matching documents row
+(via a hard FK), it would *not* be a drop-in replacement — code that worked
+against the in-memory store would throw a foreign-key violation against the
+Postgres one. **What breaks if the FK is present:** the substitutability that's
+the entire point of the `VectorStore` seam.
 
 ```
-  Layers-and-hops — two chunk populations, one table
+  Drop-in parity — why a hard FK breaks the contract
 
-  ┌─ runtime ─────┐ hop1: index(doc)   ┌─ chunks ──────────────┐
-  │ indexDocument │ ─────────────────► │ document_id = "doc#0" │ has a doc
-  └───────────────┘                    │  ─ soft link ─►       │
-                                       │ documents row exists  │
-  ┌─ session ─────┐ hop2: remember()   │                       │
-  │ memory engine │ ─────────────────► │ document_id = NULL    │ NO doc
-  └───────────────┘                    │ id "memory:conv:0"    │ ever
-                                       └───────────────────────┘
-        the FK would have rejected the NULL row → it's gone on purpose
+  ┌─ aptkit VectorStore (the port) ──────────────────────────┐
+  │  upsert(chunks: Chunk[])  ── no documents row in scope    │
+  └──────┬───────────────────────────────────┬───────────────┘
+         │ in-memory adapter                  │ PgVectorStore adapter
+         ▼                                    ▼
+   stores chunks, done             with HARD FK: throws if no
+                                   documents row → NOT a drop-in
+                                   with SOFT link: stores, parity kept
 ```
 
-**The boundary condition — the cost you accepted.** With no FK, the DB will
-never stop you from: inserting a chunk whose `document_id` names a document that
-doesn't exist; deleting a document and leaving its chunks orphaned. Both are now
-*app-code* responsibilities. `indexDocumentRow` keeps them honest by writing the
-document first (`runtime.ts:11`) — but nothing in the database *forces* that
-order, which is the same hole `07-non-atomic-document-chunk-write.md` walks from
-the transaction angle.
+**Part 3 — memory chunks with no document (what the FK would forbid).**
+Episodic memory rides the same `chunks` table (`session.ts:53`,
+`createConversationMemory({ embedder, store })`). A memory chunk
+(`"memory:<conv>:<n>"`) is a past exchange embedded for recall — it has *no*
+source document, so its `document_id` is `null`. A hard FK with a `not null`
+parent would forbid this row entirely; even a nullable FK column adds nothing
+here. **What breaks if the FK is present:** memory can't share the document
+store, and the whole "memory resurfaces through the same `search_knowledge_base`
+tool" design falls apart. The session comment says it directly:
 
-### Move 2 variant — the load-bearing skeleton
-
+```ts
+// session.ts:50-53
+// Sharing the document store means memory surfaces via the existing
+// search_knowledge_base tool — and memory chunks live with no documents
+// row, which the dropped FK allows.
+const memory = createConversationMemory({ embedder, store });
 ```
-  the kernel of "soft link"
-    1. a column that names another table's key
-    2. NO referential constraint on it
-    3. app code that maintains the relationship by convention
-    4. a deliberate reason the constraint is absent (here: drop-in parity)
-```
 
-- Keep **(1-3)** without **(4)** and it's just a missing FK — a bug.
-- **(4)** is what makes it a *pattern* instead of an oversight: the absence is
-  load-bearing, documented in the schema comment, and enables the NULL/memory
-  rows.
-- Add the FK back and you break the `VectorStore` contract and lose memory chunks
-  — so the constraint's absence is the feature.
+**The hardening that's NOT in the kernel — and the cost it leaves.** The price
+of dropping the FK is real and worth naming: nothing in the database stops a
+chunk from pointing at a deleted document, and deleting a documents row silently
+orphans its chunks (no cascade, no error). On a single-device personal tool
+driven by a human, that's an accepted cost — re-indexing is cheap and the
+natural key (`02-deterministic-chunk-ids.md`) makes it idempotent. The
+buildable hardening, if integrity ever matters more: a periodic reconciliation
+sweep that deletes chunks whose `document_id` is non-null and missing, run in
+app code since the DB no longer guards it.
+
+**This compounds with the non-atomic write.** The soft link is also what makes
+the cross-transaction document+chunk write (`audit.md` §4) *recoverable*: when
+`indexDocumentRow` writes the documents row in one transaction and the chunks in
+another (`runtime.ts:11,17`), a crash between them leaves a document with no
+chunks — but because there's no FK, re-running the index just upserts the
+missing chunks with no constraint to fight. The soft link turns a would-be
+integrity violation into a benign retry.
 
 ### Move 3 — the principle
 
-A foreign key is a guarantee you buy with flexibility. Most of the time you want
-to buy it — referential integrity is cheap correctness. But a constraint is also
-a coupling: it forces an ordering and a parent-must-exist rule on every writer.
-When a table has to satisfy an interface that doesn't know about the parent
-(here, `VectorStore`), the FK becomes the thing standing between you and drop-in
-parity. Dropping it is correct *if* you move the integrity responsibility
-somewhere explicit and write down why. This repo does both — the comment is the
-contract.
+A foreign key is a guarantee you pay for — and like any guarantee, it's only
+worth it if you actually need it *and* can afford its constraints. Here the
+constraint (every chunk needs a real document) conflicts with two real
+requirements (contract parity, parentless memory chunks), so the right move is
+to keep the *column* as a soft link and drop the *constraint*. The lesson
+isn't "FKs are bad" — it's that referential integrity is a tradeoff, not a
+default, and a soft link is the honest name for "I want to join on this but I
+can't promise it's always valid." When you drop a FK, you've moved the
+enforcement from the database into your head — say so, and have a plan for the
+orphans.
+
+---
 
 ## Primary diagram
 
-The full asymmetry: one cluster enforces, one doesn't, and why.
-
 ```
-  Soft link vs hard link — the schema's two integrity contracts
+  Soft link, no FK — the full picture
 
-  RETRIEVAL CLUSTER (soft)            TRAJECTORY CLUSTER (hard)
-  ──────────────────────              ──────────────────────────
-  documents.id                        conversations.id
-       ▲                                   ▲
-       ┊ document_id text                  ║ conversation_id uuid
-       ┊ (NO FK — dropped :27)             ║ references ... (FK :42)
-       ┊                                   ║ on delete cascade
-  chunks ───────────                  messages ───────────
-   ├ doc chunks  (doc_id set)          delete a conversation
-   └ memory chunks (doc_id NULL) ←      → its messages cascade away
-     enabled by the missing FK
-
-  reason: chunks must be a drop-in VectorStore; messages need not be
+  ┌─ aptkit VectorStore contract ────────────────────────────┐
+  │  upsert(chunks)  ── no documents row → FK would break it  │
+  └───────────────────────────────┬───────────────────────────┘
+                                  │  PgVectorStore.upsert
+  ┌─ agents schema ───────────────▼───────────────────────────┐
+  │  ┌ documents ┐         ┌ chunks ───────────────────────┐  │
+  │  │ id PK     │┄┄┄┄┄┄┄┄┄│ document_id text (NO FK, 001:27)│  │
+  │  └───────────┘ soft    │  corpus → "<docId>"            │  │
+  │                link    │  memory → null  ◄── FK forbids  │  │
+  │                        └────────────────────────────────┘  │
+  │  enforcement: NOTHING in DB · app convention + idempotent  │
+  │  re-index (natural key) cover the gap                      │
+  └────────────────────────────────────────────────────────────┘
 ```
+
+---
 
 ## Elaborate
 
-"Soft foreign key" / "logical foreign key" is a known pattern — common in
-event-sourced systems, polyglot stores, and anywhere a table must be writable by
-a component that doesn't own the parent. The cost is always the same: integrity
-moves from the DB (declarative, total) to app code (imperative, partial). The
-mitigation, when you can afford it, is a periodic reconciliation job that finds
-orphans — chunks whose `document_id` has no matching document, or documents with
-zero chunks. This repo doesn't have one yet; the honest `not yet exercised` note
-in `audit.md` Lens 4 is exactly that gap. The deliberate FK *kept* (messages) is
-the proof this wasn't laziness — when integrity didn't fight an interface, they
-enforced it.
+"Soft foreign key" / "logical foreign key" is a recognized pattern — common in
+sharded systems (you can't FK across shards), in microservices (the parent
+lives in another service's database), and in exactly this case, pluggable
+storage behind a contract that doesn't know about the parent. The discipline it
+demands: the integrity the database used to guarantee now has to be guarded
+somewhere you control, or accepted as best-effort. This repo accepts it as
+best-effort, which is defensible for a single-device tool and would not be for a
+billing system.
+
+The trust/security angle — that `app_id` is *also* not enforced (no RLS) — is a
+sibling decision; see `04-app-id-tenant-column.md` and **study-security**.
+
+---
 
 ## Interview defense
 
-**Q: You dropped a foreign key on purpose. Defend that.**
-
-The `chunks` table has to be a drop-in implementation of an in-memory
-`VectorStore` interface that has no concept of a `documents` row. A NOT-NULL FK
-would force every chunk to have a pre-existing document — but conversation-memory
-chunks have no document and never will. Dropping the FK is what lets one table
-serve both populations. I kept the FK on `messages → conversations` because
-nothing there fights an interface, which shows the drop was a decision, not
-neglect.
+**Q: You dropped a foreign key. Defend it.**
+The `chunks` table sits behind aptkit's `VectorStore` contract, whose
+`upsert(chunks)` knows nothing about a parent document — a hard FK would make
+the Postgres store throw where the in-memory store doesn't, breaking drop-in
+parity (`pg-vector-store.ts:19`). And episodic memory chunks legitimately have
+no document, so their `document_id` is null — a FK would forbid them. I kept the
+column as a soft link so I can still join when both exist; I gave up the
+database guarantee because two real requirements conflict with it. The cost —
+orphaned chunks on document delete — is accepted because re-indexing is
+idempotent via the natural key.
 
 ```
-  with FK:    can't insert memory chunk (doc_id NULL → rejected)
-  without FK: doc chunks + memory chunks share one table
-              integrity moves to app code (indexDocumentRow writes doc first)
+  Q: why drop the FK?
+  hard FK breaks:  ① VectorStore drop-in parity (upsert has no doc)
+                   ② memory chunks (document_id = null)
+  soft link keeps: the join column, minus the guarantee
+  cost owned:      orphans on delete → idempotent re-index covers it
 ```
 
-Anchor: "the FK was the thing standing between `chunks` and drop-in parity — so
-it's gone, and the integrity moved to documented app-code convention."
+**Q: What did you give up, and where does the enforcement go now?**
+Database-enforced referential integrity for chunks. Deleting a document no
+longer errors or cascades — it silently orphans the chunks. The enforcement
+moved from the database into application convention plus the idempotent
+re-index path. If integrity ever mattered more, I'd add a reconciliation sweep
+in app code; I wouldn't re-add the FK, because that re-breaks parity and memory.
+That "the enforcement moved into my head" is the load-bearing admission — a soft
+link without a plan for orphans is just a bug with a nice name.
 
-**Q: What did you give up, and how would you get it back if it mattered?**
-
-I gave up DB-enforced referential integrity: orphan chunks and dangling
-documents are now possible and the DB won't catch them. If it started mattering
-I'd add a reconciliation query — `chunks left join documents` where the parent is
-null and `kind != 'memory'` — run on a schedule, rather than re-adding the FK,
-because re-adding it would break the memory chunks again.
+---
 
 ## See also
 
-- `07-non-atomic-document-chunk-write.md` — the same relationship from the
-  transaction angle: the write that should keep doc + chunks together isn't atomic.
-- `04-deterministic-chunk-ids.md` — the `"memory:<conv>:<n>"` ids the NULL-doc
-  chunks carry.
-- `audit.md` Lens 4 — integrity, DB-enforced vs app-enforced.
+- `02-deterministic-chunk-ids.md` — the natural key that makes orphan-recovery cheap
+- `04-app-id-tenant-column.md` — the sibling "shape without enforcement" decision
+- `06-trajectory-tables.md` — the memory chunks the soft link enables
+- `audit.md` §4 — transactions-and-integrity, the non-atomic write this interacts with
+- **study-system-design** — the VectorStore contract / drop-in-parity seam

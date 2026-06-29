@@ -1,164 +1,185 @@
 # Design Docs — buffr-laptop
 
-*Staff-level RFCs for the decisions in this repo that a room would actually
-have to align behind. Coach voice: written so a skeptical reviewer reads it
-and says yes — and so you can defend it in a promo packet or an architecture
-review without re-deriving it on the spot.*
+The written layer. `study-*` is for you (comprehension); this is for a room
+(alignment). Each doc here takes one real decision buffr already made and
+writes it up the way it should be put in front of a skeptical reviewer: the
+decision in the first sentence, the alternatives that lost, the cost owned
+without flinching. Coach voice — "say this, not that," where a reviewer pushes
+and the framing that holds.
+
+Nothing here is invented. Every claim cites a real file. If a doc says "the FK
+was dropped," there's a line number where it was dropped.
 
 ---
 
-## What this folder is
+## Which decisions warranted a doc — and which didn't
 
-This is the **human layer**, not the comprehension layer. `study-*` exists so
-*you* understand buffr. This exists so *a room* aligns behind the calls buffr
-made. At staff level the bottleneck is rarely the code — it's writing the
-decision down so a reviewer, a teammate, or a promo committee can follow it
-without you in the room.
-
-So I didn't invent decisions. I ranked the ones buffr actually made, then wrote
-up the ones that clear the bar — the way they *should* have been written up (and
-in two cases, the way they nearly were, in `docs/superpowers/specs/`).
+A design doc is expensive attention. You spend it where the decision was
+**hard to reverse, had a real alternative, and someone will ask "why this
+way?"** Here's the ranking for this repo, and the honest cut line.
 
 ```
-  Where this sits
+  buffr's decisions — ranked against the doc bar
 
-  ┌─ study-* ────────────┐   understand the codebase (for you)
-  │  comprehension       │
-  └──────────┬───────────┘
-             │
-  ┌─ rehearse-design-doc ▼┐  communicate a decision in WRITING (this) ← here
-  │  RFCs for a room      │
-  └───────────────────────┘
+  decision                          reverse?   alt?   cross-cut?   → verdict
+  ───────────────────────────────   ────────   ────   ──────────   ────────────
+  pgvector graduation               HARD       yes    yes          ★ DOC 01
+   (in-memory RAG → Supabase)        (corpus    (stay  (store,
+                                      + dim      mem,   schema,
+                                      one-way)   other  tests,
+                                                 db)    CLI)
+
+  @aptkit/memory extraction          HARD       yes    yes          ★ DOC 02
+   (built in buffr → pushed up        (lib       (keep  (two repos,
+    into the published library)        API is    inline, a contract
+                                       public)   own    boundary)
+                                                 engine)
+
+  dropped chunks→documents FK        medium     yes    local        fold into 01
+   (preserve VectorStore parity)      (re-add    (keep  (one        (a tradeoff
+                                       is a       FK,    table)      of the
+                                       migration) own                graduation,
+                                                  CLI)               not its own
+                                                                     decision)
+
+  full-signal trace-sink             easy       thin   local        fold into 01
+   (persist all 6 event types,        (additive (drop  (one sink,   (the right
+    created_at from timestamp)         column)   some   one table)   default,
+                                                 events)             not an RFC)
+
+  two-brain laptop+phone body        N/A —      —      —            deferred RFC
+   (asymmetric brains, one memory)    not built  (design-only; named in Open
+                                                  Questions of 01, not written)
+```
+
+Two decisions clear the bar and get a full doc. Two more are real choices but
+**fold into the graduation doc as tradeoffs** rather than standing alone — the
+section below says why, because knowing what *doesn't* deserve a doc is itself
+the staff signal. The two-brain body isn't built yet; it lives as a forward
+pointer, not a written RFC.
+
+---
+
+## The two that earned a doc
+
+### 01 — The pgvector graduation
+
+`01-pgvector-graduation.md`. The in-memory RAG pipeline became a persistent
+Supabase pgvector one without the agent loop changing a line — because buffr
+filled a contract aptkit already shipped. The adapter (`PgVectorStore`)
+implements the port (the `VectorStore` interface); the pipeline never learns it
+swapped. This is the headline architectural decision in the repo and the one a
+reviewer will most want to see justified: a corpus and an embedding dimension
+are hard to migrate later, so "why pgvector, why now, why this shape" is a
+question worth answering on paper.
+
+Cited to: `sql/001_agents_schema.sql`, `src/pg-vector-store.ts`,
+`src/session.ts`, and the as-built design spec
+`docs/superpowers/specs/2026-06-19-laptop-supabase-graduation-design.md`.
+
+### 02 — The @aptkit/memory extraction
+
+`02-memory-extraction.md`. Conversation memory was built inline in buffr, then
+**extracted *up*** into the published aptkit library as `@aptkit/memory`. The
+engine — embed an exchange, tag it, recall by similarity — moved into the
+library over the `EmbeddingProvider`/`VectorStore` contracts; the store stays
+injected by buffr. This is a dependency-boundary RFC: it decides what lives in
+the reusable toolkit versus what stays in the app, and it's hard to walk back
+once the library's API is public. A reviewer will ask "why does generic memory
+logic live in *my* app's repo at all?" — this doc is the answer.
+
+Cited to: `packages/memory/src/conversation-memory.ts` (in the aptkit repo),
+`src/session.ts`, and `.aipe/project/context.md`.
+
+---
+
+## The two that did *not* — and why that's the right call
+
+This is the teaching half of the overview. Both are real decisions. Neither
+earns its own doc.
+
+**The dropped chunks→documents FK.** A foreign key from `agents.chunks` to
+`agents.documents` is the obvious, textbook-correct choice — and it was
+deliberately *not* used (`sql/001_agents_schema.sql:15-27`). The reason is
+load-bearing: a hard FK gives the store a hidden precondition (a `documents`
+row must exist before any chunk), which breaks drop-in parity with the
+`VectorStore` contract — and it also blocks memory rows, which the engine writes
+as chunks with no `documents` row at all (`src/session.ts:50-53`). That's a real
+tradeoff with a real alternative. But it's a tradeoff *of the graduation* — it
+only exists because chunks are now persistent and contract-bound. It belongs in
+01's "Tradeoffs accepted," not in a doc of its own. Splitting it out would make
+the reader read two docs to understand one decision.
+
+**The full-signal trace-sink.** The sink persists all six `CapabilityEvent`
+types and sets `created_at` from the event timestamp so replay order is
+deterministic (`src/supabase-trace-sink.ts:40-85`). This is the *right default*
+— capturing tool-call args, durations, token usage, and errors instead of
+dropping them turns `agents.messages` into a replayable trajectory. But run it
+through the bar: is it hard to reverse? No — adding a column is additive. Was
+there a real alternative on the table? Barely — "persist fewer events" isn't a
+design anyone would argue for once trajectory capture is the goal. Will someone
+ask "why this way"? Not really; it's self-explanatory once you know the goal.
+
+This is the **borderline "fold-it, don't doc-it" case** — and naming *why* it
+folds is the skill. A doc with no real losing alternative reads as undercooked.
+The trace-sink's "alternative" (persist less) is a strawman, so writing it up as
+a standalone RFC would manufacture suspense the decision never had. It gets one
+honest paragraph in 01's rollout section instead.
+
+```
+  The cut line — what makes a decision doc-worthy
+
+  ┌─ DOC-WORTHY ────────────────┐   ┌─ FOLD-IT ───────────────────┐
+  │ real losing alternative     │   │ alternative is a strawman   │
+  │ hard to reverse             │   │ additive / cheap to undo    │
+  │ reviewer asks "why?"        │   │ self-explanatory given goal │
+  │ → pgvector, memory-extract  │   │ → trace-sink, dropped-FK    │
+  └─────────────────────────────┘   └─────────────────────────────┘
+        write the full RFC               name it inside the RFC
+                                         it's a tradeoff of
 ```
 
 ---
 
-## The bar — which decisions warranted a doc
+## The doc template (reuse this for the next decision)
 
-A design doc is expensive attention. You spend it only where the decision was
-**significant AND non-obvious**. I ranked every decision in the repo against the
-four-part test and kept the ones that clear all the way to the right:
-
-```
-  buffr's decisions, ranked against the doc bar
-
-  decision                          reverse? alt? cross-cut? "why?"  → verdict
-  ─────────────────────────────────────────────────────────────────────────────
-  pgvector graduation               hard     yes  yes        yes     → DOC 01
-   (in-memory RAG → persistent pg)
-  @aptkit/memory extraction         hard     yes  yes        yes     → DOC 02
-   (inline in buffr → published lib)
-  dropped chunks→documents FK       med      yes  yes        yes     → DOC 03
-   (the deliberate non-default)
-  ─────────────────────────────────────────────────────────────────────────────
-  full-signal trace sink            easy     yes  no         mild    → FOLD (below)
-   (persist all 6 event types)
-  app_id default 'laptop'           easy     no   no         no      → skip
-  768-dim embedding lock            hard     no   no         mild    → folds into 01
-  direct pg over Edge Functions     med      yes  no         mild    → folds into 01
-  768 throws, never truncates       easy     no   no         no      → skip (a guard)
-```
-
-Three docs. The spec caps at ~3, and three is exactly what clears the bar — not
-a number I padded to. Everything below the line either folds into a doc that
-already covers it, or is a default nobody would question.
-
----
-
-## The three docs
-
-| # | Decision | The non-obvious move |
-| - | -------- | -------------------- |
-| [01](01-pgvector-graduation.md) | **The pgvector graduation** | turn the in-memory RAG toy into a persistent brain by *filling an existing contract* — `PgVectorStore implements VectorStore` — instead of rewriting the agent. The schema is forward-compat for apps that don't exist yet. |
-| [02](02-aptkit-memory-extraction.md) | **The @aptkit/memory extraction** | memory was built *inline in buffr*, then **extracted up** into the published aptkit library over the `EmbeddingProvider`/`VectorStore` contracts. Engine in aptkit, store injected by buffr. A dependency-boundary RFC. |
-| [03](03-dropped-chunks-fk.md) | **The deliberately-dropped FK** | `chunks.document_id` has *no* foreign key — on purpose. The FK is the obvious default; keeping it would have broken `VectorStore` drop-in parity. The non-default *is* the decision. |
-
----
-
-## The borderline case — why the trace sink is NOT its own doc
-
-The spec says to teach the "fold-it, don't doc-it" line with a real borderline
-case. buffr has a clean one: `src/supabase-trace-sink.ts`.
-
-The full-signal trace sink is a **good decision** — it persists all six
-`CapabilityEvent` types instead of just assistant steps, and it stamps
-`created_at` from `event.timestamp` so replay order matches emit order rather
-than the race between concurrent flush inserts (`supabase-trace-sink.ts:53-85`).
-That last detail is genuinely staff-level: a junior writes `now()` and ships a
-trajectory that reorders itself under load.
-
-But run it against the bar and it doesn't clear:
-
-```
-  Why the trace sink folds instead of getting its own doc
-
-  reverse?     EASY — it's an adapter behind aptkit's CapabilityTraceSink
-               contract. Swap it, the agent never notices. A doc is for
-               decisions you can't cheaply walk back; this you can.
-
-  alternative? YES, but thin — "persist fewer event types" isn't a design
-               fork a room argues over. It's a completeness choice, not an
-               architecture one. The created_at-from-timestamp call is
-               clever, but it's a one-line correctness fix, not an RFC.
-
-  cross-cut?   NO — it's contained in one file behind one contract. Nothing
-               else in the system has to change shape because of it.
-
-  "why this?"  MILD — a reviewer nods and moves on. Nobody blocks a review
-               over it.
-
-  verdict: a paragraph in the overview + a line in DOC 03's trajectory
-           tables. Not 300 lines of its own. Spending a full doc here would
-           signal you can't tell a load-bearing decision from a tidy one.
-```
-
-The lesson generalizes: *an adapter behind a stable contract is almost never an
-RFC.* The RFC is the **contract** and the **schema it writes into** — those are
-hard to reverse and cross-cutting. The adapter that fills the contract is an
-implementation detail you mention, not a decision you defend. That's why the
-trace sink lives as a paragraph here and a row in DOC 03, while the *schema* it
-writes into is load-bearing enough to anchor DOC 01.
-
----
-
-## The template (reuse this for the next decision)
-
-Every doc here follows the canonical RFC spine. When buffr grows its next
-significant decision — the phone body, RLS, the HTTP gateway — write it up with
-this exact shape:
+Every doc here follows the canonical RFC spine. When buffr makes its next
+significant decision — the phone brain, the sync model, RLS — copy this shape:
 
 ```
   1. Title + one-line summary    the decision in a sentence, up top
-  2. Context / problem           what forced it — real repo constraints
+  2. Context / problem           the real constraint that forced it
   3. Goals & non-goals           what it must do; what it explicitly won't
   4. The decision                the chosen design + a mandatory diagram
-  5. Alternatives considered     2-3 real options, each with why it lost
-  6. Tradeoffs accepted          what it costs, owned without flinching
+  5. Alternatives considered     2–3 real options, each with why it lost
+  6. Tradeoffs accepted          the cost, owned without apology
   7. Risks & mitigations         what breaks, what guards it
-  8. Rollout / migration         how it ships; what changes for callers/data
-  9. Open questions              what's still undecided — honesty is signal
+  8. Rollout / migration         how it ships safely; what changes for callers
+  9. Open questions              what's still undecided (honesty = staff signal)
 ```
 
-Two coach notes that thread through all three docs:
-
-- **Lead with the decision, not the suspense.** The one-liner at the top is the
-  whole doc compressed. A reviewer who reads only that should know what you
-  chose. Build the case *after* the verdict, never toward it.
-- **Own the tradeoff; don't apologize for it.** "We chose direct `pg`,
-  accepting that a second client later needs the HTTP layer we deferred" reads
-  as a decision. "Unfortunately we couldn't build the gateway yet" reads as a
-  miss. Same fact, opposite signal.
+The two non-negotiables a reviewer feels immediately: the **decision is in
+sentence one** (no suspense), and **section 5 has real losing alternatives**
+(no doc with one option reads as designed-twice).
 
 ---
 
-## Cross-links
+## How to use these
 
-- The decisions trace to real specs: `docs/superpowers/specs/2026-06-19-laptop-supabase-graduation-design.md`
-  (DOC 01), `agent-layer-plan.md` (the parent vision, DOC 02's repo-split
-  thesis).
-- The comprehension layer underneath these: `.aipe/study-system-design/`
-  (`01-vector-store-adapter.md`, `02-library-as-dependency-boundary.md`,
-  `03-trajectory-capture.md`, `07-deferred-body.md`),
-  `.aipe/study-data-modeling/` (`03-soft-link-no-fk.md`,
-  `06-trajectory-tables.md`), `.aipe/study-software-design/`
-  (`01-adapter-behind-a-contract.md`, `03-dependency-as-a-boundary.md`).
+Read 01 before 02 — the memory extraction depends on the same
+`VectorStore`/`EmbeddingProvider` contracts the graduation introduced, and 02
+points back at 01 for them. Read the "fold-it" section above before you write
+your *own* next doc; the discipline of not writing a doc is as load-bearing as
+writing one.
+
+```
+  reading order
+
+  00-overview  →  01-pgvector-graduation  →  02-memory-extraction
+   (the cut       (the headline RFC;          (the boundary RFC;
+    line)          contracts + tradeoffs)      builds on 01's contracts)
+```
+
+→ See `.aipe/study-system-design/` and `.aipe/study-data-modeling/` for the
+comprehension-side walks of the same patterns — those are for understanding;
+these are for the room.

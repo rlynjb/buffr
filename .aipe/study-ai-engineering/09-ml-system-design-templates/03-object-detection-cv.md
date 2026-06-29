@@ -1,64 +1,105 @@
-# Object detection (CV) system design
+# Object Detection / Computer Vision
 
-- **The prompt:** "Design a CV system that detects objects in real-time video, on-device."
+### *interview reframe · fixed 9-bullet shape · Phase 5 anchor C5.13*
 
-- **Standard architecture:**
+---
 
-  ```
-  Camera frame
-    │
-    ▼
-  ┌──────────────────────────────────┐
-  │ Preprocess                       │
-  │  (resize, normalize, color cvt)  │
-  └──────────────┬───────────────────┘
-                 │  input tensor
-                 ▼
-  ┌──────────────────────────────────┐
-  │ Detection model                  │
-  │  (single-shot detector on-device)│
-  └──────────────┬───────────────────┘
-                 │  boxes + classes + scores
-                 ▼
-  ┌──────────────────────────────────┐
-  │ Post-process                     │
-  │  (NMS, smoothing, tracking)      │
-  └──────────────┬───────────────────┘
-                 │  stable tracks
-                 ▼
-  ┌──────────────────────────────────┐
-  │ Downstream consumer              │
-  │  (UI overlay, trigger, log)      │
-  └──────────────────────────────────┘
-  ```
+**The prompt:** Design a real-time, on-device computer-vision system that detects objects in a video stream.
 
-- **Data model:**
-  - Frame stream `{frame_id, timestamp, pixels}` — the video input.
-  - Detection output `{frame_id, [boxes, classes, scores]}` — per-frame model output.
-  - Track store `{track_id, box_history}` — temporal association of detections across frames.
-  - Labeled training set — annotated frames `{image, [box, class]}` for training and eval.
+---
 
-- **Key components:**
-  - *Preprocess*: resizes and normalizes frames to the model's input size. Decision: do it on the GPU/NPU to avoid CPU→accelerator copies per frame.
-  - *Detection model*: a single-shot detector (YOLO/SSD-class) quantized for on-device latency. Decision: single-shot over two-stage (R-CNN) because real-time needs one forward pass per frame; INT8 quantization to fit the mobile NPU.
-  - *Post-process*: non-max suppression dedups overlapping boxes; tracking smooths jitter across frames. Decision: a lightweight tracker (e.g. SORT) so a flickering single-frame miss doesn't drop the object.
-  - *Downstream consumer*: overlays boxes, fires triggers, or logs. Decision: decouple from detection via a queue so a slow consumer never stalls the camera pipeline.
+**Standard architecture**
 
-- **Scale concerns:**
-  - At 30+ FPS real-time: per-frame inference latency is the hard wall. Solution: quantize, prune, run on the NPU; drop to keyframe detection + tracking between keyframes.
-  - On-device memory: the model must fit the device budget. Solution: quantize to INT8, distill to a smaller backbone.
-  - Battery / thermal: sustained inference throttles the device. Solution: adaptive frame rate, detect less often when the scene is static.
+```text
+┌──────────────────────────── ON-DEVICE OBJECT DETECTOR (top-to-bottom) ──────────────┐
+│                                                                                      │
+│   camera / video stream  (frames at a fixed rate, e.g. 30fps)                        │
+│            │                                                                          │
+│            ▼                                                                          │
+│   ┌──────────────────┐     resize, normalize, color-convert to model input tensor    │
+│   │ PREPROCESS       │ ◄── runs per frame; must finish inside the frame budget       │
+│   └────────┬─────────┘                                                                │
+│            │ input tensor                                                             │
+│            ▼                                                                          │
+│   ┌──────────────────┐     a pre-trained detector: bounding boxes + class + score    │
+│   │ DETECT (model)   │ ◄── single-stage (YOLO/SSD) for real-time, on quantized       │
+│   │                  │     weights running on NPU/GPU/accelerator                    │
+│   └────────┬─────────┘                                                                │
+│            │ raw detections (overlapping boxes)                                       │
+│            ▼                                                                          │
+│   ┌──────────────────┐     non-max suppression, confidence filter, class map         │
+│   │ POST-PROCESS     │ ◄── NMS collapses duplicate boxes per object                  │
+│   └────────┬─────────┘                                                                │
+│            │ final detections                                                         │
+│            ▼                                                                          │
+│   ┌──────────────────┐     optional: track IDs across frames (Kalman / IOU match)    │
+│   │ TRACK (optional) │                                                                │
+│   └────────┬─────────┘                                                                │
+│            │                                                                          │
+│            ▼                                                                          │
+│   ┌──────────────────┐                                                                │
+│   │ CONSUMER         │ ──► overlay / trigger / count / downstream logic               │
+│   └──────────────────┘                                                                │
+└──────────────────────────────────────────────────────────────────────────────────────┘
+```
 
-- **Eval framing:**
-  - Offline: mAP at IoU thresholds (mAP@0.5, mAP@0.5:0.95) on a labeled test set; per-class precision/recall.
-  - Online: on-device latency (p50/p99 ms/frame), FPS sustained, false-positive rate in the wild.
-  - Domain shift matters: a model trained on daylight footage degrades at night; eval per condition, not just in aggregate.
+---
 
-- **Common failure modes:**
-  - Domain shift → lighting/angle unseen in training tanks accuracy. Mitigation: augmentation, on-device fine-tuning, condition-stratified eval.
-  - Quantization accuracy loss → INT8 drops mAP. Mitigation: quantization-aware training, not just post-training quantization.
-  - Tracking drift / ID switches → boxes swap identities under occlusion. Mitigation: motion + appearance features in the tracker.
+**Data model**
 
-- **Applies to this codebase:** **no.** buffr has no camera, no image input, no vision model, no CV anywhere. It is a text-only local-first RAG agent — Ollama generation, text embeddings, pgvector retrieval. There is no frame stream, no detection model, no pixel data in any path. This template does not map to buffr in any form, not even as a stretch.
+- **Frame** — a single timestamped image tensor from the stream; the unit of work.
+- **Detection** — (bounding box, class label, confidence) per detected object; the model's raw output.
+- **Track** — a stable ID linking the same object's detections across frames; what turns per-frame boxes into objects-over-time.
+- **Model artifact** — the pre-trained, typically quantized detector weights + label map; versioned and shipped to the device.
+- **Class taxonomy** — the fixed label set the detector was trained on; defines what it can and cannot see.
 
-- **How to make it apply:** It doesn't apply cleanly, and the honest move is to say so. You would reach for this template only if an interviewer explicitly asked you to design a CV system — at which point you walk the canonical architecture above (preprocess → on-device detector → NMS + tracking → consumer) on its own merits, without forcing a buffr mapping. There is no real buffr file to cite here because there is no surface to grow it from; buffr would have to become a different kind of product (one that ingests images) before any of this architecture became relevant. Kept brief on purpose — pretending otherwise would be the marketing voice this guide avoids.
+---
+
+**Key components**
+
+- **Preprocessor** — conforms each frame to the model's expected input; choose **fixed-size letterbox resize** over naive stretch so aspect ratio (and box geometry) is preserved.
+- **Detector** — the pre-trained network producing boxes; choose a **single-stage detector (YOLO/SSD)** over two-stage (Faster R-CNN) for real-time work because single-stage trades a little accuracy for the latency the frame budget demands.
+- **Post-processor** — collapses overlapping boxes and filters low confidence; choose **non-max suppression** because a single object fires many overlapping anchors and NMS is the standard dedupe.
+- **On-device runtime** — executes the model within the power/thermal envelope; choose **quantized weights (INT8) on the device's NPU/accelerator** over float32 on CPU because real-time on-device requires it (see `../08-machine-learning/13-quantization.md`, `../08-machine-learning/12-on-device-inference.md`).
+
+---
+
+**Scale concerns** (ordered by which hits first)
+
+- **At 30fps, the entire pipeline has ~33ms per frame.** Preprocess + inference + post-process must finish inside that budget or frames drop; this is the first wall and it dictates single-stage + quantization before anything else.
+- **At sustained full-rate inference, thermal throttling kicks in.** On-device accelerators throttle under continuous load; after minutes the effective FPS drops, so you design for the *throttled* clock, not the burst clock.
+- **At higher input resolution, memory bandwidth — not FLOPs — bounds you.** Doubling resolution quadruples the input tensor; on-device the bottleneck becomes moving that tensor through memory, capping resolution well before compute does.
+- **At deployment across device classes, the slowest accelerator sets the contract.** A model that hits 30fps on the flagship NPU may manage 8fps on the budget device; the fleet's floor, not its ceiling, defines "real-time."
+
+---
+
+**Eval framing**
+
+- **Offline:** mean Average Precision (mAP) at IoU thresholds (e.g. mAP@0.5, mAP@0.5:0.95) on a held-out labeled image set — the standard detection metric pairing localization (IoU) with classification (precision/recall across classes).
+- **Online:** measured latency (p50/p99 per frame), realized FPS under thermal load, and dropped-frame rate on-device — because a model that's accurate offline but misses the frame budget on the target hardware fails the actual requirement.
+- **Per-deployment:** the on-device fleet's *worst* device class sets the online bar; eval must run on representative hardware, not just the dev workstation, or the latency numbers are fiction.
+
+---
+
+**Common failure modes**
+
+- **Domain gap** — the detector was trained on clean daytime images and degrades in low light / motion blur / novel angles. *Mitigation:* evaluate on in-domain captured frames and fine-tune or augment for the deployment's real conditions (see `../08-machine-learning/06-domain-gap.md`).
+- **Small / occluded objects missed** — single-stage detectors trade recall on small objects for speed. *Mitigation:* multi-scale feature maps (feature-pyramid) or a higher-resolution input, paid for in latency.
+- **NMS over-suppression** — densely packed objects get merged into one box. *Mitigation:* tune the NMS IoU threshold per scene density, or use soft-NMS.
+- **Latency cliff under thermal throttle** — passes the bench, fails after sustained load. *Mitigation:* eval on the throttled clock and budget for it; quantize harder if needed.
+
+---
+
+**Applies to this codebase: no**
+
+buffr is a **text-only** local RAG agent. It has no camera, no frames, no pixels, no vision model, no bounding boxes, no detector, and no on-device CV runtime of any kind. Its entire input/output surface is natural-language text: a query string in, embedded to a 768-dim `nomic-embed-text:v1.5` vector, cosine-searched against text chunks in `agents.chunks`, and answered by `gemma2:9b`. There is no honest mapping from any buffr component to preprocessing-detect-postprocess-consume — forcing one (e.g. "embedding is like a feature extractor") would be the kind of stretched analogy an interviewer rightly punishes. The only genuine point of contact is *philosophical*, not architectural: buffr's local-first, on-device stance (Ollama models running on the laptop, no cloud inference) shares a constraint with on-device CV — both must fit inference inside a local hardware envelope — and that shared constraint is covered honestly in `../08-machine-learning/12-on-device-inference.md` and `13-quantization.md`. But that is a deployment philosophy, not a CV system.
+
+---
+
+**How to make it apply**
+
+You don't. The honest move in the interview is to **say buffr is text-only and reach for this template only when explicitly asked to design a CV system** — then walk the canonical architecture above (preprocess → detect → post-process → consumer) on its own terms, without dragging buffr into it. Concretely:
+
+- **Do not invent a vision path in buffr.** There are no real or expected vision files to point at; proposing one would be gold-plating a system whose entire purpose is text RAG.
+- **If pressed on "could buffr ever do this":** the only true shared ground is the *on-device inference constraint* — buffr already runs models locally via Ollama under a fixed hardware budget, so the latency/thermal/quantization reasoning in `../08-machine-learning/12-on-device-inference.md` and `13-quantization.md` transfers as *principle*, not as code. The frame budget for CV is the latency budget for local LLM inference, viewed through a different lens.
+- **Demonstrate the recognition itself.** The interview signal here is knowing *when a template doesn't apply* and saying so cleanly, then designing the textbook system well — not manufacturing a false mapping. "buffr is text-only, so this is a from-scratch design, here it is" is the strong answer.

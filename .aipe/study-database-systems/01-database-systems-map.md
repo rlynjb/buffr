@@ -1,83 +1,115 @@
 # The datastore map
 
-**Subtitle:** datastore topology / engine choice / query-path inventory — *Project-specific*
+**Industry name:** single-node RDBMS with a vector extension · the storage
+topology / engine map — *Industry standard*
 
 ---
 
-## Zoom out, then zoom in
+## Zoom out — where this concept lives
 
-Before any single mechanism, here's the whole storage system on one screen.
-`buffr-laptop` has exactly one datastore: a Postgres instance named `reindb`,
-with the `vector` extension loaded, reached over a single connection pool. No
-cache layer, no second database, no queue. Every read and write in the repo
-lands here.
+Before any mechanism: the whole storage surface in one picture. Every other file
+in this guide zooms into one band of this diagram. This file *is* the map — it
+names the engine, traces every query path, and draws the line where durability
+ends.
 
 ```
-  Zoom out — where the database sits in buffr-laptop
+  buffr-laptop — one engine, every path through it
 
-  ┌─ UI layer ──────────────────────────────────────────────┐
-  │  Ink chat TUI (src/cli/chat.tsx)                         │
-  └───────────────────────────────┬──────────────────────────┘
-                                  │  in-process call
-  ┌─ Service layer ───────────────▼──────────────────────────┐
-  │  session.ts (ask loop) · runtime.ts (index) ·            │
-  │  pg-vector-store.ts · supabase-trace-sink.ts             │
-  └───────────────────────────────┬──────────────────────────┘
-                                  │  pg.Pool (node-postgres)
-  ┌─ Storage layer ───────────────▼──────────────────────────┐
-  │  ★ Postgres reindb · schema agents · pgvector ★          │ ← THIS GUIDE
-  │  documents · chunks · conversations · messages · profiles│
-  └──────────────────────────────────────────────────────────┘
+  ┌─ Application layer (TypeScript) ────────────────────────────────────┐
+  │                                                                      │
+  │   ★ the four call sites that touch the database ★                    │
+  │   ┌──────────────────┬──────────────────┬─────────────────────────┐ │
+  │   │ PgVectorStore    │ indexDocumentRow │ SupabaseTraceSink /      │ │
+  │   │ .upsert/.search  │                  │ persistMessage           │ │
+  │   │ pg-vector-store  │ runtime.ts       │ supabase-trace-sink.ts   │ │
+  │   └────────┬─────────┴────────┬─────────┴───────────┬──────────────┘ │
+  └────────────┼──────────────────┼────────────────────┼────────────────┘
+               │                  │                     │
+  ┌─ Connection layer ────────────▼─────────────────────▼────────────────┐
+  │   pg.Pool  (src/db.ts:5)  —  one pool, default config                │
+  └───────────────────────────────┬──────────────────────────────────────┘
+                                  │ SQL over TCP (libpq protocol)
+  ┌─ Postgres (reindb) ───────────▼──────────────────────────────────────┐
+  │   schema agents:                                                     │
+  │   documents · chunks(+vector) · conversations · messages · profiles  │
+  │   parser → planner → executor → access methods → MVCC → WAL → heap   │
+  └──────────────────────────────────────────────────────────────────────┘
 ```
 
-Zoom in: the "database system" is the bottom band — the engine that takes a
-SQL string plus parameters and turns it into pages read off disk, an index
-walked, a transaction committed to the WAL. The question this whole guide
-answers: **how does that band execute and preserve what the Service layer asks
-of it, and what does the Service layer assume it gets back?**
+There's the forest. The box that makes this repo interesting is `chunks` — it holds
+the `embedding vector(768)` column and the ANN index, and it's the only table where
+the *vector* extension changes how the engine behaves. Everything else is plain
+relational Postgres.
+
+---
+
+## Zoom in — narrow to the concept
+
+The map answers one question: *when buffr issues a read or a write, what engine
+runs it, through which path, and how far does the guarantee reach?* There's exactly
+one engine (Postgres), exactly one connection mechanism (the pool), and three
+distinct write paths plus one read path. Name them once here; the rest of the guide
+zooms into each.
 
 ---
 
 ## The structure pass
 
-**Layers.** Three nested levels inside the storage band:
+### Layers
+
+Four nested levels, outer to inner:
 
 ```
-  ┌─ SQL / planner ────────────────────────┐  what to compute
-  │   parse → plan → choose index or scan   │
-  └─────────────────┬───────────────────────┘
-  ┌─ Access methods ▼───────────────────────┐  how to find rows
-  │   heap scan · btree · HNSW (pgvector)    │
-  └─────────────────┬───────────────────────┘
-  ┌─ Storage / WAL ─▼───────────────────────┐  how to persist
-  │   8KB pages · buffer cache · WAL · MVCC  │
-  └──────────────────────────────────────────┘
+  application code   →  decides WHAT to write and in how many transactions
+      connection     →  borrows a session from the pool, hands SQL down
+        execution    →  parses, plans, picks an access method, runs it
+          storage    →  MVCC visibility + WAL durability + heap pages
 ```
 
-**Axis — trace `guarantees` (sync vs best-effort, atomic vs not) down the
-stack.** Hold one question: *what does each layer promise the one above it?*
+### Axis: trace *"who guarantees this write survives a crash?"* down the layers
 
-- SQL/planner promises **a correct result for the query as written** — but
-  *not* that it used the index. Wrong opclass → silent seq scan, same answer,
-  cliff-edge latency.
-- Access methods promise **the rows that match** — HNSW promises only
-  *approximately* the nearest neighbors (it's ANN, not exact).
-- Storage/WAL promises **durability of a committed transaction** — but only
-  *per transaction*. Two transactions get two independent promises.
+One question, held constant, and watch the answer change:
 
-**Seams — where the guarantee flips:**
+```
+  "who guarantees the write survives?"  — traced downward
 
-1. **Service ↔ Pool.** Above it: application objects, JS numbers. Below it: a
-   wire protocol, a finite set of connections (`db.ts:4`). The guarantee that
-   flips is *availability* — above the seam you call freely; below it you're
-   one of at most `max` clients.
-2. **Query ↔ access method.** Above it: declarative SQL. Below it: the planner
-   *chooses* exact-or-approximate, index-or-scan. The guarantee that flips is
-   *exactness* — and the choice is invisible unless you run `EXPLAIN`.
-3. **Transaction boundary.** Above it: a sequence of statements. Below it: all
-   or nothing — but only within one `begin`/`commit`. The guarantee that flips
-   is *atomicity*, and `runtime.ts` straddles two of these boundaries (the
-   anomaly in `05`).
+  ┌──────────────────────────────────────────────┐
+  │ application: indexDocumentRow                 │  → NOBODY: two separate
+  │                                               │     transactions, no outer atom
+  └───────────────────────┬───────────────────────┘
+      ┌───────────────────▼─────────────────────┐
+      │ connection: pool.connect() + begin       │  → ONE transaction is atomic
+      │                                          │     (upsert wraps its loop)
+      └───────────────────┬─────────────────────┘
+          ┌───────────────▼───────────────────┐
+          │ execution: commit returns          │  → durable IF wal synced
+          └───────────────┬───────────────────┘
+              ┌───────────▼─────────────────┐
+              │ storage: WAL fsync on commit │  → THIS is where durability lives
+              └─────────────────────────────┘
+
+  the answer flips at the top: a single transaction is atomic and durable,
+  but the application stitches TWO of them together with no atom around the pair.
+```
+
+That flip at the very top is the most consequential seam in the whole repo — it's
+the cross-transaction write anomaly (`05`).
+
+### Seams
+
+```
+  seam 1  app ↔ connection     the transaction boundary. an axis flips here:
+                               inside one begin/commit, atomicity holds;
+                               across two pool calls, it's gone. → 05
+  seam 2  connection ↔ execution  the SQL contract. the planner is free to choose
+                               seq scan OR index scan — the operator/opclass
+                               alignment decides which. → 03, 04
+  seam 3  execution ↔ storage  the durability boundary. commit means "WAL fsynced",
+                               NOT "checkpointed to the heap". → 07
+```
+
+Hand off to How it works with the skeleton named: four layers, the
+crash-survival axis flipping at the top, three load-bearing seams.
 
 ---
 
@@ -85,202 +117,197 @@ stack.** Hold one question: *what does each layer promise the one above it?*
 
 ### Move 1 — the mental model
 
-A database engine is a translator with a memory. You hand it a declarative
-sentence ("give me the 4 nearest chunks to this vector, for app `laptop`") and
-it decides *how* to get them — which index, which scan, in which order — then
-runs that plan against pages it keeps partly in RAM and fully on disk, logging
-every change so a crash can't lose a committed write.
+You already know the shape of a web request: it hits a handler, the handler talks
+to a database, the database answers. The storage map is that same shape frozen and
+labelled — except here there are *four* call sites in the application that talk to
+the *one* database, and they don't all use the same transaction discipline. The
+mental model is a fan-in: four writers, one pool, one engine.
 
 ```
-  The engine's job — one query, four stages
+  the fan-in — four call sites, one engine
 
-  SQL string ─► PARSE ─► PLAN ─► EXECUTE ─► result rows
-                          │         │
-                   "use HNSW or    "walk index,
-                    seq scan?"      read pages,
-                    cost-based      apply filter"
-                    decision
-                          │
-                   ┌──────▼──────┐
-                   │  every write │  WAL append (durability)
-                   │  also logs   │  MVCC version (isolation)
-                   └─────────────┘
+   upsert ─────┐
+   index ──────┤
+   persistMsg ─┼──► pg.Pool ──► Postgres (reindb / agents)
+   search ─────┘     (db.ts)        one planner, one MVCC, one WAL
+
+   the trap: each writer chooses its OWN transaction scope.
+   upsert wraps a transaction; indexDocumentRow does not wrap the pair.
 ```
 
-The repo touches all four stages but configures none of them. That's the
-through-line of this guide: the mechanisms are all *present* (they're Postgres
-defaults), and the interesting questions are about the few places the
-application code reaches in and makes a choice — the opclass, the transaction
-boundaries, the pool.
+### Move 2 — walk each path
 
-### Move 2 — the query-path inventory
-
-Every database operation in this repo is one of four paths. Walk them one at a
-time; each one is a different demand on the engine.
-
-**Path 1 — the similarity read (the hot path).** Every chat turn runs one of
-these. `PgVectorStore.search()` issues a nearest-neighbor query that the planner
-*should* answer with the HNSW index.
-
-```
-  Path 1 — similarity read (per turn)
-
-  ┌─ Service ──────┐  k=4, query vector   ┌─ Storage ──────────┐
-  │ search()       │ ───────────────────► │ ORDER BY <=> LIMIT │
-  │ pg-vector-     │                       │ → HNSW index walk  │
-  │ store.ts:67    │ ◄─────────────────── │ → top-4 by cosine  │
-  └────────────────┘   id, score, meta     └────────────────────┘
-```
+**The connection layer is a single bare pool.** Everything funnels through one
+object, created once with nothing but a connection string.
 
 ```ts
-// pg-vector-store.ts:70-78 — the read path, annotated
-const { rows } = await this.pool.query(
-  `select id, content, chunk_index, document_id, meta,
-          1 - (embedding <=> $1::vector) as score   // distance → similarity
-   from agents.chunks
-   where app_id = $2                                // btree-eligible filter
-   order by embedding <=> $1::vector                // HNSW-eligible ordering
-   limit $3`,                                       // top-k cutoff
-  [toVectorLiteral(vector), this.appId, k],
-);
+// src/db.ts:4-6
+export function createPool(databaseUrl: string): pg.Pool {
+  return new pg.Pool({ connectionString: databaseUrl });
+  //     ▲ no max, no idleTimeoutMillis, no connectionTimeoutMillis
+  //       → pg defaults: max 10 connections, no statement timeout
+}
 ```
 
-The `order by ... <=> ... limit k` is the exact shape pgvector's HNSW index is
-built to accelerate. Lose that shape (add a `having`, wrap the distance in a
-function, change the operator) and the index drops out. → `04`.
+This is the seam between your code and the engine. A `pool.query(...)` grabs a free
+connection, runs one statement on it (autocommit — its own implicit transaction),
+and returns it. A `pool.connect()` borrows a connection you hold across multiple
+statements — that's how you get a *multi-statement* transaction. Which call you
+reach for decides your transaction scope. Hold that distinction; it's the whole
+story of file `05`.
 
-**Path 2 — the transactional upsert (indexing + memory).** `upsert()` writes
-chunks inside an explicit transaction.
-
-```
-  Path 2 — transactional upsert
-
-  begin ─► insert ... on conflict do update (per chunk) ─► commit
-    │                                                        │
-    └──────────────── rollback on any error ────────────────┘
-                      (pg-vector-store.ts:40-65)
-```
-
-This path runs from two callers: `pipeline.index()` during corpus indexing, and
-`memory.remember()` after every turn (`session.ts`). Both land in the same
-`upsert()`, the same transaction shape.
-
-**Path 3 — the autocommit single write (documents, messages, conversations).**
-No explicit transaction — a bare `pool.query` is its own implicit transaction.
+**Write path A — the vector upsert, one explicit transaction.** `PgVectorStore.upsert`
+borrows a connection and wraps the whole loop in `begin`/`commit`.
 
 ```ts
-// runtime.ts:11-16 — autocommit documents write (txn A)
-await pool.query(
-  `insert into agents.documents (...) values (...)
-   on conflict (id) do update set ...`,        // one implicit txn, commits alone
-  [doc.id, appId, doc.sourcePath ?? null, doc.text],
-);
-await pipeline.index({ id: doc.id, text: doc.text });  // → Path 2 (txn B, separate)
+// src/pg-vector-store.ts:40-58 (condensed)
+const client = await this.pool.connect();   // ← borrow, hold across statements
+await client.query('begin');                //   one transaction opens
+for (const c of chunks) {
+  await client.query(`insert into agents.chunks ... on conflict (id) do update ...`);
+}
+await client.query('commit');               //   all chunks land atomically, or none
 ```
 
-The `messages` writes in `supabase-trace-sink.ts:27` and the `conversations`
-insert in `startConversation` are the same shape: single `pool.query`,
-autocommit, no batching.
+All chunks in one call commit together. Good. This is the *only* place in the repo
+that holds a multi-statement transaction deliberately.
 
-**Path 4 — the DDL migration.** `runMigration()` runs the whole schema file in
-one transaction (`migrate.ts:8-20`). Postgres supports transactional DDL, so a
-failed migration rolls back cleanly — a real strength worth naming.
+**Write path B — the document+chunk write, two transactions.** `indexDocumentRow`
+writes the documents row on the pool directly, *then* calls the pipeline (which
+calls upsert, path A).
+
+```ts
+// src/runtime.ts:11-17
+await pool.query(`insert into agents.documents ... on conflict ...`); // txn #1 (autocommit)
+await pipeline.index({ id: doc.id, text: doc.text });                 // txn #2 (upsert's begin/commit)
+//    ▲ two separate transactions. nothing wraps the pair.
+//      crash between them → orphaned document row, no chunks.
+```
+
+This is the most important thing on the map: a logical "index this document"
+operation is physically two atoms. File `05` walks the anomaly in full.
+
+**Write path C — trajectory capture, autocommit per event.** Each
+`CapabilityEvent` becomes one `persistMessage` call, each its own autocommit
+`pool.query`.
+
+```ts
+// src/supabase-trace-sink.ts:27-36 (the insert)
+await pool.query(`insert into agents.messages (...) values (...)`);
+//    ▲ one statement, one implicit transaction, per event.
+//      ordering is preserved by created_at = event.timestamp, NOT by insert order.
+```
+
+The clever bit: because flush awaits a *pile of independent promises*
+(`Promise.all(this.pending)`, line 92), the inserts race. Replay order is rescued
+by writing `created_at` from `event.timestamp` (`supabase-trace-sink.ts:55`), so
+the *data* is ordered even though the *writes* aren't. That's a real pattern: when
+writes are concurrent, push ordering into a column, not into the insert sequence.
+
+**The read path — vector search, one statement.** `search` is a single
+`pool.query` ordering by cosine distance.
+
+```ts
+// src/pg-vector-store.ts:70-77
+order by embedding <=> $1::vector    // ← the only query the ANN index serves
+limit $3
+```
+
+One read path, and it's the one the whole RAG product depends on. Files `03` and
+`04` zoom into whether the planner actually uses the index here.
 
 ### Move 3 — the principle
 
-A database system gives you a stack of guarantees, but **only the ones you ask
-for the way it expects**. The engine is the same Postgres whether you use the
-index or not, commit one statement or fifty; what changes is the contract you
-hand it. This guide is mostly about the three places `buffr-laptop` reaches
-across a seam and makes a choice the engine can't second-guess: the opclass it
-must match, the transaction boundaries it draws, and the pool it sizes (or
-doesn't).
+A storage map isn't a list of tables — it's a list of *transaction boundaries* and
+*durability boundaries*. The tables tell you what data exists; the boundaries tell
+you what the engine promises about it. buffr has one engine and one pool, which
+makes the tables easy — but four call sites each choosing their own transaction
+scope is where every consistency question in this guide originates. Map the
+boundaries first; the tables are the easy part.
 
 ---
 
 ## Primary diagram
 
-The complete map: four query paths, three seams, one engine.
+The full map: four call sites, one pool, one engine, the three seams marked.
 
 ```
-  buffr-laptop — datastore map, all paths
+  buffr storage map — call sites, pool, engine, seams
 
-  ┌─ Service layer ─────────────────────────────────────────────┐
-  │  search()  upsert()  pool.query()  runMigration()           │
-  └────┬─────────┬──────────┬──────────────┬─────────────────────┘
-       │ Path 1  │ Path 2   │ Path 3       │ Path 4
-       │ read    │ txn      │ autocommit   │ DDL txn
-  ─────┼─────────┼──────────┼──────────────┼──── seam: pg.Pool (max 10, db.ts:4)
-       ▼         ▼          ▼              ▼
-  ┌─ Planner ───────────────────────────────────────────────────┐
-  │  index-or-scan choice  ◄── seam: exactness flips here        │
-  └────┬──────────────────────────────────────┬──────────────────┘
-       ▼ HNSW (vector_cosine_ops)              ▼ btree (app_id) / heap
-  ┌─ Storage / WAL / MVCC ──────────────────────────────────────┐
-  │  8KB pages · buffer cache · WAL append · READ COMMITTED      │
-  │  ◄── seam: atomicity flips per begin/commit                  │
-  └──────────────────────────────────────────────────────────────┘
+  ┌─ Application ────────────────────────────────────────────────────────┐
+  │  upsert(txn)   indexDocumentRow(2 txns)   persistMessage(autocommit)  │
+  │  search(read)                                                         │
+  └──────┬──────────────┬────────────────────────────┬───────────────────┘
+         │              │  ░ SEAM 1: transaction boundary — atom or no atom?
+  ┌──────▼──────────────▼────────────────────────────▼───────────────────┐
+  │  pg.Pool (db.ts) — one pool, default max 10                          │
+  └──────────────────────────────┬───────────────────────────────────────┘
+                                 │  ░ SEAM 2: SQL contract — seq scan vs index scan?
+  ┌─ Postgres (reindb / agents) ─▼───────────────────────────────────────┐
+  │  parser → planner → executor                                         │
+  │  access methods:  B-tree (PKs)   |   ANN index HNSW (chunks.embedding)│
+  │  MVCC: row versions + visibility                                     │
+  │                                 ░ SEAM 3: durability — WAL fsync line │
+  │  WAL  →  fsync on commit  →  heap pages (8 KB)                        │
+  └──────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
 ## Elaborate
 
-Postgres is a process-per-connection, MVCC, WAL-logged relational engine — the
-same architecture whether it's storing a `text` column or a 768-dim vector.
-pgvector (the `vector` extension, loaded at `001_agents_schema.sql:1`) is an
-*extension*: it adds a new column type (`vector`), new operators (`<=>`, `<->`,
-`<#>`), and new index access methods (`hnsw`, `ivfflat`) on top of the same
-engine. That's why everything else in this guide — transactions, MVCC, WAL,
-pooling — applies unchanged: the vector data rides the same machinery as the
-relational data. This colocation (vector + relational in one instance) is the
-system-design call; see `study-system-design`.
+Postgres is a *process-per-connection*, MVCC, heap-storage relational engine. The
+`pgvector` extension (`create extension vector`, `sql/001_agents_schema.sql:1`) adds
+one new column type (`vector`) and two new access methods (IVFFlat and HNSW). It
+does *not* change the transaction manager, the WAL, or MVCC — a vector row is an
+ordinary heap row with an ordinary index entry. That's the key insight for the rest
+of this guide: pgvector is "just another index type," so everything you know about
+B-tree Postgres (visibility, WAL, vacuum) applies unchanged. The novelty is purely
+in *how the index is searched* (approximate, not exact) and *how the operator must
+match the opclass* (file `03`).
+
+Where this sits in the larger system: `study-system-design` owns the choice to put
+vectors and relational data in *one* Postgres rather than a dedicated vector DB
+(the AdvntrCue shape Rein has shipped). This guide takes that choice as given and
+audits the mechanism.
 
 ---
 
 ## Interview defense
 
-**Q: Walk me through what happens when buffr answers a chat turn — at the
-database level.**
-
-> One read and (after the answer) one transactional write. The read is
-> `search()` at `pg-vector-store.ts:67`: an `order by embedding <=> $1 limit k`
-> that the planner answers with the HNSW index, returning the top-4 chunks by
-> cosine similarity for `app_id='laptop'`. After the agent produces an answer,
-> `memory.remember()` embeds the exchange and lands in `upsert()` — an explicit
-> `begin`/`commit` transaction. So: one ANN read, one durable write, one bare
-> pool between them.
+**Q: "Walk me through what happens when buffr indexes one document."**
 
 ```
-  turn:  search() ──read──► HNSW ──top4──► agent ──► remember() ──txn──► commit
+  indexDocumentRow — two atoms, drawn
+
+  ┌─ txn #1 (autocommit) ─┐        ┌─ txn #2 (upsert begin/commit) ─┐
+  │ insert documents row  │  ───►  │ begin                          │
+  │ commit                │  gap!  │ insert chunk, chunk, chunk     │
+  └───────────────────────┘  ░░░░  │ commit                         │
+                          crash here└────────────────────────────────┘
+                          = document row with zero chunks
 ```
 
-> Anchor: every turn is exactly one similarity read plus one best-effort
-> transactional memory write.
+Answer: "Two transactions. The documents row commits on its own via a bare
+`pool.query`, then `pipeline.index` runs `PgVectorStore.upsert`, which opens its own
+`begin`/`commit` for the chunks. There's no atom around the pair, so a crash in the
+gap orphans the document. With a hard FK that'd be a dangling reference — but the FK
+is deliberately dropped, so the engine stays silent." Anchor: *the load-bearing fact
+is the transaction boundary, not the table list.*
 
-**Q: Where could the same query return a different answer than you expect?**
+**Q: "Is pgvector a different database?"**
 
-> Two places. One — the opclass: if the query operator stopped matching the
-> index opclass, you'd silently get a seq scan, same answer but a latency cliff.
-> Two — HNSW is *approximate*: `<=>` over an HNSW index can miss a true nearest
-> neighbor that an exact scan would find. The answer is "the 4 *approximately*
-> nearest," and that's the right tradeoff for sub-second retrieval.
-
-```
-  exact scan:  every row compared   → always the true top-k, O(n)
-  HNSW (ANN):  graph walk           → usually the top-k, sub-linear
-```
-
-> Anchor: the engine guarantees a result, not that it's the index path or the
-> exact answer — `EXPLAIN` is how you check the first, recall@k the second.
+Answer: "No — it's an extension to the same Postgres. One new column type, two new
+index access methods. Same MVCC, same WAL, same planner. A vector row is a normal
+heap row; the only thing special is the index is approximate and the operator has to
+match the opclass it was built with." Anchor: *pgvector is just another index type.*
 
 ---
 
 ## See also
 
-- `02-records-pages-and-storage-layout.md` — how these rows sit on disk.
-- `04-query-planning-and-execution.md` — the index-or-scan decision in depth.
-- `05-transactions-isolation-and-anomalies.md` — the four paths' transaction
-  boundaries, including the two-transaction write.
-- `study-system-design` — why one Postgres instance holds both vector and
-  relational data.
+- `02-records-pages-and-storage-layout.md` — how a chunk row sits on a heap page.
+- `04-query-planning-and-execution.md` — seam 2, the scan decision.
+- `05-transactions-isolation-and-anomalies.md` — seam 1, the two-transaction write.
+- `07-wal-durability-and-recovery.md` — seam 3, the fsync line.
+- `study-system-design` — *why* one Postgres holds both vector and relational data.

@@ -1,275 +1,215 @@
-# async-ui-with-a-busy-flag
+# Async UI with a busy flag — the loading state
 
-*The loading-state triad · async UI / pending-error-success · Industry standard*
+**Industry name(s):** loading/success/error state machine · the `isLoading` / `isFetching` flag · async UI guard. **Type:** Industry-standard pattern (every async UI), project-specific: hand-rolled, no query library.
+
+---
 
 ## Zoom out, then zoom in
 
-You know the loading-state triad cold: every `fetch()` you have ever wired up has a
-loading flag, a success path, and an error path, and the UI reads the flag to decide what
-to show. `<Chat>` is that exact pattern, except the "fetch" is a local async function
-(`session.ask`) that fans out to a database and a model, and the loading indicator is a
-terminal spinner instead of a CSS skeleton.
+Every UI that awaits something has this machine: idle → loading → (success | error) → idle. Buffr hand-rolls it around one awaited call with a single boolean. Here's where it sits — it's the bridge between a synchronous render and an asynchronous data layer.
 
 ```
-  Zoom out — where the busy flag sits in the surface
+  Zoom out — the busy flag straddles sync UI and async data
 
-  ┌─ UI layer (terminal) ───────────────────────────────────────┐
-  │  <Chat>  src/cli/chat.tsx:9                                  │
-  │   ┌───────────────────────────────────────────────────────┐ │
-  │   │ ★ busy flag brackets the await ★          chat.tsx:13  │ │ ← we are here
-  │   │   setBusy(true) → await ask() → setBusy(false)         │ │
-  │   │   render: busy ? <Spinner> : <TextInput>   chat.tsx:48 │ │
-  │   └───────────────────────────────────────────────────────┘ │
-  └───────────────────────────────┬──────────────────────────────┘
-                                  │  await session.ask(q)
-  ┌─ Data layer ──────────────────▼──────────────────────────────┐
-  │  ChatSession.ask()  src/session.ts:60                        │
-  └──────────────────────────────────────────────────────────────┘
-```
-
-**Zoom in.** The pattern is **pending-state-as-derived-render**: a boolean tracks "is a
-request in flight," `try/catch/finally` guarantees the boolean is restored no matter how the
-request ends, and the render branches on the boolean. The question it answers: *how does the
-UI stay honest about in-flight work — never stuck spinning, never accepting a second submit
-mid-flight?*
-
-## Structure pass
-
-One axis: **failure — where does it originate, propagate, and get contained?** This is the
-right axis here because the whole point of `try/catch/finally` is failure containment.
-
-```
-  One axis — "where does failure go?" — across the async call
-
-  ┌─ try ─────────────────────────────────────────────────┐
-  │  await session.ask(q)   ← failure ORIGINATES here      │  chat.tsx:28
+  ┌─ UI layer (synchronous render) ──────────────────────┐
+  │  <Chat>  ★ busy: idle | loading ★                     │ ← we are here
+  │          render branch: spinner ⇄ input               │
+  └───────────────────────────┬──────────────────────────┘
+                  await ask()  │  (the async hop)
+  ┌─ Data layer (asynchronous) ▼─────────────────────────┐
+  │  session.ask(): persist → agent.answer() → remember   │
+  └───────────────────────────┬──────────────────────────┘
+                  pg + Ollama  │
+  ┌─ Storage / Provider ──────▼──────────────────────────┐
+  │  Postgres · Ollama (gemma2)                            │
   └───────────────────────────────────────────────────────┘
-  ┌─ catch ───────────────────────────────────────────────┐
-  │  failure CONTAINED as an error turn, not a crash       │  chat.tsx:30-32
-  └───────────────────────────────────────────────────────┘
-  ┌─ finally ─────────────────────────────────────────────┐
-  │  setBusy(false) — runs on BOTH paths                   │  chat.tsx:33
-  └───────────────────────────────────────────────────────┘
-
-  failure flips from "throws" to "rendered turn" at the catch seam —
-  and the finally guarantees the flag resets regardless of which path won
 ```
 
-- **Layers:** the guard (`if (busy) return`) → the try (the await) → the catch → the finally.
-- **Axis:** failure. It originates inside `session.ask()`, is *contained* at the catch into a
-  rendered `error:` turn (`chat.tsx:31`), and the `busy` flag is *restored* in the finally
-  regardless of path.
-- **The load-bearing seam:** the `finally` block. It is the boundary where "the request is
-  in flight" becomes "the request is done," and it sits outside both the success and error
-  paths so the flag can never get stranded. *If failure flips anywhere, it flips at catch;
-  if the flag resets anywhere, it resets at finally.* That separation is the skeleton.
+**Zoom in:** the concept is the **async UI state machine** — the discipline of representing "something is in flight" as explicit state so the render can show progress and the handler can refuse to re-enter. Buffr's whole machine is one `boolean busy` plus a `try/finally` (`src/cli/chat.tsx:13–35`). The interesting parts: the re-entrancy guard and the `finally` that *cannot* be skipped.
+
+---
+
+## The structure pass
+
+One axis: **"can a second submit start work right now?"** Trace it across the turn's lifetime. The answer flips twice, and those two flips bound the critical section.
+
+```
+  Axis — "can new work start?" — across one turn
+
+   submit ──► if(busy) return   ──► setBusy(true) ──► await ask() ──► finally setBusy(false)
+              │                     │                                  │
+   state:   idle (YES, allowed)   loading (NO, refused) ───────────── idle (YES again)
+              ▲                     └──────── critical section ────────┘
+              └─ guard reads the flag the critical section sets
+```
+
+- **Layers:** the submit handler (control) → the `busy` flag (state) → the render branch (view).
+- **Axis (re-entrancy / control):** "can work start?" is YES at idle, NO during the await, YES again after `finally`. The guard at the top (`chat.tsx:17`) reads exactly the flag the body sets — that's a tiny mutual-exclusion lock built from one boolean.
+- **The seam:** the `await` (`chat.tsx:28`). Above it the handler runs synchronously to completion in one tick; at the `await` it suspends and the event loop is free; below it (the continuation) runs in a later tick. The `finally` straddles both sides so the flag resets no matter which path — success or throw — the continuation takes. The event-loop mechanics of that suspend/resume belong to `study-runtime-systems`.
+
+---
 
 ## How it works
 
 ### Move 1 — the mental model
 
-Think of the three states your UI can be in as a tiny state machine, the same one you draw
-for any `fetch`:
+You know a `fetch()` has three states you render differently — spinner while pending, data on resolve, message on reject. That's exactly this, with one addition: a **lock** so the user can't fire a second request while the first is pending.
 
 ```
-  The pattern — the pending-state machine
+  Pattern — the loading machine with a re-entrancy lock
 
-         idle (input shown)
-            │  onSubmit, q valid
-            ▼
-         pending (spinner)  ◄─── busy = true
-          /        \
-   resolved        rejected
-   +buffr turn     +error turn
-          \        /
-            ▼    ▼
-         idle (input shown)  ◄─── busy = false  (finally, both paths)
+        ┌────────── if(busy) return  (lock: refuse re-entry)
+        │
+   ┌────▼────┐  setBusy(true)   ┌───────────┐
+   │  idle   │ ───────────────► │  loading  │
+   └────▲────┘                  └─────┬─────┘
+        │                     await ask()
+        │            ┌───────────┴───────────┐
+        │       resolve                    reject
+        │            │                        │
+        │     append answer            append error
+        │            └───────────┬────────────┘
+        └──── setBusy(false) ◄────┘  (finally: always runs)
 ```
 
-The strategy in one sentence: **set the flag before the work, clear it in a `finally` so
-both success and failure return you to idle, and let the render derive what to show from the
-flag.** The flag is never set or cleared in two places that could disagree — `true` once
-before, `false` once in finally.
+The strategy in one sentence: **wrap the await in a flag that gates the render and locks re-entry, and reset it in `finally` so no path leaves the UI stuck.**
 
 ### Move 2 — the walkthrough
 
-#### The guard — refuse a second submit while one is in flight
+#### The guard — a one-boolean lock
 
 ```tsx
-// src/cli/chat.tsx:16-17
-const q = value.trim();
-if (busy) return;          // already working — drop this submit
+// src/cli/chat.tsx:15–17
+const onSubmit = async (value: string): Promise<void> => {
+  const q = value.trim();
+  if (busy) return;          // ← refuse: a turn is already in flight
 ```
 
-Before anything else, `onSubmit` checks `busy` and bails if a request is already running.
-This is the affordance that keeps the UI honest: hit enter twice fast and the second press
-is a no-op, so you can't fire two overlapping `ask()` calls into one conversation. The
-boundary condition: this guard reads `busy` from the render closure, which is correct here
-because each render gets a fresh `onSubmit` with the current `busy` — but it is *only* a UI
-guard. It does not cancel the in-flight call; it just refuses to start a new one. (The
-missing cancellation is `audit.md` red-flag 3.)
+This is the first thing the handler does. Bridge from what you know: it's the same reason you disable a submit button while a form posts — except here the field is hidden during `busy` (the render shows a spinner instead, `chat.tsx:48`), so the guard is the backstop against a queued keypress or a programmatic re-entry. Without it, two fast submits fire two `session.ask()` calls into the *same* conversation, interleaving persistence and trace flushes. The guard reads `busy`; the body below sets it — that read/set pair is the whole lock.
 
-#### The optimistic append + flag set — before the await
+#### Optimistic-ish: show the user's turn before awaiting
 
 ```tsx
-// src/cli/chat.tsx:24-26
+// src/cli/chat.tsx:24–26
 setInput('');                                       // clear the field immediately
-setTurns((t) => [...t, { role: 'you', text: q }]);  // show the user's turn at once
-setBusy(true);                                       // enter pending state
+setTurns((t) => [...t, { role: 'you', text: q }]);  // show YOUR turn now, before the await
+setBusy(true);                                       // enter loading
 ```
 
-All three of these run *synchronously before* the await, so the UI updates the instant you
-hit enter: field clears, your question appears, spinner takes over. This is optimistic in
-the small — the user's turn is shown before the answer exists, which is correct because the
-question is *theirs*, not server-derived; there is nothing to roll back. The boundary
-condition: if `setBusy(true)` came *after* the await instead, the spinner would never show —
-the flag has to flip before you yield to the event loop.
+Three synchronous setStates fire before any `await`, so the next render shows: empty field, your question on screen, spinner up. The user's own turn is **optimistic** — it appears without waiting for the backend, because there's nothing to confirm about your own input. The answer is *not* optimistic; it waits for the real result. This split (optimistic for the user echo, pessimistic for the response) is the right call: you can't fake the model's answer.
 
-#### The try/catch/finally — the containment skeleton
+#### The await and the two outcomes
 
 ```tsx
-// src/cli/chat.tsx:27-34
+// src/cli/chat.tsx:27–35
 try {
-  const answer = await session.ask(q);                              // the work
-  setTurns((t) => [...t, { role: 'buffr', text: answer }]);          // success path
+  const answer = await session.ask(q);                          // the async hop
+  setTurns((t) => [...t, { role: 'buffr', text: answer }]);     // success → append answer
 } catch (err) {
-  setTurns((t) => [...t, { role: 'buffr', text: `error: ${(err as Error).message}` }]); // error path
+  setTurns((t) => [...t, { role: 'buffr', text: `error: ${(err as Error).message}` }]); // reject → append error
 } finally {
-  setBusy(false);                                                    // ALWAYS restore
+  setBusy(false);                                                // ALWAYS → leave loading
 }
 ```
 
-This is the skeleton — name each part by what breaks if it is missing:
+Walk it: the handler suspends at `await session.ask(q)` and the render is already showing the spinner. When the promise settles, exactly one of two branches runs — append the answer, or append the stringified error. Then `finally` runs **on both paths**, flipping `busy` back to false, which re-renders the input field. Boundary condition, and the part people get wrong: put `setBusy(false)` at the end of `try` instead of `finally`, and any throw from `ask()` skips it — the spinner spins forever and the UI is wedged. The `finally` is load-bearing precisely because it's the one line that runs whether the await succeeds or blows up.
 
-- **`try` + `await`** — the work. Remove it and there is no async call to track.
-- **`catch`** — failure containment. Remove it and a thrown error from `session.ask()`
-  becomes an unhandled rejection: the spinner stays up forever (the finally would still run,
-  actually — but without catch the error escapes to the console and the user sees nothing
-  useful). The catch turns a throw into a *rendered* `error:` turn (`chat.tsx:31`), so the
-  user sees what went wrong and the conversation continues.
-- **`finally` + `setBusy(false)`** — the load-bearing reset. Remove it (or put `setBusy(false)`
-  only in the try) and a thrown error leaves `busy` stuck `true` forever: the spinner spins
-  with no input, the app is dead with no way to type. **This is the part people forget.** The
-  whole reason `setBusy(false)` lives in `finally` and not at the end of `try` is so the error
-  path *also* resets the flag.
-
-```
-  Execution trace — busy on both exit paths
-
-  step                       busy    footer shown
-  ───────────────────────    ────    ──────────────
-  setBusy(true)   :26        true    <Spinner> thinking…
-  await ask() …              true    <Spinner> thinking…
-  ── success ──              true    <Spinner> thinking…
-  setTurns(+buffr) :29       true    <Spinner> thinking…
-  finally setBusy(false):33  false   <TextInput>            ✓
-  ── OR error ──             true    <Spinner> thinking…
-  catch setTurns(+err):31    true    <Spinner> thinking…
-  finally setBusy(false):33  false   <TextInput>            ✓  same reset, error path
-```
-
-#### The render branch — the flag drives the footer
+#### The render branch reads the flag
 
 ```tsx
-// src/cli/chat.tsx:48-57
+// src/cli/chat.tsx:48–57
 {busy ? (
-  <Text color="yellow"><Spinner type="dots" /> thinking…</Text>   // pending
+  <Text color="yellow"><Spinner type="dots" /> thinking…</Text>
 ) : (
-  <Box><Text color="cyan">{'> '}</Text><TextInput value={input} … /></Box>  // idle
+  <Box><Text color="cyan">{'> '}</Text>
+    <TextInput value={input} onChange={setInput} onSubmit={onSubmit} placeholder="ask buffr" />
+  </Box>
 )}
 ```
 
-The render reads `busy` and shows either the spinner or the input — never both, because they
-occupy the same footer slot. `<Spinner type="dots">` (`chat.tsx:49`) is Ink's animated
-spinner, the terminal analog of a CSS loading skeleton; it animates on its own timer while
-mounted. The boundary condition: while `busy` is true the `<TextInput>` is unmounted, which
-is *why* the guard on line 17 is almost redundant — there is no field to submit from while
-spinning. Almost: a buffered keystroke or a fast double-enter can still fire `onSubmit`
-during the transition, so the guard stays as the real lock.
+The flag the handler sets is the flag the view reads. `busy === true` mounts the spinner subtree; `false` mounts the input. The reconciler unmounts one and mounts the other on each flip (the `<TextInput>` is fully torn down during `busy`, which is *why* the guard exists — there's no field to type into mid-turn, but a buffered keystroke could still reach a handler).
+
+### Move 2 variant — the load-bearing skeleton
+
+Strip it to the irreducible core: **a boolean + a guard that reads it + a `finally` that resets it.** Three parts, named by what breaks:
+
+- Drop the **guard** (`if (busy) return`) → concurrent turns; two `ask()` calls race into one conversation.
+- Drop the **`finally`** (reset in `try` instead) → one thrown error wedges the UI on the spinner permanently.
+- Drop the **render branch** on `busy` → no progress feedback; the UI looks frozen during a multi-second model call.
+
+Optional hardening *not* present (and honestly so): no `AbortController` to cancel a slow turn (`audit.md` red flag #3), no timeout, no retry/backoff, no error-type discrimination. Those are the layers a production async machine adds on top of this skeleton.
 
 ### Move 3 — the principle
 
-**Put the cleanup in `finally`, not at the end of the happy path.** Any flag, lock, or
-resource you acquire before an `await` must be released in a `finally` so the error path
-releases it too. The single most common version of this bug — a loading spinner stuck
-forever after a failed request — is exactly the bug this `finally` prevents. The principle is
-language- and framework-agnostic: it is the same reason you `finally { conn.release() }` a DB
-connection or `finally { setLoading(false) }` a React query. Acquire before, release in
-finally, derive the view from the flag.
+The reason async UI needs an explicit state machine is that **"in flight" is a real state the user must see and the handler must respect** — not an implementation detail you can leave implicit. A boolean is the minimum honest representation; a query library's `isLoading`/`isError`/`isSuccess` is the same machine with cancellation, caching, and retries bolted on. Buffr's version is correct and complete *for one in-flight call with no cancellation* — and knowing exactly which hardening it omits is what separates "I used a loading spinner" from "I built the loading state machine."
+
+---
 
 ## Primary diagram
 
-The complete async cycle, flag and failure paths labeled.
+The full machine, flag and render branch together, across the async seam.
 
 ```
-  async-ui-with-a-busy-flag — the complete frame
+  buffr's async turn — the complete loading state machine
 
-  ┌─ onSubmit  src/cli/chat.tsx:15 ──────────────────────────────┐
-  │  guard:  if (busy) return                       :17          │
-  │  pre:    setInput('') · setTurns(+you) · setBusy(true) :24-26│
-  │                                                              │
-  │  ┌─ try ──────────────────────────────────────────────────┐ │
-  │  │  answer = await session.ask(q)                :28       │ │
-  │  │  setTurns(+buffr)                             :29       │ │ success
-  │  ├─ catch ────────────────────────────────────────────────┤ │
-  │  │  setTurns(+ `error: …`)                       :31       │ │ contained
-  │  ├─ finally ──────────────────────────────────────────────┤ │
-  │  │  setBusy(false)   ← BOTH paths reach here     :33       │ │ ★ load-bearing
-  │  └────────────────────────────────────────────────────────┘ │
-  └───────────────────────────────┬──────────────────────────────┘
-                                  │ busy drives the render
-                                  ▼
-  ┌─ render footer  chat.tsx:48 ─────────────────────────────────┐
-  │  busy ? <Spinner> thinking…   :  <TextInput value={input}/>  │
-  └──────────────────────────────────────────────────────────────┘
+  ┌─ UI handler (src/cli/chat.tsx:15–35) ───────────────────┐
+  │  if(busy) return ──guard──┐                             │
+  │  setInput('') · append you · setBusy(true)              │
+  │                           │                             │
+  │      ┌── render: busy ? <Spinner/> : <TextInput/> ──┐   │  (chat.tsx:48)
+  │      │                                              │   │
+  │  try { await session.ask(q) } ═══════════════════════════╪═► async seam
+  │      ├ resolve → append answer  (chat.tsx:29)            │
+  │      ├ reject  → append error   (chat.tsx:31)            │
+  │      └ finally → setBusy(false) (chat.tsx:32) ALWAYS     │
+  └───────────────────────────┬─────────────────────────────┘
+                  session.ask()│ persist → agent → remember
+  ┌─ Data layer (src/session.ts:60) ▼───────────────────────┐
+  │  Postgres write · Ollama generate · memory.remember      │
+  └──────────────────────────────────────────────────────────┘
 ```
+
+---
 
 ## Elaborate
 
-This hand-rolled triad is what query libraries (react-query, SWR) productize: they give you
-`isLoading`/`isError`/`data` so you don't write the `try/catch/finally` yourself, plus
-caching, retry, and dedup. This codebase doesn't need them — there is one call site, no
-cache to share, no second consumer of the result — so the explicit triad is the honest
-choice; pulling in react-query for one `await` would be ceremony. The seam where you *would*
-graduate to a library: a second screen that re-fetches the same data, or a need for retry/
-optimistic-mutation-with-rollback. Until then, `try/catch/finally` + a boolean is the whole
-pattern, and it is the same pattern under the library's hood. Next:
-`04-session-as-the-data-layer.md` walks what `session.ask()` actually does on the other side
-of that await.
+This machine is the thing react-query, SWR, and TanStack Query exist to delete from your handlers — they own the flag, the dedup (your `if (busy) return` guard, generalized), the cache, retries, and cancellation, exposing `{ data, isLoading, isError }`. Buffr hand-rolls it because there's exactly one call site and no caching story, so a library would be ceremony. The honest read: this is the *correct* amount of machinery for the current surface. The trigger to adopt a library is a second async call site that needs the same dedup/cache/retry — at which point copy-pasting the flag becomes the smell.
+
+Read next: `04-session-as-the-data-layer.md` (what's behind the await) and `02-hooks-state-in-a-cli.md` (`busy` among the state triad). The suspend/resume at the `await` is `study-runtime-systems`; the wire timeout/retry semantics under `ask()` are `study-networking`.
+
+---
 
 ## Interview defense
 
-**Q: Why is `setBusy(false)` in `finally` instead of at the end of the `try`?**
+**Q: "Walk me through what happens when a user submits a question."**
+
+Guard, optimistic echo, loading, await, branch, reset. "First `if (busy) return` refuses re-entry. Then synchronously: clear the input, append the user's turn, set busy — so the next frame shows the question and a spinner. Then `await session.ask()`. On resolve I append the answer; on reject I append the error; `finally` clears busy regardless, which swaps the spinner back for the input."
 
 ```
-  setBusy(false) at end of try        setBusy(false) in finally
-  ────────────────────────────        ─────────────────────────
-  success → reset ✓                   success → reset ✓
-  error   → skipped! spinner          error   → reset ✓
-            stuck forever ✗
+  one turn, six beats
+  guard → echo → busy=true → await → branch(ok|err) → finally busy=false
 ```
 
-Because the error path has to reset the flag too. If `setBusy(false)` lived at the end of the
-try, a thrown error from `session.ask()` would jump to the catch and *skip* the reset — the
-spinner would spin forever with no input field, a dead UI. `finally` runs on both the success
-and error paths, so the flag is always restored. This is the bug everyone has shipped once.
-Anchor: *"the flag resets in finally so the error path resets it too — otherwise the spinner
-gets stranded."*
+Anchor: *"One boolean is the whole loading machine; the `finally` is what guarantees it never wedges (chat.tsx:32)."*
 
-**Q: The user double-taps enter on a slow model. What happens?**
+**Q: "What's the bug if you move `setBusy(false)` out of `finally`?"**
 
-The first submit sets `busy = true` and unmounts the `<TextInput>` (`chat.tsx:48,55`); the
-`if (busy) return` guard (`chat.tsx:17`) catches any second `onSubmit` that still fires during
-the transition. So the second tap is a no-op — you can't fan out two overlapping `ask()` calls
-into one conversation. What's *missing* is cancellation: the guard refuses a new request but
-can't abort the running one, so a slow Ollama generation locks the UI in `thinking…` until it
-finishes. That's the honest gap (`audit.md` red-flag 3). Anchor: *"`busy` is a re-entrancy
-guard, not a cancel — it blocks a second call but can't abort the first."*
+If it's the last line of `try`, a throw from `ask()` skips it and the UI is stuck on the spinner forever — no input ever comes back. `finally` is the only placement that runs on both the resolve and reject paths. That's the load-bearing detail.
+
+```
+  finally vs end-of-try
+  end of try:  throw → skipped → wedged spinner
+  finally:     throw → still runs → UI recovers
+```
+
+**Q (follow-up): "What's missing from this machine?"** Cancellation — no `AbortController`, so `/exit` can't interrupt an in-flight turn (`audit.md` #3). Naming the omission unprompted is the senior signal.
+
+---
 
 ## See also
 
-- `02-hooks-state-in-a-cli.md` — the `busy` slice and the functional updaters used here.
-- `04-session-as-the-data-layer.md` — what runs inside the `await session.ask(q)`.
-- `01-react-without-the-dom.md` — how the footer swap (Spinner↔TextInput) gets painted.
-- Cross-link: `study-runtime-systems` — the event-loop suspension at the `await`, and the
-  missing cancellation token.
+- `02-hooks-state-in-a-cli.md` — `busy` within the state triad
+- `04-session-as-the-data-layer.md` — what the await calls into
+- `01-react-without-the-dom.md` — how the spinner⇄input swap reconciles
+- `audit.md` lens 4 (data-fetching), red flag #3 (no cancellation)
+- cross-link: `study-runtime-systems` (suspend/resume at the await), `study-networking` (timeout/retry on the wire)

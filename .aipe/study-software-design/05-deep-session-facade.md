@@ -1,72 +1,92 @@
-# 05 — Deep session facade
+# Deep session facade — createChatSession behind ask() / close()
 
-**Industry name(s):** Facade pattern · "deep module" (APOSD) · resource-owning
-object · session lifecycle. **Type:** Industry standard.
+**Industry names:** the facade pattern · a deep module · the session
+object · resource-holding object (RAII-ish). **Type:** Industry standard.
+
+Eleven constructed things — embedder, store, pipeline, tool, registry,
+model, profile, memory engine, conversation, trace sink, agent — wired
+together once and held warm across a whole conversation, all hidden behind
+a two-verb interface: `ask(question)` and `close()`. This is the deepest
+*facade* in buffr: the most wiring behind the narrowest door. The UI
+(`cli/chat.tsx`) drives an entire RAG agent with persistent trajectory and
+episodic memory using exactly those two methods.
+
+Role-vocabulary (facade + deep module), named once:
+
+- **the facade** — the `ChatSession` interface (`session.ts:29-32`):
+  `ask` / `close`. The narrow door.
+- **the subsystem** — the eleven wired pieces behind it (the agent,
+  pipeline, store, memory, trace, pool, conversation).
+- **the client** — `cli/chat.tsx`, the Ink UI; it holds a `ChatSession`
+  and calls only the two methods.
+- **the resource** — the warm `pg.Pool` + the single `conversationId`
+  held across turns; what `close()` releases.
 
 ---
 
 ## Zoom out, then zoom in
 
-The chat UI (`chat.tsx`) needs to do exactly two things: ask a question and
-get an answer, and shut down cleanly on `/exit`. It should know *nothing*
-about pools, embedders, agents, trace sinks, or memory engines. So
-`createChatSession` builds all eleven of those collaborators, holds them
-across every turn, and hands the UI a two-method object: `ask(q)` and
-`close()`.
+The facade sits between the UI and the entire agent subsystem. The UI knows
+two verbs; everything else is behind the door.
 
 ```
-  Zoom out — the facade between the UI and everything else
+  Zoom out — the facade between UI and subsystem
 
-  ┌─ UI (Ink/React) ──────────────────────────────────────────┐
-  │  chat.tsx   session.ask(q) · session.close()               │
-  │  knows: turns, busy state, /exit. NOTHING else.            │
-  └──────────────────────────┬─────────────────────────────────┘
-              ChatSession seam │  { ask, close }  ← 2 methods
-  ┌─ buffr ──────────────────▼─────────────────────────────────┐
-  │  ★ createChatSession ★   session.ts                        │ ← here
-  │  holds: pool·embedder·store·pipeline·tool·registry·model·  │
-  │         profile·memory·conversationId·trace·agent (11)     │
-  └──────────────────────────┬─────────────────────────────────┘
-              ▼ aptkit + Postgres + Ollama
+  ┌─ UI layer (Ink / React) ─────────────────────────────────────┐
+  │  cli/chat.tsx   →   session.ask(q)   ·   session.close()      │
+  └───────────────────────────┬──────────────────────────────────┘
+                              │ TWO methods only (the facade door)
+  ┌─ Session facade ──────────▼──────────────────────────────────┐ ← here
+  │  ★ createChatSession() ★  holds, warm, across every turn:     │
+  │   pool · embedder · store · pipeline · tool · registry ·      │
+  │   model · profile · memory · conversationId · trace · agent   │
+  │   ask(): persist → answer → flush → remember                  │
+  └───────────────────────────┬──────────────────────────────────┘
+                              │ orchestrates aptkit + Postgres
+  ┌─ aptkit + Storage ────────▼──────────────────────────────────┐
+  │  RagQueryAgent · RetrievalPipeline · memory · agents.* tables │
+  └───────────────────────────────────────────────────────────────┘
 ```
 
-Zoom in: a facade is a small interface over a large, multi-part subsystem — the
-defining shape of a *deep module*. The depth ratio here is stark: two public
-methods, eleven private collaborators, a full per-turn lifecycle. The question:
-**what does the facade hold and orchestrate, and why is a deep facade the right
-call instead of letting the UI wire it up?**
+Zoom in: a facade gives a simple interface to a complicated subsystem. What
+makes *this* facade deep — not just a thin wrapper — is that it doesn't only
+*simplify* the subsystem, it *owns lifecycle*: it builds the eleven pieces
+once, holds the expensive ones warm (the pool, the conversation) across
+every `ask`, and tears them down on `close`. The client never sees a pool,
+never sees a `conversationId`, never sees aptkit. Two verbs, an entire
+stateful agent behind them.
 
 ---
 
-## Structure pass
+## The structure pass
 
-**Layers.** The UI on top, the facade in the middle, the subsystem below.
+**Layers:** UI (Ink) · the `ChatSession` facade · the agent subsystem
+(aptkit) · storage (Postgres).
+
+**The axis: what lives for one turn vs the whole session?** This is the
+axis that makes the facade *deep* rather than thin — trace lifetime across
+the door:
 
 ```
-  one axis traced: "what does the UI have to know?"
+  axis traced = "how long does this live?"
 
-  ┌─ UI ────────────────────────┐  knows: ask/close, two methods
-  │  chat.tsx                   │
-  └──────────────┬──────────────┘
-        seam ◄── knowledge collapses here ──►
-  ┌─ facade ─────▼──────────────┐  knows: the entire wiring + lifecycle
-  │  createChatSession          │
-  └──────────────┬──────────────┘
-  ┌─ subsystem ──▼──────────────┐  pool, agent, memory, trace, Ollama, pg
-  │  aptkit + Postgres + Ollama │
-  └──────────────────────────────┘
+  ┌─ cli/chat.tsx ──┐ seam  ┌─ createChatSession ──────────────┐
+  │ holds session   │ ══╪══►│ SESSION-lifetime (built once):   │
+  │ for whole chat  │      │   pool · agent · conversationId   │
+  │ (knows nothing  │      │ ───────────────────────────────── │
+  │  about either)  │      │ TURN-lifetime (per ask()):        │
+  └─────────────────┘      │   question · answer · flush        │
+                           └────────────────────────────────────┘
+       the facade owns BOTH lifetimes; the client sees NEITHER
 ```
 
-**Axis — "what does the UI have to know?"** Above the facade: two methods.
-Below: eleven collaborators and a four-step per-turn sequence. **The
-knowledge collapses at the facade seam** — that collapse, from eleven things
-to two, *is* the depth. The bigger the gap between interface and body, the
-deeper the module.
-
-**Seam.** The `ChatSession` type (`session.ts:29-32`) is the contract:
-`{ ask(question): Promise<string>; close(): Promise<void> }`. `chat.tsx` is
-typed against it (`:5,9`) and never imports anything else from the subsystem.
-The seam is two methods wide; everything else is hidden behind it.
+The axis flips at the door and *again inside the facade*: the client has one
+lifetime (the chat), but the facade internally distinguishes
+session-lifetime resources (built once, in `createChatSession`'s body,
+`:34-57`) from turn-lifetime work (inside `ask`, `:60-71`). Holding the
+expensive things at session lifetime — one warm pool, one conversation — is
+the design choice the facade exists to make. A thin wrapper wouldn't; it'd
+rebuild per call.
 
 ---
 
@@ -74,69 +94,66 @@ The seam is two methods wide; everything else is hidden behind it.
 
 ### Move 1 — the mental model
 
-You know how a `useQuery` hook hands your component `{ data, loading, error }`
-and hides the fetch, the cache, the retry, the abort controller? The component
-calls one hook and gets a clean surface; the machinery is the hook's problem.
-`createChatSession` is that for a whole agent session: the UI gets `ask` and
-`close`, and the eleven-object subsystem is the facade's problem. The strategy:
-**construct the world once, hold it, expose a verb or two over it.**
+You know this from frontend: a custom hook like `useChat()` that returns
+`{ send, reset }`. Inside, it wires up state, a websocket, retry logic,
+optimistic updates — but the component using it sees two functions. The
+hook is a facade over a subsystem, and it *holds state across renders*. `c
+reateChatSession` is the server-side equivalent: it wires a subsystem and
+returns two methods, holding state across turns instead of renders.
+
+In one sentence: **build the expensive subsystem once, hold the warm
+resources across turns, and expose only the verbs the client actually
+needs.**
 
 ```
-  the facade — narrow surface, held subsystem, per-turn loop
+  Deep facade — wiring hidden, lifecycle owned
 
-   ask(q) ──┐                                  ┌── close()
-            ▼                                  ▼
-   ┌─────────────────────────────────────────────────┐
-   │  HELD across turns (built once at construct):     │
-   │   pool · embedder · store · pipeline · tool ·     │
-   │   registry · model · profile · memory ·           │
-   │   conversationId · trace · agent                  │
-   │                                                   │
-   │  PER ask(): persist → answer → flush → remember   │
-   └─────────────────────────────────────────────────┘
+  createChatSession()
+    ├─ build once (session lifetime): pool, agent, conversation
+    └─ return { ask, close }              ← the narrow door
+                  │
+         ask(q) ──┤ persist → answer → flush → remember  (per turn)
+         close() ─┘ pool.end()                            (once)
 ```
 
-### Move 2 — the step-by-step walkthrough
+### Move 2 — the walkthrough
 
-**Part 1 — construct the world once (what breaks: per-turn cold starts).**
-
-**File:** `src/session.ts` · **Function:** `createChatSession` · **Lines:**
-39-57.
+**1. Build once — the subsystem is wired before any turn.** The body of
+`createChatSession` (`session.ts:34-57`) constructs the whole stack a single
+time. The expensive parts — the pool, the loaded profile, the conversation
+row — are paid for once, not per question:
 
 ```ts
-const pool     = createPool(cfg.databaseUrl);
-const embedder = new OllamaEmbeddingProvider({ model: '...', host: cfg.ollamaHost });
-const store    = new PgVectorStore({ pool, appId: cfg.appId, dimension: embedder.dimension });
+// session.ts:39-57 (condensed — the build-once block)
+const pool = createPool(cfg.databaseUrl);                       // warm pool, held
+const embedder = new OllamaEmbeddingProvider({ ... });
+const store = new PgVectorStore({ pool, appId, dimension: embedder.dimension });
 const pipeline = createRetrievalPipeline({ embedder, store });
-const tool     = createSearchKnowledgeBaseTool(pipeline, { minTopK: 4 });
-const tools    = new InMemoryToolRegistry([tool.definition], { [tool.definition.name]: tool.handler });
-const model    = new ContextWindowGuardedProvider(new GemmaModelProvider({ host: cfg.ollamaHost }), { maxTokens: 8192 });
-const profile  = await loadProfile(pool, cfg.appId);
-const memory   = createConversationMemory({ embedder, store });
-const conversationId = await startConversation(pool, cfg.appId);
-const trace    = new SupabaseTraceSink({ pool, conversationId });
-const agent    = new RagQueryAgent({ model, tools, profile, trace });
+const tool = createSearchKnowledgeBaseTool(pipeline, { minTopK: 4 });
+const tools = new InMemoryToolRegistry([tool.definition], { ... });
+const model = new ContextWindowGuardedProvider(new GemmaModelProvider({ ... }), { maxTokens: 8192 });
+const profile = await loadProfile(pool, cfg.appId);             // loaded once
+const memory = createConversationMemory({ embedder, store });
+const conversationId = await startConversation(pool, cfg.appId);// ONE conversation, held
+const trace = new SupabaseTraceSink({ pool, conversationId });
+const agent = new RagQueryAgent({ model, tools, profile, trace });// built once
 ```
 
-Eleven collaborators, built once, *before* the first question. The comment at
-`:13-17` names the win: "one warm pg pool and one conversation held across
-every turn (unlike the one-shot `ask` CLI, which opens and closes per call)."
-The old `npm run ask` rebuilt all of this per question — cold pool, new
-conversation row every time. The facade holds it, so turn two reuses the warm
-pool and writes into the *same* conversation. Strip the "hold it" property and
-you're back to per-turn cold starts and a fragmented trajectory. **This is the
-depth paying off: the lifecycle is the hidden value.**
+Eleven constructions, all behind the door. The class comment at
+`session.ts:13-28` names the design contrast directly: "one warm pg pool and
+one conversation held across every turn (unlike the one-shot `ask` CLI,
+which opens and closes per call)." That's the deep-facade thesis — the
+removed one-shot CLI rebuilt per call; this holds.
 
-**Part 2 — the per-turn sequence (what breaks: lost answers / lost
-trajectory).**
-
-**File:** `src/session.ts` · **Function:** `ask` · **Lines:** 60-71.
+**2. `ask` — the turn, four steps behind one verb.** The client calls
+`ask(q)`; behind it, four ordered operations the client never sees:
 
 ```ts
+// session.ts:60-71 (the per-turn body)
 async ask(question: string): Promise<string> {
-  await persistMessage(pool, conversationId, 'user', question);  // 1. record the question
+  await persistMessage(pool, conversationId, 'user', question);  // 1. record the user turn
   const answer = await agent.answer(question);                   // 2. run the agent (emits trace)
-  await trace.flush();                                           // 3. drain the trajectory queue
+  await trace.flush();                                           // 3. drain the trajectory writes
   try {
     await memory.remember({ conversationId, question, answer }); // 4. episodic memory (best-effort)
   } catch {
@@ -146,150 +163,178 @@ async ask(question: string): Promise<string> {
 }
 ```
 
-Four ordered steps behind one method call. Read the ordering — it's the design:
-
 ```
-  the per-turn pipeline — order matters
+  Layers-and-hops — one ask() across the subsystem
 
-  1 persist user ─► 2 agent.answer ─► 3 flush trace ─► 4 remember
-    (durable           (emits steps      (drain queue      (best-effort,
-     before run)        synchronously)    → see file 04)     swallowed)
-                                                              │
-                              the answer is already returned ─┘
-                              before remember can fail
+  ┌─ UI ─────┐ ask(q)  ┌─ facade ────────────────────────────────┐
+  │ chat.tsx │ ──────► │ 1 persist user  ──► agents.messages      │
+  │          │ ◄────── │ 2 agent.answer  ──► aptkit loop (+trace) │
+  └──────────┘ answer  │ 3 trace.flush   ──► drain trajectory     │
+                       │ 4 memory.remember ─► agents.chunks (best │
+                       │    (try/catch, swallow on fail)  effort) │
+                       └──────────────────────────────────────────┘
 ```
 
-- **Step 1 before step 2:** the question is durable *before* the agent runs, so
-  a crash mid-run still has the user turn recorded.
-- **Step 3 after step 2:** flush drains the trace sink's queue (file 04) — the
-  emits happened *inside* `answer()`, so flush has to come after.
-- **Step 4 wrapped in try/catch:** memory is best-effort. The comment is
-  explicit — "a memory-write failure must not lose the answer the user has."
-  The answer is computed at step 2; step 4 can fail and the user still gets
-  their answer. This is "define errors out of existence" (audit §6): a memory
-  failure simply isn't a failure of the turn.
+The ordering is load-bearing. Persist-first (step 1) means the user's
+question is recorded even if the agent crashes. Flush-before-return (step 3)
+means the trajectory is durable before the UI shows the answer. Memory-last
+and swallowed (step 4) means a memory failure never costs the user the
+answer they already have — the comment at `:67-68` names exactly that:
+"a memory-write failure must not lose the answer the user has." (Errors
+audit: lens 6.)
 
-**Load-bearing: the ordering and the swallow are the contract.** Reorder these
-and you lose the durability guarantee or you let a non-fatal memory write sink
-the whole turn.
-
-**Part 3 — the narrow surface the UI sees (what breaks: leaking the
-subsystem).**
-
-**File:** `src/session.ts:29-32` (the type) and `src/cli/chat.tsx:15-35` (the
-consumer).
+**3. `close` — the resource teardown, one line.** The only other verb:
 
 ```ts
-export type ChatSession = {
-  ask(question: string): Promise<string>;
-  close(): Promise<void>;
-};
+// session.ts:72-74
+async close(): Promise<void> {
+  await pool.end();           // release the warm pool — the held resource
+}
 ```
 
-`chat.tsx` does `await session.ask(q)` (`:28`) and `await session.close()`
-(`:19`) and nothing else. It never sees `pool`, `agent`, `trace`, or `memory`.
-That's the facade's payoff: the UI is a pure rendering concern — turns, busy
-spinner, `/exit` — and the entire agent subsystem is sealed behind two methods.
-Widen this interface (expose the pool, say) and the UI starts coupling to the
-subsystem, and the seam stops protecting either side. **The narrowness is the
-whole point.**
+`close` is the counterpart to build-once: the warm pool held for the whole
+session is released here. The UI calls it on `/exit` (`cli/chat.tsx:18-21`).
+This is the resource-holding half of the facade — the session *owns* the
+pool's lifetime, so the client doesn't have to.
+
+**4. The client sees the door, nothing else.** `cli/chat.tsx` is the proof
+the facade works — it drives the entire agent with two calls:
+
+```ts
+// cli/chat.tsx:18-29 (condensed)
+if (q === '/exit' || q === '/quit') { await session.close(); exit(); return; }
+// ...
+const answer = await session.ask(q);   // ← the whole subsystem, one call
+```
+
+No pool, no `conversationId`, no aptkit import, no trace, no memory in the
+UI file. The UI's entire knowledge of the backend is `ask` and `close`.
+That's the depth: maximum subsystem, minimum surface.
 
 ### Move 3 — the principle
 
-A deep module earns its depth by the ratio of what it hides to what it shows.
-`createChatSession` shows two methods and hides eleven collaborators plus a
-four-step lifecycle with ordering that matters. The right time to build a
-facade is exactly this: when a subsystem has real lifecycle (warm resources,
-held state, ordered teardown) that a caller would otherwise have to manage
-correctly every time. Don't make the caller orchestrate the world — orchestrate
-it once, hold it, and hand back a verb.
+A facade is worth building when the *interface* it exposes is dramatically
+smaller than the *subsystem* it hides — and it becomes a *deep* facade when
+it also owns the subsystem's lifecycle, so the client never manages
+resources. `createChatSession` hides eleven constructions and three storage
+tables behind two verbs, and it owns the warm pool and the single
+conversation across the whole session. The client (`cli/chat.tsx`) is
+correspondingly thin — it can't leak a connection or fragment a
+conversation across turns, because it never holds either. The general rule:
+**push the wiring and the lifecycle into the facade; hand the client only
+the verbs.** The narrower the door and the more it owns behind it, the
+harder the client is to misuse.
 
 ---
 
 ## Primary diagram
 
-The facade, its held subsystem, and the per-turn loop, in one frame.
-
 ```
-  createChatSession — deep facade over the agent subsystem
+  createChatSession — the deep facade, full recap
 
-  ┌─ UI: chat.tsx ──────────────────────────────────────────────────┐
-  │  session.ask(q) ──┐                       ┌── session.close()     │
-  └───────────────────┼───────────────────────┼──────────────────────┘
-                      │  ChatSession (2 methods)│
-  ┌─ facade: createChatSession ────────────────┼──────────────────────┐
-  │  built ONCE, held across turns:                                    │
-  │  ┌──────────────────────────────────────────────────────────────┐ │
-  │  │ pool · embedder · store · pipeline · tool · registry · model │ │
-  │  │ · profile · memory · conversationId · trace · agent          │ │
-  │  └──────────────────────────────────────────────────────────────┘ │
-  │  per ask():  ① persist user ─► ② agent.answer ─► ③ flush ─► ④ remember
-  │              durable           emits trace      drain      best-effort│
-  │  close():    pool.end()                                              │
-  └──────────────────────┬──────────────────────────────────────────────┘
-            ▼ aptkit (RagQueryAgent) · Postgres (warm pool) · Ollama
+  ┌─ UI: cli/chat.tsx (thin client) ─────────────────────────────┐
+  │  session.ask(q)            session.close()                    │
+  └───────────────────────────┬──────────────────────────────────┘
+                  TWO verbs    │  the facade door
+  ┌─ Facade: createChatSession ▼─────────────────────────────────┐
+  │  BUILD ONCE (session lifetime):                              │
+  │   pool ─ embedder ─ store ─ pipeline ─ tool ─ registry ─     │
+  │   model ─ profile ─ memory ─ conversationId ─ trace ─ agent  │
+  │                                                              │
+  │  ask(q)  →  1 persist user                                   │
+  │            2 agent.answer (emits trace events)               │
+  │            3 trace.flush  (drain trajectory)                 │
+  │            4 memory.remember (best-effort, swallowed)        │
+  │  close() →  pool.end()  (release the warm resource)          │
+  └───────────────────────────┬──────────────────────────────────┘
+                              ▼
+  ┌─ aptkit + Postgres ──────────────────────────────────────────┐
+  │  RagQueryAgent · pipeline · memory · agents.{messages,        │
+  │  conversations, chunks}                                       │
+  └───────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
 ## Elaborate
 
-The Facade is GoF: a unified, simplified interface over a complex subsystem.
-APOSD reframes it as the canonical *deep module* — the highest-value design
-move in the book, because depth is what stops complexity from amplifying
-upward. The session also does resource ownership (RAII-ish): it constructs the
-pool, holds it, and `close()` ends it (`:72-74`), so the lifetime of every
-resource is bounded by the lifetime of the session object.
+The facade pattern (Gang of Four) gives a unified, simpler interface to a
+set of interfaces in a subsystem. Ousterhout's framing sharpens it: a facade
+is good exactly when it's a *deep* module — a small interface over
+substantial behaviour. A thin facade that just forwards each subsystem call
+one-to-one is classitis; it adds a layer without hiding anything. `create
+ChatSession` avoids that by hiding *orchestration* (the four-step turn) and
+*lifecycle* (build-once, hold-warm, close), not just renaming methods.
 
-This is the same shape as the `useQuery`-style hooks you build in React —
-construct the machinery once, hand the component a tiny surface — but lifted to
-a whole agent session. The `ask` CLI it replaced (context.md: "the old one-shot
-`npm run ask` was removed") was the *shallow* version: it rebuilt the world per
-call, so there was no held state to hide and no facade to be deep. Adding the
-chat UI created the need for a long-lived session, and that need is what makes
-the deep facade the right call.
+The resource-holding angle connects to RAII (C++) and `using`/`defer`
+(C#/Go): an object that acquires a resource on construction and releases it
+on a known teardown call. buffr's version is the async pair
+`createChatSession()` / `close()` — acquire the pool when you build the
+session, release it when you close. The UI's `/exit` handler
+(`cli/chat.tsx:18-21`) is the disciplined teardown.
 
-Read next: `04-sync-interface-async-work.md` (the `flush` step), and
-`03-dependency-as-a-boundary.md` (the injection that fills the subsystem).
+This facade is the client side of three other patterns in this guide: it
+*constructs* the adapter (`01-adapter-behind-a-contract.md`), *injects*
+everything up into aptkit (`03-dependency-as-a-boundary.md`), and *flushes*
+the observer (`04-sync-interface-async-work.md`). It's where the whole
+system is wired.
 
 ---
 
 ## Interview defense
 
-**Q: Why a session object instead of letting the UI build the agent and call
-it directly?**
-Because the subsystem has real lifecycle the UI shouldn't manage: a warm pool
-reused across turns, one conversation row spanning the session, an ordered
-per-turn pipeline (persist → answer → flush → remember), and clean teardown. If
-the UI wired that up, it'd couple to eleven collaborators and would have to get
-the ordering right every render. The facade does it once and hands back two
-methods, so the UI stays a pure rendering concern.
+**Q: Is `createChatSession` a facade or a god object?** A facade — and the
+distinction is what it *exposes*, not what it *holds*. It holds eleven
+things, but it exposes two verbs and owns one clear responsibility: run a
+conversation. A god object exposes its internals and accretes unrelated
+duties; this hides every internal behind `ask`/`close` and does exactly one
+job. The eleven constructions aren't sprawl — they're a subsystem wired once
+and hidden. The tell is the client: `cli/chat.tsx` imports none of the
+eleven.
+*Anchor:* "eleven things held, two verbs exposed — a god object leaks its
+internals; this hides all of them."
 
 ```
-  depth = hidden ÷ shown
-
-  shown:   ask, close                    (2)
-  hidden:  11 collaborators + 4-step      → deep module:
-           per-turn lifecycle + teardown    the UI never sees it
+  facade (deep)                god object (shallow)
+  ┌──────────────┐             ┌──────────────┐
+  │ 11 held      │             │ 11 exposed   │
+  │ 2 exposed    │             │ + unrelated  │
+  │ 1 job        │             │ duties       │
+  └──────────────┘             └──────────────┘
 ```
 
-**Q: What's the most important detail in `ask` that's easy to miss?**
-The ordering, and specifically that `remember` is wrapped in try/catch and
-swallowed. The answer is computed by step 2; steps 3 and 4 are persistence and
-memory. Memory is best-effort — a failed memory write must not lose the answer
-the user already has — so it's swallowed deliberately (`session.ts:64-69`).
-That's the difference between "the turn failed" and "a non-essential side
-effect failed," and getting it wrong would surface memory hiccups as turn
-errors.
+**Q: Why hold the pool and conversation across turns instead of per `ask`?**
+Cost and coherence. The pool is expensive to open (TCP + auth), so opening
+it once and holding it warm saves that cost on every turn after the first —
+the comment at `session.ts:13-18` contrasts this with the removed one-shot
+CLI that opened and closed per call. The single `conversationId` is about
+coherence: every turn's messages and trajectory land in *one* conversation
+row, so the trajectory is a continuous thread, not fragments. Per-`ask`
+construction would scatter the conversation and re-pay the pool cost each
+time.
+*Anchor:* "warm pool for cost, one conversation for coherence — both are
+session-lifetime, so they live in the facade's body, not in ask()."
 
-**Anchor:** "A deep facade orchestrates lifecycle once and hands back a verb,
-so the caller never manages the subsystem."
+**Q: Why is `memory.remember` wrapped in a swallow but the agent run isn't?**
+Because they have different failure contracts. If `agent.answer` throws,
+there's no answer to return — the failure is the turn. If `memory.remember`
+throws, the user already has their answer; failing the turn over a best-
+effort episodic write would be strictly worse. So memory is last and
+swallowed (`session.ts:64-69`), agent is not. The ordering encodes the
+priority: do the thing that can lose data first, do the thing that's
+optional last and let it fail quietly.
+*Anchor:* "the swallow is deliberate — memory is best-effort, so its failure
+is defined to not cost the user the answer."
 
 ---
 
 ## See also
 
-- `audit.md` §2 (deep vs shallow — this is the runner-up deep module), §6.
-- `01-adapter-behind-a-contract.md` — the `PgVectorStore` the facade holds.
-- `03-dependency-as-a-boundary.md` — the injection wiring inside the facade.
-- `04-sync-interface-async-work.md` — the `flush` the per-turn loop calls.
+- `01-adapter-behind-a-contract.md` — the `PgVectorStore` this facade
+  constructs.
+- `03-dependency-as-a-boundary.md` — the injection wiring done in the
+  build-once block.
+- `04-sync-interface-async-work.md` — the `trace.flush()` called in `ask`.
+- `audit.md` lenses 2 (depth), 6 (the deliberate memory swallow).
+- `study-system-design/` — the request/turn flow at the architecture
+  altitude.

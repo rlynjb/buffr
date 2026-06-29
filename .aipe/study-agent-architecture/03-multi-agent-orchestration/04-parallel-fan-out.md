@@ -1,170 +1,224 @@
-# Parallel fan-out / fan-in — independent subtasks run at once, a merger combines
+# Parallel Fan-Out / Fan-In
 
-**Industry name(s):** parallel fan-out · fan-out/fan-in · map-reduce
-agents · scatter-gather. **Type label:** Industry standard.
+*Industry names: **fan-out/fan-in** / **parallel agents** / **map-reduce over agents** / **scatter-gather**. Type label: Industry standard. In this codebase: **Not yet implemented.** (buffr is single-agent; nothing runs in parallel.)*
 
-**In this codebase: Not yet implemented.** buffr runs one agent, one
-loop, no parallelism. The trace sink hints at the shape — it queues
-writes and awaits them with `Promise.all` (`src/supabase-trace-sink.ts:92`)
-— but that's I/O concurrency, not agent fan-out.
+## Zoom out, then zoom in
 
-## Zoom out, then zoom in — lead with the shape
+This is the topology for *independent* work: launch N agents at once, then merge. Here is the
+SHAPE first.
 
 ```
-  Parallel fan-out/fan-in topology (lead with it)
+  THE TOPOLOGY — scatter to N, gather to 1 (★ = the fan points)
 
-           ┌──────── split ────────┐
-           ▼          ▼            ▼
-      ┌────────┐ ┌────────┐  ┌────────┐
-      │agent 1 │ │agent 2 │  │agent 3 │   (concurrent)
-      └────┬───┘ └────┬───┘  └────┬───┘
-           └──────────┼───────────┘
-                      ▼
-              ┌──────────────┐
-              │ merge agent  │  synthesizes
-              └──────────────┘
-   latency = the SLOWEST agent, not the sum
+                    ┌─ ★ FAN-OUT ─┐
+            input ──┤              ├── (all start at once, no waiting on each other)
+                    └──┬───┬───┬───┘
+                       ▼   ▼   ▼
+                  ┌─────┐┌─────┐┌─────┐
+                  │AGENT││AGENT││AGENT│   independent · parallel
+                  │  A  ││  B  ││  C  │
+                  └──┬──┘└──┬──┘└──┬──┘
+                     ▼      ▼      ▼
+                    ┌─ ★ FAN-IN / MERGE ─┐
+                    │ combine A,B,C → 1   │──▶ answer
+                    └─────────────────────┘
 ```
 
-Zoom in: this is `Promise.all()` over independent requests, then a
-reduce. The win is latency — three agents in parallel cost the time of
-the slowest, not the sum. The constraint that makes it possible: the
-subtasks must be genuinely independent. If one needs another's output,
-it's a pipeline, not a fan-out.
+The topology is the mental model: **a diamond — one splits to many, many merge to one.** The
+defining requirement is *independence*: the N agents must not need each other's mid-results, or
+this isn't a fan-out, it's a chatty pipeline. The honest sentence: buffr runs one agent, in
+series with itself; it has no fan-out. This file teaches the shape and the independence test.
 
 ## Structure pass
 
-**Layers.** A split, N concurrent workers, a merge. The merge is the
-layer that does the reducing.
+One axis: **failure** — what happens when one of the N parallel agents fails or straggles?
 
-**Axis — "latency."** Fan-out's whole reason to exist: parallel
-workers turn additive latency (pipeline) into max latency (slowest
-worker). That's the axis that justifies it.
+```
+  Axis = FAILURE · the SEAM is how the merge handles a missing/slow branch
 
-**Seam.** Two seams: the split (how the task decomposes into
-independent parts) and the merge (how results combine). The merge seam
-is where contradictory worker outputs must be reconciled — the
-synthesis-failure mode in `09-coordination-failure-modes.md`.
+  all N succeed      → merge sees N results → clean fan-in
+  ──────────── ★ SEAM: one branch fails or straggles ★ ──────────
+  one branch fails   → merge must DECIDE: drop it? retry? fail the whole run?
+  one branch slow    → the whole fan-in waits for the slowest (tail latency)
+```
+
+Fan-out's failure model is entirely different from a pipeline's. In a pipeline one failure
+halts the line. In a fan-out the *merge* owns the failure policy: it can proceed with N-1
+results (`Promise.allSettled` semantics) or fail hard (`Promise.all` semantics). And the
+latency is the *slowest* branch, not the sum — fan-out's whole point is that the branches
+overlap in time, but that means one straggler sets your latency. That seam — what the merge
+does about a missing branch — is the design decision fan-out forces on you.
 
 ## How it works
 
-#### Move 1 — the mental model
+### Move 1 — mental model
 
-You've fired several independent `fetch`es with `Promise.all` and
-rendered once they all resolve — you wait for the slowest, not the sum.
-Fan-out is that with agents: split into independent sub-questions, run
-each agent concurrently, merge.
-
-```
-  Pattern — fan-out then fan-in
-
-  task → split into independent sub-tasks
-           ▼ (concurrent)
-       [agent 1] [agent 2] [agent 3]
-           ▼         ▼         ▼
-            all results → merge agent → answer
-       latency = max(agent_i), not sum
-```
-
-#### Move 2 — the walkthrough (what it would take in buffr)
-
-**The independence test is the whole thing.** Fan-out only works if the
-sub-tasks don't depend on each other. For buffr, a fan-out-able question
-would be "summarize what my notes say about X, Y, and Z" — three
-independent retrievals that merge. Each would be a `RagQueryAgent`
-search, run concurrently, then a synthesis pass. A question like "refine
-my answer about X based on what you found about Y" is *not*
-independent — that's a pipeline.
-
-**buffr already has the concurrency primitive, at the I/O layer.** The
-trace sink fans out writes and awaits them (`src/supabase-trace-sink.ts:87-93`):
-
-```ts
-private push(p: Promise<void>): void { this.pending.push(p); }
-async flush(): Promise<void> { await Promise.all(this.pending); }
-```
-
-That's the exact `Promise.all` shape an agent fan-out would use — but
-applied to DB writes, not agent runs. The mechanical leap to agent
-fan-out is small; the hard part is the *split* and *merge* logic, not
-the concurrency.
-
-**The cost fan-out introduces: backpressure.** Three concurrent agents
-is three concurrent Gemma calls hitting one Ollama instance. A
-supervisor that fans out faster than the provider can serve needs a
-concurrency cap — the fan-out-backpressure concern in
-`05-production-serving/02-fan-out-backpressure.md`. For local Gemma,
-unbounded fan-out would just queue at Ollama and lose the latency win.
+`Promise.all()` over independent agents, then a merge function. Bridge from frontend: it's
+exactly `await Promise.all([fetchA(), fetchB(), fetchC()])` followed by combining the three
+responses into one view — except each fetch is a full agent loop, so each can be slow,
+expensive, and individually wrong.
 
 ```
-  Comparison — pipeline vs fan-out for a 3-part question
+  THE SHAPE — Promise.all over agents, then merge
 
-  pipeline (serial):              fan-out (parallel):
-    A → B → C                       [A | B | C] → merge
-    latency = A + B + C             latency = max(A,B,C) + merge
-    (use when dependent)            (use when independent)
+   results = await Promise.all([
+     runAgentLoop(agentA, input),   ─┐
+     runAgentLoop(agentB, input),    ├─ all in flight AT ONCE
+     runAgentLoop(agentC, input),   ─┘
+   ])
+   answer = merge(results)          ── fan-in: a merge step (often itself a model call)
 ```
 
-#### Move 3 — the principle
+### Fan-out — independent loops in flight at once
 
-Fan-out trades additive latency for max latency — but only when the
-subtasks are genuinely independent. The constraint *is* the pattern: no
-subtask may need another's output. buffr has the concurrency primitive
-already (at the I/O layer) and would need only split/merge logic plus a
-concurrency cap to apply it at the agent layer — if it ever had a
-genuinely parallel question, which today it doesn't.
+Each branch is its own `runAgentLoop`, started without waiting for the others. The wall-clock
+cost is the *max* of the branches, not the sum — that's the entire reason to use this topology.
+
+```
+  Fan-out — N loops overlap in time
+
+  t0 ─┬─▶ AGENT A ███████░░░░  (returns at t=7)
+      ├─▶ AGENT B ████░░░░░░░  (returns at t=4)
+      └─▶ AGENT C ██████████░  (returns at t=10) ◀── SLOWEST sets the latency
+                              merge waits until t=10, not t=7+4+10
+```
+
+```
+pseudocode — fan-out (independence is the precondition)
+# PRECONDITION: A, B, C do NOT need each other's outputs
+results = await Promise.all([
+  runAgentLoop(agentA, input),    # e.g. search source 1
+  runAgentLoop(agentB, input),    # e.g. search source 2
+  runAgentLoop(agentC, input),    # e.g. search source 3
+])
+```
+
+Annotation: this is the *only* topology where "N independent loops" is the literal truth —
+every other multi-agent shape has a dependency DAG with cross-talk. The independence test:
+*can branch B start before branch A finishes?* If no, it's not a fan-out.
+
+### Fan-in — the merge owns correctness and failure policy
+
+The merge is where the real engineering lives. It decides how to combine N results *and* what
+to do when a branch is missing. The merge is often itself a model call (synthesize N drafts),
+which adds its own cost and its own failure mode (synthesis failure — see `09`).
+
+```
+  Fan-in — merge decides combination AND failure policy
+
+  [result A]┐
+  [result B]┼─▶ MERGE ─┬─ all present? combine → answer
+  [ FAILED ]┘          ├─ one missing? proceed with N-1, OR retry, OR fail
+                       └─ conflicting? a model call to reconcile (own failure mode)
+```
+
+Annotation: a naive merge that assumes all N branches succeed is the most common fan-out bug.
+Use `Promise.allSettled` semantics and an explicit policy: proceed-with-partial vs. fail-hard.
+The merge is also where cost can blow up — if the merge re-reads every branch's full output
+into one model call, you get context bloat (`08`).
+
+### What buffr does instead — strictly serial, one agent
+
+buffr has no fan-out anywhere. Its single agent's tool calls run one at a time inside one loop;
+even its multiple searches are sequential turns, not parallel branches.
+
+```
+  buffr (today)              vs    fan-out (NOT YET)
+
+  one agent, one loop              input
+   search ─▶ search ─▶ answer        ├─▶ agentA ─┐
+   (serial turns, never parallel)    ├─▶ agentB ─┼─▶ merge ─▶ answer
+                                     └─▶ agentC ─┘
+  run-agent-loop.ts:76-202          DESIGN-ONLY
+```
+
+Annotation: buffr's failure isn't decomposable into independent specialties — a personal-
+knowledge query is one job over one corpus, with nothing to scatter. Fan-out earns its keep
+only when you have *genuinely independent* sub-queries (e.g. search three separate corpora, or
+ask three different specialists the same question). buffr has neither, so: not yet.
+
+### Move 3 — the principle
+
+**Fan-out trades coordination cost for latency: it's worth it only when the branches are truly
+independent, and the merge is where the engineering hides.** Reach for it when you have N
+sub-tasks that *don't need each other's mid-results* and you want them to overlap in time.
+Don't reach for it when branches are entangled (that's shared state, `08`) — you'd pay the
+parallel-coordination cost with none of the parallel benefit. And design the merge's
+failure policy up front: partial results vs. fail-hard, plus tail-latency on the slowest
+branch.
 
 ## Primary diagram
 
-```
-  Parallel fan-out (would-be in buffr)
+Full recap: the diamond, the independence precondition, the verdict.
 
-  "summarize notes on X, Y, Z" → split
-       ┌──────────┬──────────┐
-       ▼          ▼          ▼
-   search(X)   search(Y)   search(Z)   ← concurrent RagQueryAgents
-       └──────────┼──────────┘             (capped concurrency)
-                  ▼
-            merge agent → combined answer
-   latency = slowest search + merge
 ```
+  Fan-out/fan-in — the diamond and its preconditions
+
+  PRECONDITION: branches are INDEPENDENT (B can start before A finishes)
+
+            ┌─▶ AGENT A ─┐
+   input ───┼─▶ AGENT B ─┼─▶ MERGE ─▶ answer
+            └─▶ AGENT C ─┘
+            (parallel)     (failure policy + tail latency live HERE)
+
+  cost: latency = MAX(branches) · tokens = SUM(branches) + merge
+  ───────────────────────────────────────────────────────────────
+  buffr: NOT YET · strictly serial · nothing to scatter
+  refactor template: SECTION F · parallel-retrieval template
+```
+
+Verdict in one line: **the latency topology — only for genuinely independent branches, with the
+merge owning failure and cost — and buffr has no independent branches to scatter, so: not
+yet.**
 
 ## Elaborate
 
-Fan-out is supervisor-worker with the workers in parallel — the
-supervisor's "decompose" produces independent sub-tasks and its
-"synthesize" is the merge. It's the topology behind the multi-agent
-research assistant (`06-...templates/01-multi-agent-research-assistant.md`):
-parallel retrieval from many sources, synthesized with citations. Its
-production hazards — backpressure on fan-out, lost-in-the-middle across
-many worker results — are in
-`05-production-serving/02-fan-out-backpressure.md` and the
-coordination-failure-modes file.
+Fan-out/fan-in is the agent-level map-reduce. LangGraph implements it with parallel edges into
+a join node; the OpenAI Agents SDK does it by awaiting multiple agents and synthesizing; it's
+also the shape of "send the same question to N models and vote" (which overlaps `05`'s debate).
+The production lessons are exactly the structure-pass seams: (1) use `allSettled` and an
+explicit partial-results policy, because in production one branch *will* fail; (2) your latency
+is the slowest branch, so a single slow agent erases the parallelism win; (3) the merge is the
+real work and a common cost-blowup site if it naively concatenates all branch outputs.
+
+To adopt fan-out for buffr, see SECTION F's parallel-retrieval template — it shows scattering a
+query across multiple corpora as independent loops, then merging the cited chunks.
 
 ## Interview defense
 
-**Q: Could buffr parallelize?**
-At the agent layer, only for genuinely independent sub-questions — e.g.
-"summarize my notes on X, Y, and Z" splits into three concurrent
-retrievals that merge. It already has the `Promise.all` concurrency
-primitive at the I/O layer (the trace sink's `flush`), so the leap is
-small; the work is the split/merge logic plus a concurrency cap so it
-doesn't overwhelm the local Ollama. Today buffr has no parallel
-question, so it stays serial.
+**Q: "When would buffr fan out to parallel agents?"**
+
+Model answer: "Only when I have *genuinely independent* branches — the precondition is that
+branch B can start before branch A finishes. That'd be something like searching three separate
+corpora at once, then merging the cited chunks. It's `Promise.all` over independent
+`runAgentLoop`s, and the latency is the slowest branch, not the sum. The real engineering is
+the merge: it owns the failure policy — proceed with N-1 via `allSettled`, or fail hard — and
+it's where cost blows up if it naively concatenates everything. buffr today is strictly serial
+over one corpus (`run-agent-loop.ts:76-202`); a RAG query is one job with nothing to scatter,
+so there's no fan-out to justify. If branches needed each other's mid-results, it wouldn't be a
+fan-out at all — it'd be entangled shared state."
 
 ```
-  independent subtasks → Promise.all(agents) → merge
-  latency = slowest, not sum
+  The defense in one picture
+
+  independent branches? ── no ──▶ NOT a fan-out (it's a pipeline / shared state)
+        │ yes
+  Promise.all(loops) ─▶ MERGE (failure policy + tail latency live here) ─▶ answer
+  buffr: serial, one corpus, nothing to scatter → not yet
 ```
 
-**Anchor:** "Fan-out is `Promise.all` over agents — only valid when no
-subtask needs another's output."
+Anchor: *Fan-out is `Promise.all` over independent agents then a merge; the precondition is
+true independence and the engineering is the merge's failure policy — buffr has no independent
+branches.*
 
 ## See also
 
-- `02-supervisor-worker.md` — fan-out is its parallel form
-- `03-sequential-pipeline.md` — the serial alternative for dependent
-  stages
-- `05-production-serving/02-fan-out-backpressure.md` — the concurrency
-  cap fan-out needs
-- `09-coordination-failure-modes.md` — the merge/synthesis failure
+- `03-sequential-pipeline.md` — the series case; fan-out is the parallel case of the same
+  "compose N loops" idea.
+- `05-debate-verifier-critic.md` — "ask N agents the same question and reconcile" is a fan-out
+  whose merge is a debate.
+- `08-shared-state-and-message-passing.md` — when branches aren't independent, the merge needs
+  shared state, and you've left fan-out territory.
+- `09-coordination-failure-modes.md` — the merge's synthesis failure and cost-blowup modes.
+- `../05-production-serving/` — fan-out backpressure (what changes when the unit is N loops).
+- `../06-orchestration-system-design-templates/` (SECTION F) — the parallel-retrieval refactor.

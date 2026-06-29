@@ -1,105 +1,59 @@
-# Overview — where time and money go in buffr-laptop
+# Overview — Performance Engineering map for buffr-laptop
 
-Before any lens: here's the whole machine in one frame, with the cost annotated on each
-hop. Read this, and the audit and pattern files just zoom into the boxes.
+The one question this guide answers: **what is measurably slow or expensive, and which change improves it without moving the bottleneck?** And the honest framing up front — at laptop scale, single-device, one user, the dominant cost on every chat turn is `gemma2:9b` generation running inside Ollama. This repo does not own that cost. Everything else here is real, but most of it is deprioritized *because* the generation step dwarfs it.
+
+## The whole system in one frame
 
 ```
-  buffr-laptop — the two hot paths, cost per hop
+  buffr-laptop — where time and money go on one chat turn
 
-  ┌─ CLI / Session layer ───────────────────────────────────────────────┐
-  │                                                                       │
-  │  PATH A — indexing (npm run index)        PATH B — chat turn (ask())  │
-  │  index-cmd.ts                              session.ts ask()           │
-  │   for path of paths  ← SERIAL              persistMessage  (1 INSERT) │
-  │     read file                              agent.answer()            │
-  │     embed all chunks ← 1 HTTP call           ├─ embed query (1 HTTP) │
-  │     upsert chunks    ← N INSERTs/txn         ├─ HNSW search (1 query)│
-  │                                              └─ gemma2 generate (HTTP)│
-  │                                            trace.flush() ← 6 ev types │
-  │                                            memory.remember            │
-  │                                              ├─ embed exchange (HTTP) │
-  │                                              └─ upsert      (1 INSERT)│
-  └───────────────┬───────────────────────────────────────┬─────────────┘
-                  │ pg wire (warm pool, db.ts)             │ HTTP :11434
-    ┌─────────────▼──────────────┐            ┌────────────▼─────────────┐
-    │ Storage — Postgres+pgvector│            │ Provider — Ollama        │
-    │  HNSW cosine (UNTUNED)      │            │  nomic-embed (768d)      │
-    │  agents.chunks             │            │  gemma2:9b generate      │
-    └────────────────────────────┘            └──────────────────────────┘
-
-  the dominant cost on Path B is gemma2 generation (seconds, GPU-bound),
-  not anything in this repo's own code. that framing matters.
+  ┌─ CLI layer (Ink TUI) ───────────────────────────────────────┐
+  │  src/cli/chat.tsx   user types a question                    │
+  └───────────────────────────┬──────────────────────────────────┘
+                              │  ask(question)
+  ┌─ Session layer ──────────▼──────────────────────────────────┐
+  │  src/session.ts  createChatSession()                          │
+  │   1. persistMessage(user)        → 1 INSERT                   │
+  │   2. agent.answer(question)      → embed + HNSW search + GEN  │ ◄── gemma2:9b
+  │   3. trace.flush()               → up to 6 INSERTs            │      DOMINATES
+  │   4. memory.remember()           → 1 embed + 1 INSERT         │
+  └───────────────────────────┬──────────────────────────────────┘
+                  ┌───────────┴────────────┐
+        HTTP      │                         │  pg (one warm Pool)
+   ┌─ Provider ──▼──────┐         ┌─ Storage ▼──────────────────┐
+   │  Ollama            │         │  Postgres + pgvector         │
+   │  nomic-embed-text  │         │  agents.chunks (HNSW cosine) │
+   │  gemma2:9b  ◄──────┼─cost──► │  agents.messages (trace)     │
+   └────────────────────┘         └──────────────────────────────┘
 ```
 
-## The verdict, first
-
-The single biggest cost on a chat turn is **`gemma2:9b` generation** — seconds of
-GPU work inside Ollama, owned by the model, not by buffr's code. Embedding is a distant
-second. Everything this repo *itself* controls (the SQL, the pool, the trace inserts) is
-sub-millisecond-to-low-millisecond at single-device scale. So the honest headline is:
-**the code in this repo is not the bottleneck.** The bottleneck is the LLM, and that's
-inherent to running a 9B model locally.
-
-That doesn't make the patterns uninteresting — it makes them *correctly prioritized*.
-The one place buffr leaves measurable performance on the table is the **serial-across-files
-indexing loop** (Path A), where the GPU sits idle through every database write.
+The arrows that cost real wall-clock time: the embed roundtrips to Ollama, the HNSW search in pgvector, the generation call (the big one), and the fan-out of INSERTs at the end of the turn. The arrow that costs nothing measurable: anything in TypeScript between them.
 
 ## Ranked findings
 
-```
-  rank  finding                          where                    matters at laptop scale?
-  ────  ───────────────────────────────  ───────────────────────  ────────────────────────
-   1    serial-across-files indexing     index-cmd.ts:22-26       YES — GPU idle between
-         (file N+1 waits on file N's                               files; the one real win
-         commit; embed↔write don't                                on the indexing path
-         overlap)                                                  → 02-embedding-roundtrip
-   2    HNSW index is untuned            sql/001:28-29            NOT YET — defaults are
-         (no m / ef_construction set,                             fine for a small corpus;
-         no ef_search at query time)                              becomes real past ~10^5
-         → 01-hnsw-approximate-search                             chunks. Worth knowing now.
-   3    no caching layer                 (absent)                 NO — but identical query
-         (identical query re-embeds                               re-embeds every time; a
-         every turn, ~free to fix)                                trivially cacheable cost
-         → 06-no-caching                                          → 06-no-caching
-   4    per-chunk INSERT loop            pg-vector-store.ts:43-57 NO — round-trips inside
-         (no multi-row / COPY)                                    one txn; fine for tens of
-         → 03-per-chunk-insert-loop                               chunks, not for bulk load
-   5    per-turn memory + trace cost     session.ts:66 /          NO — an extra embed+upsert
-         (extra embed+upsert + 6-event   trace-sink.ts:53-85      and several INSERTs per
-         write-amplified trace)                                   turn, dwarfed by gemma2
-         → 05-per-turn-memory-and-trace-cost
-```
+Ordered by consequence. The verdict is first; the "does it matter at laptop scale" call is the load-bearing part.
 
-The win nobody names: the **warm connection pool** (`db.ts` + `session.ts:39`). The
-Postgres handshake (TCP + auth + TLS) happens once and is reused across the entire
-session. That's a real latency cost *avoided* — the most load-bearing perf decision in
-the repo, and it's invisible because it works. → `04-connection-pool-reuse`.
+| # | Finding | Cost | Matters at laptop scale? |
+|---|---------|------|--------------------------|
+| 1 | **Approximate nearest-neighbour search (the HNSW index) is untuned** — no `m`, `ef_construction`, or `ef_search` set | The sub-linear search *is the main retrieval win*, but recall/latency runs on pgvector defaults | The win is real and already paid for. Tuning matters only once the corpus grows past a few thousand chunks — `not yet measured`. → `01` |
+| 2 | **Embedding is serialized across files at index time** — `for...await` in `index-cmd.ts`, GPU idle through each doc's DB writes | One file embeds, then writes, then the next file starts. The embed call itself is already batched per-doc | Indexing is a manual one-shot CLI, not a hot path. Real but low-priority. → `02` |
+| 3 | **`upsert` loops one INSERT per chunk inside a txn** — no multi-row INSERT, no COPY | N round-trips to Postgres per document instead of 1 | A 20-chunk doc is 20 INSERTs. Tiny at laptop corpus size; the first thing to fix if indexing ever feels slow. → `03` |
+| 4 | **Per-turn write amplification** — `memory.remember` adds an extra embed+INSERT, the trace sink fan-outs up to 6 INSERTs | Every chat turn does ~8 DB writes + 1 extra embed beyond the answer itself | All of it is dwarfed by generation. The extra embed is the only part on a model; still cheap. → `05` |
+| 5 | **No caching** — an identical query re-embeds and re-searches every time | Repeated questions pay the full embed roundtrip again | One user, low repeat rate. A cache would help eval runs more than chat. → `06` |
+| 6 | **`durationMs` + tokens are persisted but never read back** — written to `agents.messages`, never aggregated | The instrumentation exists; the measurement loop doesn't close | This is the gap that makes every "does it matter" answer here an estimate instead of a number. → audit lens 2 |
 
-## Not yet exercised — say it plainly
+## not yet exercised
 
-This repo has shipped zero performance *measurement* infrastructure. None of these exist,
-and the audit names each one rather than pretending:
+Be honest about what this repo has never done, because it changes how much any of the above can be trusted:
 
-```
-  ✗ performance budget        no p95/p99 target, no latency SLA, no "must answer in N s"
-  ✗ baselines / before-after  durationMs + tokens are PERSISTED but never read back
-                              (trace-sink.ts:69, 76 → agents.messages, never aggregated)
-  ✗ profiling / flamegraphs   no profiler, no flame graph, no CPU/heap sampling
-  ✗ load testing              single-device, single-conversation; no concurrency, no rps
-  ✗ tail behavior (p95/p99)   no distribution captured; one user, one turn at a time
-  ✗ caching layer             no embed cache, no query cache, no result memoization
-```
+- **Load testing** — there is no representative workload runner. The only multi-query path is the eval harness (`eval-cmd.ts`), and that measures *precision*, not latency.
+- **Profiling / flamegraphs** — no `--prof`, no `clinic`, no `0x`, no sampling profiler wired in. No before/after evidence exists for any optimization.
+- **Performance budgets** — no p95/p99 target, no per-turn latency SLO, no cost ceiling. Nothing fails when a turn gets slow.
+- **A caching layer** — embedding cache, query cache, and HTTP keep-alive tuning are all absent.
+- **Tail-behavior measurement** — single-user means no contention, no queueing, no observed tail. p95/p99 are undefined because there's no distribution to measure.
 
-The most fixable gap is the third row of the budget table: buffr already writes
-`durationMs` and `tokens_used` to `agents.messages` on every turn (trace-sink.ts), then
-never queries them. The baseline is *sitting in the database, unused*. Reading it back is
-the cheapest performance win available and the natural next step.
+The instrumentation half is further along than the measurement half: the trace sink already captures `durationMs` and token counts per event (`src/supabase-trace-sink.ts:67-78`). Nothing reads them back. Closing that loop is the highest-leverage move in the whole guide — it turns every estimate above into a number.
 
-## Cross-links
+## Reading order
 
-- `study-database-systems` — how HNSW actually indexes and searches; txn/WAL/durability
-  behind the per-chunk loop.
-- `study-networking` — the Ollama HTTP roundtrip, pg wire protocol, and pool mechanics
-  behind the latency numbers.
-- `study-ai-engineering` — embeddings, retrieval pipeline, and the precision@k eval that
-  is the closest thing to a baseline here.
+`audit.md` next for the full 8-lens walk, then the numbered pattern files in order. Cross-links to `study-database-systems`, `study-networking`, and `study-ai-engineering` throughout.

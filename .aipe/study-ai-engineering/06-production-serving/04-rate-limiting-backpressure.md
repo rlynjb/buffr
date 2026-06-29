@@ -1,347 +1,207 @@
-# Rate limiting and backpressure — bounding concurrent work
+# Rate Limiting & Backpressure
 
-*Industry standard pattern; not exercised in buffr (serial by
-construction).*
+*Industry name: rate limiting / admission control / backpressure. Type: **Language-agnostic** serving pattern.*
 
 ## Zoom out, then zoom in
 
-Pull up the path from "user submits" to "Ollama answers" and look
-for where work could pile up faster than it drains. In buffr it
-can't — the system is **serial by construction**: one
-conversation, one question at a time, the UI blocked while busy.
-There's no queue because there's nothing to queue. The one
-backpressure-*shaped* guard is the context-window check that
-refuses oversized input instead of overflowing.
+Rate limiting and backpressure are how a server protects itself from being asked to do more than it can. You know the symptoms from the web: a `429 Too Many Requests`, a `Retry-After` header, a request that queues instead of crashing the box. Here's where that machinery would sit in buffr — and for a single local user, most of the slots are honestly empty by design.
 
 ```
-  Zoom out — where a rate limiter / queue WOULD live (but doesn't)
-
-  ┌─ CLI layer ─────────────────────────────────────────────────┐
-  │  chat.tsx — input DISABLED while busy (natural backpressure) │
-  └───────────────────────────┬─────────────────────────────────┘
-                              │  one question, when ready
-  ┌─ Session layer ───────────▼─────────────────────────────────┐
-  │  [ NO QUEUE · NO CONCURRENCY CAP ]  ← serial, nothing to bound │
-  └───────────────────────────┬─────────────────────────────────┘
-                              │  one request at a time
-  ┌─ Provider layer ──────────▼─────────────────────────────────┐
-  │  ★ ContextWindowGuardedProvider — refuses > 8192 tokens ★    │ ← the one guard
-  └───────────────────────────┬─────────────────────────────────┘
-                              │
-  ┌─ Ollama (local) ──────────▼─────────────────────────────────┐
-  │  gemma2:9b — one inference at a time on the laptop GPU        │
-  └──────────────────────────────────────────────────────────────┘
+buffr serving stack — the missing admission control
+┌──────────────────────────────────────────────────────────────┐
+│ chat.tsx     ◀── ★ `if (busy) return` — the ONLY backpressure  │  (single-turn lock)
+├──────────────────────────────────────────────────────────────┤
+│ session.ask()  ◀── ★ QUEUE + CONCURRENCY CAP would go here     │  (empty)
+├──────────────────────────────────────────────────────────────┤
+│ RagQueryAgent ──▶ embed + pgvector + GemmaModelProvider        │
+├──────────────────────────────────────────────────────────────┤
+│ Ollama server   ◀── ★ the thing that actually saturates        │  one GPU/CPU
+└──────────────────────────────────────────────────────────────┘
 ```
 
-The concept: backpressure is **the system telling the producer to
-slow down** when the consumer can't keep up; rate limiting is
-**capping requests per unit time** at a boundary. Both exist to
-protect a bounded resource from an unbounded arrival rate. buffr
-has no unbounded arrival rate — one human typing — so both are
-dormant. The window guard is the closest thing: it refuses work
-that won't fit, which is backpressure's *refuse* move without the
-*queue* part.
+Buffr is one human typing one question at a time. There is no traffic to limit, no fleet of clients to fairness-schedule. **This is Case B: no rate limiter, no request queue, no concurrency cap is implemented.** But there *is* one real piece of backpressure — the `busy` flag in `chat.tsx` — and the thing it protects, the Ollama server, is genuinely saturatable. This file names the live piece, marks the empty slots, and names the exact trigger that flips this from N/A to required.
 
-## Structure pass
+## Structure pass — trace *what happens to a second request* while the first runs
 
-**Layers:** CLI (single producer) → session (no buffer) →
-provider (one guard) → Ollama (single consumer).
-
-**Axis — "control: who decides when the next unit of work
-runs?"**
+Pick one axis: **if a request arrives while one is in flight, what happens to it?** Trace it.
 
 ```
-  trace "who admits the next request?" across the layers
-
-  ┌─ CLI ───────────┐  seam   ┌─ provider ──────┐  seam   ┌─ Ollama ──────┐
-  │ user submits    │ ═══════►│ guard: fits in  │ ═══════►│ runs it (one  │
-  │ (blocked while  │ (size   │ 8192 tokens?    │ (no     │ at a time)    │
-  │  busy)          │ check)  │ no → REFUSE     │ queue)  │               │
-  └─────────────────┘         └─────────────────┘         └───────────────┘
-       admission: the UI            admission: the              consumer:
-       (busy flag)                  size guard                  serial
-
-  the only "no, not yet" in the system is the size guard
+second-request behavior (buffr today)
+  TUI path (chat.tsx):
+    turn 1 in flight ──▶ user hits enter again ──▶ `if (busy) return`  ◀ dropped, silently
+                                                    (no queue, no error, just ignored)
+  programmatic path (if someone scripts session.ask() concurrently):
+    call 1 ──┐
+    call 2 ──┼──▶ ALL hit Ollama at once ──▶ server contends for one GPU  ◀ no cap
+    call 3 ──┘                                (slower for everyone, no admission control)
 ```
 
-The load-bearing seam is the provider's size check — it's the one
-place buffr says "no" to work. The CLI's busy flag is the *only*
-reason there's no concurrency to manage; remove it (batch
-indexing many files) and the dormant concerns wake up.
+There's no seam for the programmatic path — that's the latent problem. The TUI has a crude one (drop the second submit), but it's a UI guard, not server protection. The concrete consequence: the `busy` flag only exists because the *chat UI* is single-turn; nothing stops a script from firing ten `session.ask()` calls at once and saturating the single Ollama process, at which point every request slows down and there's no fairness, no queue, no shedding.
 
 ## How it works
 
-### Move 1 — the mental model
+### Move 1 — the mental model: a bounded buffer between fast producers and a slow consumer
 
-You know backpressure from streams: a slow consumer makes a
-`Readable` pause the producer so the buffer doesn't blow up. Rate
-limiting is the bouncer at the door counting people per minute.
-Both are the same instinct — **don't let arrivals outpace
-service** — applied at different boundaries. buffr's version of
-this is the simplest possible: a queue of depth one (the current
-question) and a producer (the human) who literally can't submit
-while the consumer is busy.
+Backpressure is what a bounded buffer does when it fills: it pushes back on the producer instead of overflowing. The producer is incoming requests; the consumer is the slow resource (Ollama, one generation at a time on one GPU). A queue with a *cap* and a *concurrency limit* sits between them: admit up to N in flight, queue up to M waiting, and when both are full, *shed* (reject with a clear signal) rather than melt down.
 
 ```
-  the backpressure kernel — bound the in-flight work
-
-  producer ──► [ buffer / queue ] ──► consumer
-                     │
-                     │ buffer near full?
-                     ▼
-              signal producer: SLOW / WAIT / REFUSE
-                     │
-   buffr's version:  queue depth = 1, producer blocked while busy
-                     → the signal is "input disabled"
+the bounded-buffer shape
+  requests ──▶ [ queue, cap M ] ──▶ [ in-flight, cap N ] ──▶ Ollama (slow)
+                    │                      │
+              full? shed (429-like)   N reached? wait in queue
+              ◀ backpressure: push back, don't overflow
 ```
 
-### Move 2 — the step-by-step walkthrough
+### Move 2 — the moving parts
 
-Walk the natural backpressure that's real, then the one explicit
-guard, then the Case-B scenario where a real cap is needed.
+#### Bridge: it's a `429` and a `Retry-After`, but the server is your laptop
 
-**Step 1 — the UI is the natural backpressure (real).** The chat
-loop disables input while a turn is in flight. The producer
-*cannot* outrun the consumer because the producer is gated on the
-consumer finishing:
+You already understand this from the client side — you back off when an API returns `429`. Backpressure is that same contract from the *server's* side: the server decides when to say "not now," based on how loaded it is. The terminology lead is **backpressure (the `busy` single-flight lock)** — "single-flight" because buffr's one real piece of it allows exactly one in-flight turn through the UI.
 
-```tsx
-// src/cli/chat.tsx (onSubmit + render, condensed)
-const onSubmit = async (value) => {
-  if (busy) return;              // ← producer refused while consumer works
+#### The live piece: `if (busy) return` in `chat.tsx`
+
+The Ink chat guards against concurrent submits with a boolean (`src/cli/chat.tsx:13,17,26,33`):
+
+```ts
+// src/cli/chat.tsx:13
+const [busy, setBusy] = useState(false);
+
+const onSubmit = async (value: string): Promise<void> => {
+  const q = value.trim();
+  if (busy) return;                 // ← drop the submit if a turn is already running
+  // ...
   setBusy(true);
-  try { const answer = await session.ask(q); /* ... */ }
-  finally { setBusy(false); }    // ← producer admitted again only when done
+  try {
+    const answer = await session.ask(q);
+    // ...
+  } finally {
+    setBusy(false);                 // ← release the lock when the turn completes
+  }
 };
-// render: while busy, show a spinner INSTEAD of the TextInput
-//   → the user physically cannot submit a second question
 ```
 
-That `if (busy) return` plus swapping the input for a spinner is
-backpressure with a queue depth of one. It's not a rate limiter,
-but it's the reason buffr never needs one: arrival rate is capped
-at "one human, one at a time."
-
-**Step 2 — the context-window guard is the one explicit refusal
-(real).** This is the closest thing to a backpressure *mechanism*
-in `src/`: the provider is wrapped so that input exceeding 8192
-tokens is refused rather than sent to overflow the model's
-window.
-
-```ts
-// src/session.ts:46
-const model = new ContextWindowGuardedProvider(
-  new GemmaModelProvider({ host: cfg.ollamaHost }),
-  { maxTokens: 8192 },                // ← refuse, don't overflow
-);
+```
+the busy lock — single-flight at the UI, not the server
+  busy=false ──▶ submit allowed ──▶ setBusy(true) ──▶ ask() runs ──▶ finally setBusy(false)
+       ▲                                  │
+       └────── second submit while true ──┘  ◀ `if (busy) return` drops it
 ```
 
-Trace the consequence: if retrieval + profile + question exceed
-8192 tokens, the guard refuses instead of silently truncating or
-crashing the model. That's the "REFUSE" arm of backpressure — the
-system protecting a bounded resource (the context window) from an
-oversized unit of work. What it is *not*: a queue, a retry, or a
-per-second cap. It bounds *size*, not *rate*.
+This is real backpressure, but understand its scope precisely: it is a **UI single-flight lock**, not server admission control. It guarantees the *chat UI* never has two turns running at once. It does *nothing* if a different caller — a script, a future HTTP wrapper, a second TUI instance — calls `session.ask()` directly. The protection lives in the wrong layer to be a server defense; it's a UX guard that happens to also serialize Ollama access *for this one client*.
+
+#### The empty slots: queue, concurrency cap, shedding
+
+The slots that would make this real server protection are all empty:
+
+- **No request queue.** A second concurrent `session.ask()` doesn't wait its turn — it races straight to Ollama.
+- **No concurrency cap.** Nothing limits how many generations hit Ollama at once. The implicit cap is "however many callers call at once."
+- **No load shedding.** Nothing rejects a request when overloaded. There's no `429`-equivalent, no `Retry-After`, no clear "try again later."
 
 ```
-  the guard's decision — bound input SIZE (not rate)
-
-  request tokens ──► ┌─ ContextWindowGuardedProvider ─┐
-                     │  tokens ≤ 8192 ? ─yes─► forward │──► Ollama
-                     │       │ no                       │
-                     │       ▼                          │
-                     │    REFUSE (don't overflow)       │
-                     └──────────────────────────────────┘
+the three empty slots (and the one trigger that fills them)
+  queue:        none   ── fills when: >1 concurrent caller exists
+  concurrency:  uncapped ── fills when: a fleet (not one human) submits
+  shedding:     none   ── fills when: load can exceed Ollama's throughput
+  ───────────────────────────────────────────────────────────────────────
+  TRIGGER: the moment buffr serves more than one user / device / over a network
 ```
 
-**Step 3 — where a real cap WOULD be needed (Case B).** The
-dormant concern wakes the instant buffr does concurrent work. The
-obvious trigger: batch indexing. Today `npm run index -- a.md
-b.md` loops files **serially** in `src/cli/index-cmd.ts`:
-
-```ts
-// src/cli/index-cmd.ts (the indexing loop) — serial today
-for (const path of paths) {
-  const text = await readFile(path, 'utf8');
-  await indexDocumentRow(pool, cfg.appId, pipeline, { ... });  // ← one at a time
-}
-```
-
-If you sped that up by embedding many files **concurrently**, you'd
-suddenly have N requests hitting one local Ollama instance that
-serves one inference at a time. *Now* you need a concurrency cap —
-a semaphore that admits, say, 2–4 embeds at once and makes the
-rest wait. That's the real backpressure exercise: bound the
-in-flight requests to what the laptop GPU can actually serve.
+### Move 2.5 — current vs future
 
 ```
-  layers-and-hops — Case-B concurrency cap on batch indexing
-
-  ┌─ index-cmd ───┐ hop 1: N files   ┌─ Semaphore ──┐
-  │ index a..z.md │ ────────────────►│ cap = 4      │
-  └───────────────┘                  │ admit ≤ 4    │
-                              hop 2: │ rest WAIT     │
-                            admitted ▼               │
-                                   ┌─ Ollama ───────┐│
-                                   │ embeds (serial  ││
-                                   │ inference)      ││
-                                   └─────────────────┘│
-                              hop 3: done → admit next ┘
+current (buffr today)               │  future (after the exercise / multi-user)
+──────────────────────────────────────┼──────────────────────────────────────────
+in-flight limit: 1 (UI lock only)    │  N-concurrency cap at session/server layer
+second request: dropped (TUI) /       │  queued up to M, then shed with a clear signal
+                races to Ollama (API)  │
+overload behavior: Ollama contends    │  admission control protects Ollama throughput
+fairness: none                        │  FIFO queue (or priority) across callers
 ```
 
-### Move 2 variant — the load-bearing skeleton
-
-Kernel of backpressure: **a bounded buffer + an admission
-decision + a signal to the producer.**
-
-- Drop the **bound** → the buffer grows unbounded; memory blows
-  up or the consumer is swamped. (buffr's bound is "depth 1, UI
-  gated" — trivially safe.)
-- Drop the **admission decision** → every request goes through;
-  the size guard is exactly this decision for *size*.
-- Drop the **producer signal** → the producer keeps pushing; in
-  buffr the signal is the disabled input.
-
-Skeleton = bound + admit/refuse + signal. Token-bucket rate
-limiting, fair queueing, and priority lanes are hardening on top.
-
-### Move 2.5 — current state vs future state
-
-```
-  Phase A (today)                  Phase B (Case B — concurrent indexing)
-  ─────────────                    ──────────────────────────────────────
-  one human, one question          batch index runs files concurrently
-  UI gates the producer            semaphore caps in-flight embeds
-  context guard refuses big input  context guard unchanged
-  no rate/concurrency cap needed   cap = what the GPU can serve at once
-```
-
-What doesn't change: chat stays serial; the context guard stays
-exactly as is. Phase B only adds a cap to the *one* path that
-could go concurrent — indexing.
+The honest shape: buffr's backpressure is correct *for its current shape* (one UI, one user) and absent *for any other shape*. The `busy` flag is the right amount of mechanism for a single-turn TUI and the wrong layer entirely for a multi-client server.
 
 ### Move 3 — the principle
 
-Backpressure and rate limiting protect a bounded resource from an
-unbounded arrival rate. buffr is the degenerate, honest case:
-arrival rate is bounded by physics (one human, gated UI), so the
-machinery is dormant. The one guard it does have — refusing
-oversized input — is backpressure's "refuse" move on the *size*
-axis rather than the *rate* axis. The day any path goes concurrent
-(batch indexing is the obvious one), the rate axis comes alive and
-you cap in-flight work to what the consumer can actually serve.
+**A slow consumer must be allowed to push back, or a fast producer will drown it.** The mechanism — UI lock, queue, concurrency cap, load shedding — scales with the number of producers. One producer (one human at a keyboard) needs only a single-flight lock, which is exactly what buffr has. More producers need a real bounded buffer with admission control, which is exactly what buffr lacks. Match the mechanism to the producer count; don't build a queue for an audience of one.
 
 ## Primary diagram
 
+The whole backpressure story: one live UI lock, the saturatable resource it incidentally protects, and the empty server-side slots.
+
 ```
-  buffr backpressure — real guards (solid) vs dormant cap (dashed)
-
-  CLI:      chat.tsx ── busy? ──► input DISABLED   ◄── natural backpressure
-                          │ not busy                    (queue depth 1)
-                          ▼
-  Provider: ContextWindowGuardedProvider             ◄── REFUSE oversized
-            tokens ≤ 8192 ? forward : refuse              (size axis, REAL)
-                          │
-                          ▼
-  Ollama:   gemma2:9b — one inference at a time
-
-  ┄┄┄ Case B (dormant) ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄
-  index-cmd ─► [ semaphore cap=4 ] ─► Ollama embeds   (rate axis)
+buffr backpressure — UI lock live, server admission control empty
+  UI CLIENT (chat.tsx)                          OTHER CALLERS (scripts, future HTTP)
+  ┌────────────────────┐                        ┌────────────────────┐
+  │ if (busy) return    │ ◀ single-flight LOCK   │ session.ask() ×N    │ ◀ no lock
+  │ setBusy(true/false) │   (protects THIS UI)   │ all race            │
+  └─────────┬──────────┘                        └─────────┬──────────┘
+            │                                              │
+            └──────────────┐              ┌────────────────┘
+                           ▼              ▼
+              ★ QUEUE + CONCURRENCY CAP (empty) — would admit/queue/shed here
+                           │
+                           ▼
+                    Ollama server  ◀ ONE GPU/CPU, the actually-saturatable resource
 ```
 
 ## Elaborate
 
-Rate limiting and backpressure are the two answers to "arrivals
-exceed service." Rate limiting (token bucket, leaky bucket, fixed
-window) lives at an API boundary and protects a *shared* resource
-from *many* clients — buffr has no shared boundary and one client,
-so it's structurally N/A. Backpressure lives inside a pipeline and
-protects a *downstream* stage from an *upstream* one; buffr's
-pipeline is a depth-one queue gated by the UI, so it's trivially
-satisfied. The single genuinely-engineered piece is the
-context-window guard, which is the size-axis cousin of the same
-family — it refuses a unit of work too big for the consumer rather
-than letting it overflow. The moment you parallelize indexing, the
-rate axis becomes real and you reach for a concurrency semaphore;
-that's the one place the dormant concept earns its Case-B exercise.
+Why this is **Case B and the right call**: building a rate limiter for a single local user is solving a problem you don't have. The `busy` flag is precisely enough — it stops the one realistic failure (a user double-submitting and getting two interleaved generations) with one boolean. Adding a queue and concurrency cap now would be speculative complexity, the kind APOSD warns against: mechanism with no load to justify it.
+
+The trigger that flips it is sharp and worth memorizing: **the moment buffr has more than one concurrent producer.** That happens if you wrap `session.ask()` in an HTTP endpoint, run buffr as a shared team service, or even script batch questions against it. At that point the `busy` flag is useless (it's per-UI-instance) and Ollama — which serializes generations on one device — becomes the bottleneck that *needs* a cap, because uncapped concurrency against a single-GPU Ollama doesn't fail loudly; it just makes everyone slow with no fairness and no signal. The fix is a server-layer semaphore (concurrency cap) plus a bounded queue with shedding, placed at `session.ask()` or the HTTP boundary — *not* in the React component.
 
 ## Project exercises
 
-> No curriculum file present; exercises derived from the
-> codebase. Case B — no queue or rate cap is exercised; chat is
-> serial by construction.
+### Exercise: concurrency cap + bounded queue at the session layer
 
-### Concurrency cap on batch indexing
+- **Exercise ID:** [B5.8] (Phase 5, production-serving)
+- **What to build:** A semaphore-backed admission layer around `session.ask()`: cap concurrent generations at N (start at 1, since Ollama serializes anyway), queue up to M waiters, and shed beyond M with a clear, typed error (the `429`-equivalent). This makes backpressure a *server* property, independent of any UI.
+- **Why it earns its place:** It moves protection from the wrong layer (a React boolean that only guards one UI) to the right one (the shared entry point every caller goes through), and it's the prerequisite for ever exposing buffr over a network without melting Ollama under concurrent load.
+- **Files to touch:** `src/session.ts` (wrap `ask()` in the admission layer), a new `src/admission.ts` (the semaphore + bounded queue), `src/cli/chat.tsx` can then drop or keep the `busy` flag as a UX nicety.
+- **Done when:** Firing N+M+1 concurrent `session.ask()` calls results in exactly N running, M queued, and the rest rejected with a clear "try again" signal — and Ollama is never hit by more than N generations at once.
+- **Estimated effort:** One day.
 
-- **Exercise ID:** RATE-1 (Case B — the real backpressure
-  scenario).
-- **What to build:** parallelize the indexing loop, then bound it
-  with a semaphore that admits a fixed number of concurrent embeds
-  (e.g. 4) and makes the rest wait — so you don't swamp the single
-  local Ollama instance.
-- **Why it earns its place:** it's the one path in buffr where
-  concurrency is real, so it's where the bound + admit + signal
-  kernel actually has to work; a clean "I capped in-flight work to
-  what the consumer could serve" story.
-- **Files to touch:** `src/cli/index-cmd.ts` (the `for` loop) and
-  `src/runtime.ts indexDocumentRow`.
-- **Done when:** indexing many files runs faster than serial but
-  never exceeds the configured concurrency, verified by logging
-  in-flight count.
-- **Estimated effort:** 1–4hr.
+### Exercise: per-caller rate limit for a multi-user wrapper
 
-### Make the context-guard refusal observable
-
-- **Exercise ID:** RATE-2 (Case A — surface the one real guard).
-- **What to build:** when `ContextWindowGuardedProvider` refuses
-  oversized input, surface it as a clear user-facing message and a
-  `warning` trace event instead of a generic error.
-- **Why it earns its place:** turns the one real backpressure
-  guard from a silent refusal into a measurable, explainable event
-  — the observability half of backpressure.
-- **Files to touch:** `src/session.ts:46` (catch/translate the
-  refusal), `src/cli/chat.tsx` (the error branch),
-  `src/supabase-trace-sink.ts` (already handles `warning`).
-- **Done when:** an oversized question produces a readable "input
-  too large" message and a traced warning.
-- **Estimated effort:** 1–4hr.
+- **Exercise ID:** [B5.9] (Phase 5, production-serving)
+- **What to build:** If/when buffr is wrapped in an HTTP endpoint, a token-bucket rate limiter keyed per caller (IP, API key, or user id) that returns a real `429` with `Retry-After` when a caller exceeds their budget — the classic web contract, now on the server side.
+- **Why it earns its place:** It introduces fairness across callers, which the concurrency cap alone doesn't give (one greedy caller could still fill the whole queue). It's the standard multi-tenant defense and pairs naturally with the admission layer.
+- **Files to touch:** A new HTTP layer (does not exist yet — this exercise is partly "stand up the endpoint"), the limiter middleware, reusing `src/session.ts`'s admission layer beneath it.
+- **Done when:** A single caller exceeding their token budget receives `429 + Retry-After` while other callers are unaffected — proving per-caller fairness, not just global capacity.
+- **Estimated effort:** One to two days (includes standing up the endpoint).
+- **Case note:** This is two steps out — it requires the HTTP wrapper (Case B) *and* the admission layer ([B5.8]) first. Treat [B5.8] as the primary; this is the multi-user follow-on.
 
 ## Interview defense
 
-**Q: How does buffr handle rate limiting and backpressure?**
-Answer: it doesn't need most of it — it's single-user local, so
-the arrival rate is one human, and the UI gates the producer
-(`if (busy) return` plus swapping the input for a spinner), giving
-a queue of depth one. There's no provider rate limit because
-there's no paid provider. The one real backpressure-shaped guard
-is `ContextWindowGuardedProvider` (`src/session.ts:46`), which
-refuses input over 8192 tokens rather than overflowing the window.
+**Q: "How does buffr handle rate limiting and backpressure?"**
 
-**Q: When would you actually need a real cap, and what would you
-add?**
-Answer: the moment any path goes concurrent — batch indexing is
-the obvious one. If I parallelized the index loop, N embeds would
-hit one local Ollama that serves one inference at a time, so I'd
-add a concurrency semaphore capping in-flight requests to what the
-GPU can serve. **The load-bearing part people forget is the
-producer signal** — bounding the buffer is useless if you don't
-make the producer wait; in buffr today that signal is the disabled
-UI, and in the indexing case it'd be the semaphore making excess
-embeds await a slot.
+Honestly: it mostly doesn't, and that's correct for a single-user local agent. The one real piece is a single-flight lock — `if (busy) return` in the Ink chat — which stops the user from double-submitting and getting interleaved generations. But that's a *UI* guard, not server admission control: it only protects the one chat instance and does nothing against a script or a future HTTP wrapper calling `session.ask()` concurrently. There's no queue, no concurrency cap, no load shedding. The thing that actually saturates is the Ollama server, which serializes generations on one GPU — so uncapped concurrency wouldn't crash, it'd just make everyone slow with no fairness.
 
 ```
-  the one-liner:  no unbounded arrival rate → no rate limiter  ·
-                  the one guard refuses SIZE (8192 tokens)  ·
-                  concurrency cap wakes up only if indexing
-                  goes parallel
+buffr backpressure today
+  live: `if (busy) return`  ── UI single-flight lock (one client only)
+  empty: queue / concurrency cap / shedding  ── server admission control
+  trigger to build: >1 concurrent producer (HTTP wrap, team service, batch script)
 ```
+
+*Anchor:* "The busy flag is the right mechanism for an audience of one, and the wrong layer for an audience of two."
+
+**Q: "What breaks first if you put buffr behind an HTTP endpoint as-is?"**
+
+Ollama. The `busy` flag is per-UI-instance, so it provides zero protection across HTTP callers — every concurrent request races straight to the single Ollama process. It won't error loudly; it'll just contend for one GPU and slow everyone down with no fairness and no signal to back off. The fix is a server-layer semaphore at `session.ask()` (concurrency cap N, since Ollama serializes anyway) plus a bounded queue with shedding — admission control in the shared layer, not the React component.
+
+```
+HTTP-wrap failure mode
+  busy flag: per-UI, useless across callers
+  Ollama: serializes on 1 GPU ──▶ uncapped concurrency = slow-for-all, no fairness
+  fix: semaphore + bounded queue at session.ask() (server layer)
+```
+
+*Anchor:* "Put the cap where every caller passes through, not where one UI does."
 
 ## See also
 
-- `05-retry-circuit-breaker.md` — the other half of resilience:
-  what to do when the bounded call *fails*, not when it's
-  *oversized*.
-- `02-llm-cost-optimization.md` — latency as the local budget the
-  concurrency cap is protecting.
-- `../02-context-and-prompts/01-context-window.md` — the 8192
-  bound the guard enforces, from the prompt side.
+- `../../study-runtime-systems/` — bounded work, semaphores, and cancellation as runtime-execution mechanics.
+- `05-retry-circuit-breaker.md` — the client-side counterpart: backpressure is the server saying "not now"; retry/breaker is the client *hearing* it correctly.
+- `02-llm-cost-optimization.md` — routing reduces the *load* a limiter has to shed by making cheap requests cheaper.
+- `../00-overview.md` — where the single-process, single-device shape of buffr is framed.
