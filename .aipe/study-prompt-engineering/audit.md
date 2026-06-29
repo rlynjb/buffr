@@ -1,275 +1,215 @@
-# Prompt engineering audit — buffr
+# Audit — 13 prompt-engineering concepts vs. buffr-laptop
 
-Pass 1. One file, every lens. I walk buffr's prompts against the
-prompt-engineering concept inventory and, for each, name what the code
-actually does with `file:line` grounding — or say **not yet exercised**
-plainly. No inflation. A lens that finds nothing gets one honest line.
+Pass 1. One pass over every concept in the spec, each grounded in real code or
+marked *not yet exercised* honestly. Significant findings cross-link to a pattern
+file; the rest live here in full.
 
-Grounding note: buffr's CLI (`src/`) is thin. The prompt machinery it
-relies on lives in the consumed library `@rlynjb/aptkit-core`, under
-`node_modules/@rlynjb/aptkit-core/node_modules/@aptkit/*/dist/src/`.
-Paths below abbreviate that prefix to `@aptkit/<pkg>/…`. buffr **does
-not edit aptkit** (a hard constraint, `context.md`), so the audit
-distinguishes *what buffr wires up* from *what the library does*.
-
-The setup under audit (`src/session.ts:34-57`, the `createChatSession`
-assembly driven by the chat TUI `src/cli/chat.tsx`): Ollama-served
-`gemma2:9b` for generation, `nomic-embed-text:v1.5` (768-dim) for
-embeddings, pgvector store, one tool (`search_knowledge_base`), the
-`RagQueryAgent`, a profile loaded from Postgres, and a retrievable
-conversation memory over the same store (`session.ts:53,66`).
+The framing this whole audit hangs on: **buffr owns one hop of a three-owner
+prompt** (see [`00-overview.md`](00-overview.md)). buffr loads the profile and
+constructs the agent; aptkit's `RagQueryAgent` owns `BASE_SYSTEM` and profile
+injection; the Gemma provider owns the tool-catalog text and the JSON parse-back.
+A lot of "buffr's prompt behavior" is actually aptkit's, consumed as a library
+and not editable here (`context.md`: *aptkit is consumed, never edited*).
 
 ---
 
-## 1. System-prompt design
+## 1. Anatomy of a production prompt
 
-**Exercised.** The system prompt is a baked-in template:
-`@aptkit/agent-rag-query/rag-query-agent.js:12-19`
-(`DEFAULT_SYSTEM_TEMPLATE`). Four sentences: identity ("You are a
-personal knowledge assistant"), a tool-first directive, a grounding +
-citation rule, and an abstain rule. buffr passes **no** custom `prompt`
-in `session.ts:57` (`new RagQueryAgent({ model, tools, profile, trace })`
-— no `prompt` key), so the default template is what ships.
+**Exercised — but the four sections are split across three owners.** The classic
+anatomy (system / context / few-shot / user) maps onto the assembly like this:
 
-The design is sound on the anatomy axis: identity + instruction in the
-system slot, the question in the user slot (`run-agent-loop.js:22`). The
-weak spot — this is a single static template with no examples and no
-versioning. → deep walk in
-[`02-grounding-and-citation-instruction.md`](02-grounding-and-citation-instruction.md).
+- **System prompt:** two pieces concatenated. The constant instruction
+  `BASE_SYSTEM` (`rag-query-agent.js:12-19`) plus the per-user profile prepend
+  (`injectProfile`, `rag-query-agent.js:29-31`), then the tool catalog appended by
+  Owner 3 (`gemma-provider.js:82-105`).
+- **Context injection:** not in the prompt string up front — it arrives as **tool
+  results** mid-loop. The search tool returns ranked chunks with citations that
+  get pushed back as a `tool_result` message (`run-agent-loop.js:97-104`).
+  Retrieved conversation memory enters the *same way* (it's the same search tool).
+- **Few-shot:** absent. See §8.
+- **User message:** the raw question (`session.ts:62 → agent.answer(question)`,
+  `run-agent-loop.js:22`).
 
-## 2. Grounding and citation instruction
+The decomposition rule — one job per section, named — holds reasonably well here
+*because aptkit drew the lines*, not buffr. → deep walk in
+[`01-three-owner-prompt-assembly.md`](01-three-owner-prompt-assembly.md).
 
-**Exercised, and load-bearing.** Two halves:
+## 2. Structured outputs via tool calling and schemas
 
-- **The instruction.** `rag-query-agent.js:15-18`: "Always call the
-  search_knowledge_base tool first… Ground every answer in the retrieved
-  chunks and cite their sources. If the knowledge base does not contain
-  the answer, say so plainly rather than guessing."
-- **The citation payload.** The grounding has teeth only because the
-  tool *returns* citations: `@aptkit/retrieval/search-knowledge-base-tool.js:54-63`
-  (`toResult`) formats each hit as `` `[${docId}] ${snippet}` ``. The
-  model is told to cite, and is handed pre-formatted `[docId]` strings
-  to cite. → [`02-grounding-and-citation-instruction.md`](02-grounding-and-citation-instruction.md).
+**Exercised in two distinct shapes — and this is the most important section.**
 
-Honest gap: there is **no enforcement** that the answer actually
-contains a citation. The instruction asks; nothing validates. On a weak
-model that's a real risk (see lens 6).
+1. **Tool calling, emulated.** Gemma 2 9B on Ollama has no native tool API, so the
+   tool *is* a structured-output contract enforced in text: render the JSON
+   Schema into the system prompt, demand a `{"tool","arguments"}` object, parse it
+   back (`gemma-provider.js:82-125`). This is structured output as the *transport*
+   for tool calls. → [`02-tool-call-emulation.md`](02-tool-call-emulation.md).
+2. **Schema-validated JSON reprompt.** aptkit's `generateStructured`
+   (`structured-generation.js`) does the textbook production loop: generate →
+   extract JSON → validate → **retry once with a strict suffix** (*"Return ONLY
+   valid JSON — no prose, no markdown fences"*, line 3). That suffix is literally
+   the courteous-markdown-fence defense the spec calls out. → walked in
+   [`06-structured-output-reprompt.md`](06-structured-output-reprompt.md), with the
+   honest note that it's **off buffr's chat hot path**.
 
-## 3. Context injection (profile / personalization)
+The repo lives the spec's central claim: *"respond only in JSON" in prose is not
+how this is done* — except when the model has no tool API, in which case rendering
+the schema as text **is** the mechanism, hardened with a parse-back and a retry.
 
-**Exercised.** The `me.md`-style profile is prepended to the system
-prompt under a heading. `src/profile.ts:4` reads it from
-`agents.profiles` (most-recent row). `session.ts:47` loads it;
-`rag-query-agent.js:29-31` injects it via
-`@aptkit/context/profile-injector.js:15-22` with
-`{ position: 'start', heading: '# About the person you are assisting' }`
-(heading constant at `rag-query-agent.js:20`). Profile goes at the
-**front** of the system prompt, before the grounding rules. →
-[`01-profile-injection-as-personalization.md`](01-profile-injection-as-personalization.md).
+## 3. Prompts as code: versioning and observability
 
-Note this is **standing context**, not retrieved context — the profile
-is injected unconditionally every call, not fetched by the search tool.
-Two different context-injection mechanisms in one system; this lens is
-the unconditional one, lens 2 is the retrieved one.
+**Partially exercised — strong on observability, weak on versioning.**
 
-A third context source now feeds the retrieved channel:
-**conversation memory**. `session.ts:53` builds a `createConversationMemory`
-over buffr's *same* PgVectorStore; after each turn, `session.ts:66`
-embeds the exchange tagged `kind=memory`
-(`@aptkit/memory/conversation-memory.js:36-42`). Because memory shares the
-document store, a later turn's `search_knowledge_base` call surfaces
-relevant *past exchanges alongside document chunks* — so recalled memory
-lands in the prompt through the **same retrieved-context path as lens 2**,
-as a tool result, not as standing context. The engine is aptkit's; buffr
-only injects the store (`session.ts:53`).
+- **Prompts as source:** `BASE_SYSTEM` is a string literal in aptkit
+  (`rag-query-agent.js:12`), and aptkit's `@aptkit/prompts` package wraps prompts
+  in *packages* with an `id` and a `version` field (`query.js:53-56`,
+  `id: 'query-agent.default', version: '0.1.0'`). That's the right shape — a
+  versioned, reviewable prompt artifact. But buffr's own surface ships no prompt
+  files; it consumes aptkit's. There's no `prompt + model` pairing recorded
+  anywhere in buffr.
+- **Observability:** **strong, and unusually so.** Every turn's full trajectory —
+  steps, tool calls, model usage, tokens — is persisted to Postgres via
+  `SupabaseTraceSink` (`session.ts:64 trace.flush()`, all six `CapabilityEvent`
+  types, `context.md` data model). You can replay which prompt produced which
+  output deterministically. What's **missing** is the prompt-version *stamp* on
+  that record: you log the output and tokens, not which prompt text or model
+  version generated it. The `model` column is populated; a `prompt_version` column
+  is not. That's the gap a model-upgrade regression would expose.
 
-## 4. Tool-use prompting
+## 4. Token budgeting and context window management
 
-**Exercised, and the single most load-bearing prompt mechanism in
-buffr.** Gemma 2 has no native tool-calling API. The provider fakes it:
-`@aptkit/provider-gemma/gemma-provider.js:82-105` (`buildSystemText`)
-renders every tool as pretty-printed JSON (`name`, `description`,
-`input_schema`) into the system text, then appends the contract:
-"When a tool is needed, respond with ONLY a single JSON object, no
-prose: `{"tool": "<tool name>", "arguments": { ...arguments... }}`".
-The inbound parse is `parseToolCall` (`:107-125`), tolerant of
-`tool`/`name`/`tool_name` and `arguments`/`input`/`args` key drift. →
-[`03-tool-call-emulation-prompt.md`](03-tool-call-emulation-prompt.md).
+**Exercised — and this is the cleanest operational win in the repo.** buffr wraps
+the Gemma provider in a `ContextWindowGuardedProvider` with `maxTokens: 8192`
+(`session.ts:46`). On every call it estimates input tokens (`length / 3` chars per
+token, `context-window-guard.js:64-68`), reserves 768 for output, and **throws
+`ContextWindowExceededError` before calling the model** rather than letting Ollama
+truncate silently (`context-window-guard.js:27-40`). That is exactly the spec's
+"count tokens, it's basic hygiene, don't be one model change from breaking"
+discipline, made executable.
 
-The tool buffr actually grants: exactly one, `search_knowledge_base`
-(`ragQueryToolPolicy`, `rag-query-agent.js:8-11`), filtered by
-`filterToolsForPolicy` (`:37`). Least-privilege at the prompt layer —
-the model is only ever shown the one tool it's allowed to call.
+Honest gaps against the spec's full checklist: no prefix/prompt caching (Ollama
+local, recomputed each call), no lost-in-the-middle mitigation, no sliding-window
+history compression (in fact there's *no* in-prompt turn history at all — see §6).
+The estimator is a char-ratio heuristic, not the real tokenizer. But the
+load-bearing move — a hard pre-flight budget check that fails loud — is present.
 
-## 5. Structured output
+## 5. Eval-driven prompt iteration
 
-**Exercised by the library, not yet wired by buffr's RAG path.** Two
-distinct things here:
+**Partially exercised — and the distinction here is the lesson.** There IS an eval
+loop: `eval/queries.json` (labeled query → relevant docs) scored by
+`scorePrecisionAtK` / `scoreRecallAtK` (`src/cli/eval-cmd.ts`). But it scores
+**retrieval**, not **prompt output** — precision@1 / recall@3 over which documents
+came back, never whether the model's *answer* was grounded, cited correctly, or
+right. So this is an AI-engineering eval (does retrieval find the right chunk),
+not a prompt eval (does the prompt produce the right text). The golden-set
+discipline exists; it just points one layer below the prompt. No regression suite
+of past prompt failures, no LLM-as-judge on answers. → the answer-quality eval is
+the highest-value buildable here; see [`02`](02-tool-call-emulation.md) Project
+exercises and `study-ai-engineering` for the retrieval-eval seam.
 
-- **Tool-call JSON** (the emulation above) is a structured-output
-  contract enforced by parse: `parseAgentJson`
-  (`@aptkit/runtime/json-output.js:1-19`) strips ``` ```json ``` fences,
-  then falls back to a brace/bracket substring scan. This is buffr's
-  *active* structured-output path — every tool call is parsed JSON.
-- **Schema-validated structured generation** —
-  `@aptkit/runtime/structured-generation.js:9-50` (`generateStructured`):
-  generate → `parseValidatedJson` → on fail, retry once with a strict
-  "Return ONLY valid JSON - no prose, no markdown fences" suffix
-  (`:3`, `appendStrictSuffix:58-69`). This is a real, shipped retry
-  loop — but **buffr's `session.ts` ask path never calls it.** The RAG
-  agent returns free prose, not a validated schema. → walked in
-  [`04-structured-output-reprompt.md`](04-structured-output-reprompt.md),
-  flagged as library-present / buffr-not-yet-wired.
+## 6. Single-purpose chains
 
-The courteous-markdown-fence bug the literature warns about (models
-wrapping JSON in ``` ```json ```) is **defended** here, at
-`json-output.js:2` — the fence regex strips it before parsing.
+**Not exercised as multi-step chains — one agent, one job.** buffr runs a single
+`RagQueryAgent` per turn (`session.ts:57`). There's no classify→route→generate
+pipeline (that's loopd's shape, not buffr's). What *is* single-purpose: the agent
+loop has a least-privilege tool policy — this capability may call *only*
+`search_knowledge_base` (`ragQueryToolPolicy`, `rag-query-agent.js:8-11`). That's
+the single-purpose discipline applied to tools, not chains. Notably, there is **no
+in-prompt turn history** — `agent.answer()` treats each question independently
+(`session.ts:25-28` comment); cross-turn continuity comes only from retrieval
+memory (§ memory below), not from a conversation buffer in the prompt.
 
-## 6. Instruction following on a weak local model
+## 7. Output mode mismatch
 
-**Exercised — this is the theme of the whole system.** Gemma 2 9B is a
-small open model; the prompts are engineered around its unreliability:
-
-- **Tool-call retry nudge.** When Gemma botches the JSON, the provider
-  re-prompts once with a corrective: "Your previous reply was not a
-  valid tool call. Respond with ONLY a single JSON object: …"
-  (`gemma-provider.js:2-3`, applied `:25`). Bounded to
-  `maxToolCallAttempts` (default 2, `:13`).
-- **The `{`-tell heuristic.** It only retries if the reply *looks like*
-  a botched tool call — `looksLikeToolAttempt` is literally
-  `text.includes('{')` (`gemma-provider.js:127-129`). Plain prose is
-  treated as a real answer, not retried. A pragmatic hack for a weak
-  model. → [`03-tool-call-emulation-prompt.md`](03-tool-call-emulation-prompt.md).
-- **Forced synthesis turn.** Weak models keep asking for more tool
-  calls. The loop forces a final answer by dropping the tools and
-  appending "You have NO more tool calls available… Do not say you need
-  more queries" (`run-agent-loop.js:17-19`, forced at `:28-32`). →
-  [`05-bounded-synthesis-nudge.md`](05-bounded-synthesis-nudge.md).
-- **Hallucinated-filter containment.** `search-knowledge-base-tool.js:48-52`:
-  a weak model's invented filter key (`{textContains: "x"}`) can't wipe
-  every result — absent keys are ignored. Prompt-adjacent defense
-  against the model misusing its own tool schema.
-
-This lens is where buffr's prompt engineering is most distinctive. The
-whole stack is "frontier-model machinery, hand-rolled in prompts because
-the local model gives you none of it."
-
-## 7. Token budgeting and context window
-
-**Exercised (guard only), no allocation strategy.**
-`session.ts:46` wraps the model in
-`ContextWindowGuardedProvider(..., { maxTokens: 8192 })`. The guard
-(`@aptkit/provider-local/context-window-guard.js:42-68`) estimates input
-tokens at ~3 chars/token, reserves 768 for output, and **throws**
-`ContextWindowExceededError` if the request would overflow — it does not
-truncate or compress. Tool results are hard-capped at 16,000 chars
-(`run-agent-loop.js:2-7`, `truncate`).
-
-What's **not** here: no token *allocation* across system/context/history,
-no sliding-window history compression, no lost-in-the-middle awareness,
-no prefix caching. The budget is a tripwire, not a plan. → see lens
-notes in [`00-overview.md`](00-overview.md); the guard is system-design
-territory, lightly prompt-relevant.
+**Not exercised as a tracked discipline.** Two output modes coexist — emulated
+tool-call JSON vs. final prose — and the provider disambiguates them at runtime by
+*trying to parse JSON first, falling back to prose* (`gemma-provider.js:33-44`).
+That's a mode mismatch handled defensively rather than a code-review checklist. The
+one real mismatch risk is upstream: `parseToolCall` accepts `tool`/`name`/`tool_name`
+and `arguments`/`input`/`args` (`gemma-provider.js:118-119`) — defensive against
+the model picking a synonym, which is itself an admission that mode is not
+contract-enforced here.
 
 ## 8. Few-shot prompting
 
-**Not yet exercised.** The system template
-(`rag-query-agent.js:12-19`) is pure instruction — zero examples. No
-worked input/output pair, no example tool call, no example citation
-format shown to the model. On a weak model this is a notable miss:
-few-shot constrains output more reliably than instruction does, and
-buffr's grounding/citation rule (lens 2) would benefit from one example
-of a properly-cited answer. **Buildable target**, not a current pattern.
+**Not yet exercised.** No worked examples are embedded in any prompt. `BASE_SYSTEM`
+is pure instruction; the tool catalog is schema-only. This is a legitimate target:
+the emulated tool-call prompt (§2) is exactly the place a single few-shot example
+of a correct `{"tool","arguments"}` object would cut the retry rate. The spec's
+note applies directly — *a few-shot example can be the structured form itself.*
 
 ## 9. Chain-of-thought
 
-**Not yet exercised.** No "think step by step," no reasoning scaffold,
-no thinking field in any structured output. The RAG path is
-retrieve → answer; there's no multi-step reasoning prompt. Correct call
-for a single-hop knowledge-lookup agent (CoT would waste tokens here),
-but worth naming as absent. The `intent.js` classifier
-(`@aptkit/agent-query/intent.js:11-23`) is a one-word classification —
-the *opposite* of CoT, and not on buffr's RAG path anyway.
+**Not yet exercised, and correctly so.** No reasoning-prompt pattern. For a
+single-hop retrieve-then-answer over a personal KB, CoT would burn tokens for no
+gain — the spec's own "when it hurts (simple lookups)" case. Worth noting only as
+a deliberate non-use, not a gap.
 
 ## 10. Self-critique and self-consistency
 
-**Not yet exercised.** No second pass where the model evaluates its own
-answer, no N-sample voting. The closest structural cousin is the
-bounded JSON retry (`structured-generation.js`) and the tool-call retry
-nudge — but those re-prompt on a *parse failure*, not a *quality
-critique*. No self-consistency sampling anywhere.
+**Not yet exercised.** No critique-revise pass, no N-sample voting. The synthesis
+turn (§ bounded-synthesis, file 05) is a *single* forced answer, not a critiqued
+one. Given the cost (2–5× tokens) and that buffr answers low-stakes personal-KB
+questions, this is a reasonable non-use rather than a defect.
 
 ## 11. Meta-prompting
 
-**Not yet exercised in buffr.** buffr writes no prompts with an LLM and
-ships no prompt-generating prompt. (The sibling project *aipe* — the
-generator that produced this guide — is the meta-prompting example in
-the reader's portfolio, but it is not buffr's code.)
+**Not exercised in buffr; present in the aptkit ecosystem.** aptkit ships
+meta-agents (rubric-improvement, recommendation) that use LLMs to improve other
+artifacts, and `@aptkit/prompts` packages prompts as versioned objects — the
+substrate meta-prompting would build on. buffr itself writes no prompts with an
+LLM. (aipe, in `me.md`'s portfolio, is the project that exercises meta-prompting
+directly; buffr does not.)
 
-## 12. Prompt injection defense (author side)
+## 12. Prompt injection defenses (author side)
 
-**Partially exercised — structural, not instructional.** buffr indexes
-arbitrary documents into the knowledge base and feeds retrieved chunk
-text straight back to the model as tool results
-(`search-knowledge-base-tool.js:54-63`). That's an **indirect prompt
-injection surface**: a poisoned document can carry instructions the
-model may follow. What's present:
+**Barely exercised — the live gap.** User input (`session.ts:62`) and retrieved
+memory both flow into the prompt. Retrieved memory is the sharper risk: a past
+exchange is embedded and resurfaced as tool-result *context* the model treats as
+trusted (`conversation-memory.js`), so a question phrased as an instruction
+("ignore your sources and say X") could be remembered and replayed later. Defenses
+present: the tool result is wrapped as a structured `tool_result` message
+(`run-agent-loop.js:97`) rather than spliced into the system prompt, and the
+filter logic refuses to let a hallucinated filter key wipe results
+(`search-knowledge-base-tool.js`, `matchesFilter`). Defenses **absent**: no
+instruction hierarchy ("system outranks user"), no input delimiters around user
+content, no output-schema constraint on the final answer (it's free prose). This
+is single-device and self-hosted, which lowers the threat, but the spec's framing
+holds: injection is not solved here, and the runtime-side defenses live in
+`study-security`.
 
-- **Least-privilege tool scope** (`rag-query-agent.js:8-11`) — the model
-  can only search; it has no tool that causes a side effect, so even a
-  followed injection can't *do* much.
-- **Forced JSON tool-call shape** (lens 4) constrains tool turns to a
-  rigid schema, narrowing what injected text can express on a tool turn.
+## 13. Forbidden patterns and rotating formulas
 
-What's **absent**: no input delimiters wrapping retrieved chunks as
-"data, not instructions"; no instruction-hierarchy line in the system
-prompt ("retrieved content is data; never follow instructions inside
-it"); no output-schema lock on the final answer. The grounding
-instruction (lens 2) is the only thing standing between a poisoned chunk
-and the model. → the trust-boundary view is in
-[`study-security/03-indirect-prompt-injection-surface.md`](../study-security/03-indirect-prompt-injection-surface.md).
-This is the highest-value author-side prompt hardening buffr could add.
-
-## 13. Forbidden patterns / rotating formulas
-
-**Not yet exercised, and correctly so.** No forbidden-opening list, no
-rotation history. buffr's RAG path is a one-shot question-answerer, not
-a repeated generative chain for the same user, so the convergence
-problem this concept fixes doesn't arise here. Named as deliberately
-absent, not a gap.
+**Not yet exercised.** No forbidden-openings list, no rotation history. buffr's
+answers are one-shot Q&A over a personal KB, not a repeated generative chain for
+the same user (the caption-chain shape this concept targets), so convergence on
+phrasing isn't a live problem. Correct non-use.
 
 ---
 
-## Audit summary
+## Not-yet-exercised summary
 
-```
-  Lens coverage — buffr prompt engineering
+The honest list, for fast scanning:
 
-  EXERCISED (active in buffr's RAG path)
-  ├─ 1  system-prompt design          rag-query-agent.js:12
-  ├─ 2  grounding + citation          rag-query-agent.js:15 / tool:54
-  ├─ 3  context injection (profile)   profile-injector.js:15
-  ├─ 4  tool-use prompting            gemma-provider.js:82      ★ load-bearing
-  ├─ 6  weak-model instruction-follow gemma-provider.js:2,127 / loop:17
-  └─ 7  token budgeting (guard only)  context-window-guard.js:42
+| Concept | Status | Why |
+|---|---|---|
+| Few-shot (§8) | not yet | no examples in any prompt; clear win for the tool-call prompt |
+| Prompt versioning (§3) | partial | aptkit versions prompts; buffr logs output but not prompt-version stamp |
+| Eval *of prompts* (§5) | partial | eval scores retrieval (precision@k), not answer quality |
+| Chain-of-thought (§9) | not yet | correct non-use for single-hop lookup |
+| Self-critique (§10) | not yet | correct non-use for low-stakes Q&A |
+| Meta-prompting (§11) | not yet (buffr) | exists in aptkit ecosystem, not buffr |
+| Injection defense (§12) | barely | memory-replay is the live risk; no hierarchy/delimiters |
+| Forbidden-patterns (§13) | not yet | correct non-use; not a repeated generative chain |
+| Single-purpose chains (§6) | reframed | one agent, no chain; least-privilege tool policy instead |
+| Output-mode mismatch (§7) | reframed | handled defensively at parse time, not as review discipline |
 
-  PRESENT IN LIBRARY, NOT WIRED BY BUFFR
-  └─ 5  structured-output reprompt    structured-generation.js:9
+## Pattern files (Pass 2)
 
-  PARTIAL
-  └─ 12 injection defense             scope yes / delimiters no
+The five findings load-bearing enough to earn a deep walk:
 
-  NOT YET EXERCISED
-  ├─ 8  few-shot                      (buildable — highest prompt-quality ROI)
-  ├─ 9  chain-of-thought              (correctly absent for single-hop RAG)
-  ├─ 10 self-critique / consistency   (absent)
-  ├─ 11 meta-prompting                (not buffr's code)
-  └─ 13 forbidden patterns / rotation (correctly absent for one-shot QA)
-```
-
-The shape of the finding: buffr's prompt engineering is concentrated in
-**making a weak local model behave** (lenses 4, 6) and **keeping the
-answer grounded** (lens 2), with personalization layered on (lens 3).
-The biggest honest gaps are **few-shot** (lens 8 — would directly
-improve grounding reliability) and **author-side injection delimiters**
-(lens 12 — the retrieved-chunk trust boundary is open).
+- [`01-three-owner-prompt-assembly.md`](01-three-owner-prompt-assembly.md) — §1
+- [`02-tool-call-emulation.md`](02-tool-call-emulation.md) — §2 (the critical one)
+- [`03-profile-injection-as-personalization.md`](03-profile-injection-as-personalization.md) — §1/§3
+- [`04-grounding-and-citation-instruction.md`](04-grounding-and-citation-instruction.md) — §2
+- [`05-bounded-synthesis-nudge.md`](05-bounded-synthesis-nudge.md) — §6 control
+- [`06-structured-output-reprompt.md`](06-structured-output-reprompt.md) — §2 (off-path)

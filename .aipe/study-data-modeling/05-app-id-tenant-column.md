@@ -1,247 +1,268 @@
-# app_id Tenant Column (multi-tenant in shape only)
+# 05 · app_id tenant column
 
-**Industry names:** tenant discriminator column / shared-schema
-multi-tenancy / discriminator-based isolation. **Type:** Industry standard
-(here, present but inert).
+**Subtitle:** a multi-tenant discriminator column present on every table — tenancy
+*shape* without row-level enforcement — *Industry standard (shape only)*.
+
+---
 
 ## Zoom out, then zoom in
 
-Here's the column that's on every table, and the boundary it does *not* yet
-enforce.
+Every table in the schema carries `app_id text not null default 'laptop'`. It's
+the column you'd reach for to isolate one application's (or user's) data from
+another's in a shared database. The catch: here it's a *shape*, not a *boundary*
+— it filters reads, but nothing in the database stops a query from reading across
+it.
 
 ```
-  Zoom out — where app_id sits and what's missing
+  Zoom out — where app_id sits, and what's missing above it
 
-  ┌─ Service layer (the app) ───────────────────────────┐
-  │  loadConfig(env).appId   default 'laptop'            │  ★ source of app_id
-  │           │  NOT derived from any auth token         │
-  └───────────┼──────────────────────────────────────────┘
-              │  passed as constructor arg
-  ┌─ Storage layer (Postgres) ▼──────────────────────────┐
-  │  every table: app_id text not null default 'laptop'  │
-  │  queries: where app_id = $2    ← app CHOOSES to apply │
-  │  ✗ no RLS  ✗ no policy  ✗ no DB-enforced boundary    │  ← we are here
-  └──────────────────────────────────────────────────────┘
+  ┌─ Trust boundary (NOT present) ──────────────────────────┐
+  │  no auth token → no token-derived app_id   ✗            │
+  └───────────────────────────┬─────────────────────────────┘
+                              │  app_id = constructor default 'laptop'
+  ┌─ App layer ───────────────▼─────────────────────────────┐
+  │  PgVectorStore(appId) → where app_id = $2                │
+  └───────────────────────────┬─────────────────────────────┘
+                              │
+  ┌─ Storage: agents (every table) ──▼──────────────────────┐
+  │  app_id text not null default 'laptop'   ★ the column ★  │ ← here
+  │  NO row-level security policy            ✗ (not present) │
+  └─────────────────────────────────────────────────────────┘
 ```
 
-**Zoom in.** Every table carries `app_id`. Every read filters on it. It
-*looks* like multi-tenancy. But the value comes from an env var, not an
-authenticated identity, and the database enforces nothing — any query that
-forgets `where app_id` sees every tenant. The question: *what's actually
-isolated here, and what only appears to be?*
+Zoom in: the question is "if two apps shared this database, would one be able to
+read the other's rows?" Today the answer is "there's only one app, so it never
+comes up." But the *mechanism* — a filter column with no RLS and no token
+derivation — means the isolation lives entirely in remembering to write
+`where app_id = $x`. Forget it once and the boundary is gone.
 
 ## The structure pass
 
-**Layers:** (1) the column `app_id` on all five tables. (2) the app-side
-filter `where app_id = $2` in each read. (3) the *absent* DB enforcement — no
-RLS, no policy. The isolation is real at layer 2, imaginary at layer 3.
+One axis: **trust** — what can each side see or tamper with? Trace it from the
+column up to where a real boundary *would* be.
 
-**Axis — trust (what stops one tenant reading another's rows):** trace it.
-At the column, nothing — it's just text. At the query, the *application*
-stops it, *if* the developer wrote the filter. At the DB, nothing — there's
-no policy. So the answer to "what enforces tenant isolation" is "developer
-discipline," at every layer. Nowhere does it become "the database."
+```
+  axis = "what stops a query from reading another app's rows?"
 
-**Seam:** the load-bearing boundary is **filter-by-convention vs
-enforced-by-RLS**. Today crossing into another tenant's data takes one
-forgotten `where` clause. With RLS, the DB would reject the cross-tenant read
-regardless of the query. That seam is exactly where this stops being real
-multi-tenancy.
+  ┌─ a real tenant boundary (RLS) ─┐   DB enforces: yes, per-row
+  │  policy: app_id = current_app  │   → forget the filter → DB still blocks
+  └────────────────┬────────────────┘
+                   │ seam: this layer is ABSENT here
+  ┌─ this repo (filter only) ──────┐   DB enforces: nothing
+  │  where app_id = $2 in app code │   → forget the filter → full leak
+  └─────────────────────────────────┘
+
+  the boundary that should flip "trust" is missing → app_id isolates nothing
+```
+
+The seam is the RLS layer that *isn't there*. With RLS, `app_id` is a boundary
+the DB defends row by row regardless of what the query says. Without it, `app_id`
+is a convention — load-bearing only as long as every query author remembers it.
 
 ## How it works
 
 ### Move 1 — the mental model
 
-You know how a client-side `if (user.isAdmin)` guard is worthless if the API
-doesn't *also* check — because anyone can skip the client? `app_id` filtering
-without RLS is that: a guard in the layer that can be bypassed, with no guard
-in the layer that can't. The filter is the client-side check; RLS would be
-the server-side one. Right now only the bypassable layer exists.
+The shape is a **discriminator column** — the same idea as a `type` or `tenant_id`
+field you filter on in any multi-tenant app. It's the right *shape* for tenancy.
+What makes it a boundary vs a suggestion is whether something *enforces* the
+filter. Think of `where user_id = ?` in a query: it isolates correctly until the
+one endpoint that forgets it, and then it's an IDOR.
 
 ```
-  app_id today — the guard is in the bypassable layer
+  filter-column tenancy (pattern)
 
-  ┌─ app query ─────────────────────────────────────────┐
-  │  where app_id = $2     ← present IF dev remembers it │  bypassable
-  └───────────────────────┬──────────────────────────────┘
-                          │  forget it once →
-  ┌─ database ────────────▼──────────────────────────────┐
-  │  (no RLS policy)       ← returns ALL tenants' rows    │  no backstop
-  └──────────────────────────────────────────────────────┘
+  app_id='laptop' rows   ┐
+  app_id='other'  rows   ┘  same table, mixed tenants
+
+  read with WHERE app_id='laptop'   → laptop rows only   ✓ (if remembered)
+  read WITHOUT the where clause      → BOTH tenants        ✗ (no DB stop)
 ```
 
-### Move 2 — the step-by-step walkthrough
+### Move 2 — the walkthrough
 
-**Where `app_id` comes from.** `loadConfig` reads `AGENT_APP_ID` from env,
-defaulting to `'laptop'` (`src/config.ts:12`). That value is passed into
-`PgVectorStore`'s constructor (`src/pg-vector-store.ts:27`) and used as a
-bound parameter. **It is not derived from an authenticated token, session, or
-JWT claim.** There is no auth in the system at all — it's single-device. So
-`app_id` is a *configuration constant*, not an *identity*.
+**The column, on every table, with a default.**
 
-**Where it's applied.** Reads filter on it: vector search
-(`pg-vector-store.ts:75`, `where app_id = $2`), profile load
-(`src/profile.ts:5`, `where app_id = $1`). Writes stamp it: chunk upsert
-(`pg-vector-store.ts:55`), document insert (`src/runtime.ts:12`), conversation
-start (`src/supabase-trace-sink.ts:6`), and memory writes — which go through
-the same `PgVectorStore.upsert` (`src/session.ts:53,67`), so each
-`memory:<conv>:<n>` row is stamped with the store's `appId` exactly like a
-corpus chunk. The discipline is consistent — every current write path stamps
-it, every read filters it.
+```
+  File: sql/001_agents_schema.sql
+  Lines: 6, 18-19, 34, 53 (one per table)
 
-**Where the boundary isn't.** There is no `enable row level security`, no
-`create policy` anywhere in `sql/001_agents_schema.sql`. So the only thing
-between tenant A and tenant B is that every query *remembers* its `where
-app_id`. The `chunks_app_id` index (`:30`) optimizes the filter but doesn't
-enforce it — an index makes the filter fast, not mandatory.
+    documents:     app_id text not null default 'laptop'   :6
+    chunks:        app_id text not null default 'laptop'   :19
+    conversations: app_id text not null default 'laptop'   :34
+    profiles:      app_id text not null default 'laptop'   :53
+```
 
-**Where it breaks.** Add one new read path — say a "list all recent
-conversations" admin query — and forget the `where app_id`, and it returns
-every tenant's conversations. No error, no rejection. The DB has no opinion.
-At one tenant (`'laptop'`) this is harmless; the moment `app_id` has a second
-value, it's a data-leak waiting on a forgotten clause.
+`not null default 'laptop'` is the shape decision. Every row is tagged; the
+default means a writer that forgets to set it still gets a consistent tag.
+(`messages` is the exception — it has no `app_id`; it reaches its tenant through
+`conversation_id → conversations.app_id`, the one real FK. That's correct
+normalization: the tenant of a message is the tenant of its conversation.)
+
+**Where it's filtered — the one hot path.**
+
+```
+  File: src/pg-vector-store.ts
+  Function: PgVectorStore.search
+  Lines: 70-77
+
+    select id, content, ..., 1 - (embedding <=> $1::vector) as score
+    from agents.chunks
+    where app_id = $2                ← THE filter, in app code
+    order by embedding <=> $1::vector
+    limit $3
+                       [toVectorLiteral(vector), this.appId, k]
+                                                   └─ this.appId
+```
+
+The `where app_id = $2` is the entire isolation mechanism for the search path. It
+works. But it's *one query author remembering*, not a rule the DB imposes.
+
+**Where `appId` comes from — and what it is NOT.**
+
+```
+  File: src/pg-vector-store.ts
+  Constructor + src/session.ts:41
+  Lines: 25-30
+
+    this.appId = opts.appId ?? 'laptop';   ← a constructor default
+    // session.ts:41
+    new PgVectorStore({ pool, appId: cfg.appId, ... })
+                                    └─ cfg.appId from AGENT_APP_ID env (context.md)
+```
+
+This is the security-relevant line. `appId` is a *configuration value* — an env
+var with a default — **not** something derived from an authenticated token. In a
+real multi-tenant system the tenant id must come from the verified identity of
+the caller, so a user can't ask for another tenant's data by changing a
+parameter. Here it's a process-wide constant. For a single-device personal agent
+that's exactly right; as a tenancy boundary it's nothing.
+
+```
+  Layers-and-hops — where the tenant id is decided
+
+  ┌─ env ─────────┐ AGENT_APP_ID    ┌─ config ────┐ cfg.appId  ┌─ store ──┐
+  │ 'laptop'      │ ──────────────► │ loadConfig  │ ─────────► │ this.appId│
+  └───────────────┘                 └─────────────┘            └─────┬─────┘
+        ▲                                                            │ where
+        │  NOT a token. NOT per-request. process-wide.               ▼ app_id=$2
+        │                                              ┌─ Postgres ──────────┐
+        └──── a real boundary would derive this ──────│ filters, no RLS check│
+              from auth per request                    └──────────────────────┘
+```
+
+**The boundary condition — exactly where it breaks.** The isolation holds for
+every query that includes `where app_id = ?`. It breaks the moment: (a) a second
+`app_id` value shares the database, AND (b) any query omits the filter — an
+admin script, a new feature, a `select * from chunks` for debugging. With no RLS,
+the DB happily returns every tenant's rows. There's also no `app_id` index on
+`documents`, `conversations`, or `profiles` (only `chunks` has
+`chunks_app_id`, `001:30`) — so even as a filter it's only index-backed on the
+one hot table.
 
 ### Move 2.5 — current state vs future state
 
-```
-  Phase A (now)                  Phase B (real multi-tenancy)
-  ─────────────                  ────────────────────────────
-  app_id from env constant       app_id from auth token claim
-  filter by convention           RLS policy: USING (app_id = current_setting)
-  forget where → leak            forget where → DB still filters
-  one tenant ('laptop')          many tenants, DB-isolated
+This is built-but-deliberately-partial. The shape is in; the enforcement is
+gated to a later phase (context.md: "**No RLS this phase.**").
 
-  what DOESN'T change: the column, the index, every existing query.
-  RLS layers UNDER them. The shape is already right; the enforcement
-  is the missing half.
+```
+  Phase A — now (single device)        Phase B — multi-tenant (gated)
+  ──────────────────────────────       ───────────────────────────────
+  app_id column present       ✓        app_id column present        ✓ (no change)
+  app_id = env default 'laptop'        app_id = token-derived per request
+  filter in app code only              RLS policy: app_id = current_setting(...)
+  no RLS                               DB enforces row-by-row
+  one tenant → boundary moot           N tenants → boundary real
+
+  what does NOT change: the column, the writes, the search filter.
+  what's added: token derivation + RLS policies. The shape was built
+  forward-compatible on purpose.
 ```
 
-The payoff worth naming: the schema is *already shaped* for multi-tenancy.
-Turning it on is additive — enable RLS, write one policy per table, derive
-`app_id` from a token. No table redesign. The column did its job by existing.
+The takeaway is *what doesn't have to change*: the column is already on every
+table with the right type and default, so Phase B is additive — add RLS policies
+and derive `app_id` from auth. You don't reshape the schema; you add the
+enforcement layer that was deferred.
 
 ### Move 3 — the principle
 
-A tenant discriminator column is necessary but not sufficient for isolation.
-The column lets you *filter*; only an enforced policy (RLS) makes the filter
-*mandatory*. Shipping the column without the policy is a legitimate phase —
-it gets the shape right while the app is single-tenant — but it must be named
-as "isolation in shape only," never mistaken for the real thing. The day a
-second `app_id` appears, the missing half becomes load-bearing.
+A tenancy *column* and a tenancy *boundary* are different things, and conflating
+them is how multi-tenant data leaks ship. The column is the shape — every row
+knows its tenant. The boundary is the enforcement — the DB refuses cross-tenant
+reads no matter what the query says (RLS) and the tenant id comes from verified
+identity, not a parameter. This repo has the shape, correctly, and has
+*deliberately deferred* the boundary because there's one tenant. The discipline
+worth copying: build the column forward-compatible now so the boundary is
+additive later — don't bolt tenancy onto a schema that never had the column.
 
 ## Primary diagram
 
-```
-  app_id across the stack — present everywhere, enforced nowhere
-
-  ┌─ config ─────────────────────────────────────────────┐
-  │  AGENT_APP_ID → 'laptop'   (env constant, not identity)│
-  └───────────────────────┬───────────────────────────────┘
-                          │  constructor arg / bind param
-  ┌─ queries ─────────────▼───────────────────────────────┐
-  │  WRITE: ...app_id... stamped on every insert           │
-  │  READ:  where app_id = $2   (only if remembered)       │
-  └───────────────────────┬───────────────────────────────┘
-                          │
-  ┌─ database ────────────▼───────────────────────────────┐
-  │  app_id text not null default 'laptop'  (5 tables)     │
-  │  chunks_app_id index (speeds filter, doesn't enforce)  │
-  │  ✗ NO RLS  ✗ NO POLICY  → boundary does not exist here  │
-  └─────────────────────────────────────────────────────────┘
-```
-
-## Implementation in codebase
-
-**Use case.** Every read and write stamps or filters `app_id`. Today it's
-always `'laptop'`, so the filter is effectively a no-op — but it's the seam
-that would carry real isolation if buffr ever served more than one app/user.
-
-**The column — `sql/001_agents_schema.sql:6,19` (and on every table):**
+The whole tenancy story — shape present, boundary deferred.
 
 ```
-  app_id text not null default 'laptop'
-        │            │              │
-        │            │              └─ default makes single-tenant frictionless
-        │            └─ not null: every row HAS a tenant, good
-        └─ but it's a plain column — no policy references it
-```
+  app_id — shape without enforcement (and the gap to a real boundary)
 
-**The filter — `src/pg-vector-store.ts:75`, `src/profile.ts:5`:**
-
-```
-  where app_id = $2            ← search; $2 is the config constant
-  where app_id = $1            ← profile load
-       │
-       └─ this is the ENTIRE isolation mechanism. Remove it and the
-          query crosses tenants. The DB won't stop you.
-```
-
-**The source — `src/config.ts:12`, `src/pg-vector-store.ts:27`:**
-
-```
-  appId: env.AGENT_APP_ID || 'laptop',    ← from ENV, not from a token
-  ...
-  this.appId = opts.appId ?? 'laptop';    ← constructor arg, trusted as-is
-       │
-       └─ no auth → app_id is configuration, not authenticated identity.
-          The "tenant" is whoever set the env var.
+  ┌─ every table ───────────────────────────────────────────┐
+  │  app_id text not null default 'laptop'   ← SHAPE: present│
+  └──────────────────────┬───────────────────────────────────┘
+                         │
+        ┌────────────────┴─────────────────┐
+        │ filter (app code)                │ boundary (DB) ── MISSING
+        │  search: where app_id=$2  ✓      │  RLS policy      ✗
+        │  other reads: no filter   ✗      │  token-derived id ✗
+        └──────────────────────────────────┘
+                         │
+        isolation = "remember the filter"  ← holds for 1 tenant,
+                                             leaks the day a 2nd appears
 ```
 
 ## Elaborate
 
-Shared-schema multi-tenancy with a discriminator column is the lightest of
-the three tenancy models (vs schema-per-tenant, DB-per-tenant). Its known
-failure mode is exactly this one: isolation depends on every query carrying
-the discriminator, and one missed `where` leaks across tenants. Postgres RLS
-exists to close that — a policy makes `app_id` filtering happen *below* the
-query, so forgetting the clause is harmless. The trust analysis (what an
-attacker or a buggy path can reach) belongs to `study-security`; the *shape*
-question — is the column the right modeling choice — is here, and the answer
-is yes, the column is right, the enforcement is the deferred half.
+Shared-schema multi-tenancy (one set of tables, a `tenant_id` discriminator) is
+the most common SaaS tenancy model — cheaper than schema-per-tenant or
+database-per-tenant, at the cost of needing airtight filtering. Postgres RLS is
+the tool that makes the filtering airtight: policies move the `where tenant_id =
+...` from every query into one place the engine enforces, so a forgotten filter
+can't leak. This repo's choice to ship the column without RLS is fine for one
+device and is a known, named gap — the *security* read of this exact column
+(trust boundary, token derivation, IDOR risk) lives in `study-security`; here we
+care that the column's *shape* is right and forward-compatible. Whether to scale
+this to many tenants at all is a `study-system-design` question.
 
 ## Interview defense
 
-**Q: You have `app_id` on every table. Is this multi-tenant?**
+**Q: You have `app_id` on every table but no RLS. Is that a security hole?**
+
+Today, no — there's one tenant, `'laptop'`, and the search path filters on it.
+But it's a *boundary that isn't enforced*: isolation depends on every query
+remembering `where app_id = ?`, and `app_id` is an env-var default, not derived
+from an authenticated token. The moment a second tenant shares the database, any
+query that forgets the filter leaks across tenants and the DB won't stop it. The
+fix is additive — RLS policies plus token-derived `app_id` — because the column
+is already there.
 
 ```
-  shape:        ✓ column present, ✓ filtered, ✓ indexed
-  enforcement:  ✗ no RLS, ✗ app_id not token-derived
-  verdict:      multi-tenant in SHAPE only
+  shape: app_id on every table         ✓ done
+  boundary: RLS + token-derived id     ✗ deferred (Phase B)
+  risk: real only at 2+ tenants; until then, moot but pre-wired
 ```
-Answer: in shape, not in enforcement. The column's on every table and every
-query filters it — but the value comes from an env var, not an auth token,
-and there's no RLS, so isolation is one forgotten `where` clause from
-breaking. At one tenant it's fine; it's deliberately phase-one. The fix is
-additive: enable RLS, one policy per table, derive `app_id` from a token — no
-schema redesign, because the column's already there. **Anchor:**
-`config.ts:12` (env, not token) + no RLS in `sql/001_agents_schema.sql`.
 
-**Q: What's the single most dangerous line if this went multi-tenant
-tomorrow?**
+Anchor: "a discriminator column is tenancy's shape; RLS plus token derivation is
+its boundary — I built the shape forward-compatible and deferred the boundary on
+purpose."
 
-Any read missing `where app_id`. There's no DB backstop, so the first
-forgotten filter leaks every tenant's rows. **Anchor:** the mechanism is
-entirely `pg-vector-store.ts:75` / `profile.ts:5` — app-side, bypassable.
+**Q: Why does `messages` not have an `app_id` column?**
 
-## Validate
-
-1. **Reconstruct:** name the two halves of tenant isolation (column +
-   enforcement) and which half this repo has.
-2. **Explain:** why does the `chunks_app_id` index not provide isolation?
-   (`sql/001_agents_schema.sql:30`)
-3. **Apply:** add a "recent conversations" query and show how forgetting one
-   clause leaks across tenants.
-4. **Defend:** why is shipping the column without RLS a legitimate phase, and
-   exactly when does that stop being true?
+Because a message's tenant is fully determined by its conversation — `messages`
+has a real FK to `conversations`, and `conversations` carries `app_id`. Adding
+`app_id` to `messages` would duplicate that fact and let the two disagree. It's
+the one place the schema normalizes the tenant through a relationship instead of
+copying it, and that's correct.
 
 ## See also
 
-- `06-trajectory-tables.md` — conversations/messages also carry `app_id`.
-- `audit.md` §7 — RLS and token-derivation under "not yet exercised."
-- `study-security` — the trust-boundary / data-exposure analysis.
-- `study-system-design` — why single-device defers the tenancy work.
-
----
-Updated: 2026-06-24 — no-RLS / not-token-derived findings unchanged; noted
-memory writes (`@aptkit/memory` via the shared `PgVectorStore`) also stamp
-`app_id` on `memory:<conv>:<n>` rows.
+- `06-trajectory-tables.md` — why `messages` reaches its tenant through the FK.
+- `03-soft-link-no-fk.md` — the FK that *does* exist, carrying tenant down to
+  messages.
+- `audit.md` Lens 4 — integrity, including app_id-as-filter-not-boundary.
+- `study-security` — the trust-boundary read: token derivation, RLS, IDOR.

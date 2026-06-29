@@ -1,52 +1,68 @@
-# Records, Pages, and Storage Layout
+# Records, pages, and storage layout
 
-**Industry name(s):** heap storage / page layout / row-oriented storage · **Type:** Industry standard
+**Subtitle:** heap tuples / 8KB pages / TOAST / the cost model of persistence — *Industry standard*
 
 ---
 
 ## Zoom out, then zoom in
 
-Below the pool seam, every row buffr writes lands in a fixed-size page on disk. The interesting row is `chunks` — it carries a 768-float vector that's far too big to sit inline with the rest of the columns. This file is about what a record physically is and what it costs.
+Every row you've ever inserted lives somewhere physical: a fixed-size block on
+disk, read into a buffer in RAM, mutated, and logged. This file is the bottom of
+the stack — below the planner, below the index. It's where a `chunks` row and
+its 768-dimensional vector actually sit.
 
 ```
-  Zoom out — where physical storage sits
+  Zoom out — storage layout under everything else
 
-  ┌─ Persistence layer ─────────────────────────────────────────┐
-  │  PgVectorStore.upsert  →  INSERT … embedding $6::vector      │
-  └──────────────────────────┬──────────────────────────────────┘
-                             │  SQL
-  ┌─ Storage engine ─────────▼──────────────────────────────────┐
-  │  ★ THIS FILE: how that row becomes bytes on a page ★         │ ← we are here
-  │                                                              │
-  │   8KB heap page ──┬── tuple header                           │
-  │                   ├── inline columns (id, app_id, content…)  │
-  │                   └── embedding → TOAST (out of line)        │
-  └──────────────────────────────────────────────────────────────┘
+  ┌─ SQL / planner ─────────────────────────────────────┐
+  │  search() · upsert() · pool.query()                 │
+  └───────────────────────┬──────────────────────────────┘
+  ┌─ Access methods ──────▼──────────────────────────────┐
+  │  HNSW · btree · heap scan                            │
+  └───────────────────────┬──────────────────────────────┘
+  ┌─ ★ Storage layout ★ ──▼──────────────────────────────┐ ← THIS FILE
+  │  heap pages (8KB) · tuples · TOAST · buffer cache    │
+  └──────────────────────────────────────────────────────┘
 ```
 
-Zoom in: Postgres is **row-oriented** — a record stores all of one row's columns together, in one place, on one page. That's the opposite of column stores (which keep each column contiguous for analytics). For buffr's access pattern — fetch a whole chunk by similarity, return its content + meta — row orientation is exactly right: one row read gets you everything the citation needs.
+Zoom in: a **page** is the unit Postgres reads and writes — 8KB, always, even
+to fetch one row. A **tuple** is one row's bytes inside a page. The question
+here: when buffr stores a `chunks` row with a 768-float embedding plus a `text`
+content blob, *where do those bytes go*, and what does that cost on read?
 
 ---
 
 ## The structure pass
 
-Two layers: the logical row (what your SQL sees) and the physical tuple (what the disk holds). Trace one axis: *where does each column physically live?*
+**Layers.** Storage decomposes into three nested levels:
 
 ```
-  Axis = "where do this row's bytes live?"  — traced across one chunks row
-
-  ┌─ logical row (your INSERT) ──────────────────────────────────┐
-  │  id, app_id, chunk_index, content, embedding, meta           │  → "all together"
-  └──────────────────────────┬───────────────────────────────────┘
-                  physical split here ▼  (the seam)
-  ┌─ main heap page ─────────┐    ┌─ TOAST table ────────────────┐
-  │ id, app_id, chunk_index, │    │ embedding (768 floats ≈ 3KB)  │
-  │ small content, meta ptr  │ ──►│ large content, large meta     │
-  └──────────────────────────┘    └───────────────────────────────┘
-       small + fixed                   big + variable
+  ┌─ Relation (table) ───────────────┐  agents.chunks — a set of pages
+  │   heap file + index files         │
+  └──────────────┬────────────────────┘
+  ┌─ Page (8KB block) ▼───────────────┐  header + line pointers + tuples
+  │   the I/O unit                     │
+  └──────────────┬────────────────────┘
+  ┌─ Tuple (one row) ▼────────────────┐  header + column values (or TOAST ptr)
+  │   the addressable record           │
+  └────────────────────────────────────┘
 ```
 
-The seam is **TOAST** (The Oversized-Attribute Storage Technique). It flips the "where do the bytes live" answer: small/fixed columns stay inline on the main page; anything over ~2KB gets compressed and pushed to a side table, with only a pointer left inline. The 768-dim `embedding` (≈3KB raw) and long `content` cross that line. **This is the load-bearing fact for the vector column:** every similarity hit that returns `content` may require a second page fetch to de-TOAST it.
+**Axis — trace `cost` (bytes moved per operation) down the layers.** *What does
+it cost to touch this level?*
+
+- Relation: a seq scan reads **every page** — cost grows with row count.
+- Page: one page fetch is one I/O (or one buffer-cache hit) — 8KB regardless of
+  how many bytes you wanted.
+- Tuple: a wide value (the embedding, a long `content`) may not fit inline and
+  gets pushed **out-of-line to TOAST** — turning one logical row into extra page
+  fetches.
+
+**Seam — the TOAST threshold (~2KB).** Below it: the value lives inline in the
+tuple, one page fetch gets it. Above it: Postgres compresses and/or moves the
+value to a side table, and reading it costs extra I/O. A 768-float vector is
+~3KB of raw float data — it's *over* the line. This seam is the most important
+storage fact in the repo, and nobody configured it; it's automatic.
 
 ---
 
@@ -54,177 +70,177 @@ The seam is **TOAST** (The Oversized-Attribute Storage Technique). It flips the 
 
 ### Move 1 — the mental model
 
-You know how a JS object with a huge string field is still "one object," but the engine stores big strings on the heap and keeps a pointer in the object slot? A Postgres tuple does the same. The page is a fixed 8KB slab; the tuple is a header plus column values; oversized values get a pointer to TOAST.
+You already know an array of structs: fixed-size slots, each holding one
+record's fields, packed contiguously so you can index in. A Postgres heap page
+is that array — except the slots grow from the bottom, the pointers grow from
+the top, and when a field is too big to fit, it's stored elsewhere with a
+pointer left behind. Same idea as a JS object holding a giant string by
+reference rather than inline.
 
 ```
-  The pattern — an 8KB heap page holds many tuples
+  A heap page — 8KB, two growing ends
 
-  ┌─ 8KB heap page ───────────────────────────────────┐
-  │ page header │ line pointers → → →                  │
-  │ ┌────────┐ ┌────────┐ ┌────────┐                   │
-  │ │ tuple1 │ │ tuple2 │ │ tuple3 │  …  (grows up)    │
-  │ └────────┘ └────────┘ └────────┘                   │
-  │            free space                              │
-  │   (tuples fill from the bottom, pointers from top) │
-  └────────────────────────────────────────────────────┘
-       each tuple = header + visibility info + columns
+  ┌─ page header (24 B) ──────────────────────────┐
+  ├─ line pointers ──►  [ptr0][ptr1][ptr2] ...     │  grow down ▼
+  │                                                 │
+  │              ... free space ...                 │
+  │                                                 │
+  │   ▲ grow up   ... [tuple2][tuple1][tuple0]      │
+  └─────────────────────────────────────────────────┘
+   a line pointer (ItemId) → byte offset of its tuple
 ```
 
-One sentence: **a table is a heap of 8KB pages, each packed with row tuples, oversized columns spilled to TOAST.**
+### Move 2 — walk a `chunks` row onto disk
 
-### Move 2 — the walkthrough
+Take one row written by `PgVectorStore.upsert()` (`pg-vector-store.ts:47`) and
+follow its bytes.
 
-**The tuple header carries MVCC bookkeeping.** Every tuple starts with a 23-byte header holding `xmin`/`xmax` — the transaction IDs that decide which snapshots can see this row version. Bridge: it's metadata you never SELECT but always pay for. This is why an `UPDATE` doesn't overwrite in place — it writes a *new* tuple with a new `xmin`. (Full mechanism in `06`.) Drop the header and MVCC can't tell a live row from a dead one.
-
-**Fixed and small columns sit inline.** `id` (text), `app_id` (text), `chunk_index` (int), `embedding_model` (text) — these live directly in the tuple on the main page. Reading them is free once the page is in the buffer cache.
+**The tuple header comes first.** Every Postgres tuple carries a ~23-byte
+header before any column data: transaction IDs (`xmin`/`xmax` — the MVCC
+versioning from `06`), a null bitmap, and the line-pointer back-reference. You
+pay this on every row. For `chunks`, with its small scalar columns, the header
+is a real fraction of the inline tuple.
 
 ```
-  One chunks tuple — inline vs TOASTed
+  one chunks tuple, inline portion
 
-  ┌─ tuple on main heap page ──────────────────────────┐
-  │ header(xmin,xmax) │ id │ app_id │ chunk_index │ ... │
-  │ │ embedding_model │ content(if small)             │
-  │ │ meta(jsonb, if small)                           │
-  │ │ embedding → [TOAST pointer] ─────────┐          │
-  └────────────────────────────────────────┼──────────┘
-                                            ▼
-                              ┌─ TOAST table ──────────┐
-                              │ 768 floats, compressed  │
-                              └─────────────────────────┘
+  ┌ header ┐┌ id ┐┌ document_id ┐┌ app_id ┐┌ chunk_index ┐┌ meta? ┐┌ emb ptr ┐
+  │ ~23 B  ││text││ text (soft) ││ text   ││ int4 (4 B)  ││ jsonb ││ TOAST → │
+  └────────┘└────┘└─────────────┘└────────┘└─────────────┘└───────┘└────┬────┘
+                                                                         │
+                                          embedding vector(768) ~3 KB ───┘
+                                          (over the TOAST threshold)
 ```
 
-**The vector(768) is the TOAST tenant.** pgvector stores a `vector(768)` as a length-prefixed array of 4-byte floats — ≈3076 bytes raw. That's well over the ~2KB TOAST threshold, so embeddings live out-of-line by default. Here's where it bites: a `SELECT embedding` (rare in buffr) pays the de-TOAST cost, but the ANN *index* stores its own copy of the vectors in the HNSW graph, so similarity *search* mostly reads the index, not the TOASTed column. The column is fetched only to return `content`, not the vector itself — `search()` selects `content` and `meta`, never `embedding` (`src/pg-vector-store.ts:71`).
+**The embedding gets TOASTed.** Here's the load-bearing part for this repo. The
+schema declares `embedding vector(768) not null` (`001_agents_schema.sql:22`).
+768 four-byte floats is ~3072 bytes of payload — above Postgres's ~2KB inline
+limit. So the vector is pushed to the TOAST side table, and the main tuple keeps
+an 18-byte pointer. **Consequence:** a query that needs the embedding (the
+`order by embedding <=> ...` in `search()`) may touch *two* storage locations
+per row on an exact scan — the heap tuple and the TOAST chunk. This is one more
+reason the HNSW index matters: the index stores its own copy of the vectors in
+its graph nodes, so the index walk doesn't pay the TOAST detour the way a seq
+scan would.
 
-**jsonb meta is binary, not text.** `meta jsonb` (schema line 24) is stored as a parsed binary tree, not a string — so a key lookup doesn't reparse, and small metas stay inline. Bridge: it's the difference between `JSON.parse(str)` on every read versus a pre-parsed object. Large metas TOAST like any oversized value.
+```
+  Layers-and-hops — reading the embedding without an index
+
+  ┌─ Planner ──┐  seq scan plan   ┌─ Heap ────────┐
+  │ ORDER BY   │ ───────────────► │ tuple → ptr    │
+  │ <=> (no    │                   └──────┬─────────┘
+  │  index)    │   hop: deref ptr         ▼
+  │            │ ◄──────────────── ┌─ TOAST table ─┐
+  └────────────┘   3KB vector       │ embedding blob│
+                                    └───────────────┘
+   two page fetches per row, for every row → the seq-scan cost cliff
+```
+
+**The `content` column may TOAST too.** `content` holds the chunk text. Short
+chunks stay inline; a long one crosses the same threshold and gets compressed or
+moved. Same mechanism, different column.
+
+**`meta` is `jsonb`, and `jsonb` is binary.** The `meta jsonb` column
+(`001_agents_schema.sql:24`) is stored in Postgres's decomposed binary jsonb
+format, not as text — which is why `supabase-trace-sink.ts:25` has that comment
+about stringifying explicitly: node-postgres needs help to not mistake a JS
+array payload for a Postgres array literal. The binary format means key lookups
+inside `meta` don't reparse the whole document, but for this repo `meta` is read
+whole anyway (rebuilt into the in-memory hit shape at `pg-vector-store.ts:83`).
 
 ### Move 3 — the principle
 
-Row-oriented storage means *the unit of I/O is the row, and big columns leak out to TOAST.* For buffr that's a clean fit: retrieval wants the whole chunk (content + meta) per hit, and the giant vector is read by the index, not re-fetched from the row. The cost model to carry: **a row read is one page fetch; an oversized column read is two.**
+The page is the atom of database I/O, and **the cost of a query is mostly the
+count of pages it touches**, not the count of rows it returns. The single
+biggest storage fact in this repo — that a 768-dim vector overflows the inline
+tuple into TOAST — is exactly why an index that keeps its own copy of the
+vectors turns a two-fetch-per-row scan into a sub-linear graph walk. Storage
+layout is *why* indexes pay off.
 
 ---
 
 ## Primary diagram
 
-The full picture — logical row, physical split, what the index touches.
+The full layout: relation → page → tuple → TOAST, with the embedding's path
+marked.
 
 ```
-  chunks storage — logical row to physical bytes
+  agents.chunks — storage layout, full
 
-  INSERT into agents.chunks (id, document_id, app_id, chunk_index,
-                             content, embedding, embedding_model, meta)
-                                  │
-        ┌─────────────────────────┴──────────────────────────┐
-        ▼                                                     ▼
-  ┌─ main heap (8KB pages) ─────────────┐      ┌─ TOAST table ──────────┐
-  │ header(xmin/xmax) · id · app_id ·   │      │ embedding: 768×f32 ≈3KB │
-  │ chunk_index · embedding_model ·     │ ───► │ (compressed)            │
-  │ small content/meta · [TOAST ptrs]   │      │ large content / meta    │
-  └──────────────┬──────────────────────┘      └─────────────────────────┘
-                 │                                        ▲
-        PK btree(id) points here              de-TOAST only when content
-                 │                            is returned by search()
-  ┌─ HNSW index ─▼──────────────────────┐
-  │ its OWN copy of the vectors, in a    │  ← search reads HERE, not the
-  │ navigable small-world graph          │     TOASTed embedding column
-  └──────────────────────────────────────┘
-```
-
----
-
-## Implementation in codebase
-
-**Use cases.** The storage layout is decided entirely in the `chunks` DDL and exercised by every `upsert`/`search`. There's no code that *manages* pages — Postgres does — but the column choices in the schema determine the physical layout.
-
-```
-  sql/001_agents_schema.sql  (lines 14–25)  — the row that TOASTs
-
-  create table if not exists agents.chunks (
-    id text primary key,                         ← inline, small
-    document_id text,                            ← inline (soft link, see 05)
-    app_id text not null default 'laptop',       ← inline
-    chunk_index int not null,                    ← inline, 4 bytes
-    content text not null,                       ← inline if small, TOAST if big
-    embedding vector(768) not null,              ← ≈3KB → TOASTed by default
-    embedding_model text not null default '...', ← inline
-    meta jsonb not null default '{}'             ← binary; inline if small
-  );
-       │
-       └─ the embedding is the only column guaranteed to TOAST. It's why
-          search() never SELECTs it — reading it back would de-TOAST 3KB
-          per row for no reason; the score comes from the index instead.
-```
-
-```
-  src/pg-vector-store.ts  (lines 70–78)  — selecting around the TOAST
-
-  select id, content, chunk_index, document_id, meta,
-         1 - (embedding <=> $1::vector) as score   ← embedding USED, not RETURNED
-  from agents.chunks
-       │
-       └─ `embedding <=> $1` is computed by the index walk; the column itself
-          is never in the SELECT list. So a 4-row search returns 4 small
-          tuples + maybe 4 de-TOASTed `content` reads — never 4×3KB vectors.
-```
-
-```
-  src/pg-vector-store.ts  (lines 15–17, 55)  — the wire format
-
-  function toVectorLiteral(v: number[]): string {
-    return `[${v.join(',')}]`;            ← JS array → "[0.1,0.2,...]" text
-  }
-  // …values ($1,…,$6::vector,…)  with toVectorLiteral(c.vector)
-       │
-       └─ pgvector accepts the text literal and casts ($6::vector) into its
-          packed binary on-disk form. The text form is the WIRE shape;
-          the 4-byte-float-array is the STORED shape.
+  ┌─ Relation: agents.chunks (heap file) ──────────────────────┐
+  │  page 0          page 1          page 2     ...            │
+  │  ┌────────┐      ┌────────┐      ┌────────┐                │
+  │  │ tuples │      │ tuples │      │ tuples │  ← 8KB each     │
+  │  └───┬────┘      └────────┘      └────────┘                │
+  └──────┼──────────────────────────────────────────────────────┘
+         │ each tuple:
+         ▼
+  ┌ header(~23B) ┐ id, document_id, app_id, chunk_index (inline)
+  │ + null bitmap│ content ──┐  embedding ──┐  meta(jsonb) ──┐
+  └──────────────┘           ▼              ▼                ▼
+                        TOAST if >2KB   TOAST (~3KB) ✓    inline/TOAST
+                        ┌──────────────────────────────────────┐
+                        │  TOAST side table (out-of-line blobs) │
+                        └──────────────────────────────────────┘
 ```
 
 ---
 
 ## Elaborate
 
-TOAST exists because Postgres committed to 8KB pages early and needed a way to store values bigger than a page without redesigning the heap. The threshold (`TOAST_TUPLE_THRESHOLD`, ~2KB) is the point past which a value is pushed out to keep the main tuple small enough that many fit per page — which keeps sequential scans and index lookups touching fewer pages.
-
-For vector workloads this is why the *index* matters so much more than the column: HNSW keeps its own compact copy of the vectors in its graph nodes, so the hot search path never touches the TOASTed column. The column is the source of truth; the index is the working copy. That split is the whole reason an ANN index is fast — covered next in `03`.
-
-Cross-link: `study-data-modeling` owns whether `content` *should* live on the chunk at all (denormalization) and the jsonb `meta` shape. This file owns only the physical consequence of those choices.
+TOAST (The Oversized-Attribute Storage Technique) exists because Postgres pages
+are a fixed 8KB and a row must fit in a page — without TOAST you couldn't store
+a value larger than ~8KB at all. It kicks in automatically at ~2KB per tuple,
+compressing first and moving out-of-line if compression isn't enough. You can
+tune it per-column (`alter table ... set storage`), but this repo doesn't and
+shouldn't — the default behavior is exactly right for a vector column. The
+deeper lesson connects forward to `03`: the reason a vector index isn't just
+"nice to have" is that the alternative — scanning TOASTed vectors row by row —
+pays the page-fetch cost twice per row, every row.
 
 ---
 
 ## Interview defense
 
-**Q: A chunk has a 768-dim vector. Where does it physically live, and does similarity search read it?**
+**Q: A `chunks` row has a 768-dim vector. Where does that vector physically
+live?**
 
-The vector is ≈3KB, over the ~2KB TOAST threshold, so it's stored compressed in a TOAST side-table with a pointer left in the main tuple. Similarity search does *not* read that column — the HNSW index holds its own copy of the vectors, so the search walks the index and only de-TOASTs `content` for the returned rows.
+> Not inline in the heap tuple. 768 floats is ~3KB, over Postgres's ~2KB TOAST
+> threshold, so the vector is pushed to the TOAST side table and the main tuple
+> keeps an ~18-byte pointer. On a sequential scan that means two page fetches
+> per row to compare an embedding — heap tuple, then deref to TOAST. The HNSW
+> index avoids that by keeping its own vector copies in its graph nodes.
 
 ```
-  main tuple ──[ptr]──► TOAST(embedding 3KB)   ← NOT read by search
-       │
-  HNSW index holds its own vector copy  ← search reads THIS
+  tuple ──ptr──► TOAST(3KB vector)   ← seq scan pays this twice per row
+  HNSW node ──── vector copy inline  ← index walk doesn't
 ```
 
-Anchor: *"The column is the source of truth; the index is the working copy — search reads the working copy."*
+> Anchor: the vector overflows the tuple into TOAST — that's *why* the index
+> earns its keep.
 
-**Q: Why is Postgres row-oriented a good fit here?**
+**Q: Why does the row count barely matter but the page count does?**
 
-Retrieval wants the whole chunk per hit — content plus meta for the citation. Row orientation puts those on one page, so one row read serves the citation. A column store would scatter them.
+> Postgres reads 8KB at a time, hit or miss — one page fetch is one unit of I/O
+> whether you wanted one byte or the whole page. A query's cost is the number of
+> pages it has to bring into the buffer cache. A seq scan over `chunks` reads
+> every page (plus TOAST derefs); the HNSW index touches a handful. Same rows
+> exist either way; the page count is what changed.
 
-Anchor: *"One hit needs the whole row — row storage gives it in one fetch."*
+```
+  seq scan:   all pages + all TOAST derefs   → O(pages)
+  HNSW walk:  a few index pages              → O(log-ish)
+```
 
----
-
-## Validate
-
-1. **Reconstruct:** Draw an 8KB heap page with three tuples and show where the `embedding` value actually lives.
-2. **Explain:** Why does `search()` (`src/pg-vector-store.ts:71`) select `content` but never `embedding`? What would change if it selected `embedding`?
-3. **Apply:** You add a `summary text` column that's usually 5KB. Inline or TOAST? What does that cost a `SELECT *`?
-4. **Defend:** Someone says "store the vector as a JSON string column instead of `vector(768)`." Name two physical-storage reasons that's worse.
+> Anchor: cost is pages-touched, not rows-returned.
 
 ---
 
 ## See also
 
-- `03-btree-hash-and-secondary-indexes.md` — the HNSW index's own copy of the vectors
-- `01-database-systems-map.md` — the pool seam above this layer
-- `06-locks-mvcc-and-concurrency-control.md` — the `xmin`/`xmax` tuple header in action
-- `study-data-modeling` — whether `content`/`meta` belong on the chunk at all
+- `03-btree-hash-and-secondary-indexes.md` — why the HNSW index's own vector
+  copies beat scanning TOASTed heap rows.
+- `06-locks-mvcc-and-concurrency-control.md` — the `xmin`/`xmax` in the tuple
+  header and what they buy.
+- `study-performance-engineering` — the page-fetch cost model applied to the
+  per-turn hot path.

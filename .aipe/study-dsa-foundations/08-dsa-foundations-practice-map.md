@@ -1,305 +1,235 @@
 # DSA Foundations — Practice Map
 
-**ranked learning plan / exercised-first, gaps-second** — *Project-specific*
+**Industry name:** a ranked learning plan. **Type:** Project-specific.
+
+---
 
 ## Zoom out, then zoom in
 
-This is the audit file: the ranked verdict on what buffr exercises, what it
-doesn't, and — given your reincodes portfolio — what's actually worth your time.
-The honest headline: **buffr exercises very little classic DSA in its own source,
-the interesting algorithm (HNSW) is rented from a C extension, and the highest-
-value gaps (DP, backtracking, quickselect, tries) are absent from both the repo
-and your portfolio.**
+This is the audit file: it ranks every concept by how much it *matters* against
+two facts — what this repo exercises, and what your reincodes portfolio already
+covers. The verdict drives the order: drill what's absent from *both* first
+(highest leverage), reinforce what the repo exercises but you've only seen
+shallowly second, and skip re-grinding what you've already built from scratch.
 
 ```
-  Zoom out — the practice map, three tiers
+  Zoom out — the two filters that rank every drill
 
-  ┌─ TIER 1: exercised here, you own it ─────────────────┐
-  │  Map/Set, cosine-over-arrays, sliding-window chunker, │ ← reinforce,
-  │  top-k selection, graph traversal (HNSW family)       │   don't re-learn
-  └───────────────────────────┬──────────────────────────┘
-                              │
-  ┌─ TIER 2: adjacent, half-built ───────────────────────┐
-  │  heap-for-top-k (built the heap, repo uses sort),     │ ← close the
-  │  quickselect (built quicksort, not the select variant)│   gap, small effort
-  └───────────────────────────┬──────────────────────────┘
-                              │
-  ┌─ TIER 3: absent from repo AND portfolio ─────────────┐
-  │  dynamic programming, backtracking, tries, union-find,│ ← deliberate
-  │  building HNSW from scratch, binary search in anger    │   practice targets
-  └───────────────────────────────────────────────────────┘
+  ┌─ filter 1: does buffr exercise it? ───────────────────────┐
+  │  exercised  → you've seen it applied, in real code         │
+  │  not yet    → foundation only, no repo anchor              │
+  └──────────────────────────┬─────────────────────────────────┘
+                             │  crossed with
+  ┌─ filter 2: have YOU built it (reincodes)? ─────────────────┐
+  │  built      → from scratch, IK curriculum                  │
+  │  gap        → never implemented                            │
+  └─────────────────────────────────────────────────────────────┘
+
+  highest leverage = (not yet exercised) ∧ (never built)
 ```
 
-Zoom in: this file ranks every concept from the guide by *consequence* — how
-load-bearing it is in the system — and by *gap size* — how far it is from what you
-already own. The question it answers: *if you have ten hours, where do they go?*
+Zoom in: the plan isn't "study all of DSA." It's "spend your reps where the
+return is highest" — which, given your strong graph/heap/BST/sorting base, means
+**tries, union-find, and real DP**, not another pass at BFS.
+
+---
 
 ## The structure pass
 
-Trace **one axis — "is this a reinforce or a fill-the-gap?" — across the
-concepts.**
+**Axis — leverage (return per hour of drilling).** Trace it across the topics and
+they sort into three clean bands: things you've built (low return on re-grinding),
+things the repo exercises that you should be able to *defend* (medium), and the
+true gaps (high). The whole map is that one axis applied.
 
-```
-  Axis = "do I already own this, or is it a gap?"
+**Seam — the "built vs gap" boundary.** The load-bearing seam: your reincodes
+work. It splits the topic list into "reinforce/defend" (built) and "drill from
+zero" (gap). Crossing it is the difference between a confidence pass and new
+learning.
 
-  ┌─ exercised + owned ─────────────────────┐
-  │ graph traversal, Map/Set, sort+slice     │  REINFORCE — anchor new
-  │                                          │  learning to repo evidence
-  └──────────────────────┬───────────────────┘
-                         │  seam: have-the-piece vs missing-it
-  ┌─ half-built ──────────▼────────────────┐
-  │ heap-for-top-k, quickselect             │  CONNECT — you built the
-  │                                          │  component, wire it in
-  └──────────────────────┬───────────────────┘
-                         │  seam: adjacent vs net-new
-  ┌─ net-new ─────────────▼────────────────┐
-  │ DP, backtracking, tries, union-find      │  BUILD — absent everywhere,
-  │                                          │  needs a from-scratch drill
-  └──────────────────────────────────────────┘
-```
-
-The load-bearing **seam**: between "half-built" (you own the component, the repo
-just doesn't wire it) and "net-new" (absent from repo *and* your portfolio). The
-first kind closes in an afternoon — swap a sort for your heap. The second kind is
-real curriculum work — a from-scratch build with a visualizer. Sorting your hours
-by which side of that seam a concept sits on is the entire plan.
+---
 
 ## How it works
 
-### Move 1 — the ranking
-
-The plan is ranked, not a flat list. Top items are highest leverage: either
-load-bearing in the system *or* the biggest gap from your portfolio.
+### The ranked plan
 
 ```
-  The ranked practice map — exercised first, gaps second
+  the practice map — ranked by leverage (high → low)
 
-  RANK  CONCEPT                  STATUS          LEVERAGE   FILE
-  ──────────────────────────────────────────────────────────────
-  1  graph traversal / HNSW    exercised, owned  HIGHEST    05
-       └ the system's hot path; you own the family — reinforce
-  2  top-k: heap vs sort        half-built        HIGH       03,06
-       └ built the heap, repo sorts — connect in an afternoon
-  3  cosine over arrays         exercised, owned  HIGH       02
-       └ the one hand-written math; solid, just internalize
-  4  Map/Set + complexity       exercised, owned  MEDIUM     01,02
-       └ workhorse; reinforce amortized-O(1) reasoning
-  5  quickselect                half-built        MEDIUM     06
-       └ built quicksort, not the select variant — small build
-  6  dynamic programming        ABSENT everywhere HIGH(gap)  07
-       └ thin in portfolio AND repo — real curriculum target
-  7  backtracking               ABSENT everywhere MEDIUM(gap)07
-       └ did state-space BFS, not undo-based search
-  8  tries / prefix structures  ABSENT everywhere MEDIUM(gap)04
-       └ absent from buffr and reincodes — distinct mental model
-  9  binary search in anger     ABSENT in buffr   LOW(gap)   06
-       └ verify it's solid in reincodes; trivial to re-prove
-  10 building HNSW from scratch ABSENT (rented)   STRETCH    05
-       └ the deepest drill: own the graph you currently rent
+  ┌─ BAND A: DRILL FROM ZERO (not built, not exercised) ★★★ ─────┐
+  │  1. dynamic programming    (file 07)  biggest interview gap    │
+  │  2. union-find             (file 05)  near-O(1) components     │
+  │  3. trie / prefix tree     (file 04)  memory-ids are prefixes  │
+  │  4. backtracking explicit  (file 07)  DFS + make/undo          │
+  │  5. binary search (impl)   (file 06)  the off-by-one reps      │
+  └───────────────────────────────────────────────────────────────┘
+  ┌─ BAND B: DEFEND WHAT THE REPO EXERCISES ★★ ──────────────────┐
+  │  6. ANN / HNSW as a graph  (file 05)  the headline — defend it │
+  │  7. top-k: sort+slice vs   (file 06)  the repo's two paths     │
+  │     heap vs ANN            (file 03)                            │
+  │  8. cosine + vectors       (file 02)  the retrieval substrate  │
+  │  9. B-tree vs HNSW index   (file 04)  why two indexes          │
+  └───────────────────────────────────────────────────────────────┘
+  ┌─ BAND C: REINFORCE (built; light touch) ★ ───────────────────┐
+  │  10. BFS / DFS             (Graph.ts)   keep warm              │
+  │  11. heaps / priority queue (BinaryHeap) wire to top-k         │
+  │  12. BST traversals        (BST.ts)     keep warm              │
+  │  13. sorting (5)           (Sorting/)   keep warm              │
+  └───────────────────────────────────────────────────────────────┘
 ```
 
-### Move 2 — the plan, tier by tier
+### Band A — drill from zero (the real gaps)
 
-**Tier 1 — reinforce what the repo proves you own.**
-Graph traversal, Map/Set, cosine-over-arrays, sort+slice top-k. Bridge: these are
-already in your hands — the repo is *evidence*, not a lesson. The move here isn't
-to re-learn; it's to be able to point at `src/pg-vector-store.ts:74` and say "this
-is greedy graph search, same family as my BFS." Where it breaks: don't spend your
-ten hours here — you'd be polishing what already shines.
+These are absent from buffr **and** from your reincodes portfolio. Highest
+return per rep.
 
-```
-  Tier 1 — anchor, don't re-learn
+**1. Dynamic programming (file 07).** The biggest gap and the highest interview
+ceiling. You have recursion (`Tree.ts`) and hash maps (file 02) — DP is exactly
+those two composed. Drill the canonical set: fib-memo, coin change, edit
+distance, longest-increasing-subsequence, 0/1 knapsack. The knapsack one connects
+to buffr's `maxTokens: 8192` budget (`session.ts:46`) — token-budget chunking is
+knapsack-shaped. Build a visualizer of the DP table filling, the way you
+visualized the sorts; that's how it becomes real for you.
 
-  reincodes Graph.ts BFS  ──maps to──►  pgvector HNSW walk (file 05)
-  reincodes Sorting/      ──maps to──►  in-mem sort+slice (file 06)
-  the work: articulate the mapping, not rebuild the piece
-```
+**2. Union-find / disjoint-set (file 05).** Near-O(1) "are these in the same
+component?" with union-by-rank + path compression. Your `Graph.ts`
+`numberOfConnectedComponents` solves the same problem the O(V+E) traversal way —
+union-find is the upgrade. Small to implement, high recognition value.
 
-**Tier 2 — connect the components you've already built.**
-The heap-for-top-k and quickselect. Bridge: you built `BinaryHeap.ts` and
-quicksort; the repo just doesn't use them. The move is a concrete, small wire-in.
-Where it breaks: this is the *highest ROI* tier — you get a real complexity story
-(`O(n log n)` → `O(n log k)`) for an afternoon's work, and it's the kind of change
-that demonstrates judgment in an interview.
+**3. Trie / prefix tree (file 04).** The one gap with a real repo hook: buffr's
+memory ids are `"memory:<conv>:<n>"` (`session.ts:53`) — a prefix-structured key
+space. Build a trie, then notice Postgres' `LIKE 'memory:c1:%'` is the same
+prefix scan over a B-tree.
 
-```
-  Tier 2 — the afternoon wins
+**4. Explicit backtracking (file 07).** You have the cousin in `PG.ts`
+(state-space search). Make the make/undo explicit: N-queens, subsets,
+permutations, sudoku. The `undo()` is the rep that matters.
 
-  EXERCISE: replace in-mem store's hits.sort().slice(0,k)
-            with a size-k min-heap (copy BinaryHeap.ts)
-  Done when: same top-k results, O(n log k), a benchmark showing
-             the crossover where the heap wins at large n
-  Effort: ~half a day. Highest leverage per hour in this map.
-```
+**5. Binary search, hand-implemented (file 06).** You've used it inside
+`BinarySearchTree.ts` navigation but not written the bare algorithm with its
+off-by-one boundary reps. Drill the variants: exact, lower-bound, upper-bound,
+rotated array. Cheap, high-frequency in interviews.
 
-**Tier 3 — build the net-new fundamentals.**
-DP, backtracking, tries, union-find — absent from both buffr and your portfolio.
-Bridge: there's no component to wire here; these need from-scratch builds. The
-move is one focused drill each, in the format that makes things real for you —
-build it, visualize it. Where it breaks: DP ranks highest because `me.md` flags it
-as thin in your portfolio *and* it's the most common senior-interview gap. Tries
-and union-find are real but lower-frequency.
+### Band B — defend what the repo exercises
 
-```
-  Tier 3 — the curriculum builds (ranked)
+You can't *build* these as fresh drills (they're delegated to Postgres/aptkit),
+but you must be able to *defend* them cold — they're your repo's story.
 
-  1. DP: edit distance OR LCS, bottom-up table + visualizer  ← highest
-  2. backtracking: N-queens or Sudoku, choose/recurse/undo
-  3. trie: autocomplete over chunk text (could even land in buffr)
-  4. union-find: connected components (your PG.ts could use it)
-       │
-       └─ each is a from-scratch build, the format that makes it real for you
-```
+**6. ANN / HNSW as a graph (file 05).** The headline. Be able to say "it's BFS's
+frontier-and-visited skeleton, turned greedy, stopping at a local minimum for
+~O(log N) — approximate, and the eval's recall is the price." That sentence is
+the interview money shot for this repo.
 
-### Move 2.5 — the stretch: own the algorithm you rent
+**7. Top-k: sort+slice vs heap vs ANN (files 03, 06).** Walk the ladder:
+in-memory full sort (`in-memory-vector-store.ts:31`), size-k heap (your
+`BinaryHeap.ts`), ANN (`pg-vector-store.ts:74`). Naming all three rungs is the
+selection-vs-sorting signal.
 
-The deepest drill in the map: build a small HNSW (or even a brute-force-then-
-navigable-graph) from scratch in TypeScript. Right now buffr *rents* the most
-important algorithm in the system from pgvector's C extension. Building a toy
-version — nodes, proximity edges, greedy layered walk — would convert "I use a
-vector index" into "I understand and have built approximate nearest neighbor."
+**8. Cosine similarity + vectors (file 02).** `1 - (embedding <=> $1)` —
+distance vs similarity, the 768-dim contract, why `assertDim` throws. The
+substrate everything rides on.
 
-```
-  Phase A (now): rent it          Phase B (stretch): own it
+**9. B-tree vs HNSW — two indexes, two query shapes (file 04).** Why `where
+app_id` rides a B-tree and `order by <=>` rides HNSW, and why no single index does
+both.
 
-  pgvector HNSW, invisible    →   hand-built navigable graph in TS
-  "I call order by <=>"           "I built the greedy layered walk"
-       │                               │
-  uses your graph skills          PROVES your graph skills, end to end
-  indirectly                      with a visualizer (your format)
-```
+### Band C — reinforce (already built)
 
-This is the single drill that would most strengthen the story your portfolio
-already tells — it sits directly on top of your `Graph.ts` and `PriorityQueue.ts`.
+`Graph.ts` (BFS/DFS), `BinaryHeap.ts`/`PriorityQueue.ts`, `BinarySearchTree.ts`,
+the five sorts. You built these from scratch via IK. Don't re-grind — keep them
+warm with occasional reps and, more usefully, *wire them to the repo*: the heap
+to top-k (file 03), BFS's skeleton to the HNSW walk (file 05). The value now is
+connecting what you built to what the repo runs, not rebuilding.
 
 ### Move 3 — the principle
 
-**Spend hours where leverage is highest: connect half-built components first
-(cheap, high signal), then build net-new fundamentals the repo can't teach you.**
-Don't re-learn what the repo already proves you own. The map's whole job is to
-stop you polishing Tier 1 when Tiers 2 and 3 are where the growth is.
+Drill against the gap, not the strength. Your base (graphs, heaps, BSTs, sorting)
+is strong and the repo leans on it — so the leverage is in the three absences
+(DP, union-find, trie) plus the ability to *defend* the repo's delegated
+algorithms (HNSW, top-k) in the same vocabulary you built the foundations with.
+
+---
 
 ## Primary diagram
 
-The complete map: every concept, its status, and the recommended action.
+The whole map in one frame — the two filters and the three bands.
 
 ```
-  The full practice map — recap
+  practice map — built × exercised, ranked by leverage
 
-  EXERCISED + OWNED (reinforce)         HALF-BUILT (connect — best ROI)
-  ┌──────────────────────────┐          ┌──────────────────────────┐
-  │ HNSW graph walk    (05)  │          │ heap-for-top-k    (03,06)│
-  │ cosine over arrays (02)  │          │ quickselect       (06)   │
-  │ Map / Set          (02)  │          └──────────────────────────┘
-  │ sort+slice top-k   (06)  │                     │
-  │ complexity models  (01)  │                     ▼
-  └──────────────────────────┘          NET-NEW (build — curriculum gaps)
-                                         ┌──────────────────────────┐
-  STRETCH (own what you rent)            │ dynamic programming (07) │ ★ highest
-  ┌──────────────────────────┐          │ backtracking        (07) │
-  │ build HNSW from scratch  │          │ tries               (04) │
-  │ (05) — caps the story    │          │ union-find          (05) │
-  └──────────────────────────┘          │ binary search       (06) │
-                                         └──────────────────────────┘
+                    │ exercised in buffr        │ not exercised
+  ──────────────────┼───────────────────────────┼──────────────────────
+  built (reincodes) │ BAND C: reinforce/wire    │ Band C-ish: keep warm
+                    │  BFS/DFS, heaps→top-k,     │  (heaps, BST exist;
+                    │  sorts, BST                │   no repo anchor)
+  ──────────────────┼───────────────────────────┼──────────────────────
+  gap (never built) │ BAND B: DEFEND            │ BAND A: DRILL ★★★
+                    │  HNSW, cosine, B-tree,     │  DP, union-find, trie,
+                    │  top-k ladder              │  backtracking, binary search
+  ──────────────────┴───────────────────────────┴──────────────────────
+
+  spend reps bottom-right (drill), be fluent bottom-left (defend),
+  keep top warm (reinforce)
 ```
 
-## Implementation in codebase
-
-**Use cases.** This map is reached for when you plan study time, prep for an
-interview that will probe DSA, or decide what to build next on top of buffr. Each
-ranked item ties to a real `file:line` in the repo (or an honest "absent").
-
-```
-  The evidence behind each rank — where to look
-
-  graph traversal   src/pg-vector-store.ts:74  + sql/001_agents_schema.sql:28
-  heap vs sort      @aptkit/retrieval in-memory-vector-store.js (hits.sort)
-  cosine math       @aptkit/retrieval in-memory-vector-store.js (cosineSimilarity)
-  Map / Set         in-memory store (new Map) + src/cli/eval-cmd.ts:26 (new Set)
-  quickselect       — absent; reincodes quicksort is the starting point
-  DP / backtracking — absent everywhere (the file-07 finding)
-  tries / union-find— absent everywhere (file-04 / file-05 findings)
-```
-
-```
-  Tier-2 exercise target — the exact line to change
-
-  @aptkit/retrieval in-memory-vector-store.js  (search)
-
-  hits.sort((a, b) => b.score - a.score);   ← REPLACE this O(n log n)
-  return hits.slice(0, Math.max(0, k));      ← with a size-k min-heap
-       │
-       └─ (note: this lives in the library, not buffr — so the realistic
-          exercise is a standalone reimplementation in your own repo using
-          BinaryHeap.ts, proving the O(n log k) crossover, not editing aptkit
-          which buffr's constraints forbid touching)
-```
+---
 
 ## Elaborate
 
-The framing this map uses — exercised vs half-built vs net-new — comes straight
-from `me.md`'s honest portfolio accounting: you're strong on graphs, heaps, BSTs,
-sorting, and recursion-with-memoization; thinner on DP-beyond-memoization,
-backtracking, tries, union-find, segment trees. buffr happens to exercise exactly
-the strong half (graphs, top-k, hashing) and none of the thin half — which is why
-this guide can *reinforce* the first and only *teach* the second.
+The discipline here is the same one your IK curriculum already taught you:
+methodical, foundation-first, build-to-understand. The shift for the AI-
+engineering pivot is *what* to drill — the retrieval stack (HNSW, top-k, cosine)
+is a graph-and-selection story you can tell in DSA vocabulary you already own,
+which is a strong interview position. The genuine new learning is the Band A set,
+and the reason it's worth deliberate practice is leverage: DP and union-find and
+tries show up across hundreds of problems, and you've built none of them. Pair
+each with a visualizer the way you did the sorts — that's how the fundamental
+becomes real for you (me.md's hands-on loop), and it doubles as portfolio.
 
-The strategic read: buffr is a system-design and AI-engineering artifact, not a
-DSA showcase. Its DSA value is (1) proving you can recognize the graph/heap/hash
-fundamentals inside a production retrieval path, and (2) making the gaps visible.
-Use `study-database-systems` and `study-ai-engineering` as the primary homes for
-buffr's real depth; use *this* guide to anchor DSA vocabulary and to sequence the
-fundamentals the repo can't teach you.
+---
 
 ## Interview defense
 
-**Q: This repo is mostly a thin wrapper. What DSA does it actually demonstrate?**
+**Q: This repo barely writes DSA — its retrieval is one SQL line. So what DSA do
+you actually know?**
 
 ```
-  the honest answer — recognition, not reinvention
-
-  exercised: graph search (HNSW), top-k selection, hashing, cosine math
-  the skill it proves: spotting fundamentals inside a production path,
-                       not hand-rolling them
+  delegated ≠ unknown. I can decompose the one SQL line into:
+   - HNSW = navigable-small-world GRAPH, greedy walk (BFS skeleton, approx)
+   - order by <=> limit k = TOP-K SELECTION (sort+slice / heap / ANN ladder)
+   - 1 - distance = COSINE on 768-d VECTORS
+   - where app_id = B-TREE index
+  and I built the harder versions by hand — Dijkstra, BinaryHeap, BST, 5 sorts.
 ```
 
-Answer: "Recognition. The headline algorithm is approximate nearest neighbor over
-a navigable small-world graph — that's graph traversal, the family I built BFS,
-DFS, and Dijkstra in. Top-k is a selection problem, hashing backs the store, and
-cosine is the one hand-written piece of math. What the repo proves isn't that I
-reinvent these — it's that I see them inside a real system and know the tradeoffs,
-like recognizing the in-memory sort should be a heap." Anchor:
-`src/pg-vector-store.ts:74`.
+The repo *delegates* the algorithm to Postgres, but I can take that one SQL line
+apart into the graph walk, the selection, the vector math, and the index — and I
+implemented the foundations those rest on from scratch. Delegation is an
+architecture choice, not a knowledge gap. Naming the decomposition *and* the
+hand-built foundations is the answer.
 
-**Q: Where would you invest to strengthen the DSA story?**
+**Q: What would you drill next and why?**
 
-Answer: "Three moves, ranked. One: wire my `BinaryHeap` into a top-k
-reimplementation — afternoon's work, real `O(n log n)` → `O(n log k)` story. Two:
-build a DP classic with a visualizer — it's the gap in both this repo and my
-portfolio. Three, the stretch: build a toy HNSW from scratch, so I *own* the
-algorithm buffr currently rents from pgvector. That last one sits directly on my
-existing `Graph.ts` and `PriorityQueue.ts`." Anchor: this map, ranks 2, 6, 10.
+```
+  highest leverage = absent from both repo AND portfolio:
+   DP (biggest ceiling) · union-find · trie · explicit backtracking
+  lowest = re-grinding BFS/heaps I already built from scratch
+```
 
-## Validate
+DP first — biggest interview ceiling and I have the parts (recursion + hash map)
+without having composed them. Then union-find and tries — small to build, high
+recognition. I wouldn't re-grind BFS or heaps; I built those from scratch, so the
+return is in defending how they map to the repo, not rebuilding them.
 
-1. **Reconstruct.** From memory, name the three tiers (exercised/owned,
-   half-built, net-new) and one concept in each.
-2. **Explain.** Why is "wire in the heap for top-k" the highest-ROI item, given
-   you already built `BinaryHeap.ts`? (Component exists; afternoon to connect; real
-   complexity story.)
-3. **Apply.** You have ten hours before a senior DSA interview. Allocate them
-   across the ranked map and justify each block.
-4. **Defend.** Argue why buffr's *thin* DSA surface is consistent with it being a
-   strong portfolio piece. (It's a system-design/AI artifact; its DSA value is
-   recognition inside a production path, plus making gaps visible.)
+**Anchor:** "Drill the gap, defend the delegated. The repo's retrieval is a
+graph-and-selection story I can tell in the same DSA vocabulary I built the
+foundations with — and the new reps are DP, union-find, and tries."
+
+---
 
 ## See also
 
-- `00-overview.md` — the repo-grounded map and the `not yet exercised` list.
-- `05-graphs-and-traversals.md` — rank-1 concept; the HNSW story.
-- `03-stacks-queues-deques-and-heaps.md` / `06-sorting-searching-and-selection.md`
-  — rank-2; the heap-vs-sort connect.
-- `07-recursion-backtracking-and-dynamic-programming.md` — rank-6/7; the net-new
-  curriculum gaps.
-- `study-ai-engineering` / `study-database-systems` — where buffr's real depth
-  lives; this guide is the DSA-vocabulary layer beneath them.
+- `00-overview.md` — the repo-grounded findings this plan ranks
+- `05-graphs-and-traversals.md` — the headline to defend (Band B) + union-find
+  (Band A)
+- `07-recursion-backtracking-and-dynamic-programming.md` — the top Band A drills
+- `03-stacks-queues-deques-and-heaps.md` — wiring your heap to top-k (Band B/C)

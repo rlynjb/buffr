@@ -1,52 +1,65 @@
-# B-tree, Hash, and Secondary Indexes
+# B-tree, HNSW, and secondary indexes
 
-**Industry name(s):** secondary indexes / ANN index (HNSW) / access methods · **Type:** Industry standard
+**Subtitle:** B-tree index / HNSW approximate-nearest-neighbor index / opclass selection — *Industry standard*
 
 ---
 
 ## Zoom out, then zoom in
 
-buffr has three index kinds doing three jobs: a B-tree on every primary key (exact lookup by id), a B-tree on `app_id` (filter), and the one that earns its keep — an **HNSW** graph index on the embedding column (approximate nearest-neighbor). This file is about why each exists and the one that's actually interesting.
+An index is a second data structure that lets the engine find rows without
+reading every page. This repo has exactly two: a B-tree on `chunks.app_id`, and
+an HNSW graph on `chunks.embedding`. They answer two completely different
+questions — equality vs nearness — and the HNSW one is the engine that makes
+sub-second retrieval possible.
 
 ```
-  Zoom out — where indexes sit
+  Zoom out — indexes sit between the planner and the heap
 
-  ┌─ Persistence ───────────────────────────────────────────────┐
-  │  search()  →  ORDER BY embedding <=> $1  LIMIT k             │
-  │  upsert()  →  INSERT … ON CONFLICT (id)                      │
-  └──────────────────────────┬──────────────────────────────────┘
-                             │  SQL
-  ┌─ Storage engine ─────────▼──────────────────────────────────┐
-  │  agents.chunks heap                                          │
-  │   ├─ PK btree(id) ............. exact lookup, ON CONFLICT     │
-  │   ├─ btree(app_id) ............ filter the search            │
-  │   └─ ★ HNSW(embedding vector_cosine_ops) ★ ... ANN search    │ ← we are here
-  └──────────────────────────────────────────────────────────────┘
+  ┌─ SQL / planner ─────────────────────────────────────┐
+  │  search(): WHERE app_id = $2  ORDER BY <=> $1 LIMIT k│
+  └──────────┬───────────────────────────┬───────────────┘
+             │ equality filter           │ nearness order
+  ┌─ ★ Indexes ★ ──────────────────────────────────────┐ ← THIS FILE
+  │  btree(app_id)              HNSW(embedding, cosine) │
+  └──────────┬───────────────────────────┬──────────────┘
+             ▼                            ▼
+  ┌─ Heap (agents.chunks pages) ───────────────────────┐
+  └────────────────────────────────────────────────────┘
 ```
 
-Zoom in: an index is a side structure that turns "scan everything" into "jump to it." The B-trees do the boring, essential work. The HNSW index is the one that makes RAG fast — and the one with a tradeoff most people miss: **it returns *approximate* neighbors, not exact ones.**
+Zoom in: the B-tree is the index you already know — sorted, balanced,
+O(log n) equality and range lookups. HNSW is the one worth your attention: a
+*navigable small-world graph* that finds approximate nearest neighbors in
+high-dimensional space without comparing every vector. The question: how does
+each find rows, what does each cost to maintain, and why is HNSW *approximate*
+on purpose?
 
 ---
 
 ## The structure pass
 
-Three indexes, one axis: *exact or approximate, and what does a lookup cost?*
+**Layers.** Two index kinds, one axis to separate them:
 
 ```
-  Axis = "is the answer exact, and what's the lookup cost?"
-
-  ┌─ PK btree(id) ───────────────┐   EXACT   · O(log n) · always correct
-  │  WHERE id = '<docId>#<idx>'  │
-  └──────────────────────────────┘
-  ┌─ btree(app_id) ──────────────┐   EXACT   · O(log n + matches) · filter
-  │  WHERE app_id = 'laptop'     │
-  └──────────────────────────────┘
-  ┌─ HNSW(embedding) ────────────┐   APPROX  · ~O(log n) · CAN MISS top-k
-  │  ORDER BY embedding <=> $1   │   ◄── the answer-correctness axis FLIPS here
-  └──────────────────────────────┘
+  ┌─ B-tree: chunks_app_id ──────────┐  answers "=" and "<,>"  (exact)
+  └──────────────────────────────────┘
+  ┌─ HNSW: chunks_embedding_hnsw ────┐  answers "nearest by cosine" (approx)
+  └──────────────────────────────────┘
 ```
 
-The seam is the third index. Across it the *correctness guarantee flips*: B-trees give you the exact row, every time. HNSW gives you *probably* the right neighbors — it trades a small recall loss for a massive speed gain over scanning every vector. **That flip is the most important thing to know about vector search**, and buffr accepts it without tuning the dial.
+**Axis — trace `guarantees` (exact vs approximate) across the two indexes.**
+*What does this index promise about its answer?*
+
+- B-tree promises **exactly the matching rows** — `app_id = 'laptop'` returns
+  every laptop chunk, no more, no fewer.
+- HNSW promises **approximately the k nearest** — it walks a graph and may miss
+  a true neighbor. You trade exactness for sub-linear time. This is the seam.
+
+**Seam — exact ↔ approximate, and it's invisible.** The B-tree side is exact and
+boring. The HNSW side is approximate and the recall depends on a runtime
+parameter (`ef_search`) the repo never sets. Cross this seam and "correct" stops
+meaning "complete." A reader who doesn't know which index answered can't reason
+about whether a missing chunk is a bug or just ANN recall.
 
 ---
 
@@ -54,206 +67,243 @@ The seam is the third index. Across it the *correctness guarantee flips*: B-tree
 
 ### Move 1 — the mental model
 
-You know how a B-tree is a sorted, balanced tree you binary-search down? HNSW isn't a tree — it's a **navigable small-world graph**: nodes are vectors, edges connect near-neighbors, and a search greedily hops toward the query through a layered graph, like skip-lists made of proximity.
+You've built a BST and a binary heap from scratch — you know how a tree turns
+O(n) search into O(log n) by halving the search space at each node. HNSW is the
+same trick lifted into vector space, but with a twist: instead of one tree it's
+a *layered graph* of shortcuts, and instead of "less / greater" the navigation
+rule is "which neighbor is closer to my target vector." You greedily hop toward
+the query, dropping down layers as you home in.
 
 ```
-  The pattern — HNSW greedy graph descent
+  HNSW — a navigable small-world graph (the shape)
 
-  layer 2 (sparse, long hops):   A ───────────► D
-                                 │              │
-  layer 1 (medium):              A ──► B ──────► D ──► E
-                                 │     │         │
-  layer 0 (dense, all nodes):    A─B─C─D─E─F─G─H─I─J…
-                                       ▲
-                         start high, hop greedily toward the query
-                         vector, descend a layer, repeat → land near
-                         the true neighbors (approximately)
+  layer 2:   ●─────────────────────●        few nodes, long hops
+                │                  │
+  layer 1:   ●──●────────●─────────●──●      more nodes, medium hops
+             │  │        │         │  │
+  layer 0:   ●─●─●─●─●─●─●─●─●─●─●─●─●─●      every node, short hops
+                         ▲
+                    query enters at top,
+                    greedily hops toward
+                    nearest, descends layers
 ```
 
-One sentence: **start at the top layer, greedily walk edges toward the query vector, drop down layers, and collect the closest nodes you land near.** It can miss the true #1 if the greedy path routes around it — that's the "approximate" in approximate-NN.
-
-### Move 2 — the load-bearing skeleton
-
-HNSW search has an irreducible kernel. Strip any part and it breaks:
+Compare the alternative — exact nearest-neighbor — which is just a linear scan:
+compare the query to *every* vector, keep the top k. Correct, but O(n) and
+paying the TOAST deref from `02` on every row.
 
 ```
-  HNSW search kernel (pseudocode)
-
-  input:  query_vector, k
-  start at entry_point on the TOP layer
-  for each layer from top down to 0:
-    while a closer neighbor exists among current node's edges:
-      move to the closest neighbor       // greedy hop
-  collect the ef closest nodes found at layer 0   // ef = search width
-  return the k closest of those
+  exact NN:   for each chunk: cosine(query, chunk) → keep top-k   O(n)
+  HNSW:       greedy graph walk from top layer down               sub-linear
 ```
 
-**The greedy hop — without it, no navigation.** The whole speed win is *not* visiting every node. Remove greediness (visit all) and you're back to an exact full scan.
+### Move 2 — walk the two indexes in this repo
 
-**The layers — without them, you start far away.** Upper sparse layers let you cover distance in few hops before refining. One flat layer means many small hops.
+**The B-tree on `app_id`.** Declared at `001_agents_schema.sql:30`:
 
-**`ef` (search width) — without enough of it, recall tanks.** `ef` is how many candidates you keep while descending layer 0. Bigger `ef` = more thorough = higher recall = slower. **This is `hnsw.ef_search`, and buffr never sets it** — it runs the pgvector default (40). That's the recall/latency dial, untouched.
-
-```
-  The recall/latency dial — ef_search
-
-  ef_search = 40  (default, buffr) ─── fast, ~good recall
-  ef_search = 100 ───────────────────► slower, higher recall
-  ef_search = 10  ◄─────────────────── faster, misses more
-
-  buffr sits at the default and never measures the exact baseline
+```sql
+create index if not exists chunks_app_id on agents.chunks (app_id);
 ```
 
-**Build-time params — `m` and `ef_construction` — shape the graph.** `m` = edges per node (graph density), `ef_construction` = how hard the build searches for good edges. Both are set at `CREATE INDEX` time. buffr's index (`sql/001_agents_schema.sql:28-29`) sets *neither* — pgvector defaults (`m=16`, `ef_construction=64`). Optional hardening, never applied.
+This serves the `where app_id = $2` filter in `search()` (`pg-vector-store.ts:74`).
+It's a standard Postgres B-tree: sorted keys, balanced, O(log n) to find all
+rows for `app_id='laptop'`. **What breaks without it:** the equality filter
+falls back to scanning every chunk to check `app_id`. In a single-app deploy
+where nearly every row is `'laptop'` anyway, this index earns little today — but
+it's the right call for the moment a second `app_id` shows up. Honest note: with
+one dominant value, the planner may *ignore* this index and scan anyway, because
+scanning is cheaper than index+heap when the filter isn't selective.
 
-**The opclass must match the operator — the load-bearing alignment.** The index is built `using hnsw (embedding vector_cosine_ops)`. The `vector_cosine_ops` opclass tells the index "distances here mean cosine." The query orders by `<=>` — the cosine-distance operator. **They are a matched pair.** Order by `<->` (L2) and the planner sees no cosine index for that operator → full sequential scan over every vector. Here's where it breaks silently: the query still *works*, just slowly, with no error.
+**The HNSW index on `embedding`.** The load-bearing one. Declared at
+`001_agents_schema.sql:28-29`:
+
+```sql
+create index if not exists chunks_embedding_hnsw
+  on agents.chunks using hnsw (embedding vector_cosine_ops);
+```
+
+Three parts, and each carries weight:
+
+- `using hnsw` — the access method. Builds the layered graph above. The
+  alternative pgvector method is `ivflat` (cluster-based); HNSW gives better
+  recall-vs-speed for this size of corpus and needs no training step.
+- `(embedding ...)` — the indexed column, the 768-dim vector.
+- `vector_cosine_ops` — **the operator class. This is the part that must align
+  with the query operator.** The opclass tells the index *which distance metric
+  its graph is organized around*. `vector_cosine_ops` ⇒ cosine. The query in
+  `search()` orders by `<=>`, the cosine-distance operator. They match, so the
+  planner uses the index. → walked in full in `04`.
 
 ```
-  Operator ↔ opclass alignment (the silent-failure trap)
+  HNSW build — the alignment that makes it usable
 
-  index:  hnsw (embedding vector_cosine_ops)   ← cosine
-  query:  ORDER BY embedding <=> $1            ← <=> = cosine   ✓ MATCH → index walk
-
-  if query used <->  (L2)                      ← mismatch       ✗ → seq scan, no error
-  if query used <#>  (inner product)           ← mismatch       ✗ → seq scan, no error
+  index built with:  vector_cosine_ops  (graph organized by COSINE)
+                              ║  must equal
+  query orders by:   embedding <=> $1    (<=> is COSINE distance)
+                              ║
+                       MATCH → planner uses HNSW
+                    MISMATCH → silent sequential scan (no error)
 ```
 
-### Move 2 (the B-trees) — the boring, essential ones
+**The write cost nobody sees.** Every `upsert()` (`pg-vector-store.ts:47`) that
+inserts a chunk also inserts that vector into the HNSW graph — finding its
+neighbors, wiring edges across layers. That's not free: HNSW inserts are more
+expensive than B-tree inserts because each one runs a partial graph search to
+place the node. **What breaks if you ignore this:** bulk-indexing a large corpus
+pays graph-construction cost per chunk; for buffr's single-device scale it's
+invisible, but it's the reason large pgvector loads sometimes build the index
+*after* the bulk insert, not during.
 
-**PK btree on `id` powers ON CONFLICT.** `upsert()`'s `ON CONFLICT (id) DO UPDATE` needs to find an existing row by `id` instantly — that's the primary-key B-tree doing an exact O(log n) lookup. Without it, every upsert would scan the heap to check for a duplicate.
+**The default parameters, untouched.** The index is created with no `m` or
+`ef_construction` (build-time graph density) and the query sets no `ef_search`
+(search-time candidate-list size). All defaults. `ef_search` is the recall dial:
+higher = more graph explored = better recall, slower. Since the repo never sets
+it, recall is whatever pgvector's default gives. → `not yet exercised`, below.
 
-**`btree(app_id)` filters the search.** `search()` has `WHERE app_id = $2`. With one app_id (`'laptop'`) on a laptop, this index earns little today — but it's the seam that makes multi-tenant search possible without rescanning. Honest read: **on a single-app database it's nearly dead weight; it's a forward bet on multi-app.**
+### Move 2.5 — current state vs future state (HNSW tuning)
+
+The index *exists and is aligned*; what's *not* exercised is tuning it.
+
+```
+  Phase A — now                    Phase B — when corpus / recall matters
+  ─────────────────────────────    ────────────────────────────────────
+  hnsw, default m/ef_construction  m, ef_construction tuned at build
+  no ef_search per query           SET hnsw.ef_search before search()
+  recall = pgvector default        recall measured via eval/queries.json
+  fine for single-device corpus    needed when recall@k regresses
+
+  what doesn't change: the opclass alignment, the <=> operator,
+  the search() SQL shape. Tuning is dials, not surgery.
+```
+
+The repo already has the measurement hook for Phase B: `eval/queries.json` plus
+the precision@k eval CLI (`src/cli/eval-cmd.ts`). That's where you'd *see* a
+recall regression before tuning `ef_search` to fix it.
 
 ### Move 3 — the principle
 
-Indexes turn scans into jumps, but the *kind* of index decides what you're promised. B-trees promise the exact row. ANN indexes like HNSW promise *probably the nearest* rows — fast, with a recall knob (`ef_search`) you tune against your latency budget. The trap unique to vector search: the index opclass and the query operator must agree, or you silently fall back to scanning everything.
+An index is a bet: you pay write cost and storage to buy read speed, and the
+bet only pays off if the query asks the question the index was built to answer.
+For B-tree that question is equality/range; for HNSW it's nearest-by-a-specific-
+metric — and "specific metric" is load-bearing. The opclass is the contract
+between how the index is *built* and how the query is *written*. Get them
+aligned and you get a sub-linear graph walk; get them crossed and you get a
+silent seq scan with the same answer and a latency cliff.
 
 ---
 
 ## Primary diagram
 
-Every index on `chunks`, what query reaches it, exact vs approximate.
+Both indexes, both query clauses, the alignment seam.
 
 ```
-  agents.chunks — three indexes, three jobs
+  agents.chunks — two indexes, two questions
 
-                    ┌─ agents.chunks heap ─┐
-                    │ (8KB pages of tuples)│
-                    └──────────┬───────────┘
-        ┌──────────────────────┼──────────────────────────┐
-        ▼                      ▼                           ▼
-  ┌─ PK btree(id) ─┐   ┌─ btree(app_id) ─┐   ┌─ HNSW(embedding,vector_cosine_ops)─┐
-  │ EXACT          │   │ EXACT filter    │   │ APPROXIMATE NN                      │
-  │ O(log n)       │   │ O(log n+match)  │   │ greedy graph walk, ef_search=40     │
-  │                │   │                 │   │ ★ <=> operator MUST match opclass ★ │
-  └───────┬────────┘   └────────┬────────┘   └──────────────┬──────────────────────┘
-          │                     │                           │
-   ON CONFLICT (id)      WHERE app_id=$2        ORDER BY embedding <=> $1 LIMIT k
-   (upsert dedup)        (search filter)        (the RAG retrieval hot path)
+  search() SQL (pg-vector-store.ts:70):
+    WHERE app_id = $2        ORDER BY embedding <=> $1::vector   LIMIT k
+         │                        │
+         ▼ equality               ▼ nearest-by-cosine
+  ┌─ B-tree ───────────┐   ┌─ HNSW ─────────────────────────────┐
+  │ chunks_app_id      │   │ chunks_embedding_hnsw              │
+  │ sorted keys        │   │ using hnsw (embedding              │
+  │ O(log n) exact     │   │   vector_cosine_ops) ◄── must align │
+  │ schema:30          │   │ approximate, sub-linear             │
+  └─────────┬──────────┘   │ schema:28-29                        │
+            │              └───────────────┬─────────────────────┘
+            ▼                              ▼
+  ┌─ Heap: agents.chunks pages (with TOASTed vectors) ──────────┐
+  └──────────────────────────────────────────────────────────────┘
 ```
-
----
-
-## Implementation in codebase
-
-**Use cases.** The HNSW index is hit on every `chat` turn and every `eval` query — it's the retrieval hot path, and it now also serves episodic-memory recall (memory chunks live in the same `chunks` table and are queried by the same `search_knowledge_base` tool). The PK btree is hit on every chunk upsert (dedup — including memory writes via `memory.remember`, `src/session.ts:67`) and every document upsert. The `app_id` btree is hit on every search filter.
-
-```
-  sql/001_agents_schema.sql  (lines 28–30)  — the indexes declared
-
-  create index if not exists chunks_embedding_hnsw
-    on agents.chunks using hnsw (embedding vector_cosine_ops);
-                                  └─ opclass: cosine. MUST pair with <=>.
-                                     No (m=…, ef_construction=…) → defaults.
-  create index if not exists chunks_app_id on agents.chunks (app_id);
-                                  └─ btree filter. Near-idle with one app_id;
-                                     a forward bet on multi-tenant search.
-```
-
-```
-  src/pg-vector-store.ts  (lines 73–75)  — the query that MUST match
-
-  from agents.chunks
-  where app_id = $2                       ← uses btree(app_id)
-  order by embedding <=> $1::vector       ← uses HNSW … IF operator matches opclass
-  limit $3
-       │
-       └─ <=> is cosine distance — it pairs with vector_cosine_ops on line 29.
-          Change this to <-> and the index is bypassed: same result, full scan,
-          no error. This single operator is the alignment the index lives or
-          dies on.
-```
-
-```
-  src/pg-vector-store.ts  (lines 48–54)  — ON CONFLICT rides the PK btree
-
-  insert into agents.chunks (id, …) values ($1, …)
-  on conflict (id) do update set …       ← PK btree(id) finds the dup in O(log n)
-       │
-       └─ re-indexing a document re-upserts every chunk by its stable id
-          ("<docId>#<index>"). Without the PK btree, each upsert would
-          heap-scan to detect the conflict.
-```
-
-The `vector_cosine_ops` ↔ `<=>` pairing is also annotated in the code itself — `src/pg-vector-store.ts:69` carries the comment `// <=> is cosine DISTANCE; cosine similarity score = 1 - distance.`
 
 ---
 
 ## Elaborate
 
-HNSW (Hierarchical Navigable Small World, Malkov & Yashunin 2016) won over the older IVFFlat approach for most workloads because it has no "training" step and degrades gracefully — you can insert into it incrementally, which matches buffr's "index a doc, search immediately" loop. IVFFlat partitions vectors into lists and needs a representative sample to build the lists; HNSW just adds nodes to the graph. pgvector ships both; buffr chose HNSW (the better default for read-heavy, incremental-write RAG).
+HNSW (Hierarchical Navigable Small World, Malkov & Yashunin 2016) is the
+default high-recall ANN index in pgvector because it needs no training phase
+(unlike IVFFlat, which clusters first) and degrades gracefully — more search
+effort buys more recall on the same graph. The opclass concept it rides on is
+pure Postgres: an *operator class* binds a data type to a set of operators and
+support functions an index can use. `vector_cosine_ops`, `vector_l2_ops`, and
+`vector_ip_ops` are three opclasses pgvector ships, one per distance metric, and
+choosing one at `create index` time locks the index to that metric. This is the
+same machinery that lets you build a `text_pattern_ops` B-tree for `LIKE`
+queries — opclasses are how Postgres makes indexes pluggable.
 
-The exact-vs-approximate tradeoff is the whole game in vector search. For RAG specifically, approximate is usually fine: you're feeding the top-k to an LLM that tolerates a slightly-off retrieval. But you only *know* it's fine if you measure recall against an exact baseline — which is exactly the gap `eval-cmd.ts` has (it scores P@1/R@3 on the approximate results, never comparing to an exact scan). Cross-link `study-performance-engineering` for the latency side of the `ef_search` dial; cross-link `study-ai-engineering` for what retrieval recall does to answer quality.
+---
 
-This is the same pgvector + HNSW pattern you shipped in AdvntrCue — buffr is the local-first restatement of it.
+## Project exercises
+
+This is a curriculum topic; here are build items anchored to this repo's files.
+
+### EX-IDX-1 — Prove the opclass alignment with EXPLAIN
+
+- **What to build:** an `EXPLAIN ANALYZE` harness around the `search()` query
+  that prints the chosen plan node.
+- **Why it earns its place:** the "HNSW is used" claim is currently *reasoned*
+  from the opclass, never *measured*. This closes the EXPLAIN-discipline gap.
+- **Files to touch:** a new `src/cli/explain-cmd.ts` issuing
+  `explain (analyze, buffers) select ... order by embedding <=> ...`.
+- **Done when:** the output shows an `Index Scan using chunks_embedding_hnsw`,
+  and swapping `<=>` for `<->` flips it to `Seq Scan` — proving the seam.
+- **Estimated effort:** 1-2 hours.
+
+### EX-IDX-2 — Measure recall vs `ef_search`
+
+- **What to build:** sweep `set hnsw.ef_search` over a few values and rerun the
+  precision@k eval.
+- **Why it earns its place:** turns the untuned recall dial into a measured
+  curve, using the eval set the repo already has.
+- **Files to touch:** `src/cli/eval-cmd.ts` (wrap the query in a `set
+  hnsw.ef_search = N` per run), `eval/queries.json` (labeled set).
+- **Done when:** you have a recall@k-vs-`ef_search` table and can name the knee.
+- **Estimated effort:** 2-3 hours.
 
 ---
 
 ## Interview defense
 
-**Q: What kind of index backs the vector search, and what does it actually guarantee?**
+**Q: Your HNSW index is built with `vector_cosine_ops`. Why does that matter to
+the query?**
 
-HNSW — a navigable small-world graph, not a tree. It does approximate nearest-neighbor: a greedy graph walk that can miss the true top-k. It trades exact correctness for ~log-time search. The recall knob is `ef_search` (search width); buffr runs the pgvector default and never tunes it.
-
-```
-  greedy graph walk → "probably the nearest" → not guaranteed exact
-       │
-  ef_search = recall dial (default 40, untuned)
-```
-
-Anchor: *"It's approximate by design — fast neighbors, not certain ones. The recall knob is ef_search."*
-
-**Q: What's the one line that would silently break vector search?**
-
-Changing the distance operator without rebuilding the index. The index is `vector_cosine_ops` and the query uses `<=>` (cosine). Switch the query to `<->` (L2) and the planner can't use the index — it full-scans every vector. No error, just slow.
+> Because the opclass is the contract between how the index is organized and how
+> the query measures distance. The graph is built around cosine; the query at
+> `pg-vector-store.ts:75` orders by `<=>`, which is cosine distance. They match,
+> so the planner uses the index. If I changed the query to `<->` (L2) without
+> rebuilding the index with `vector_l2_ops`, Postgres wouldn't error — it would
+> silently fall back to a sequential scan. Same answer, a latency cliff that
+> grows with the corpus.
 
 ```
-  index opclass  ─── must equal ───  query operator
-  vector_cosine_ops                  <=>
-       mismatch → silent seq scan
+  build:  vector_cosine_ops  ══ must equal ══  query: <=>
+  match → HNSW used  ·  mismatch → silent seq scan
 ```
 
-Anchor: *"Operator and opclass are a matched pair; mismatch them and you scan everything with no error."*
+> Anchor: the opclass and the operator have to name the *same* distance metric.
 
----
+**Q: HNSW is approximate. When is that a problem?**
 
-## Validate
+> When recall matters more than latency. HNSW walks a graph and can miss a true
+> nearest neighbor an exact scan would find — the recall depends on `ef_search`,
+> which this repo leaves at default. For buffr's retrieval, "approximately the 4
+> nearest" is the right call: sub-second beats perfect. The way you'd catch a
+> recall problem is the precision@k eval over `eval/queries.json`, then raise
+> `ef_search` if it regresses.
 
-1. **Reconstruct:** Draw the HNSW layered graph and trace a greedy descent. Where does it risk missing the true nearest neighbor?
-2. **Explain:** Why does `chunks_embedding_hnsw` (`sql/001_agents_schema.sql:28-29`) only help when the query uses `<=>`?
-3. **Apply:** Retrieval feels like it's missing relevant chunks. Which single index parameter would you raise first, and which file declares the index? (Hint: `ef_search`; index at `sql/001_agents_schema.sql:28`.)
-4. **Defend:** Someone wants exact nearest-neighbor "to be safe." For a RAG agent feeding an LLM, argue for keeping HNSW approximate.
+```
+  exact: every vector compared → true top-k, O(n)
+  HNSW:  graph walk, ef_search candidates → ~top-k, sub-linear
+```
+
+> Anchor: HNSW trades a small recall miss for sub-linear time; `ef_search` is
+> the dial and the eval set is how you watch it.
 
 ---
 
 ## See also
 
-- `02-records-pages-and-storage-layout.md` — the HNSW index's own copy of the vectors
-- `04-query-planning-and-execution.md` — how the planner chooses the index walk
-- `09-database-systems-red-flags-audit.md` — untuned ef_search ranked as a risk
-- `study-performance-engineering` — the latency side of the ef_search dial
-- `study-ai-engineering` — retrieval recall's effect on answer quality
-
----
-
-Updated: 2026-06-24 — `every ask` → `every chat turn`; noted the HNSW + PK btrees now also serve episodic-memory chunks written via `memory.remember` (`src/session.ts:67`), which share the same `chunks` table.
+- `04-query-planning-and-execution.md` — the planner's index-or-scan decision
+  and EXPLAIN.
+- `02-records-pages-and-storage-layout.md` — why scanning TOASTed vectors is the
+  costly alternative the index avoids.
+- `study-performance-engineering` — recall/latency tradeoff as a measured budget.

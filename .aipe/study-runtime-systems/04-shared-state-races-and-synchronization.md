@@ -1,336 +1,172 @@
-# 04 · Shared State, Races, and Synchronization
+# Shared State, Races, and Synchronization — why buffr is almost race-free
 
-**The pool as shared state, transactions, and `--test-concurrency=1`** · *Industry standard*
-
----
+**Industry name(s):** data races, interleaving, serialization, the busy-flag guard · **Type:** Industry standard
 
 ## Zoom out, then zoom in
 
-The single thread (`02`) means buffr has *no* JS-level data races — two
-functions never mutate the same object simultaneously, because two functions
-never run simultaneously. So where does synchronization live here? Two places:
-**Postgres transactions** (the database is the shared state, and `begin/commit`
-is the lock), and **`--test-concurrency=1`** (the test runner serializes file
-execution so they don't trample a shared database).
+Most race conditions need two things: shared mutable state, and two flows of control touching it at once. buffr has very little of either — one thread (no preemption mid-statement) and a UI that refuses to start a second turn while one is running. So this file is mostly the story of *why the races don't happen*, plus the one spot where genuine concurrency exists and how it stays safe by owning nothing.
 
 ```
-  Zoom out — where synchronization actually lives
+  Zoom out — where shared state could live
 
-  ┌─ JS runtime ─────────────────────────────────────────────────┐
-  │  single thread → NO data races on JS objects (free win)       │
+  ┌─ UI layer (chat.tsx) ─────────────────────────────────────────┐
+  │  React state: turns[], input, busy  ← single-thread, serial   │ ← guard lives here
   └───────────────────────────────┬───────────────────────────────┘
-                                  │ but state is shared HERE:
-  ┌─ Shared resource layer ───────▼──────────────────────────────┐
-  │  ★ ONE pg.Pool ★  ·  borrowed by store, agent, trace sink     │ ← here
+                                  │  busy flag gates the next turn
+  ┌─ Session layer (session.ts) ──▼───────────────────────────────┐
+  │  one conversation, one agent — reused, not mutated concurrently│
   └───────────────────────────────┬───────────────────────────────┘
-                                  │ real concurrency control:
-  ┌─ Storage layer ───────────────▼──────────────────────────────┐
-  │  Postgres: begin/commit transaction = the lock + atomicity    │
-  └───────────────────────────────────────────────────────────────┘
+                                  │  the ONE concurrent spot:
+  ┌─ Trace sink (parallel inserts) ▼──────────────────────────────┐
+  │  pending[]: append-only, never read until flush — race-free   │
+  └────────────────────────────────────────────────────────────────┘
 ```
 
-Zoom in: the concept is **shared mutable state and the mechanisms that make
-concurrent access safe**. buffr's shared state is the pool and the database;
-its synchronization is transactions plus a test-runner serialization flag.
-
----
+Zoom in: the question here is *what stops two writers from clobbering each other?* In a single-threaded I/O app the answer is usually "the runtime, for free" — but not always, and naming the two places it could go wrong is the lesson.
 
 ## Structure pass
 
-**Layers, by "what's shared and what guards it":**
+**Layers.** Three: **UI state** (React), **session state** (the held conversation/agent), **trace concurrency** (the parallel inserts).
+
+**Axis: state ownership — "who can write this, and can two writes interleave?"**
 
 ```
-  Layer            Shared thing            Guard
-  ───────────────  ──────────────────────  ──────────────────────────
-  JS objects       nothing concurrent      single thread (no guard needed)
-  pg.Pool          connection handles      pool internal queue (built-in)
-  Postgres rows    chunks / messages       transactions (begin/commit)
-  test database    one real reindb         --test-concurrency=1 (serialize files)
-```
-
-**Axis traced — "who can touch this at the same time, and is that safe?"**
-
-```
-  "is concurrent access to this safe?"
+  One axis — "can two writes interleave?" — traced down
 
   ┌──────────────────────────────────────────────┐
-  │ JS object  → only one toucher ever (1 thread) │  trivially safe
-  └──────────────────────────────────────────────┘
-      ┌──────────────────────────────────────────┐
-      │ pg.Pool    → many awaits share it; pool   │  ← safe: pool queues
-      │              hands out distinct clients    │     checkouts internally
-      └──────────────────────────────────────────┘
-          ┌──────────────────────────────────────┐
-          │ DB rows    → concurrent writers exist;│  ← safe ONLY inside a
-          │              transaction makes N writes│     transaction
-          │              atomic                    │
-          └──────────────────────────────────────┘
-              ┌──────────────────────────────────┐
-              │ test DB    → parallel test files  │  UNSAFE without the flag
-              │              would race deletes    │  → serialized to 1
-              └──────────────────────────────────┘
+  │ UI: setTurns / setBusy — one thread, serial   │  → NO interleave (guarded too)
+  └───────────────────────┬────────────────────────┘
+       ┌──────────────────────────────────────────┐
+       │ session: conversationId fixed; agent reused│  → NO concurrent mutation
+       └───────────────────────┬───────────────────┘
+            ┌─────────────────────────────────────┐
+            │ trace pending[]: N async inserts      │  → CONCURRENT, but append-only
+            └─────────────────────────────────────┘   so still safe
+
+  the only concurrency that exists shares nothing mutable-and-read
 ```
 
-The answer flips from "trivially safe" at the JS layer to "unsafe without
-explicit serialization" at the test-database layer. The repo's two real
-synchronization decisions sit at the bottom two rows.
-
-**Seams:**
-
-- **`pool.query` ↔ `pool.connect`.** A direct `pool.query` borrows a client for
-  one statement and returns it — fine for a single read. `pool.connect` borrows
-  a *dedicated* client you hold across multiple statements — required when those
-  statements must share a transaction. The seam is "do these statements need to
-  be atomic together?"
-- **parallel test files ↔ shared database.** `--test-concurrency=1` is the lock
-  that makes this seam safe.
-
----
+**The seam: the `busy` flag in the chat UI.** On one side, a turn is in flight and the input box is gone; on the other, the UI is idle and accepting. That flag is the synchronization primitive that turns a UI that *could* fire overlapping `ask()` calls into one that can't.
 
 ## How it works
 
 ### Move 1 — the mental model
 
-You know how `useState` is safe in React because only the main thread ever sets
-it — no two handlers fight over it? buffr's JS state is the same: one thread,
-no contention. The contention that *does* exist is at the database, and a
-transaction is the tool that says "these writes happen all-or-nothing, and no
-one sees a half-finished version."
+You know the classic React bug where a user double-clicks "submit" and you fire two requests? The fix is a disabled/loading flag that ignores the second click until the first resolves. That *is* buffr's concurrency control. There's no mutex, no lock — just a boolean that says "a turn is running, don't start another."
 
 ```
-  Transaction as the unit of atomicity — the shape
+  The pattern — a busy flag serializes turns
 
-   begin ──► write chunk 1 ──► write chunk 2 ──► ... ──► commit
-     │                                                     │
-     └──── if ANY write throws ──► rollback ──────────────┘
-            (nobody ever sees a partial batch)
-
-   the begin/commit pair is the lock + the all-or-nothing guarantee
+  idle ──submit──► busy=true ──run ask()──► busy=false ──► idle
+   ▲                  │
+   │            submit while busy?
+   └──────── ignored (early return) ──────────────────────────
 ```
 
-### Move 2 — the synchronization mechanisms, one at a time
+### Move 2 — the walkthrough
 
-**The pool is shared, and that's by design.** `createPool` (`db.ts:4`) makes one
-`pg.Pool`. That single pool is passed into `PgVectorStore`, the trace sink,
-`indexDocumentRow`, `loadProfile` — everyone shares it. In `chat` it's shared
-across an extra dimension too: not just across borrowers *within* one run but
-across *every turn* of the session — `createChatSession` builds it once
-(`session.ts:39`) and every `ask()` reuses it. This is safe because the pool
-*itself* manages concurrent access: each `query`/`connect` checks out a distinct
-underlying client from its internal pool, and queues the request if none is free.
-You never see two callers on the same socket. → see `06` for the checkout/release
-lifecycle.
+**The busy flag is the whole synchronization story for turns.** In `chat.tsx`, `onSubmit` bails immediately if a turn is running, then sets `busy` for the duration:
 
-```
-  One pool, many borrowers — the pool's internal queue
-
-  store.search ──┐
-  trace write 1 ─┼──► pg.Pool ──► [client A][client B][client C]
-  trace write 2 ─┘       │              (handed out, one per checkout)
-                         └─ if all busy, the request waits in line
-```
-
-**Transactions in `upsert` — multi-statement atomicity.** When indexing, a
-document's chunks must all land or none — a half-indexed document gives the
-retriever a corrupt corpus. `PgVectorStore.upsert` (`pg-vector-store.ts:38`)
-checks out *one* dedicated client, runs `begin`, loops the inserts, `commit`s,
-and on any throw `rollback`s in the `catch`. The dedicated client is mandatory:
-a transaction lives on a single connection, so you can't `begin` on one pooled
-client and `insert` on another.
-
-```
-  upsert's transaction — atomic batch on one borrowed client
-
-  pool.connect ──► client ──► begin ──► insert ×N ──► commit ──► release
-                                 │                         ▲
-                                 └── catch → rollback ─────┘
-                                            (release still runs, finally)
+```ts
+// src/cli/chat.tsx:15-35
+const onSubmit = async (value: string): Promise<void> => {
+  const q = value.trim();
+  if (busy) return;                    // ← guard: refuse to overlap a running turn
+  // ...handle /exit, empty
+  setBusy(true);                       // ← claim the "lock"
+  try {
+    const answer = await session.ask(q);
+    setTurns((t) => [...t, { role: 'buffr', text: answer }]);
+  } catch (err) { /* push error turn */ }
+  finally {
+    setBusy(false);                    // ← release, always
+  }
+};
 ```
 
-**`runMigration` — the same shape, one SQL blob.** `migrate.ts:8` does the
-identical begin/try/commit/catch-rollback/finally-release dance, wrapping the
-whole schema script in one transaction so a failed migration leaves the schema
-untouched.
+Because there's only one thread and one user typing into one input, this guard is enough to guarantee `session.ask()` is never re-entered. The `finally { setBusy(false) }` mirrors the `finally { client.release() }` pattern from `01` — same shape, different resource: claim, use, always release. Note the render also *removes* the input box while busy (`src/cli/chat.tsx:48-56`), so there isn't even an input to submit into mid-turn — belt and suspenders.
 
-**`--test-concurrency=1` — serializing the shared test database.** This is the
-repo's clearest synchronization decision and it's not in the code — it's in
-`package.json`. The integration tests all point at one real `reindb`, and
-`supabase-trace-sink.test.ts:18` runs `delete from agents.conversations` in a
-`beforeEach`. If `node --test` ran files in parallel (its default), file A's
-`delete` could fire while file B's `insert` is mid-flight — a classic
-shared-resource race producing flaky, order-dependent failures. Forcing
-concurrency to 1 makes the test files run strictly one after another.
+**The React state updates are functional, which sidesteps stale-closure races.** Every `setTurns` uses the updater form:
 
-```
-  Why --test-concurrency=1 — the race it prevents
-
-  WITHOUT (parallel):           WITH (serial):
-  fileA: delete ──┐             fileA: delete → insert → assert ✓
-  fileB: insert ──┴► RACE       fileB:                    delete → insert ✓
-         assert ✗ (flaky)              one file fully finishes before next
+```ts
+// src/cli/chat.tsx:25, 29, 31
+setTurns((t) => [...t, { role: 'you', text: q }]);
 ```
 
-The kernel here: **the test runner's concurrency level is a lock on the shared
-database.** Drop the flag (or raise it) and the tests share state unsafely. The
-trade is wall-clock speed for determinism — the right call when correctness of a
-shared resource is the point. → `study-testing` owns the testing strategy; this
-file owns only the runtime-synchronization reason for the flag.
+Passing `(t) => [...t, …]` instead of `[...turns, …]` means React hands you the *latest* array, not the one captured when the closure was created. If two updates queued in the same tick (they don't here, but the pattern protects you), neither would clobber the other. This is the React-flavored version of "don't read-then-write shared state non-atomically."
+
+**The one genuinely concurrent place owns nothing mutable-and-shared.** The trace sink fires *N* inserts that run at the same time (→ `03`). The shared object is `pending[]` — but it's only ever *appended to* during `emit()` and only ever *read* once, in `flush()`, after the agent run is done:
+
+```ts
+// src/supabase-trace-sink.ts:87-93
+private push(p: Promise<void>): void { this.pending.push(p); }   // append only
+async flush(): Promise<void> { await Promise.all(this.pending); } // read once, at the end
+```
+
+There's no read-modify-write on `pending` interleaved with the inserts, and the inserts themselves write to *different rows* in Postgres (each is a fresh `INSERT`). So even though the inserts are concurrent, there's no shared mutable cell they fight over. The one ordering concern — "will rows land out of order?" — is solved not with a lock but by stamping `created_at` from the *event* timestamp, so replay order is deterministic regardless of which insert's socket settles first:
+
+```ts
+// src/supabase-trace-sink.ts:55-59 — order comes from the data, not the race
+const at = event.timestamp;
+// ...createdAt: at  → persisted into created_at (src/supabase-trace-sink.ts:26-30)
+```
+
+That's the clever bit: instead of synchronizing the writers, they made the *order independent of the writers*. The comment at `src/supabase-trace-sink.ts:46-48` says exactly this — "replay order matches emit order rather than the race between concurrent flush inserts."
+
+**The boundary condition: what would actually introduce a race.** Two things, neither present today. First, removing the `busy` guard would let overlapping `ask()` calls share the one `conversationId` and interleave their trace emits into the same conversation — messy, not corrupting, but wrong. Second, if `pending[]` were ever *read and cleared* mid-flight (e.g. a `flush` that spliced the array while `emit` appended), you'd get a lost-update race on the array. The current code dodges both by construction. → `07` notes that `pending[]` is also *unbounded*, a different problem (memory/backpressure, not correctness).
 
 ### Move 3 — the principle
 
-**Single-threaded JS gives you race-freedom for free *inside* the process; the
-races live wherever state is genuinely shared across concurrent actors — the
-database and the parallel test runner.** Reach for transactions when multiple
-writes must be atomic, and serialize when independent actors share one mutable
-resource. The synchronization isn't in your JS objects; it's at the boundaries
-where real concurrency leaks in.
-
----
+In a single-threaded async runtime, you don't get data races on individual statements — run-to-completion (→ `03`) guarantees no statement is interrupted mid-flight. What you *can* still get is *logical* races: two async flows touching the same state across `await` points. buffr defeats those two ways — serialize the flows (the busy flag) or make the shared state append-only and order-independent (the trace sink). Locks are the heavy tool; most app-level concurrency is solved with one of those two lighter moves.
 
 ## Primary diagram
 
 ```
-  Shared state and its guards — full picture
+  buffr — synchronization, all three layers
 
-  ┌─ JS thread (one) ─────────────────────────────────────────────┐
-  │  no shared mutable JS state across concurrent code → no locks  │
-  └───────────────────────────┬───────────────────────────────────┘
-                              │ shares one resource ▼
-  ┌─ pg.Pool (shared handle) ─────────────────────────────────────┐
-  │  internal queue hands out distinct clients, one per checkout   │
-  │   search → pool.query (1 stmt, autocommit)                     │
-  │   upsert → pool.connect → begin … commit (atomic batch)        │
-  └───────────────────────────┬───────────────────────────────────┘
-                              │ writes land in ▼
-  ┌─ Postgres (shared state) ─────────────────────────────────────┐
-  │  transactions = atomicity + isolation between writers          │
-  └───────────────────────────────────────────────────────────────┘
-
-  Test runtime:  node --test --test-concurrency=1
-                 serializes test FILES so they don't race the one reindb
+  ┌─ UI: chat.tsx ──────────────────────────────────────────────────────┐
+  │  busy=false ──submit──► busy=true ──► (input box hidden) ──► ask()    │
+  │      ▲                                                       │        │
+  │      └──────────── finally setBusy(false) ◄──────────────────┘        │
+  │  setTurns((t)=>...) functional updates — no stale-closure clobber     │
+  └───────────────────────────────┬──────────────────────────────────────┘
+                                  │ one ask() at a time
+  ┌─ Session: one conversationId, agent reused (no concurrent mutation) ──┐
+  └───────────────────────────────┬──────────────────────────────────────┘
+                                  │ during the run, trace emits fan out
+  ┌─ Trace sink: pending[] append-only ───────────────────────────────────┐
+  │  emit→push (append)   ×N concurrent inserts → different rows           │
+  │  flush→Promise.all (read once)   order from event.timestamp, not race  │
+  └────────────────────────────────────────────────────────────────────────┘
 ```
-
----
-
-## Implementation in codebase
-
-**Use cases.** Atomicity is reached for twice — batch chunk upsert and schema
-migration. Serialization is reached for once — the integration test suite
-against a shared database.
-
-**The transaction guard** (`src/pg-vector-store.ts`, lines 40–64):
-
-```
-  src/pg-vector-store.ts  (lines 40–64)
-
-  const client = await this.pool.connect();   ← borrow ONE dedicated client
-  try {
-    await client.query('begin');              ← open the transaction (the lock)
-    for (const c of chunks) {
-      await client.query(`insert into agents.chunks ... on conflict ...`);
-    }                                          ← N writes, all on the same client
-    await client.query('commit');             ← all-or-nothing: make them visible
-  } catch (err) {
-    await client.query('rollback');           ← any throw → undo the whole batch
-    throw err;
-  } finally {
-    client.release();                          ← return the client to the pool ALWAYS
-  }
-       │
-       └─ pool.connect (not pool.query) is load-bearing: a transaction lives on
-          ONE connection. begin on client X then insert on client Y would split
-          the transaction across connections and the begin would do nothing.
-          assertDim runs BEFORE this block (line 39) so a bad vector never even
-          opens a transaction.
-```
-
-**The serialization flag** (`package.json`, test script):
-
-```
-  package.json  (scripts.test)
-
-  "test": "npm run build && node --test --test-concurrency=1 dist/test/*.test.js"
-                                          ▲
-                                          └─ runs test FILES one at a time.
-       │
-       └─ the integration tests share one real reindb and delete rows in
-          beforeEach (supabase-trace-sink.test.ts:18). Concurrency 1 is the
-          lock that stops file A's delete racing file B's insert. Remove it and
-          the suite goes flaky and order-dependent.
-```
-
----
 
 ## Elaborate
 
-"Single-threaded means no locks in your code" is Node's biggest ergonomic win
-over thread-per-request servers (Java, Go) where you reason about mutexes,
-visibility, and memory ordering constantly. The cost is that all your real
-concurrency control is pushed to the boundary — the database — where you use the
-database's tools (transactions, isolation levels, row locks) instead.
-
-Transaction isolation levels (read-committed, repeatable-read, serializable) are
-the database-layer answer to "what can concurrent transactions see of each
-other." buffr uses Postgres defaults (read-committed) and never sets an
-isolation level — *not yet exercised*, and fine for single-user laptop use where
-concurrent writers are rare. `study-database-systems` owns the deep treatment of
-isolation; this file owns only the runtime fact that transactions are buffr's
-synchronization primitive.
-
-**Not yet exercised:** explicit locks, atomics, `SharedArrayBuffer`, channels,
-or any in-process synchronization primitive. There's nothing to synchronize
-in-process because the thread count is one.
-
----
+The reason "single-threaded means no races" is a *half*-truth worth understanding precisely: it's true for shared-memory data races (the kind `Atomics`/mutexes exist to prevent), because there's no preemption — your statement finishes before any other code runs. It's *false* for logical/interleaving races across `await` boundaries, because between `await x` and the next line, arbitrary other async work can run and mutate shared state. The canonical bug is a check-then-act split by an await (`if (!cache[k]) { await fetch(); cache[k] = … }` firing twice). buffr's busy flag is precisely a check-then-act guard, but it's safe because the check and the `setBusy(true)` happen synchronously *before* any await — no window to interleave. That's the detail that makes it correct, and it's the thing to point at in an interview. `Atomics`/`SharedArrayBuffer`/worker-thread synchronization are *not yet exercised* — they only become relevant once buffr has shared memory across threads, which it doesn't.
 
 ## Interview defense
 
-**Q: buffr is single-threaded. Does it have race conditions?**
+**Q: buffr is single-threaded — so it has no race conditions, right?**
+No — that's a half-truth. Single-threaded kills *shared-memory data races* (no statement is interrupted mid-flight). But *logical* races across `await` boundaries are still possible: two async flows can interleave around an await. buffr prevents them with the `busy` flag, and crucially the check-and-set happens synchronously before any await, so there's no interleave window.
 
 ```
-  where races can and can't happen
-
-  in-process JS  →  one thread  →  NO race (free)
-  the pg.Pool    →  pool queues checkouts  →  NO race (built-in)
-  DB rows        →  concurrent writers possible  →  race UNLESS in a transaction
-  test database  →  parallel files  →  RACE unless --test-concurrency=1
+  if (busy) return; setBusy(true);   ← both sync, no await between
+  ── await session.ask() ──          ← interleave only possible here, but
+                                        guard already claimed
 ```
+Anchor: *the guard is safe because check-then-claim is atomic w.r.t. the event loop.*
 
-Not in the JS — one thread can't race itself. The real concurrency is at the
-database (guarded by transactions) and in the test runner (guarded by forcing
-concurrency to 1). *Anchor:* single-threaded kills in-process races but pushes
-them to wherever state is genuinely shared.
+**Q: The trace sink fires N concurrent inserts — how is that not a race?**
+Because the shared state (`pending[]`) is append-only and read exactly once at flush, and the inserts write different rows. Ordering is solved without synchronization: `created_at` is stamped from `event.timestamp`, so replay order is the emit order regardless of which insert's socket settles first.
 
-**Q: Why does `upsert` use `pool.connect` but `search` uses `pool.query`?**
-`upsert` runs many inserts that must be one atomic transaction — a transaction
-lives on a single connection, so you need a dedicated client you hold across all
-of them. `search` is one statement; `pool.query` checks out, runs, and returns a
-client in one shot — no transaction needed. *Anchor:* `connect` when statements
-must share a transaction; `query` when one statement stands alone.
-
----
-
-## Validate
-
-1. **Reconstruct:** draw the begin/insert×N/commit/rollback/release skeleton from
-   `upsert` and name what breaks if you swap `pool.connect` for `pool.query`.
-2. **Explain:** why does `--test-concurrency=1` exist? Trace the exact race in
-   `supabase-trace-sink.test.ts:18` it prevents.
-3. **Apply:** you add a `reindex` command that deletes a document's chunks then
-   re-inserts them. Should that be one transaction? Which pool method?
-4. **Defend:** argue why buffr has zero in-process locks and why that's correct,
-   not a gap — then name the one change (local embedding via workers) that would
-   reintroduce in-process shared state.
-
----
+```
+  emit→append (write-only)   flush→Promise.all (read-once)
+  order from event.timestamp, NOT from insert completion order
+```
+Anchor: *make the order independent of the writers instead of synchronizing them.*
 
 ## See also
 
-- `02-processes-threads-and-tasks.md` — why one thread = no JS-level races
-- `06-filesystem-streams-and-resource-lifecycle.md` — the client checkout/release lifecycle
-- `study-database-systems` — transaction isolation levels (neighbor guide)
-- `study-testing` — the testing strategy behind the concurrency flag (neighbor guide)
-
----
-
-Updated: 2026-06-24 — noted the pool is now shared across every chat turn (built once in `session.ts:39`, reused per `ask()`), not just across borrowers within one run; transaction + test-concurrency findings unchanged.
+- `03-event-loop-and-async-io.md` — run-to-completion is why no statement interleaves
+- `07-backpressure-bounded-work-and-cancellation.md` — `pending[]` is safe but unbounded
+- `05-memory-stack-heap-gc-and-lifetimes.md` — the closures that hold this state alive across turns

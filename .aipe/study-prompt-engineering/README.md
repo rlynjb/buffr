@@ -1,91 +1,58 @@
-# Prompt engineering — buffr
+# Prompt Engineering — buffr-laptop
 
-How buffr's prompts get built. Not the 13-concept curriculum survey —
-this is an **audit** of one real system: a TypeScript laptop RAG agent
-that runs **Gemma 2 9B** through **Ollama**, with all the prompt
-machinery living in the consumed library `@rlynjb/aptkit-core`.
+> The prompt in this repo is **assembled across three owners** and you (buffr) own
+> only the first hop. Read that sentence again before you touch anything — most of
+> what looks like "buffr's prompt behavior" is decided in `@rlynjb/aptkit-core`,
+> and the load-bearing piece (tool calling) is *emulated in text* because Gemma 2
+> 9B has no native tool API.
 
-I've shipped RAG search features before. The interesting thing about
-buffr isn't that it does RAG — it's that it does RAG on a **stock open
-model with no native tool-calling API**, on a laptop, and the prompts
-have to carry weight that a frontier model's built-in machinery would
-carry for free. Every concept below is grounded in `file:line` across
-buffr and aptkit-core. Where buffr doesn't exercise a prompt-engineering
-concept, the audit says **not yet exercised** plainly.
+This guide is **audit-style** (the two-pass shape from `me.md`):
+
+- **Pass 1 — `audit.md`.** Walks all 13 prompt-engineering concepts from the spec
+  against this repo's actual code, with `file:line` grounding or an honest
+  *not yet exercised*. Start here.
+- **Pass 2 — pattern files.** One file per load-bearing prompt pattern this repo
+  actually exercises. Named after the pattern, not the lens.
+
+Written in a working-AI-engineer voice (production scars, demo-vs-prod
+discipline), calibrated to a reader who has shipped LLM apps (AdvntrCue, aipe)
+but is new to prompt engineering as a formal discipline.
 
 ---
 
 ## Reading order
 
-Two passes (per the audit-style shape in `me.md`).
+Operational discipline first, then the specific mechanisms.
 
-**Pass 1 — the audit.** One file. Walk every prompt-engineering lens
-against the real code. Start here.
+| # | File | One line |
+|---|------|----------|
+| — | [`00-overview.md`](00-overview.md) | The three-owner assembly in one diagram. Read first. |
+| — | [`audit.md`](audit.md) | All 13 concepts walked against this repo. The map. |
+| 01 | [`01-three-owner-prompt-assembly.md`](01-three-owner-prompt-assembly.md) | Who concatenates what, in what order, before Ollama sees a string. |
+| 02 | [`02-tool-call-emulation.md`](02-tool-call-emulation.md) | **The load-bearing one.** Stock Gemma has no tool API; tools are rendered as text and JSON is parsed back, with one retry gated on a `{`. |
+| 03 | [`03-profile-injection-as-personalization.md`](03-profile-injection-as-personalization.md) | `me.md` prepended to the system prompt = personalization with no extra call. |
+| 04 | [`04-grounding-and-citation-instruction.md`](04-grounding-and-citation-instruction.md) | "Cite the sources" works because the tool hands back pre-formatted `[docId]` citations the model copies. Citation is **unenforced**. |
+| 05 | [`05-bounded-synthesis-nudge.md`](05-bounded-synthesis-nudge.md) | The forced "now answer, no more tools" turn that stops the agent looping forever. |
+| 06 | [`06-structured-output-reprompt.md`](06-structured-output-reprompt.md) | Generate → parse → validate → retry-once with a strict JSON-only suffix. Built in aptkit, **not on buffr's hot path yet.** |
 
-- [`audit.md`](audit.md) — system-prompt design, grounding/citation,
-  context injection, tool-use prompting, structured output, instruction
-  following on a weak local model, token budgeting, few-shot, CoT,
-  self-critique, meta-prompting, injection defense, forbidden patterns.
-  Each lens: `file:line` or **not yet exercised**.
-
-**Pass 2 — discovered patterns.** One file per load-bearing prompt
-pattern buffr actually runs. Read after the audit.
-
-- [`00-overview.md`](00-overview.md) — the whole prompt, assembled in
-  one diagram. Where each piece comes from.
-- [`01-profile-injection-as-personalization.md`](01-profile-injection-as-personalization.md)
-  — the `me.md`-style profile prepended to the system prompt under a
-  heading. Standing context, not retrieval.
-- [`02-grounding-and-citation-instruction.md`](02-grounding-and-citation-instruction.md)
-  — the BASE_SYSTEM "search first, ground every answer, cite sources,
-  say so plainly if you don't know" contract.
-- [`03-tool-call-emulation-prompt.md`](03-tool-call-emulation-prompt.md)
-  — **the load-bearing one.** Gemma has no native tool API, so the
-  provider renders tools into the system text and demands a JSON tool
-  call. The retry nudge. The `{`-tell heuristic.
-- [`04-structured-output-reprompt.md`](04-structured-output-reprompt.md)
-  — generate → extract JSON → validate → retry once with a strict
-  JSON-only suffix. Fence-stripping. The courteous-markdown bug.
-- [`05-bounded-synthesis-nudge.md`](05-bounded-synthesis-nudge.md)
-  — the forced final turn: "You have NO more tool calls available. Now
-  answer, cite sources. Do not say you need more queries."
+Concepts the spec lists that this repo **does not yet exercise** (covered honestly
+in `audit.md`, not given their own file): few-shot prompting, prompt
+versioning/eval-of-prompts, chain-of-thought, self-critique, meta-prompting,
+prompt-injection defense, forbidden-patterns/rotation, output-mode-mismatch as a
+code-review discipline.
 
 ---
 
-## One-line concept index
+## Cross-links
 
-| File | Pattern | Anchor |
-|------|---------|--------|
-| `00-overview.md` | The full assembled prompt | `rag-query-agent.js`, `session.ts` |
-| `01-profile-injection-as-personalization.md` | Profile prepended to system prompt | `profile-injector.js:15`, `profile.ts:4` |
-| `02-grounding-and-citation-instruction.md` | BASE_SYSTEM grounding contract | `rag-query-agent.js:12` |
-| `03-tool-call-emulation-prompt.md` | Tools rendered as text + JSON demand | `gemma-provider.js:82` |
-| `04-structured-output-reprompt.md` | Validate + strict-suffix retry | `structured-generation.js:9` |
-| `05-bounded-synthesis-nudge.md` | Forced "now answer, cite" final turn | `run-agent-loop.js:17` |
-
----
-
-## Cross-links to neighbor guides
-
-These guides overlap with prompt engineering where mechanisms meet.
-Follow them when the boundary is the interesting part.
-
-- **`study-agent-architecture/`** — the *runtime* side of these prompts.
-  `05-emulated-tool-calling.md` is the same Gemma mechanism viewed as
-  an agent capability; `06-profile-as-standing-context.md` is the
-  injection viewed as memory; `03-agentic-retrieval.md` is the loop the
-  synthesis nudge terminates. Prompt engineering here is *what text we
-  send*; agent architecture is *the loop that sends it*.
-- **`study-security/`** — `03-indirect-prompt-injection-surface.md` is
-  the runtime-side of concept #12 (injection defense). The author-side
-  prompt defenses (or lack of them) are audited here; the trust-boundary
-  view is there.
-- **`study-ai-engineering/`** (sibling generator) — the production-serving
-  and eval discipline that wraps these prompts. When present, cross-link
-  its grounding/eval sections; this guide stays on *prompt text*.
-
----
-
-Updated: 2026-06-24 — Re-pointed `00-overview.md`'s anchor from the
-deleted `ask-cmd.ts` to `session.ts` (the agent is now assembled in
-`createChatSession`, driven by `chat.tsx`).
+- **`study-ai-engineering`** (sibling generator) — the RAG retrieval pipeline,
+  embeddings, precision@k evals, and the production-serving seam. Prompt
+  engineering is the *text* that rides that pipeline; AI-engineering is the
+  pipeline. The grounding-and-citation concept (04) and the structured-output
+  reprompt (06) hand off there.
+- **`study-agent-architecture`** (sibling generator) — the `runAgentLoop`
+  tool/synthesis/turn-budget machinery, agentic retrieval, and memory recall as
+  context. The bounded-synthesis nudge (05) and tool-call emulation (02) are the
+  *prompt surface* of patterns that file walks as *control flow*.
+- **`study-security`** — trust boundaries and the runtime-side defenses that
+  complement author-side prompt-injection defense (see `audit.md` §12).

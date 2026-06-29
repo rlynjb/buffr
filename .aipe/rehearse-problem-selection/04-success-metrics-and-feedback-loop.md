@@ -1,153 +1,218 @@
-# Chapter 4 — Success Metrics and the Feedback Loop
+# 04 — Success Metrics and Feedback Loop
 
-Everything so far justifies *starting* the project. This chapter justifies *finishing* it — by answering the question that turns a hobby into engineering: **how do you know it's good, and when are you done?** This is the line your own plan draws as the biggest separator in the whole field: *"Evals with numbers — precision@5, faithfulness, JSON validity rate. The biggest separator between 'played with an LLM' and 'does AI engineering.'"* A project without a success metric is someone tinkering. A project with a measured number and a decision rule attached to it is someone doing the job. The metric is what makes the *build* decision from Chapter 3 defensible instead of self-indulgent.
+A problem brief that can't say *how you'll know it worked* is a wish. This file names the
+observable outcomes, the gate that decides ship-vs-iterate, and the feedback loop that
+turns a finished build into a *decision made from evidence.* The single most important
+thing here: the metrics are **honest about what exists and what doesn't yet.** The eval
+*harness* and the *gate* are documented decisions; the actual *numbers* are produced by
+running the gate — and where a number doesn't exist yet, this file says so.
 
-```
-  THE FEEDBACK LOOP — measure, then decide from evidence
+## Zoom out — where success is measured
 
-  ┌─ BUILD ───────────────────────────────────────────────┐
-  │  index corpus → ask → retrieve → generate → persist   │
-  └────────────────────────┬───────────────────────────────┘
-                           │  run the ruler
-  ┌─ MEASURE ─────────────▼────────────────────────────────┐
-  │  precision@5  ·  recall@k  ·  faithfulness (rubric     │
-  │  judge, DIFFERENT model)  ·  JSON validity rate        │
-  └────────────────────────┬───────────────────────────────┘
-                           │  categorize the failures
-  ┌─ DECIDE (from evidence, not toward it) ───────▼─────────┐
-  │  ≥80% → ship                                           │
-  │  50–80% retrieval-bound → improve retrieval            │
-  │  50–80% model-bound → fallback chain / maybe fine-tune │
-  │  <50% → architecture problem; don't paper over w/      │
-  │         training                                       │
-  └────────────────────────────────────────────────────────┘
-```
-
-That loop is the chapter. The metric tells you where you are; the decision rule tells you what to do; the one-pager is the artifact that proves you closed the loop.
-
-## The headline metric: precision@5 as a gate
-
-  ┌─────────────────────────────────────────────────────────┐
-  │ THEY ASK                                                 │
-  │   "How do you know your agent is any good?"             │
-  │                                                         │
-  │ WHAT THEY'RE TESTING                                     │
-  │   Do you have a *number*, or just vibes? And is the      │
-  │   number a *gate* that blocks progress, or decoration    │
-  │   you report after the fact?                            │
-  └─────────────────────────────────────────────────────────┘
-
-The strong answer names a specific metric *and* the threshold you gated on. Your plan sets it: *"Build a 20-item eval set; require precision@5 ≥ 0.8 before Phase 3."*
-
-> "I measure retrieval with precision@5 against a labeled eval set, and I gated on it: precision@5 had to clear 0.8 before I let myself move from the API phase to agent integration. That's the key part — it's not a number I report at the end to look good, it's a *gate* that blocks the next phase. If retrieval can't surface the right chunks in the top 5 at least 80% of the time, there's no point wiring it into the agent, because a good model grounding on bad chunks still gives a bad answer. So 'how do I know it's good' isn't a feeling — it's a threshold that earns the right to keep building, and I built the scorer myself because AptKit didn't have one. I grepped its evals package for precision, recall, ndcg, mrr — nothing. So `scorePrecisionAtK` and `scoreRecallAtK` are mine."
-
-  ┃ "The eval number isn't decoration I report at the end.
-  ┃  It's a gate — precision@5 ≥ 0.8 — that blocks the
-  ┃  next phase. A number that doesn't block anything
-  ┃  isn't a metric, it's a vanity stat."
-
-## The two-axis honesty: retrieval vs faithfulness
-
-This is where you show you understand that *one* number isn't enough — and where you volunteer the gap honestly. precision@5 measures whether you retrieved the right chunks. It does **not** measure whether the answer is actually grounded in them. Those are two different failure surfaces, and conflating them is a junior mistake.
+Success isn't "the agent runs." The loop runs from day one. Success is **a measured
+decision** — and the artifact that proves it is a one-pager, not the code.
 
 ```
-  TWO METRICS, TWO FAILURE SURFACES — don't conflate
+  Zoom out — the metric stack, from "it runs" to "it's proven"
 
-  ┌─ retrieval quality ───────────────────────────────────┐
-  │  precision@5 / recall@k                                │
-  │  "did the right chunks reach the model?"               │
-  │  ✓ built and measured                                  │
-  └────────────────────────┬───────────────────────────────┘
-                           │  a good answer needs BOTH
-  ┌─ answer faithfulness ─▼────────────────────────────────┐
-  │  rubric judge, grounding / no-hallucination dims       │
-  │  "did the model actually USE the chunks, or make it    │
-  │   up?"  — judged by a DIFFERENT model (Claude), so     │
-  │   Gemma doesn't grade Gemma (that number is circular)  │
-  └────────────────────────────────────────────────────────┘
+  ┌─ does it RUN? (necessary, not sufficient) ───────────────────────────┐
+  │  bounded agent loop completes · tool dispatched · answer returned     │
+  │  → this is a TEST, not an eval (agent-layer-plan.md:109)              │
+  └───────────────────────────────┬──────────────────────────────────────┘
+                                  │ running ≠ good
+  ┌─ is it GOOD? (the eval layer) ▼──────────────────────────────────────┐
+  │  ★ precision@5 ≥ 0.8 ★  ·  faithfulness (rubric judge)  ·            │ ← the gate
+  │  JSON validity rate                                                   │
+  └───────────────────────────────┬──────────────────────────────────────┘
+                                  │ measured → decide
+  ┌─ the PORTFOLIO ARTIFACT ──────▼──────────────────────────────────────┐
+  │  Phase-4 one-pager: eval numbers + failure breakdown + next action    │
+  │  "the write-up matters as much as the code"  agent-layer-plan.md:33   │
+  └───────────────────────────────────────────────────────────────────────┘
 ```
 
-> "precision@5 only measures whether the right chunks reached the model — not whether the answer is grounded in them. Those are separate failure surfaces. Faithfulness comes from a rubric judge scoring groundedness and no-hallucination, and critically, the judge has to be a *different* model family than the one being graded — Claude judging Gemma, never Gemma grading Gemma, because that number is circular. I'll be honest about the current state: I built and measure the retrieval metric; the faithfulness judge is designed but not yet wired, and it's the single highest-leverage thing I'd add. So I can prove I retrieve the right chunks. I can't yet prove the answer is grounded in them — and I know exactly which number closes that gap."
+Zoom in. The metric that gates everything is **precision@5 ≥ 0.8** before the project moves
+forward (`agent-layer-plan.md:93`). But the *deliverable* metric — the one that proves the
+career-face pain is solved — is the **Phase-4 one-pager**: the numbers, a failure-category
+breakdown, and a chosen next action. The write-up is the portfolio artifact, not the repo.
 
-That honesty is a feature, not a confession. (It's the same gap you name as your top counterfactual in interview-defense Chapter 7 — keeping the two stories consistent is itself a signal.) Naming the metric you *haven't* wired, and naming exactly why it matters, proves you understand the metric better than someone who just reports a green number.
+## Structure pass
 
-## The decision rule — the actual portfolio artifact
+**Layers:** tests (does the loop run?) sit below evals (is the answer good?), which sit
+below the decision (ship / iterate / fine-tune?). Confusing the layers is a documented
+non-goal: *"don't conflate evals (good answers) with tests (loop runs). Both needed"*
+(`agent-layer-plan.md:109`).
 
-  ┌─────────────────────────────────────────────────────────┐
-  │ THEY ASK                                                 │
-  │   "Okay you have numbers — what do you DO with them?     │
-  │    When is the project done?"                           │
-  │                                                         │
-  │ WHAT THEY'RE TESTING                                     │
-  │   Do the metrics drive a *decision*, or do they just     │
-  │   sit in a README? The senior move is a pre-committed    │
-  │   decision rule that turns evidence into action.        │
-  └─────────────────────────────────────────────────────────┘
-
-This is the part that's genuinely rare, and it's straight from your plan's Phase 4. The metrics aren't the deliverable — the *decision made from them* is.
-
-> "The metrics drive a pre-committed decision rule, and that decision is the actual deliverable. Phase 4 categorizes every failure — retrieval miss, bad synthesis, or model gap — and the rule is set in advance: 80% or better, ship it; 50 to 80 and retrieval-bound, improve retrieval; 50 to 80 and model-bound, escalate through the fallback chain and consider fine-tuning *only* if the failure pattern is narrow and my captured trajectories can supply the training data; below 50, that's an architecture problem and I don't paper over it with training. The point of pre-committing the rule is that I decide *from* evidence, not *toward* a conclusion I already wanted. 'Done' isn't 'the code runs' — done is a written one-pager with the eval numbers, the failure breakdown, and the chosen next action. That one-pager is the portfolio artifact. The write-up matters as much as the code."
+**Axis — *what does this number actually prove?*** Trace it up the layers:
 
 ```
-  WHEN ARE YOU DONE? — done is the one-pager, not the code
+  one axis — "what does this number prove?" — traced up the stack
 
-  done  ≠  "the agent runs and answers"
-  done  =  Phases 1–4 checked off
-           + a written one-pager containing:
-             • the eval numbers (precision@5, faithfulness,
-               JSON validity)
-             • a failure-category breakdown
-             • a chosen next action (ship / iterate / fine-tune)
-
-  the agent running is the PREREQUISITE.
-  the measured decision is the DELIVERABLE.
+  ┌─ test layer ─────────────────┐   proves: the machinery works
+  │ loop completes, tool fires   │   does NOT prove: the answer is right
+  └───────────────┬──────────────┘
+  ┌─ eval layer ──▼──────────────┐   proves: retrieval finds the right chunks
+  │ precision@5 ≥ 0.8            │   (precision) and the answer is grounded
+  │ + faithfulness + JSON valid  │   (faithfulness)
+  └───────────────┬──────────────┘
+  ┌─ decision layer ▼────────────┐   proves: I can make a build/ship call FROM
+  │ ship / iterate / fine-tune   │   evidence — the actual portfolio signal
+  └──────────────────────────────┘
 ```
 
-  ┃ "Done isn't 'the code runs.' Done is a one-pager with
-  ┃  the eval numbers, the failure breakdown, and a
-  ┃  chosen next action. The decision is the deliverable."
+**Seam:** the load-bearing boundary is between the eval *number* and the *decision rule*.
+The number alone is trivia; the decision rule (≥80% → ship, 50–80% retrieval-bound →
+improve retrieval, <50% → architecture problem) is what turns measurement into judgment.
+That seam is where "played with an LLM" becomes "does AI engineering."
 
-## The third metric, named: JSON validity
+## The metrics — what each one is, what it proves, and its honest status
 
-Don't forget the operational one. Gemma has no native tool-calling — the provider emulates it by parsing tool calls out of text. JSON validity rate measures whether that emulation actually works, and it's a *different* failure surface again: a flaky answer degrades one response, but a flaky tool-call decode stalls the entire agent loop.
+```
+  metric ledger — defined vs produced vs not-yet
 
-> "There's a third number that's easy to overlook: JSON validity rate. Gemma emits no native tool-calls, so my provider parses them out of text — and if that parse is flaky, the whole loop stalls, not just one answer. So JSON validity isn't a quality metric like precision, it's a *liveness* metric: it tells me whether the agent can act at all. Three numbers, three surfaces — retrieval quality, answer faithfulness, and tool-call liveness."
+  ┌──────────────────────┬────────────────────────────┬──────────────────┐
+  │ metric               │ what it proves             │ honest status    │
+  ├──────────────────────┼────────────────────────────┼──────────────────┤
+  │ precision@5 ≥ 0.8    │ retrieval surfaces the      │ HARNESS wired    │
+  │   (the gate)         │ right chunks; the gate      │ (precision@k +   │
+  │                      │ before moving forward       │ recall@k); the   │
+  │                      │                            │ NUMBER comes from│
+  │                      │                            │ running it       │
+  ├──────────────────────┼────────────────────────────┼──────────────────┤
+  │ faithfulness         │ the answer is grounded in   │ RubricJudge      │
+  │   (rubric judge,     │ retrieved context, not      │ EXISTS in aptkit │
+  │    Claude as judge)  │ hallucinated                │ but UNWIRED here │
+  │                      │                            │ (don't let Gemma │
+  │                      │                            │ grade Gemma —    │
+  │                      │                            │ circular)        │
+  ├──────────────────────┼────────────────────────────┼──────────────────┤
+  │ JSON validity rate   │ the Gemma tool-call         │ named as a Phase │
+  │                      │ emulation decodes reliably  │ 4 metric; the    │
+  │                      │ (the riskiest seam)         │ riskiest surface │
+  └──────────────────────┴────────────────────────────┴──────────────────┘
+```
 
-## When you're cornered
+**Say the status out loud in the room.** "precision@5 ≥ 0.8 is my gate; the harness is
+wired and the number comes from running it. Faithfulness uses a rubric judge with Claude as
+the grader so the model doesn't grade itself — that one's defined in aptkit but I haven't
+wired it into buffr yet." That honesty is *stronger* than a fabricated number. An invented
+metric dies on the first "how did you compute that?"; a named gate with a named gap
+survives every follow-up.
 
-  ╔═════════════════════════════════════════════════════════╗
-  ║ IF THEY SAY                                              ║
-  ║   "A 20-item eval set is tiny. Those numbers don't        ║
-  ║    mean anything."                                      ║
-  ║                                                         ║
-  ║ DON'T                                                    ║
-  ║   Defend 20 items as statistically meaningful. It        ║
-  ║   isn't, and claiming so loses the room.                ║
-  ║                                                         ║
-  ║ DO                                                       ║
-  ║   "You're right that 20 items isn't a statistical claim  ║
-  ║    — it's a *regression* tripwire and a forcing          ║
-  ║    function. The value isn't 'precision is exactly       ║
-  ║    0.84'; it's that I built the ruler, gated a phase on  ║
-  ║    it, and have a labeled set I can grow. For a one-      ║
-  ║    person portfolio project, having ANY measured gate    ║
-  ║    is the separator — most personal AI projects have     ║
-  ║    none. The honest framing is: small set, real          ║
-  ║    discipline, expandable. I'd grow it before I trusted  ║
-  ║    the absolute number for a ship decision."            ║
-  ╚═════════════════════════════════════════════════════════╝
+## The feedback loop — measurement → decision
 
-## The one-page version
+### Move 1 — the mental model
 
-**Core claim:** Success is measured, not felt. Three metrics on three surfaces — precision@5 / recall@k (retrieval quality, built and gated at ≥0.8 before Phase 3), faithfulness via a rubric judge run by a *different* model (answer grounding — designed, not yet wired, the top gap), and JSON validity (tool-call liveness, since Gemma's emulated tool-calls can stall the whole loop). The metrics feed a *pre-committed* decision rule (ship / improve retrieval / escalate-or-fine-tune / fix architecture), and "done" is a written one-pager with the numbers, the failure breakdown, and the chosen next action — not "the code runs."
+You know a CI gate: the test suite goes green or red, and red blocks the merge. The eval
+gate is that, but the "red" branches into *diagnoses*, not just pass/fail. The number
+doesn't only say "good/bad" — it routes to a *specific next action* based on *why* it
+failed.
 
-**The questions, one-line answers:**
-- "How do you know it's good?" → precision@5 ≥ 0.8, gated as a phase blocker, not reported decoration. I built the scorer; AptKit didn't have one.
-- "Is one number enough?" → No — retrieval quality and answer faithfulness are different surfaces. Faithfulness needs a different judge model so it isn't circular.
-- "What do you do with the numbers?" → A pre-committed decision rule turns them into a ship/iterate/fine-tune call decided *from* evidence, not toward it.
-- "When are you done?" → When the one-pager exists: numbers + failure breakdown + next action. The write-up matters as much as the code.
-- "20 items is tiny." → Right — it's a regression tripwire and a forcing function, expandable. Having *any* gate is the separator.
+```
+  the eval decision tree — the number routes to an action
 
-**The pull quote you keep:** *"The eval number isn't decoration — it's a gate that blocks the next phase. A number that doesn't block anything isn't a metric, it's a vanity stat."*
+  run eval-harness → precision@5, faithfulness, JSON validity
+        │
+        ▼
+   precision@5 ≥ 0.8 ? ──── YES ──► SHIP (it's good enough)
+        │ NO
+        ▼
+   categorize the failures (retrieval miss / bad synthesis / model gap)
+        │
+        ├─ 50-80%, retrieval-bound  ─► improve retrieval
+        ├─ 50-80%, model-bound      ─► escalate via fallback chain;
+        │                              consider fine-tuning ONLY if the
+        │                              failure pattern is narrow AND
+        │                              trajectories can supply data
+        └─ < 50%                    ─► ARCHITECTURE problem — don't paper
+                                       over it with training
+```
 
-→ Next: Chapter 5, the skeptical reviewer. You've justified the problem, the scope, the build, and the metrics. Now someone tries to take it all apart — and you hold.
+This decision tree *is* the portfolio artifact. Anyone can report "precision@5 = 0.82."
+The signal is the rule that says what you'd do at 0.65 retrieval-bound vs 0.65 model-bound
+vs 0.45 — and the discipline to call <50% an architecture problem instead of reaching for
+fine-tuning. Anchor: `agent-layer-plan.md:97`.
+
+### Move 2 — the feedback loop that makes fine-tuning answerable later
+
+```
+  why trajectory capture is part of the success loop
+
+  every conversation → persisted to agents.messages (full trajectory)
+        │
+        ▼  this is the feedback corpus
+  if Phase-4 evidence ever demands fine-tuning, the training data already
+  exists — capture ships NOW so the fine-tune decision is ANSWERABLE later,
+  not assumed   (agent-layer-plan.md:17)
+```
+
+The success loop isn't just "measure and ship." It's "measure, decide, and have the data to
+revisit the decision when evidence changes." Trajectory capture is the part of the loop that
+keeps the *next* decision (fine-tune or not) grounded in data instead of vibes. That's why
+it ships in v1b even though fine-tuning is deferred — the loop is designed to keep
+feeding itself.
+
+## What "done" means — the success definition, verbatim from the plan
+
+```
+  done = the measured one-pager exists
+
+  ✓ Phases 1-4 checked off
+  ✓ a written one-pager with: eval numbers + failure-category breakdown +
+    a chosen next action
+  ✓ the agent runs, retrieves, generates with Gemma, persists everything
+  ✓ MEASURED evidence about whether it's good enough to ship or what
+    specifically needs to improve
+
+  everything beyond (fine-tuning, gateways, skill auto-gen) is a Phase 5+
+  decision made FROM evidence, not toward it
+  (agent-layer-plan.md:135)
+```
+
+Done is not "it works." Done is "I have measured evidence and a decision made from it."
+That's the success metric that maps back to the career-face problem: the pivot is proven
+not by a running agent but by a *measured one-pager that shows engineering judgment under
+real numbers.*
+
+## The principle
+
+Success metrics are worth defining only if they route to decisions. A number with no
+decision rule is trivia; a decision rule with no number is a wish. The strongest success
+story names the gate (precision@5 ≥ 0.8), names what each metric proves, is *honest about
+which numbers exist and which don't yet*, and points at the decision tree that turns the
+number into a next action. And it builds the feedback loop (trajectory capture) that keeps
+the *next* decision grounded in evidence too. The deliverable isn't the agent — it's the
+measured judgment the agent makes possible.
+
+## Interview defense
+
+**Q: What's your success metric, and do you have the number?**
+The gate is precision@5 ≥ 0.8 — the harness is wired (precision@k + recall@k), and the
+number comes from running it against a labeled eval set. I'm honest about the gaps:
+faithfulness uses a rubric judge with Claude as grader (so the model isn't grading itself),
+and that's defined in aptkit but not yet wired into buffr. A named gate with a named gap is
+stronger than an invented number. Anchor: `agent-layer-plan.md:93`.
+
+```
+  precision@5 ≥ 0.8 = gate (wired)
+  faithfulness via Claude-as-judge = defined, unwired (named, not hidden)
+```
+
+**Q: Say the number comes back at 0.65. What do you do?**
+I categorize the failures first — retrieval miss vs bad synthesis vs model gap. If it's
+retrieval-bound, I improve retrieval. If it's model-bound, I escalate via the provider
+fallback chain and only consider fine-tuning if the failure pattern is narrow and the
+captured trajectories can supply the data. The action depends on *why* it failed, not just
+that it did. Anchor: `agent-layer-plan.md:97`.
+
+**Q: Why capture every conversation if you're not fine-tuning?**
+So the fine-tune decision is *answerable* later instead of assumed. Trajectory capture ships
+now; if Phase-4 evidence ever demands fine-tuning, the training corpus already exists. The
+feedback loop is designed to keep feeding the next decision. Anchor: `agent-layer-plan.md:17`.
+
+## See also
+
+- `01-problem-brief.md` — the career-face pain these metrics ultimately prove solved.
+- `03-options-and-opportunity-cost.md` — "evals with numbers" as the separator that justified building.
+- `.aipe/study-ai-engineering/05-evals-and-observability/` — the eval harness, deep-walked.
+- `agent-layer-plan.md:89-135` — the phase plan, the gate, and the "done means" definition.

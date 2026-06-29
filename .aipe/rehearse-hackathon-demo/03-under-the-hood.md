@@ -1,164 +1,126 @@
-# Chapter 03 — Under the Hood   (6:00–8:00, 2 minutes)
+# Chapter 03 — Under the hood   (6:00–8:00, 2 minutes)
 
 ## Opening hook
 
-The room just watched buffr remember a past conversation. Now they want to know how — and you have two minutes to earn credibility without losing them. The trap here is the architecture tour: pulling up six boxes and walking every arrow until the room's eyes glaze. Don't. Go exactly one level deep on the *one* thing that made the money shot possible, draw it as a single diagram, and explain it in about three sentences. One level deep, then stop. The goal isn't to teach the system — it's to prove you understand the system. Those are different, and the second one is shorter.
+The room just watched it remember a prior conversation. Now they're wondering whether it's real or smoke. This chapter earns the credibility — but you go exactly one level deep and stop. Two minutes, one diagram, three sentences of mechanism. Not an architecture tour. If you start explaining the embedding model, the HNSW index parameters, and the Ollama provider all at once, you lose the room and you blow past 8:00. Pick the single most impressive, least obvious thing and show only that.
 
-The single most impressive, non-obvious mechanism in buffr is this: **the memory is RAG over your chat history, and past exchanges live in the same vector store as your documents.** That's why recall works through the exact same search the documents use — no separate memory system, no special-casing. One store, two kinds of row, a tag to tell them apart. That is the whole trick, and it's genuinely elegant. Show that, and the room believes you built it.
+The one thing worth showing: **memory and your documents live in the same table, served by the same vector index, recalled through the same tool.** That's why the recall in the demo wasn't a special "memory feature" bolted on the side — it's your existing retrieval, pointed at the conversation's own history. When a judge hears that, they understand the money shot was architecture, not a hack. That's the credibility beat.
 
 ## The time-budget bar
 
-You own two minutes. One mechanism, one diagram, three sentences, then hand to the build story.
+You own 6:00 to 8:00. One diagram, the one non-obvious mechanism, then hand off — do not overstay.
 
 ```
-  ┌──────────────────────────────────────────────────────────┐
-  │ ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░░ │
-  │ 0:00              6:00 ─────── 8:00 ─────────────── 10:00 │
-  │        UNDER THE HOOD — you own 6:00 to 8:00 (2 min)       │
-  └──────────────────────────────────────────────────────────┘
+  ┌──────────────────────────────────────────────────────┐
+  │ ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░ │
+  │ 6:00 ──────── 8:00 ──────────────────────────────── 10:00 │
+  │       UNDER THE HOOD — you own 6:00 to 8:00 (2 min)   │
+  └──────────────────────────────────────────────────────┘
 ```
 
-## The chapter-opening diagram — memory is RAG, pointed at your chat
+## The chapter-opening diagram — one store, two roles
 
-This is the one diagram you show. It says: writing a memory and retrieving a memory are the same two operations RAG already uses on documents — embed, then store or search. The corpus just happens to be your own past exchanges.
-
-```
-  EPISODIC MEMORY — RAG, but the corpus is your chat history
-
-   AFTER a turn (write):                LATER, a new turn (read):
-   "I use Neovim"  ─┐                   "configure my editor"
-                    │ embed                       │ embed
-                    ▼                             ▼
-             ┌────────────┐                ┌────────────┐
-             │  vector    │                │  vector    │
-             └─────┬──────┘                └─────┬──────┘
-                   │ upsert (tag kind=memory)    │ search top-k
-                   ▼                             ▼
-        ┌─────────── ONE shared vector store (agents.chunks) ─────────┐
-        │  [doc] [doc] [memory:conv:0 "I use Neovim"] [doc] [memory…] │
-        └──────────────────────────┬──────────────────────────────────┘
-                                   │ the SAME search_knowledge_base tool
-                                   ▼
-                    past exchange surfaces alongside doc hits
-                    → "it remembers me"  (what the room just saw)
-```
-
-The thing to point at: documents and memories are *in the same drawer*. That's the non-obvious choice, and it's why recall needed zero new retrieval code.
-
-## The body — the mechanism in three sentences
-
-You do not walk this slowly — this is a demo, not the study guide. Three sentences, each pointing at the diagram. Say them close to verbatim.
+This is the only diagram you show in this chapter, and you point at it while you talk. It's the master demo diagram zoomed into the one part that matters: the shared store.
 
 ```
-┃ "When buffr finishes answering, it embeds the whole exchange —
-┃  question and answer — into the same vector store as my documents,
-┃  tagged as a memory."
+  WHY IT REMEMBERS — one store, one index, one tool
+
+  ┌─ Session layer (src/session.ts) ──────────────────────────────┐
+  │  every turn:  agent.answer(q)                                  │
+  │               then  memory.remember({ conv, question, answer })│  ← writes the
+  └───────────────────────────────┬───────────────────────────────┘    exchange back
+                                  │  embed → upsert (tagged kind=memory)
+  ┌─ Adapter layer ───────────────▼───────────────────────────────┐
+  │  PgVectorStore — the SAME instance documents use              │
+  └───────────────────────────────┬───────────────────────────────┘
+                                  │
+  ┌─ Storage (agents.chunks) ─────▼───────────────────────────────┐
+  │   documents  (kind absent)   +   memory  (kind=memory)        │
+  │   ─────────────────────────────────────────────────────────   │
+  │   ONE HNSW cosine index over vector(768) serves BOTH          │
+  └───────────────────────────────┬───────────────────────────────┘
+                                  │  next turn: search_knowledge_base
+                                  ▼  recalls documents AND memory, ranked
+                          relevant past exchange surfaces as a top hit
 ```
 
-```
-┃ "So a later question doesn't need a special memory system — the
-┃  ordinary search retrieves the relevant past exchange the same way
-┃  it retrieves a document chunk."
-```
+Read that bottom band out loud if you want — it's the whole insight in one line: *one index, two kinds of row, recalled by the same tool.*
+
+## The body — the three sentences
+
+You say roughly three sentences over this diagram. Rehearse them tight; this is where presenters ramble.
 
 ```
-┃ "One store, two kinds of row, a tag to tell them apart. That's the
-┃  whole trick — and because the memory engine only speaks the vector-
-┃  store contract, I built it on my own toolkit and just handed it my
-┃  Postgres."
+  SHOW (on screen / slide)            SAY (out loud)
+  ────────────────────────────────    ─────────────────────────────────
+  point at the "memory.remember"      "After every turn, buffr embeds
+  arrow                                the exchange and writes it back
+                                       into the same vector store the
+                                       documents live in."
+  point at the chunks band — two      "So a memory and a document are
+  kinds of row, one index             the same kind of thing — a row
+                                       with an embedding, one tagged
+                                       'memory'. One index over both."
+  point at the search arrow           "Which means recall isn't a new
+                                       feature — it's the search tool the
+                                       agent already had, now reaching
+                                       the conversation's own past."
 ```
 
-That third sentence does double duty: it explains the mechanism *and* lands the "built on her own aptkit toolkit" architecture one-liner. The memory engine (`createConversationMemory` from `@aptkit/memory`) is store-agnostic — it knows nothing about Postgres — so buffr injects its `PgVectorStore` and gets episodic recall for free. That's the clean seam that lets the capability live in the toolkit and the storage live in the app.
+That's it. Three sentences, one diagram. If a judge wants the depth — how the engine over-fetches and filters by `kind`, why the foreign key was deliberately dropped to allow memory rows with no parent document — that's the Q&A (chapter 06) and the deep walk in `study-system-design/06-retrieval-as-memory.md`. On stage, you stop at "same store, same index, same tool."
 
-## The one structural truth to name (if asked, not before)
-
-If a judge presses on "is this just a chat log?", you have one crisp distinction ready. This is the load-bearing part people miss:
+Here's the move, made explicit, because going too deep here is the classic credibility-beat failure:
 
 ```
-  CHAT LOG vs EPISODIC MEMORY — the distinction that matters
-
-  ┌─ saved chat log ────────┐        ┌─ retrieval-based memory ────────┐
-  │  rows in a messages     │        │  embeddings in a vector store   │
-  │  table, ordered by time │        │  recalled by MEANING, top-k     │
-  │  → scroll to find it     │        │  → relevant past exchange       │
-  │  → exact match / time    │        │    surfaces for a PARAPHRASED   │
-  │                          │        │    query it has never seen      │
-  └──────────────────────────┘        └──────────────────────────────────┘
-   buffr has BOTH: the messages table     ★ this is what made the demo
-   is for observability (the trace);        work — recall by similarity,
-   the vector memory is for recall.         not by keyword or timestamp
-```
-
-Both exist in buffr, and saying so is honest and precise: the `messages` table captures the full trajectory for observability; the vector memory is the thing that makes recall work for a question worded differently than the original. Don't volunteer this whole distinction in the two minutes — but have it loaded for the Q&A.
-
-## Strong vs weak — under the hood
-
-```
-  WEAK UNDER-THE-HOOD                STRONG UNDER-THE-HOOD
-  ─────────────────────────────      ─────────────────────────────────
-  pulls up the full 5-layer          ONE diagram: memory = RAG over chat
-  architecture diagram, walks         history, same store as docs
-  every box, runs out of clock
-
-  "so we have a retrieval pipeline    "one store, two kinds of row, a tag
-   and a model provider and a          to tell them apart — that's the
-   context guard and a trace sink…"    whole trick." (three sentences)
-
-  → room sees complexity, not        → room sees ONE elegant idea and
-     insight; loses the thread          believes you built it
+  WEAK under-the-hood                 STRONG under-the-hood
+  ──────────────────────────────      ──────────────────────────────────
+  walk the whole stack: Ollama,       one diagram: memory rides the same
+  the embedding dims, HNSW params,    store as documents. Three sentences.
+  the agent loop, the trace sink…     "Want the depth? Happy to go there
+  → 4 minutes gone, room glazed       in Q&A." → 90 seconds, room impressed
 ```
 
 ## The IF-IT-BREAKS box
 
-This chapter is a diagram and three sentences — there's no live app beat to crash. The failure mode is *you*, going too deep and running over.
+This chapter has no live beat — it's a diagram and three sentences, so nothing can crash. But it has a failure mode: a judge interrupts with a hard question mid-explanation and you get pulled into the weeds and lose the clock.
 
 ```
 ╔══════════════════════════════════════════════════════════════════╗
-║ IF IT BREAKS — you feel yourself going too deep / running long   ║
-║                                                                   ║
-║ You've started explaining embeddings, or HNSW, or the agent loop ║
-║ → STOP at the current sentence. Say: "I'll spare you the rest —  ║
-║ happy to go deeper in questions." Jump to Chapter 04. The depth   ║
-║ is written in .aipe/study-ai-engineering/08 — you don't need it   ║
-║ on the clock. One level deep, then out.                           ║
+║ IF IT BREAKS (you get pulled into the weeds)                      ║
+║                                                                    ║
+║ A judge interrupts with a deep question here → DO NOT answer it    ║
+║ fully now. Say: "great question — let me finish the picture and    ║
+║ I'll take that in Q&A." Park it. The deep answer is in            ║
+║ study-system-design/06-retrieval-as-memory.md. Protect the clock; ║
+║ you still have the close to land.                                 ║
 ╚══════════════════════════════════════════════════════════════════╝
 ```
 
-## The "tighten it" treatment
+## The "tighten it" cut
 
-This chapter is already lean. If you're behind, collapse it to one sentence and the diagram on screen.
+Under a tight slot, this whole chapter compresses to one sentence said over the demo's afterglow: *"and the reason it remembers is that memory lives in the same vector store as the documents — same index, same search tool."* You can cut the diagram entirely if the clock demands it. The floor: the room hears *why* the recall is real (shared store), even if they don't see the diagram. This is a ceiling chapter, not a floor chapter — it's the first place to cut when you're running long.
 
-```
-  TIGHTEN IT
-    cut to:  show the diagram, say ONLY the third script line —
-             "one store, two kinds of row, a tag to tell them apart;
-              I built it on my own toolkit and handed it my Postgres."
-    floor:   the room must hear that memory and documents share one
-             retrieval path. That single idea is the credibility. Don't
-             cut below it — without it the money shot looks like magic
-             instead of engineering.
-```
-
-## The one-page run sheet — UNDER THE HOOD
+## The one-page run sheet — CHAPTER 03
 
 ```
-  ┌─ RUN SHEET · 03 UNDER THE HOOD · 6:00–8:00 ────────────────────┐
-  │                                                                 │
-  │  GOAL: ONE diagram + three sentences. Prove you get it, then    │
-  │        stop. One level deep, no architecture tour.              │
-  │                                                                 │
-  │  SHOW: the "memory = RAG over chat history, same store" diagram │
-  │                                                                 │
-  │  SAY (close to verbatim):                                       │
-  │   1. "it embeds the whole exchange into the same store as my    │
-  │       documents, tagged as a memory"                            │
-  │   2. "so a later question retrieves the past exchange the same  │
-  │       way it retrieves a document — no special memory system"   │
-  │   3. "one store, two kinds of row, a tag to tell them apart —   │
-  │       I built it on my own toolkit and handed it my Postgres"   │
-  │                                                                 │
-  │  IF YOU OVERRUN: stop mid-sentence, "happy to go deeper in Q&A" │
-  │  TIGHTEN: diagram + sentence 3 only. Floor = "memory + docs     │
-  │           share one retrieval path."                            │
-  └─────────────────────────────────────────────────────────────────┘
+  ┌─ UNDER THE HOOD ─ 6:00–8:00 ─ 2 min ─ one level deep, STOP ──┐
+  │                                                              │
+  │  ONE DIAGRAM: memory + documents in the same chunks table,   │
+  │  one HNSW index, one search tool.                            │
+  │                                                              │
+  │  THREE SENTENCES (point at the diagram):                     │
+  │   1. "after each turn it embeds the exchange back into the   │
+  │       same store the documents live in"                      │
+  │   2. "a memory and a document are the same kind of row —     │
+  │       one index over both"                                   │
+  │   3. "so recall isn't a new feature — it's the search tool   │
+  │       the agent already had, reaching the past"              │
+  │                                                              │
+  │  NAIL THIS LINE: "same store, same index, same tool."        │
+  │  IF INTERRUPTED: "let me finish the picture, then Q&A."      │
+  │  TIGHTEN: cut to ONE sentence, drop the diagram. First place │
+  │           to cut when long.                                  │
+  └──────────────────────────────────────────────────────────────┘
 ```
+
+On to chapter 04 — proof it's real.

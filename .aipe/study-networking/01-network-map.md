@@ -1,296 +1,270 @@
-# Network Map — every boundary buffr crosses
+# Network Map
 
-**The on-the-wire topology** · Project-specific
+**Industry name(s):** network topology / connection graph / system
+boundary map. **Type:** Language-agnostic.
 
 ## Zoom out, then zoom in
 
-Here's the whole thing. buffr is one Node process that you launch from a
-terminal. It talks to exactly two things outside itself, and both calls go
-*out* — buffr never accepts an inbound connection.
+Here's the whole thing on one screen. `buffr-laptop` is a single Node
+process that opens exactly two outbound connections and accepts zero
+inbound ones. Find the boxes that cross a line — those lines are the only
+networking that exists in this repo.
 
 ```
-  Zoom out — buffr's place in the network
+  Zoom out — where the network boundaries live
 
-  ┌─ Provider layer (outside the process) ───────────────────────────┐
-  │   Postgres reindb (Supabase)        Ollama (gemma2:9b, nomic)     │
-  │      ▲  TCP :5432                       ▲  HTTP :11434            │
-  └──────┼─────────────────────────────────┼───────────────────────┘
-         │                                 │
-  ┌─ Network boundary ──────────────────────────────────────────────┐
-  │   pg wire protocol over TCP         HTTP/1.1 over TCP            │ ★ THIS FILE ★
-  │   (remote, real internet)           (loopback, no NIC)          │
-  └──────┼─────────────────────────────────┼───────────────────────┘
-         │                                 │
-  ┌─ Service layer (the repo) ──────────────────────────────────────┐
-  │   src/db.ts createPool              aptkit provider transports   │
-  │   src/pg-vector-store.ts            (host from src/config.ts)    │
-  │   src/*-trace-sink / profile        repo passes `host` only      │
-  └──────┼──────────────────────────────────────────────────────────┘
-         │
-  ┌─ Entry layer (the CLI) ─────────────────────────────────────────┐
-  │   npm run chat (long-lived) | index | eval | migrate            │
-  └──────────────────────────────────────────────────────────────────┘
+  ┌─ UI layer (in-process, NO network) ──────────────────────┐
+  │  src/cli/chat.tsx  Ink TUI  →  session.ask(q)             │
+  └─────────────────────────────┬─────────────────────────────┘
+                                │  function call, same process
+  ┌─ Orchestration (in-process) ▼─────────────────────────────┐
+  │  src/session.ts  RagQueryAgent · pipeline · memory        │
+  │      ★ owns the two clients, holds them across turns ★    │ ← we are here
+  └──────┬───────────────────────────────────┬────────────────┘
+         │ ★ NETWORK BOUNDARY 1 ★             │ ★ NETWORK BOUNDARY 2 ★
+         │ pg wire / TCP 5432                 │ HTTP / TCP 11434
+  ┌─ Storage provider ▼───────┐      ┌─ Model provider ▼───────┐
+  │  Postgres (reindb)        │      │  Ollama daemon          │
+  │  schema agents, pgvector  │      │  gemma2 + nomic-embed   │
+  └───────────────────────────┘      └─────────────────────────┘
+
+  inbound boundary: NONE. nothing in this repo calls listen().
 ```
 
-Zoom in: a network map answers one question — *what bytes leave this process,
-to whom, and in what order?* For buffr the answer is short enough to hold in
-your head. Two destinations. Both client-initiated. One remote, one loopback.
-That's the map. The rest of this file walks the order the hops fire.
+Zoom in. The concept here is the **network map**: the complete inventory
+of every point where bytes leave or enter the process, and what protocol
+rides each one. Get this map right and every later file is just zooming
+into one box on it. Get it wrong — imagine a stray inbound server you
+forgot — and you'll reason about CORS or request auth that doesn't exist.
 
 ## Structure pass
 
-**Layers.** Four bands: the CLI entry, the repo's service code, the network
-boundary, the external providers. The interesting contrast is *who owns the
-socket* as you descend.
+Three layers, one axis, two seams.
 
-**Axis — trace "who owns the socket?" down the stack.**
+**Layers.** UI (Ink terminal) → orchestration (`session.ts`) → two
+providers (Postgres, Ollama). The top two layers share one OS process;
+the providers are separate processes reached over TCP.
+
+**Axis — trust / "does this byte cross a process boundary?"** Hold that
+one question down the stack:
 
 ```
-  One question, held constant down the layers
+  axis: "does this hop cross a process boundary?"
 
-  "who holds the socket?"  — trace it downward
+  ┌─ chat.tsx → session.ask() ───┐   → NO  (same process, function call)
+  └──────────────────────────────┘
+  ┌─ session → pg.Pool query ────┐   → YES (TCP to Postgres :5432)
+  └──────────────────────────────┘
+  ┌─ session → Ollama provider ──┐   → YES (TCP to Ollama :11434)
+  └──────────────────────────────┘
 
-  ┌──────────────────────────────────────────┐
-  │ CLI: npm run chat (chat.tsx)              │  → owns nothing, just calls
-  └──────────────────────────────────────────┘
-      ┌──────────────────────────────────────┐
-      │ service: createPool (src/db.ts)       │  → REPO owns the pg socket
-      └──────────────────────────────────────┘
-      ┌──────────────────────────────────────┐
-      │ service: GemmaModelProvider(host)     │  → APTKIT owns the HTTP socket;
-      └──────────────────────────────────────┘     repo only handed it a string
-          ┌──────────────────────────────────┐
-          │ boundary: TCP / fetch             │  → the OS owns the file descriptor
-          └──────────────────────────────────┘
-
-  the answer flips between the two wires — that flip IS the lesson
+  the answer flips exactly twice — those two flips ARE the network
 ```
 
-**Seam.** The load-bearing seam is the one between buffr and aptkit on the
-Ollama wire. On the Postgres wire there's no such seam — buffr holds the
-`pg.Pool` directly. On the Ollama wire, the seam is `host: cfg.ollamaHost`
-(`src/session.ts:40,46`): everything buffr controls is on the left of that
-colon; the `fetch`, the headers, the status handling are all on the right,
-inside aptkit. If you want to add a timeout to the LLM call, this seam is where
-you'd reach — and right now nothing crosses it but a URL string.
+**Seams.** The boundary flips from "in-process" to "on-the-wire" in
+exactly two places, and both are *vertical seams to a provider*: the
+`pg.Pool` handed to `PgVectorStore` / trace sink / memory, and the
+`ollamaHost` string handed to aptkit's Ollama providers. Every networking
+concern in this repo lives behind one of those two seams. There is no
+third.
 
 ## How it works
 
 ### Move 1 — the mental model
 
-A network map is just a dependency graph where the edges happen to be sockets.
-You already draw these when you sketch which component calls which API. Here
-the "components" are processes and the edges are the two wires.
+You already know the shape: it's a `fetch()` in a frontend app. Your
+React component doesn't *contain* the network — it calls `fetch(url)` and
+the runtime owns DNS, TCP, TLS, HTTP. buffr is the same, twice over.
+`session.ts` is the "component"; the pool and the Ollama providers are its
+two `fetch`-equivalents. The map is just: which calls are local function
+calls, and which two punch out to a socket.
 
 ```
-  The map's kernel — one node fans out to two
+  The map as a frontier — local calls vs wire calls
 
-           ┌──────────────┐
-           │  buffr CLI   │
-           └───┬──────┬───┘
-       pg/TCP  │      │  HTTP
-        :5432  │      │  :11434
-               ▼      ▼
-        ┌──────────┐ ┌──────────┐
-        │ Postgres │ │  Ollama  │
-        │ (remote) │ │ (local)  │
-        └──────────┘ └──────────┘
-
-  no edges point INTO buffr. it is a leaf that calls two parents.
+   start: chat.tsx onSubmit
+     │ local
+     ▼
+   session.ask(question)
+     ├──── local ───► persistMessage ──┐
+     ├──── local ───► agent.answer ─────┤
+     │                                  │   each of these eventually
+     └──── local ───► memory.remember ──┘   bottoms out at ONE of two
+                                            wire calls:
+       wire call A: pool.query  ──TCP 5432──►  Postgres
+       wire call B: provider.*  ──TCP 11434─►  Ollama
 ```
 
-### Move 2 — walk the hops of one `npm run chat` turn
+### Move 2 — walk the boundaries
 
-`chat` splits into two phases: a **once-per-session setup** (`createChatSession`,
-`src/session.ts:34`) that builds the pool and providers exactly once, and a
-**per-turn** `ask()` that fires every time you press enter. The wire walk below
-is one `ask()` turn — but note the pool it rides was opened on the *first* turn
-and stays warm for *all* of them. Watch the order; this path touches both wires.
-
-**Setup (once) — build the pg pool (lazy).** `createPool(cfg.databaseUrl)`
-(`src/session.ts:39`) constructs the Pool object but opens *no* socket yet.
-node-postgres connects lazily on first query. So "create the session" is a no-op
-on the wire; the providers (`src/session.ts:40,46`) are likewise just objects
-holding a host string.
+**Boundary 0: the UI hop that isn't a hop.** `chat.tsx` is React running
+in the terminal via Ink. When the user submits, `onSubmit` calls
+`session.ask(q)` directly — `src/cli/chat.tsx:28`. No serialization, no
+socket, no port. This matters because in a web app this same arrow *would*
+be a network hop (browser → API), and a reader carrying web instincts will
+look for request auth and CORS here. There's nothing to secure because
+nothing crosses.
 
 ```
-  Layers-and-hops — session setup then warm turns
+  Boundary 0 — UI to orchestration, in-process
 
-  ┌─ CLI ─────────┐  build Pool (no socket)         ┌─ Service ────┐
-  │ chat.tsx      │ ─────────────────────────────► │ pg.Pool      │
-  └───────────────┘  createChatSession()            └──────┬───────┘
-                                                           │ cold once
-  ┌─ Provider ────┐  first query opens TCP, then   ◄───────┘
-  │ Postgres :5432│  STAYS OPEN across every turn ──────────
-  └───────────────┘  startConversation() is the first real query
+  ┌─ Ink TUI ───────────┐   onSubmit(q): function call   ┌─ session ──┐
+  │ chat.tsx:28         │ ──────────────────────────────►│ ask(q)     │
+  │ const answer =      │ ◄──────────────────────────────│ returns    │
+  │   await session.ask │   resolved Promise<string>     │ string     │
+  └─────────────────────┘   (no bytes on any wire)        └────────────┘
 ```
 
-**Hop 1 — first query forces the TCP connect (first turn only).**
-`startConversation(pool, appId)` (`src/session.ts:55`) — then `persistMessage`
-of the user turn (`src/session.ts:61`) — runs `insert ... returning id`. *This*
-is the moment the pool dials Postgres: DNS resolve the Supabase host → TCP
-handshake → pg startup/auth → query. On every *later* turn this connection is
-already warm, so the handshake is skipped entirely — that's finding #1 of the
-overview.
+`src/cli/chat.tsx:62-63` constructs the session and renders the UI in the
+same module — one process, top to bottom.
 
-**Hop 2 — embed the question over HTTP to Ollama.** Inside `agent.answer()`
-(`src/session.ts:62`) the retrieval pipeline calls `OllamaEmbeddingProvider.embed()`,
-which (inside aptkit) `fetch`es `POST http://localhost:11434/api/embed`. Loopback
-— the bytes never leave the machine's network stack.
+**Boundary 1: orchestration → Postgres, TCP 5432.** `session.ts:39`
+builds the pool: `const pool = createPool(cfg.databaseUrl)`. That single
+pool is then injected into three consumers — `PgVectorStore`
+(`session.ts:41`), the memory engine via the same store (`session.ts:53`),
+and the trace sink + `persistMessage` (`session.ts:55-61`). Every one of
+them ultimately calls `pool.query(...)` or `pool.connect()`, which is
+where bytes hit the pg wire protocol on TCP 5432. The exact line where a
+query becomes wire traffic: `src/pg-vector-store.ts` `search()` →
+`this.pool.query(...)`.
 
-**Hop 3 — vector search back over the pg wire.** The 768-dim query vector goes
-to `PgVectorStore.search()` → `pool.query(... order by embedding <=> $1 ...)`.
-Same pool, same warm TCP connection, new query.
+```
+  Boundary 1 — one pool, three consumers, one wire
 
-**Hop 4 — generate over HTTP to Ollama.** `GemmaModelProvider` `fetch`es
-`POST /api/chat` with the prompt + retrieved chunks. Blocks until Ollama returns
-the *entire* answer (no streaming — see `06`).
+  ┌─ session.ts ─────────────────────────────────────────────┐
+  │  pool = createPool(cfg.databaseUrl)   (line 39)           │
+  │     ├─► PgVectorStore   (upsert / search)                 │
+  │     ├─► createConversationMemory (shares the store)       │
+  │     └─► SupabaseTraceSink + persistMessage                │
+  └───────────────────────────────┬───────────────────────────┘
+                                  │  pg wire protocol
+                                  ▼  TCP 5432
+                          ┌─ Postgres reindb ─┐
+                          │  schema agents     │
+                          └────────────────────┘
+```
 
-**Hop 5 — persist the trajectory over the pg wire.** `trace.flush()`
-(`src/session.ts:63`) awaits the queued `persistMessage` inserts; then the
-best-effort `memory.remember()` (`src/session.ts:66`) embeds the exchange (one
-more HTTP embed) and inserts the memory chunk — all on the same warm pool.
+What's *inside* Postgres — the HNSW index, the `<=>` cosine operator, the
+transaction in `upsert()` — belongs to `study-database-systems`. This file
+stops at the wire.
 
-**Loop — back to the input prompt.** No `pool.end()` here. The turn returns, Ink
-re-renders the input, and the *next* `ask()` reuses the same pool with no new
-handshake. Only `/exit` (`src/cli/chat.tsx:19`) calls `session.close()` →
-`pool.end()` (`src/session.ts:73`).
+**Boundary 2: orchestration → Ollama, TCP 11434.** `session.ts:40` and
+`:46` construct the two providers with `host: cfg.ollamaHost`. buffr hands
+over a host string and nothing more. The actual HTTP request to
+`/api/embeddings` or `/api/generate`, the JSON body, the response parsing —
+all of it lives in aptkit's `OllamaEmbeddingProvider` and
+`GemmaModelProvider`. buffr's entire contribution to boundary 2 is the
+string `http://localhost:11434` from `config.ts:14`.
 
-So one turn interleaves the two wires: **pg → http → pg → http → pg**. The DB
-wire is hit several times on one *reused* connection; the HTTP wire is hit twice
-(embed + chat, plus the memory embed) on separate fetches. Across a whole session
-that's one TCP handshake amortized over dozens of turns.
+```
+  Boundary 2 — orchestration to Ollama, HTTP over loopback
+
+  ┌─ session.ts ──────────────────────┐
+  │ new OllamaEmbeddingProvider(       │
+  │   { host: cfg.ollamaHost })  :40   │
+  │ new GemmaModelProvider(            │
+  │   { host: cfg.ollamaHost })  :46   │
+  └───────────────┬────────────────────┘
+                  │  aptkit owns the fetch()
+                  ▼  HTTP POST, TCP 11434
+          ┌─ Ollama daemon ─┐
+          │ gemma2:9b        │
+          │ nomic-embed      │
+          └──────────────────┘
+```
+
+**Boundary 3: inbound — there isn't one.** Search the repo: nothing calls
+`http.createServer`, `net.createServer`, `app.listen`, or opens a socket
+for reading. The Ink app reads stdin and writes stdout — terminal I/O, not
+network I/O. So the entire inbound half of networking (accepting
+connections, request routing, CORS, listen-port security) is `not yet
+exercised`. That's not a gap to apologize for; it's a deliberate
+local-first shape (see `me.md`'s buffr entry: SQLite/Postgres primary,
+single-device).
 
 ### Move 3 — the principle
 
-A network map is the first artifact you draw for *any* system, because every
-later question — where's the latency, where's the failure, where's the
-attacker — is answered by pointing at an edge. buffr's map is small, but the
-discipline is identical whether you have two edges or two hundred: name every
-process, name every wire between them, mark the direction. The map you can't
-draw is the system you don't understand.
+A network map is worth drawing before you reason about any single
+protocol, because **the map tells you which concerns are even in scope.**
+buffr has no inbound boundary, so half the networking syllabus is
+out-of-scope by construction — and you only know that for sure once
+you've drawn the map and found zero `listen()` calls.
 
 ## Primary diagram
 
-The full recap — one `npm run chat` turn, every hop, both wires, in order.
-The pool is built once at session start and stays warm across every turn.
+The full map, every box and every hop labelled.
 
 ```
-  npm run chat — one ask() turn over the warm session pool
+  buffr-laptop — complete network map
 
-  ┌─ session setup (once): createChatSession (src/session.ts:34) ────┐
-  │ loadConfig → createPool → build providers → RagQueryAgent        │
-  │ pool opened on turn 1, then REUSED for every turn below          │
-  └───┬──────────────────────────────────────────────────────────────┘
-      │ 1  insert conversation/   ┌─ Postgres reindb :5432 (remote) ─┐
-      ├─── user message ──────────► agents.conversations/messages    │
-      │                          └───────────────────────────────────┘
-      │ 2  POST /api/embed        ┌─ Ollama :11434 (loopback) ──────┐
-      ├──────────────────────────► nomic-embed-text → 768-dim       │
-      │                          └───────────────────────────────────┘
-      │ 3  select <=> search      ┌─ Postgres reindb :5432 ─────────┐
-      ├──────────────────────────► agents.chunks (HNSW cosine)      │
-      │                          └───────────────────────────────────┘
-      │ 4  POST /api/chat         ┌─ Ollama :11434 ─────────────────┐
-      ├──────────────────────────► gemma2:9b → full answer          │
-      │                          └───────────────────────────────────┘
-      │ 5  flush + memory.remember┌─ Postgres reindb :5432 ─────────┐
-      ├──────────────────────────► agents.messages + memory chunk   │
-      │                          └───────────────────────────────────┘
-      ▼
-   print answer → wait for next turn  (pool stays warm; /exit → pool.end())
-```
+  ┌─ Process: node dist/src/cli/chat.js ───────────────────────┐
+  │                                                            │
+  │  ┌─ UI ───────────┐  onSubmit()    ┌─ Orchestration ─────┐ │
+  │  │ chat.tsx       │ ─────────────► │ session.ts          │ │
+  │  │ Ink + stdin    │ ◄───────────── │  createChatSession  │ │
+  │  └────────────────┘  Promise<str>  │  · pool (db.ts)     │ │
+  │       ▲                            │  · Ollama providers │ │
+  │       │ terminal I/O               └──────┬──────┬───────┘ │
+  │       │ (stdout)                          │      │         │
+  └───────┼──────────────────────────────────┼──────┼─────────┘
+          │ NOT network              boundary1│      │boundary2
+          ▼                          pg/TCP   │      │HTTP/TCP
+        user                          5432    ▼      ▼ 11434
+                                  ┌─ Postgres ─┐ ┌─ Ollama ──┐
+                                  │ reindb     │ │ gemma2    │
+                                  │ pgvector   │ │ nomic-emb │
+                                  └────────────┘ └───────────┘
 
-## Implementation in codebase
-
-**Use cases.** Every CLI is a different subset of this map. `migrate` touches
-*only* the pg wire. `index` and `eval` touch pg + the embed HTTP wire but not
-chat. `chat` is the only command that touches all of it — and the only one that
-holds its pool open across many turns instead of opening and closing per run.
-
-**Code side by side.** The whole map is assembled once in `createChatSession`,
-`src/session.ts:39-46`:
-
-```
-  src/session.ts  (lines 39–46)
-
-  const pool = createPool(cfg.databaseUrl);            ← pg wire endpoint (warm)
-  const embedder = new OllamaEmbeddingProvider(        ← embed HTTP wire
-    { model: 'nomic-embed-text:v1.5', host: cfg.ollamaHost });
-  const store = new PgVectorStore({ pool, ... });      ← rides the pg wire
-  const pipeline = createRetrievalPipeline({ embedder, store });
-  const model = new ContextWindowGuardedProvider(
-    new GemmaModelProvider({ host: cfg.ollamaHost }),   ← chat HTTP wire
-    { maxTokens: 8192 });
-        │
-        └─ both wires are configured here by VALUE: a connection string
-           and a host string. that's buffr's entire network config surface.
-           swap either string and you've repointed the whole map. built ONCE
-           per session, then every ask() turn rides these same objects.
-```
-
-The `migrate` path is the minimal map — pg only:
-
-```
-  src/migrate.ts  (lines 27–30)
-
-  const pool = createPool(cfg.databaseUrl);   ← only the pg wire exists here
-  const sql = await readFile(...);            ← local disk, not network
-  await runMigration(pool, sql);              ← one TCP round-trip set
-  await pool.end();                           ← close it
+  inbound: none · proxies: none · the two TCP lines are the whole network
 ```
 
 ## Elaborate
 
-The map is small because the *deployment* is small: single device, single
-process, single user. The context.md calls this "single-device" and "no Edge
-Functions this phase." That phase choice is why there's no edge band, no LB, no
-fan-out — the parent `agent-layer-plan.md` vision may add them, but the map you
-audit is the map that exists. When buffr graduates to a server (an inbound HTTP
-band appears), this file gets a third wire and the seam analysis changes:
-suddenly buffr owns a *listening* socket, and CORS, auth, and request timeouts
-(`05`, `07`) stop being "not yet exercised."
+This shape — a fat local process talking to a couple of backing services
+over direct TCP — is the canonical *local-first client*. It predates the
+web-app reflex of "everything is an HTTP request to my own API." Among
+your five system shapes (`me.md`), this is closest to AdvntrCue's
+Postgres-colocated design, except AdvntrCue *also* runs a serverless
+inbound API, and buffr deliberately doesn't. Drop the inbound server and
+you drop CORS, request auth, and rate limiting from the design — that
+deletion is the architecture, not an omission.
 
 ## Interview defense
 
-**Q: Walk me through every network call in one user request.**
+**Q: "Walk me through every network boundary in this app."**
+
+> Two outbound, zero inbound. One Node process: the Ink UI calls the
+> session in-process — no network there. The session holds one pg.Pool
+> reaching Postgres over the pg wire protocol on TCP 5432, and two Ollama
+> providers reaching the local model daemon over HTTP on TCP 11434.
+> Nothing listens, so there's no inbound boundary at all.
 
 ```
-  pg(profile) → http(embed) → pg(search) → http(chat) → pg(persist)
-       remote      local         remote       local        remote
+  in-process  │  TCP 5432 (pg wire)  │  TCP 11434 (HTTP)
+  UI→session  │  session→Postgres    │  session→Ollama
+              │                       │
+        the two flips = the whole network; inbound = ∅
 ```
 
-Answer: "Five network round-trips across two wires. Three hit a remote Postgres
-over the pg binary protocol on one reused TCP connection; two hit a local
-Ollama over plain HTTP, one fetch each. The DB wire is remote so it's where the
-latency and the TLS live; the LLM wire is loopback so it's fast and plaintext.
-And in `chat` that DB connection is reused across the whole session, so only the
-first turn pays the handshake." Anchor: `src/session.ts:55-66`.
+Anchor: *"Two outbound connections, zero inbound — `session.ts:39-46`
+holds both clients."*
 
-**Q: Which wires does buffr actually own?**
+**Q: "What's the load-bearing part people forget here?"**
 
-Answer: "Only the pg one. `src/db.ts` constructs the `pg.Pool` directly. The
-HTTP wire is owned by aptkit's provider transports — buffr hands them a host
-string and never sees the `fetch`. That seam is `host: cfg.ollamaHost`." Anchor:
-`src/config.ts:14`, `src/session.ts:40,46`.
+> That the UI→session arrow is *not* a hop. In a web app it would be, and
+> you'd reason about auth and CORS on it. Here it's a function call, so
+> those concerns don't exist. Forgetting that makes you secure a boundary
+> that isn't there and miss that the real boundaries are the two TCP
+> sockets.
 
-## Validate
-
-1. **Reconstruct:** draw the two-wire map from memory — name both ports.
-2. **Explain:** why does "create the session" open no socket? (lazy connect; the
-   first query in `startConversation` forces it — `src/session.ts:55`.)
-3. **Apply:** Ollama is down. Which hop fails and which hops already succeeded?
-   (Hop 2 embed fails; hop 1's conversation/user-message inserts already
-   committed.)
-4. **Defend:** why is it fine that buffr doesn't own the HTTP socket? (aptkit's
-   provider contract is the seam; buffr's job is configuration, not transport —
-   `src/session.ts:40,46`.)
+Anchor: *"`chat.tsx:28` — `await session.ask(q)` is a function call, not a
+fetch."*
 
 ## See also
 
-- `02-dns-routing-and-addressing.md` — localhost vs the remote Supabase host.
-- `03-tcp-udp-connections-and-sockets.md` — the pg TCP connection up close.
-- `05-http-semantics-caching-and-cors.md` — the two POSTs inside the seam.
-- `study-system-design` — where these boundaries *belong* in the architecture.
-
-Updated: 2026-06-24 — Repointed the whole map off the deleted `ask-cmd.ts` onto `src/session.ts`: split Move 2 into once-per-session setup vs per-turn `ask()` hops, reframed the warm pool reused across many turns (only turn 1 pays the TCP handshake), rewired the seam/anchor cites to `src/session.ts:40,46` and `:55-66`, and added the best-effort `memory.remember()` embed hop.
+- `02-dns-routing-and-addressing.md` — how `localhost` / a DB host on
+  these two boundaries resolves to an address.
+- `03-tcp-udp-connections-and-sockets.md` — the TCP connections behind
+  boundary 1 and the pool that holds them.
+- `08-networking-red-flags-audit.md` — what can fail on each boundary.
+- `study-system-design` — *where* these boundaries belong in the design.

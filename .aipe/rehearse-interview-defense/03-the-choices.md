@@ -1,326 +1,616 @@
 # Chapter 3 — The Choices
 
-"Why this stack?" is where interviewers find out whether you make decisions or just accept defaults. The weak answer to every "why X" is "it's good for this kind of thing." The strong answer names the alternatives, names the actual criterion you decided on, and names the cost you're paying for the choice. Every real decision has a cost; pretending yours don't is the tell that you didn't really decide.
+This is the longest chapter, and it's the one that wins or loses senior
+interviews. "Why did you pick X?" is the question that separates someone
+who made decisions from someone who accepted defaults. The answer to
+every one of these is the same shape: name the alternatives, name the
+real decision criterion, name the cost you're paying. Not "X is good for
+this" — that's the filler that tells an interviewer you don't remember
+why you chose it.
 
-This chapter defends the eight load-bearing choices in `buffr-laptop`. Not the trivial ones — nobody cares which test runner you picked. The eight that an interviewer will actually probe, each with the alternatives, the criterion, and the cost. Some of these you decided deliberately. Some an AI tool suggested and you evaluated and accepted. One or two you defaulted to. The strong move is being honest about which is which, and this chapter marks each one.
+There are eight load-bearing choices in buffr worth defending. The
+trivial ones — which test runner, which env loader — don't get a section,
+because no interviewer cares and pretending they were agonized decisions
+wastes the room. These eight carry real weight.
 
-```
-  THE DECISION TREE — eight load-bearing choices
+## The choices — the decision tree
 
-  Vector store?
-   ├─ dedicated DB (Pinecone/Qdrant/Weaviate)
-   └─ ★ pgvector in the same Postgres ★   ← colocation, one source of truth
-         │
-  ANN index?
-   ├─ IVFFlat (needs training, batch)
-   └─ ★ HNSW (no training, incremental) ★  ← index one doc, search now
-         │
-  Generation model?
-   ├─ cloud LLM (GPT-4 / Claude)
-   └─ ★ local gemma2:9b via Ollama ★      ← privacy + zero per-query cost
-         │                                   (cost: no native tool-calling)
-  Storage shape?
-   ├─ separate vector + relational stores
-   └─ ★ one Postgres, vectors + rows ★    ← one pool, one commit point
-         │
-  documents→chunks integrity?
-   ├─ hard FK (rejects orphan chunks)
-   └─ ★ soft link, FK dropped ★           ← parity + lets memory rows ride chunks
-         │
-  Embedding dimension?
-   └─ ★ 768, committed everywhere ★       ← one-way door on indexed data
-         │
-  The agent loop itself?
-   ├─ build it from scratch
-   └─ ★ consume aptkit as a library ★     ← build the glue, not the loop
-         │
-  Conversation memory?
-   ├─ build a bespoke memory store in buffr
-   └─ ★ inject store into @aptkit/memory ★ ← engine up, store down; same contract
-```
-
-The starred path is what's in the repo. Every fork is a place the interviewer can stop and ask "why not the other branch?" — so let's defend each one.
-
-## Choice 1 — pgvector, not a dedicated vector database
-
-  ┌─────────────────────────────────────────────────────────┐
-  │ THEY ASK                                                 │
-  │   "Why pgvector and not Pinecone or Qdrant?"            │
-  │                                                         │
-  │ WHAT THEY'RE TESTING                                     │
-  │   Do you understand the cost of a network hop and a      │
-  │   second source of truth? Did you think about scale,    │
-  │   or default to whatever you'd heard of? Can you         │
-  │   compare on more than one axis?                        │
-  └─────────────────────────────────────────────────────────┘
-
-> "I picked pgvector for operational simplicity at my scale. There's exactly one client, one corpus, and my relational data — conversations, profiles, the source documents — lives in the same place. A dedicated vector DB would split my source of truth across two systems for no gain: I'd add a network hop, a second thing to operate, and a second billing surface, to solve a scaling problem I don't have. With pgvector, a chunk is one join from its document and I manage one connection pool. The cost I'm accepting is that pgvector is slower than specialized engines at billions of rows — but I'm nowhere near that, and the colocation is worth more to me than peak ANN throughput I'll never use."
-
-Decision mode: **deliberate.** You shipped this exact shape before in AdvntrCue (pgvector + Drizzle + GPT-4). This is the local-first restatement of a pattern you already proved.
-
-  ┃ "Colocate until you have a scaling axis that splits
-  ┃  them. buffr never does."
+Every box here is a fork you took with a reason. The picked branch is
+marked. This is the chapter's map.
 
 ```
-  "Why pgvector?"
-        │
-        ▼  you give the operational-simplicity answer
-        │
-        ├─► IF THEY ASK ABOUT COST
-        │     pgvector is free beyond the Postgres I already
-        │     run. A managed vector DB starts a separate
-        │     monthly bill. At one user that's pure overhead.
-        │
-        ├─► IF THEY ASK ABOUT PERFORMANCE AT SCALE
-        │     pgvector is slower than specialized engines at
-        │     billions of rows. At my corpus size it doesn't
-        │     matter. Say so plainly — don't pretend it wins
-        │     on raw throughput.
-        │
-        └─► IF THEY ASK "WHEN WOULD YOU SWITCH?"
-              When vectors and relational data develop
-              separate scaling axes — when one needs to scale
-              independently of the other. Until then, splitting
-              them is premature.
+  buffr's load-bearing choices — picked branch marked ★
+
+  build it / buy a tool? ──────────► ★ BUILD (portfolio: own the
+                                        interesting parts) · not Hermes
+
+  vector store? ───────────────────► ★ pgvector in ONE Postgres
+                                        (colocate vector + relational)
+                                        · not Pinecone, not Weaviate
+
+  where do models run? ────────────► ★ LOCAL via Ollama (gemma2:9b +
+                                        nomic-embed) · not GPT-4/cloud
+                                        cost: Gemma = reliability ceiling
+
+  agent logic: in-app or library? ─► ★ aptkit LIBRARY (contracts up,
+                                        impls down) · memory extract-up
+                                        round-trip · not inline
+
+  chunks→documents FK? ────────────► ★ DROP it (soft link) · preserves
+                                        VectorStore parity + lets memory
+                                        rows exist · not a hard FK
+
+  interface? ──────────────────────► ★ Ink/React terminal TUI
+                                        (plays to React strength) · not
+                                        a web UI, not one-shot CLI
+
+  Gemma tool calls? ───────────────► ★ EMULATE (schema in prompt, parse
+                                        JSON back) · Gemma has no native
+                                        tool API · the reliability ceiling
+
+  eval quality? ───────────────────► ★ precision@k / recall@k WIRED ·
+                                        faithfulness (RubricJudge) NOT
+                                        wired yet · named, not hidden
 ```
 
-## Choice 2 — HNSW, not IVFFlat
-
-  ┌─────────────────────────────────────────────────────────┐
-  │ THEY ASK                                                 │
-  │   "Why HNSW for the index and not IVFFlat?"             │
-  │                                                         │
-  │ WHAT THEY'RE TESTING                                     │
-  │   Do you know there's more than one ANN method, and     │
-  │   why one fits your write pattern? Or did you copy the   │
-  │   first CREATE INDEX you found?                          │
-  └─────────────────────────────────────────────────────────┘
-
-> "HNSW because it has no training step and supports incremental inserts. I index documents one at a time, and I want to search immediately after — HNSW lets me do that. IVFFlat needs to see a representative sample of the data to build its centroids, so it's built for a batch-load-then-query pattern, not an incremental one. HNSW also degrades more gracefully on recall. The trade I'm accepting is that it's approximate by design — a greedy graph walk can miss the true top-k — and the recall-vs-latency knob, `ef_search`, I left at the default. I haven't tuned it because I don't have a recall baseline to tune against yet; that's a known gap."
-
-Decision mode: **evaluated and accepted.** You knew both methods existed and picked on the write pattern. The honest part is the untuned `ef_search` — own it.
-
-The one line that wins this answer: the opclass-operator pairing. The index is built with `vector_cosine_ops` and queried with `<=>`. If those don't match — if someone queries with the L2 operator `<->` against a cosine index — Postgres silently ignores the index and does a full sequential scan. No error. Just orders of magnitude slower as the corpus grows. Knowing that one line is the single most load-bearing thing in the storage layer signals you understand the index, not just that you typed it.
-
-  ┃ "The operator and the opclass are a matched pair.
-  ┃  Mismatch them and you scan the whole table with
-  ┃  no error to tell you."
-
-## Choice 3 — local Gemma via Ollama, not a cloud LLM
-
-  ┌─────────────────────────────────────────────────────────┐
-  │ THEY ASK                                                 │
-  │   "Why a local model instead of GPT-4 or Claude?         │
-  │    Wouldn't a frontier model just be better?"           │
-  │                                                         │
-  │ WHAT THEY'RE TESTING                                     │
-  │   Did you choose local for a reason, or because it was   │
-  │   free? Do you understand what you GAVE UP — and what    │
-  │   that forced you to engineer around?                    │
-  └─────────────────────────────────────────────────────────┘
-
-> "Local was the whole point of the project, not a cost-saving fallback. It's my own notes — a personal knowledge base — so keeping everything on the laptop is the privacy story, and there's zero per-query cost so I can iterate freely. But I'm honest that I gave up answer quality: gemma2:9b is weaker than a frontier model, and more interestingly, it has no native tool-calling. That forced the most interesting engineering in the system — the toolkit emulates tool-calling by rendering the tool schema into the prompt and parsing the JSON back out. A cloud model would have given me that for free. Choosing local meant I had to understand and rely on that emulation layer, which is exactly the kind of thing I wanted to learn."
-
-Decision mode: **deliberate** — local-first is your through-line across dryrun (Gemini Nano) and contrl (MediaPipe). You've shipped on-device AI three times; this is consistent, not a fluke.
-
-The frontier-model gap is real and you name it. But you turn the limitation into the interesting part: it's *because* Gemma can't call tools natively that you ended up understanding emulation, which most candidates who used GPT-4's tool API have never had to think about. Chapter 6 goes deep on this; here, just establish that local was a choice with a known cost.
-
-## Choice 4 — one Postgres for both vectors and relational data
-
-  ┌─────────────────────────────────────────────────────────┐
-  │ THEY ASK                                                 │
-  │   "Vectors and your application data in one database —   │
-  │    isn't that mixing concerns?"                         │
-  │                                                         │
-  │ WHAT THEY'RE TESTING                                     │
-  │   Do you know when separation buys you something and     │
-  │   when it's just ceremony? Can you defend colocation     │
-  │   without sounding lazy?                                │
-  └─────────────────────────────────────────────────────────┘
-
-> "It's one process, one pool, one commit point. Durability is Postgres's promise at COMMIT, not something my code has to coordinate across two systems. Separating concerns buys you something when the two halves scale independently or fail independently — but here they don't. A chunk and its source document and the conversation that retrieved it all live one join apart. Splitting them would mean coordinating writes across two stores and reasoning about partial failure, to separate things that have no reason to live apart at this scale. I'd separate them the day vectors need to scale on a different axis than the relational data. That day hasn't come."
-
-Decision mode: **deliberate.** This is the same instinct as Choice 1 — colocate until there's a scaling axis to split on.
-
-## Choice 5 — the deliberately-dropped foreign key
-
-This is the one that looks like a bug and isn't. Interviewers love finding it, because it lets them test whether you'll defend a decision or apologize for a mistake.
-
-  ┌─────────────────────────────────────────────────────────┐
-  │ THEY ASK                                                 │
-  │   "Your chunks have a document_id but no foreign key     │
-  │    to documents. Isn't that a missing constraint —       │
-  │    a bug?"                                              │
-  │                                                         │
-  │ WHAT THEY'RE TESTING                                     │
-  │   Will you cave and call it a bug, or do you know        │
-  │   exactly why it's there? Do you understand the          │
-  │   contract that forced it? Can you name what you gave    │
-  │   up and how you'd get it back if you needed it?        │
-  └─────────────────────────────────────────────────────────┘
-
-> "That's deliberate, and the schema comments say why. My pgvector store implements aptkit's VectorStore contract, and that contract upserts chunks with no notion of a documents row — it's just `id`, `vector`, `meta`. A hard foreign key would reject any chunk written before its parent document existed, which would break drop-in parity with the in-memory store the contract is built around. The FK and the contract are mutually exclusive, and I chose the contract — the migration even actively drops the constraint if a previous version of the schema had it. What I gave up is the database enforcing parent-exists and cascade-delete; integrity relocated to my application's call order, where `indexDocumentRow` writes the document first, then the chunks. And here's where the decision pays off twice: when I added conversation memory, the memory rows ride the same `chunks` table tagged `meta.kind='memory'` — and they have *no* parent document at all. A hard FK would have rejected every one of them. The dropped constraint is exactly what lets a second kind of vector (an embedded exchange) share the table with corpus chunks. If I needed integrity back, the fix isn't re-adding the FK — that re-breaks both parity and memory — it's wrapping the index writes in one transaction plus an orphan-sweep keyed on document_id, scoped to corpus chunks only."
-
-Decision mode: **deliberate** — and a strong one to volunteer. Notice the proof it's principled, not lazy: the schema *keeps* a real foreign key elsewhere — `messages.conversation_id` references `conversations` with cascade delete — because the trace sink writes through your own code with no external contract forbidding it. The presence or absence of the FK marks exactly where an external contract crosses the boundary. That's the answer that turns a "gotcha" into a signal of depth.
-
-  ┃ "I enforce integrity in the database unless an
-  ┃  external contract forbids it. chunks: the contract
-  ┃  forbids it, so it's dropped. messages: nothing
-  ┃  forbids it, so it's kept."
-
-## Choice 6 — the embedding dimension is a one-way door
-
-  ┌─────────────────────────────────────────────────────────┐
-  │ THEY ASK                                                 │
-  │   "Why hard-code 768 everywhere? Why not make the        │
-  │    dimension configurable?"                             │
-  │                                                         │
-  │ WHAT THEY'RE TESTING                                     │
-  │   Do you understand that the embedding dimension isn't   │
-  │   a runtime knob — it's a commitment baked into every    │
-  │   indexed row? Do you fail loud on a mismatch, or        │
-  │   would you silently corrupt retrieval?                 │
-  └─────────────────────────────────────────────────────────┘
-
-> "768 is the dimension of nomic-embed-text, my embedder, and it's a one-way door on indexed data. Query and corpus vectors have to share a space to be comparable — so switching embedders changes the dimension, which invalidates the entire indexed corpus. I'd have to re-embed every document and migrate the `vector(768)` column. It's cheap to set and expensive to undo, so I treat it as a commitment and source the number from one place: the embedder reports its dimension, the pipeline asserts the embedder and store agree at wiring time, and the store asserts every vector's length before any read or write. Critically, that assertion *throws* — it never truncates or pads — because a silently-truncated vector would index fine and then retrieve wrong forever. Fail loud at wiring time, never degrade at query time."
-
-Decision mode: **deliberate** — and the defense-in-depth here was called out in the study guides as better than most production RAG systems. The killer detail is that `assertDim` throws rather than coerces. A lot of systems would pad or truncate to "be helpful," and that turns a loud wiring bug into a silent retrieval-quality bug you'd never catch.
-
-## Choice 7 — consuming aptkit as a library, not building the loop
-
-This one is about honesty as much as architecture. The agent loop, the tool emulation, the eval scorers — those live in `@rlynjb/aptkit-core`, which you consume and never edit. An AI helped you assemble a lot of it.
-
-  ┌─────────────────────────────────────────────────────────┐
-  │ THEY ASK                                                 │
-  │   "Did you write the agent loop, or is that the          │
-  │    library?"                                            │
-  │                                                         │
-  │ WHAT THEY'RE TESTING                                     │
-  │   Will you overclaim? Do you know precisely where your   │
-  │   code ends and the library begins? Can you defend the   │
-  │   decision to NOT build the loop?                        │
-  └─────────────────────────────────────────────────────────┘
-
-> "The loop is the library — I consume aptkit and never edit it. That was a deliberate scope decision: reinventing the agent loop and vector search would have cost me the time and hidden the interesting parts. What I built is the glue and the judgment layer — the pgvector store implementing the library's VectorStore contract, the Postgres persistence, the Ink chat REPL and the long-lived chat session, the index and eval CLIs, the trajectory trace sink, the memory wiring (injecting my store into aptkit's engine), and choices like flooring the tool's result count so a model asking for one chunk still gets four. I can point at the exact seam: imports and interface implementations cross the npm boundary; everything below `src/` is mine. If there were a bug in the loop, the fix goes upstream into aptkit, not a node_modules edit."
-
-Decision mode: **deliberate.** The senior move is the precision of the seam. You're not claiming the loop. You're claiming the integration, and you can draw the exact line. That precision is worth more than pretending you wrote everything.
-
-  ┃ "I don't claim what I wired. I claim the integration,
-  ┃  and I can draw the exact line where my code ends."
-
-## Choice 8 — conversation memory as an injected capability
-
-This one is new, and it's the cleanest demonstration of the seam discipline from Choice 7 — because the memory capability was literally *extracted out of buffr and up into the library*, then re-consumed.
-
-  ┌─────────────────────────────────────────────────────────┐
-  │ THEY ASK                                                 │
-  │   "How does it remember anything? Did you build the      │
-  │    memory system?"                                      │
-  │                                                         │
-  │ WHAT THEY'RE TESTING                                     │
-  │   Do you understand what kind of memory this is — and    │
-  │   the difference between persisting a chat log and       │
-  │   making past turns retrievable? Do you know where the   │
-  │   engine ends and your store begins?                    │
-  └─────────────────────────────────────────────────────────┘
-
-> "It's retrieval-based episodic memory — RAG applied to conversation history instead of documents. After each turn, the question and answer get embedded and written back into the same vector store, tagged `meta.kind='memory'`, so a later turn — even in a future session — can pull a relevant past exchange back by similarity, through the exact same `search_knowledge_base` tool that retrieves corpus chunks. The important honesty: I didn't build the memory *engine* — `createConversationMemory` is aptkit's, in the published `@aptkit/memory` package. What I did was draw the seam. The engine speaks only the `EmbeddingProvider` and `VectorStore` contracts, so I inject my `PgVectorStore` and it has no idea it's talking to Postgres. The interesting history is that this engine was extracted *up* out of buffr into aptkit and then re-consumed here — a clean round-trip across the npm boundary. That's the proof the contract holds: the same capability can move out of my app and into the toolkit without my persistence layer changing a line. The cost I'm accepting is that this is relevance-based recall, not sequential in-prompt turn history — each `answer()` still treats its question independently; I get memory by similarity, not a running transcript in the prompt."
-
-Decision mode: **deliberate** on the seam, **evaluated-and-accepted** on the engine. You chose to inject a store into a library capability rather than hand-roll a memory table, and you can name exactly what that buys (store-agnostic engine, testable against the in-memory store) and what it costs (no sequential history). For a 7-year frontend engineer, the move that lands here is the contract-as-seam reasoning — the same instinct as a well-designed React boundary, where the consumer injects state and the component stays ignorant of where it came from.
-
-  ┃ "The memory engine moved up into the library and came
-  ┃  back down — and my persistence layer never changed.
-  ┃  That round-trip is the contract proving itself."
-
-## A note on the Ink chat surface — a genuine frontend
-
-Worth naming when the conversation touches the interface: the chat REPL is built in **Ink — React in the terminal**. `chat.tsx` is a real React component tree (`useState` for the turn list and the busy flag, `TextInput` and `Spinner` from the Ink ecosystem, the same render/state/effect model as a browser app). That's not incidental for you — it's a terminal *frontend surface*, and it plays directly to seven years of React. When an interviewer asks "what did you build," the chat UI is a place where your existing strength and this new AI-engineering work meet: same mental model (declarative components, state-driven render), different runtime. Claim it as the part of the system you were *most* equipped to build, not the least.
-
-## Strong vs. weak — defending any choice
-
-  ┌──────────────────────────────┬──────────────────────────────┐
-  │ WEAK DEFENSE                 │ STRONG DEFENSE               │
-  ├──────────────────────────────┼──────────────────────────────┤
-  │ "I used pgvector because     │ "I picked pgvector for       │
-  │ it's good for this kind of   │ operational simplicity. One  │
-  │ thing and a lot of people    │ corpus, one client, and my   │
-  │ use it."                     │ relational data lives in the │
-  │                              │ same instance — so I avoid   │
-  │                              │ a network hop and a second   │
-  │                              │ source of truth. The cost is │
-  │                              │ it's slower at billions of   │
-  │                              │ rows, which I'm nowhere near."│
-  ├──────────────────────────────┼──────────────────────────────┤
-  │ Why it's weak:               │ Why it works:                │
-  │ "Good for this kind of       │ Names the criterion          │
-  │ thing" is filler — it        │ (operational simplicity),    │
-  │ signals you don't remember   │ the specific tradeoff        │
-  │ why you chose it. "A lot of  │ (network hop, second store), │
-  │ people use it" is an appeal  │ and the cost you're paying   │
-  │ to popularity, not a         │ (throughput you don't need). │
-  │ reason.                      │ Three axes, one decision.    │
-  └──────────────────────────────┴──────────────────────────────┘
-
-The structure is always the same: criterion, tradeoff, cost. If your defense of any choice doesn't have all three, it's the weak version dressed up.
-
-## When you don't know
-
-The choice you're least equipped to defend deeply is the embedding model *quality* — whether nomic-embed-text is actually the right embedder, versus the alternatives, on retrieval benchmarks. You picked it because it's local and 768-dim and it worked; you didn't benchmark it against, say, a larger local embedder.
-
-  ╔═══════════════════════════════════════════════════════════╗
-  ║ WHEN YOU DON'T KNOW                                       ║
-  ║                                                          ║
-  ║   They ask: "How does nomic-embed-text compare to other  ║
-  ║   embedding models on retrieval quality? Why this one?"  ║
-  ║                                                          ║
-  ║   Say:                                                   ║
-  ║   "I chose it on operational fit — it's local, it's      ║
-  ║    768-dim, and it ran well through Ollama. I haven't    ║
-  ║    benchmarked it head-to-head against other embedders   ║
-  ║    on a retrieval set, so I can't give you a quality     ║
-  ║    ranking. What I'd do to answer that properly: my eval ║
-  ║    harness already scores precision and recall against   ║
-  ║    a labeled query set, so I'd swap the embedder,        ║
-  ║    re-index, and compare the numbers. That's the         ║
-  ║    measurement I haven't run yet."                       ║
-  ║                                                          ║
-  ║   What this signals: you chose on a real (if narrow)     ║
-  ║   criterion, you don't pretend to a benchmark you didn't ║
-  ║   run, and you know exactly the experiment that would    ║
-  ║   settle it. That last part is what makes it senior.     ║
-  ║                                                          ║
-  ║   Do NOT say:                                            ║
-  ║   "It's one of the best embedding models, I'm pretty     ║
-  ║    sure it's near the top of the leaderboards."          ║
-  ║   You'll get asked "which leaderboard, what score" and   ║
-  ║   the bluff collapses.                                   ║
-  ╚═══════════════════════════════════════════════════════════╝
-
-## What you'd change
-
-The choice you'd most reconsider is leaving `ef_search` at its default. It's the highest-leverage tuning knob in the whole retrieval path — it directly trades recall for latency — and you have a recall harness that could sweep it, but you never wired the two together. You'd build an exact-scan baseline (force Postgres to skip the index, get ground-truth nearest neighbors), then sweep `ef_search` against your eval set to find the recall floor you're actually getting. Right now a recall regression from an under-tuned index would be invisible. That's the choice you defaulted to rather than decided — and the senior move is owning that it was a default, not dressing it up as deliberate.
-
-## One-page summary
-
-**Core claim:** Every choice defense has three parts — the criterion, the tradeoff, the cost. Missing any one is the weak version.
-
-**The eight choices, one line each:**
-- *pgvector vs dedicated DB* → operational simplicity, one source of truth; cost: throughput at billions of rows I don't have. (deliberate)
-- *HNSW vs IVFFlat* → no training, incremental insert; cost: approximate, `ef_search` untuned. (evaluated)
-- *local Gemma vs cloud* → privacy + zero per-query cost; cost: weaker model, no native tool-calling. (deliberate)
-- *one Postgres* → one pool, one commit point; split when scaling axes diverge. (deliberate)
-- *dropped FK* → preserves VectorStore parity AND lets memory rows ride chunks; cost: integrity moves to call order. (deliberate)
-- *768 committed* → one-way door, fail loud, never truncate. (deliberate)
-- *consume aptkit* → build the glue, not the loop; I can draw the exact seam. (deliberate)
-- *injected memory* → inject store into `@aptkit/memory`; engine-up/store-down; cost: relevance recall, not sequential history. (deliberate seam, evaluated engine)
-
-**Pull quotes:**
-- "Colocate until you have a scaling axis that splits them."
-- "The operator and the opclass are a matched pair. Mismatch them and you scan the whole table with no error."
-- "I don't claim what I wired. I claim the integration."
-
-**What you'd change:** Wire the recall harness to sweep `ef_search` — the highest-leverage knob I defaulted on instead of deciding.
+Now defend each one.
 
 ---
 
-Updated: 2026-06-24 — added an eighth choice (conversation memory injected into `@aptkit/memory` — the engine-up/store-down round-trip) and an Ink/React chat-surface note that plays to the reader's frontend strength; strengthened the dropped-FK defense to show it now also enables parent-less memory rows to ride the `chunks` table.
+### Choice 1 — Build it, instead of using Hermes
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ THEY ASK                                                        │
+│   "Why build this yourself instead of using an existing agent  │
+│    framework?"                                                  │
+│                                                                 │
+│ WHAT THEY'RE TESTING                                           │
+│   Do you know what NOT to build? A senior engineer who builds  │
+│   everything from scratch is a red flag. They want to hear     │
+│   that you drew the line deliberately — built the parts that   │
+│   signal skill, reused the parts that don't.                   │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+The strong answer:
+
+> "It's a portfolio project, so the goal isn't shipping fastest — it's
+> demonstrating the engineering that a turnkey tool hides. Hermes Agent,
+> for example, is a multi-agent Python platform running fine-tuned models
+> — if I'd used it, I'd be showing I can configure a platform, not that I
+> can write a model provider, a RAG pipeline, and an eval harness. So I
+> built the *judgment layer* — the Gemma provider, the retrieval ranking,
+> the trajectory capture, the evals — and I deliberately did NOT reinvent
+> the agent loop or vector search, because those cost scope and hide the
+> interesting parts. I borrowed exactly one idea from Hermes: capture
+> every conversation as a trajectory now, so fine-tuning is *answerable*
+> later instead of assumed. The cost of building it myself is that it's
+> less feature-complete than a platform — single agent, single device. I
+> traded breadth for owning the parts that matter."
+
+This is the answer that signals seniority because it draws the line in
+*both* directions: built the interesting parts (`agent-layer-plan.md:23-35`),
+reused the boring parts (vector search, the loop), borrowed one
+discipline (trajectory capture). Building everything is junior. Building
+nothing is junior. Knowing which is which is senior.
+
+```
+  ┃ Building everything is a red flag. So is building nothing.
+  ┃ The senior signal is naming exactly where you drew the line.
+```
+
+#### The follow-up tree
+
+```
+  You give the build-the-judgment-layer answer.
+        │
+        ├─► IF THEY ASK "what did you borrow from Hermes specifically?"
+        │     → The trajectory-capture discipline ONLY — not the
+        │       multi-agent platform, not the fine-tuned models. buffr
+        │       runs stock Gemma 2. Capture now, so fine-tuning is
+        │       evidence-driven later (agent-layer-plan.md:17).
+        │
+        ├─► IF THEY ASK "isn't reinventing the agent loop the fun part?"
+        │     → I DID write the loop — it's in aptkit (run-agent-loop,
+        │       bounded maxTurns/maxToolCalls). What I didn't reinvent
+        │       is pgvector and the embedding math. I build glue and
+        │       judgment, not substrate.
+        │
+        └─► IF THEY ASK "would you use a framework for the real thing?"
+              → For a product with a deadline, yes — LangChain or
+                similar. For a portfolio piece whose whole point is to
+                show the engineering, no. Different goals, different call.
+```
+
+---
+
+### Choice 2 — pgvector in one Postgres, not a dedicated vector DB
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ THEY ASK                                                        │
+│   "Why pgvector and not Pinecone or Weaviate?"                 │
+│                                                                 │
+│ WHAT THEY'RE TESTING                                           │
+│   Do you understand the cost of a network hop and a second     │
+│   system? Did you think about your actual scale, or default    │
+│   to whatever vector DB you'd heard of? Can you compare on     │
+│   more than one axis?                                           │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+The strong answer:
+
+> "Operational simplicity and colocation. My vector data and my
+> relational data — the documents, the conversation history, the
+> trajectory — all live in one Postgres instance, so a single
+> transaction and a single connection cover both. When I index a
+> document, the documents row and the chunk embeddings commit together
+> in one transaction; I don't have a two-system consistency problem
+> between a relational store and a separate vector store. A dedicated
+> vector DB like Pinecone adds a network hop, a second billing surface,
+> and a second thing to keep in sync — and at my data scale, hundreds to
+> low-thousands of chunks, I get nothing for that. It's the same call I
+> made in AdvntrCue: colocate the vector and relational data in one
+> Postgres. The cost I'm watching: pgvector with default HNSW params
+> degrades on recall and build time past roughly 10k chunks. At that
+> point I'd tune the index, not switch databases."
+
+This answer compares on *three* axes — operational (one system),
+consistency (one transaction), cost (no second billing surface) — and
+names the scale ceiling where the calculus flips. That's what "can you
+compare on more than one axis" is looking for.
+
+#### Weak vs strong — pgvector
+
+```
+┌─────────────────────────────┬─────────────────────────────┐
+│ WEAK ANSWER                 │ STRONG ANSWER               │
+├─────────────────────────────┼─────────────────────────────┤
+│ "I used pgvector because    │ "Operational simplicity     │
+│ it's good for RAG and I      │ and colocation. Vector and  │
+│ already knew Postgres."     │ relational data are in one  │
+│                             │ Postgres, so one            │
+│                             │ transaction covers an index │
+│                             │ write. Pinecone adds a      │
+│                             │ network hop and a second    │
+│                             │ system to sync, and at my   │
+│                             │ scale I gain nothing. Cost: │
+│                             │ default HNSW degrades past  │
+│                             │ ~10k chunks — then I tune,  │
+│                             │ not switch."                │
+├─────────────────────────────┼─────────────────────────────┤
+│ Why it's weak:              │ Why it works:               │
+│ "Good for RAG" is filler.   │ Names the criterion         │
+│ "I already knew Postgres"   │ (colocation), the specific  │
+│ is the real reason but it   │ tradeoff avoided (network   │
+│ sounds like laziness        │ hop + sync), the scale at   │
+│ unstated. No alternative    │ which it flips, and the     │
+│ evaluated, no cost named.   │ next move at that scale.    │
+│                             │ Familiarity becomes a       │
+│                             │ deliberate "fewer moving    │
+│                             │ parts," not laziness.       │
+└─────────────────────────────┴─────────────────────────────┘
+```
+
+---
+
+### Choice 3 — Local models via Ollama, not a cloud API
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ THEY ASK                                                        │
+│   "Why run Gemma locally instead of just calling GPT-4? You'd  │
+│    get better quality."                                         │
+│                                                                 │
+│ WHAT THEY'RE TESTING                                           │
+│   Did you weigh quality against the things local buys you, or  │
+│   did you pick local for ideology? Can you name what you GAVE  │
+│   UP by going local — because that's the honest part most      │
+│   candidates skip?                                              │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+The strong answer:
+
+> "Three reasons, and a real cost. One, privacy — it's a *personal*
+> agent over my own documents and conversation history, and I didn't
+> want that leaving my machine. Two, cost — zero dollars per call, the
+> only ledger is latency and my 8k-token input budget. Three, it's a
+> portfolio piece I wanted to own end-to-end, including writing the model
+> provider against a messy local model. Now the honest cost: gemma2:9b is
+> the reliability ceiling of the whole system. It has no native tool-call
+> API, so I emulate tool calls — I render the tool schema into the system
+> prompt and parse the JSON back out. That parse is the dominant failure
+> mode: the model emits the wrong arg key, the search runs empty, and the
+> answer comes back ungrounded. GPT-4 with native tool-calling would
+> mostly remove that failure mode. So I traded answer quality and tool
+> reliability for privacy, cost, and ownership. For this project's goals,
+> that's the right trade — for a production product where reliability is
+> the product, I'd reconsider."
+
+That answer is strong *because* it volunteers the cost — the Gemma
+reliability ceiling — instead of pretending local was free. The
+interviewer asked "what did you give up," and you answered it before
+they had to push.
+
+```
+  ┃ Local models bought me privacy, cost, and ownership. The
+  ┃ price was the Gemma reliability ceiling — emulated tool
+  ┃ calls that miss. I name the price; I don't pretend it's free.
+```
+
+---
+
+### Choice 4 — The aptkit library boundary (and the memory extract-up)
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ THEY ASK                                                        │
+│   "Why split this into a library plus an app? Why not just one │
+│    codebase?"                                                   │
+│                                                                 │
+│ WHAT THEY'RE TESTING                                           │
+│   Do you understand dependency inversion in practice, not just │
+│   as a SOLID acronym? Can you point at a concrete payoff the   │
+│   boundary bought you — or is it separation for its own sake?  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+The strong answer:
+
+> "Because aptkit is meant to be reused across apps, and buffr is one
+> running body with a database and secrets. If I welded Postgres and
+> Ollama config into the toolkit, that kills its reuse. So the contracts
+> and logic — the vector store interface, the agent loop, the memory
+> engine — live in aptkit; the implementations and deployment live in
+> buffr. The dependency arrow always points at aptkit; buffr imports it
+> and can't edit it. The concrete payoff: when I graduated the store from
+> in-memory to pgvector, the agent loop and retrieval pipeline changed
+> zero lines, because they only ever spoke the `VectorStore` interface.
+> And the cleverest part is a round-trip — the conversation-memory engine
+> was *born in buffr*, turned out to be general, so I extracted it up into
+> aptkit and now re-consume it. It only worked because that engine never
+> names a database; it takes a `VectorStore` as a parameter. buffr injects
+> its `PgVectorStore` down for durable memory; a test injects an in-memory
+> store for the same logic. The cost of the two-repo boundary is friction —
+> a change that spans both is two PRs — but that friction is the feature:
+> it's what stops buffr from special-casing Postgres inside the pipeline
+> and rotting the contract."
+
+The memory extract-up round-trip (`src/session.ts:53`,
+`.aipe/project/context.md:24`) is your single best architecture story.
+It's dependency inversion you can *narrate as an event* — code moved
+across the boundary and cost nothing because it always spoke the
+contract. Lead with it when this thread opens.
+
+#### The follow-up tree
+
+```
+  You give the dependency-inversion answer.
+        │
+        ├─► IF THEY ASK "what stops the boundary from rotting?"
+        │     → The hard published-package line. buffr CAN'T edit
+        │       aptkit, so it must conform to the contract or extract
+        │       a new one up. The friction is the feature.
+        │
+        ├─► IF THEY ASK "give me the concrete payoff"
+        │     → In-memory → pgvector swap: zero agent-loop changes.
+        │       The contract is the unit of evolution. Same move
+        │       absorbs the deferred Edge-Function store later.
+        │
+        └─► IF THEY ASK "isn't two repos overkill for one developer?"
+              → For shipping speed, maybe. For keeping the contract
+                honest under co-evolution, the hard boundary earns it.
+                I'd revisit if the round-trips got expensive.
+```
+
+---
+
+### Choice 5 — Dropping the chunks→documents foreign key
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ THEY ASK                                                        │
+│   "Your chunks reference a document_id but there's no foreign  │
+│    key. Isn't that a missing integrity constraint?"            │
+│                                                                 │
+│ WHAT THEY'RE TESTING                                           │
+│   Did you drop the FK on purpose or forget it? This is a trap  │
+│   that looks like a bug. They want to see if you can defend a  │
+│   relaxed integrity constraint as a deliberate tradeoff —      │
+│   the senior answer — or whether you'll flinch and call it     │
+│   tech debt.                                                    │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+The strong answer:
+
+> "Deliberate, for two reasons. First, the `VectorStore` contract upserts
+> chunks with no notion of a documents row — it just stores
+> `{id, vector, meta}`. A hard FK would add a hidden precondition: a
+> documents row must exist before any chunk. That breaks drop-in parity
+> with the in-memory store, which has no documents concept at all.
+> Second — and this is the one that actually forces it — conversation
+> memory rides the same `chunks` table, tagged `kind=memory`, and memory
+> rows have *no documents row* by nature. They're exchanges, not source
+> files. A hard FK would reject every memory write. So `document_id` is a
+> soft link, no constraint. The cost I accept: nothing in the database
+> stops an orphaned chunk. I'm trading referential integrity for contract
+> parity and the ability to let two kinds of rows share one table and one
+> HNSW index. It's documented in the schema comment and the design spec
+> — it's a tradeoff, not an oversight."
+
+The whole game on this question is *not flinching*. The interviewer is
+probing whether you'll defend the relaxed constraint or apologize for
+it. You defend it — `sql/001_agents_schema.sql:18-27`, two named reasons,
+one named cost.
+
+```
+  ┃ A relaxed constraint defended as a deliberate tradeoff is
+  ┃ a senior signal. The same constraint called "tech debt"
+  ┃ in an apologetic voice is a junior one. Same FK, opposite
+  ┃ read.
+```
+
+---
+
+### Choice 6 — An Ink/React terminal TUI
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ THEY ASK                                                        │
+│   "Why a terminal UI in React? Why not a web app, or just a    │
+│    plain CLI?"                                                   │
+│                                                                 │
+│ WHAT THEY'RE TESTING                                           │
+│   Is the interface choice incidental or reasoned? For a        │
+│   frontend engineer pivoting to AI, do you understand that     │
+│   Ink is React — the same component model, state, and          │
+│   reactivity — just rendered to a terminal?                    │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+The strong answer:
+
+> "Ink is React rendered to the terminal — same component model, same
+> `useState`, same render-on-state-change. So `chat.tsx` is a React
+> component: it holds the turn list, the input, and a busy flag as state,
+> and re-renders as the conversation grows. That plays directly to my
+> strength — seven years of React — while keeping the whole thing in one
+> Node process with no browser, no bundler, no server. A web UI would
+> have meant a frontend *and* an API layer, which the design called YAGNI
+> for a single-device tool. A plain CLI would've meant one-shot
+> question-answer with no held conversation; I needed a long-lived
+> session that keeps one conversation in-process across turns. Ink gives
+> me the reactive UI model I know, at terminal weight. The cost: it's a
+> personal tool's interface, not something I'd ship to non-technical
+> users — but that's the right scope for the phase."
+
+This is a choice you can own with total confidence because it's *your*
+domain. Lead into it by naming that Ink is React (`src/cli/chat.tsx:1-13`
+— `useState`, the component, the busy spinner). For a frontend engineer
+pivoting to AI, this is the answer where you're unambiguously on home
+ground.
+
+---
+
+### Choice 7 — Emulating Gemma tool calls
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ THEY ASK                                                        │
+│   "How does the model call the search tool? Walk me through    │
+│    the tool-calling."                                           │
+│                                                                 │
+│ WHAT THEY'RE TESTING                                           │
+│   Do you understand what tool-calling actually IS underneath   │
+│   the API sugar? Gemma has no native tool API — do you know    │
+│   that, and do you know what you built to work around it?      │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+The strong answer:
+
+> "Gemma 2 has no native tool-call API — there's no `tools` parameter
+> like GPT-4 or Claude have. So I emulate it. The tool schema gets
+> rendered into the system prompt as instructions: 'to search, emit JSON
+> shaped like this.' The model produces free text, and I scan it for a
+> JSON object and parse out the tool name and arguments. If it parses, I
+> run the search and feed the results back; if not, the model answers
+> directly. The honest weakness: there's no argument-schema validation. If
+> the model emits the wrong key — say `q` instead of `query` — it passes
+> straight through and the handler coerces the missing `query` to an empty
+> string, so the search runs empty and the answer comes back ungrounded.
+> That's the single dominant failure mode of the system, and it's the
+> reliability ceiling of choosing a local model with no native tools. I
+> know exactly what would fix it — native-tool-calling model, or strict
+> arg validation on the parse — and I know exactly why I haven't: the
+> whole point was to run local."
+
+This answer is gold for an AI-engineering interview because it shows you
+understand that "tool-calling" is a *capability* some models have
+natively and others have to emulate — and you built the emulation and
+measured its failure mode. Naming the empty-query coercion as the
+dominant failure is the detail that proves you ran it, not just read
+about it.
+
+```
+  ┃ "Tool-calling" isn't magic — it's schema-in-the-prompt and
+  ┃ parse-the-JSON-back when the model has no native API. I
+  ┃ built that, and the parse miss is my reliability ceiling.
+```
+
+---
+
+### Choice 8 — precision@k evals wired, faithfulness not
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ THEY ASK                                                        │
+│   "How do you know your RAG is any good? How do you evaluate    │
+│    it?"                                                          │
+│                                                                 │
+│ WHAT THEY'RE TESTING                                           │
+│   Do you measure, or do you vibe-check? And — the sharper       │
+│   probe — do you know the DIFFERENCE between measuring          │
+│   retrieval and measuring answer faithfulness? Most candidates  │
+│   conflate them.                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+The strong answer:
+
+> "I have an offline eval that scores *retrieval* — precision@1 and
+> recall@3 over a labeled query set in `eval/queries.json`. For each
+> query I know the relevant docs, I run the pipeline, and I score whether
+> the right docs came back in the top-k. That's wired and runnable as
+> `npm run eval`. But I want to be precise about what it does NOT measure:
+> it scores retrieval, not *faithfulness*. A hallucinated answer over
+> perfect chunks scores nothing here, because I never score the answer —
+> only the retrieved docs. The faithfulness eval is the gap. aptkit ships
+> a `RubricJudge` that could grade the answer against the chunks, but I
+> haven't wired it into buffr yet. So my honest position is: I measure
+> the retrieval half of RAG quality, I know the generation half is
+> unmeasured, and closing that gap with the RubricJudge is the next eval
+> I'd build."
+
+The strong move here is naming the *seam* between retrieval-quality and
+answer-faithfulness, and being honest that you only measure one side.
+That distinction — most candidates say "I have evals" and mean one
+number — is what marks you as someone who's thought about LLM evaluation
+properly.
+
+#### Weak vs strong — evals
+
+```
+┌─────────────────────────────┬─────────────────────────────┐
+│ WEAK ANSWER                 │ STRONG ANSWER               │
+├─────────────────────────────┼─────────────────────────────┤
+│ "I have evals — I test it   │ "I score retrieval with     │
+│ with a set of queries and   │ precision@1 and recall@3    │
+│ check the answers are       │ over a labeled set. But     │
+│ good."                      │ that measures RETRIEVAL,    │
+│                             │ not faithfulness — a        │
+│                             │ hallucination over good     │
+│                             │ chunks scores nothing,      │
+│                             │ because I never grade the   │
+│                             │ answer. The faithfulness    │
+│                             │ eval (a RubricJudge) is the │
+│                             │ gap, and it's my next       │
+│                             │ build."                     │
+├─────────────────────────────┼─────────────────────────────┤
+│ Why it's weak:              │ Why it works:               │
+│ "Check the answers are      │ Names exactly what's        │
+│ good" is a vibe-check       │ measured (retrieval), what  │
+│ disguised as a metric.      │ isn't (faithfulness), why   │
+│ Conflates retrieval and     │ they're different, and the  │
+│ generation. Sounds like     │ specific next step. Honesty │
+│ "evals" as a buzzword, not  │ about the gap reads as more │
+│ a measurement.              │ rigorous, not less.         │
+└─────────────────────────────┴─────────────────────────────┘
+```
+
+---
+
+### Where you'll get pushed past your depth
+
+```
+╔═══════════════════════════════════════════════════════════════╗
+║ WHEN YOU DON'T KNOW                                           ║
+║                                                               ║
+║   On the pgvector choice, the deep push is HNSW internals:    ║
+║   "How does HNSW actually build the graph? What's the         ║
+║   ef_construction parameter doing?" You chose HNSW on         ║
+║   pgvector defaults and the recall numbers held up — you      ║
+║   haven't read the graph-construction paper.                  ║
+║                                                               ║
+║   Say:                                                        ║
+║   "I haven't gone deep into HNSW's graph-construction         ║
+║    internals — I picked it on pgvector's operational          ║
+║    defaults and my retrieval numbers held up on the eval      ║
+║    set. I know the shape: it's a navigable small-world graph  ║
+║    you descend layer by layer to approximate nearest          ║
+║    neighbors, and m / ef_construction trade index build       ║
+║    time and memory against recall. Past that, I'd be reciting ║
+║    a paper I haven't read carefully. If you want to dig into  ║
+║    the parameter tuning, walk me through what you're after."  ║
+║                                                               ║
+║   What this signals: you know the SHAPE (small-world graph,   ║
+║   the recall/build tradeoff) and the operational knob, you    ║
+║   own that you took the default, and you don't fake the       ║
+║   internals. Knowing the shape but not the paper is exactly   ║
+║   the right depth for someone who USED it well.               ║
+║                                                               ║
+║   Do NOT say:                                                 ║
+║   "It builds a hierarchical graph and... uh... uses cosine    ║
+║    distance to find close vectors fast" — mushing together    ║
+║    half-remembered terms. Better to cleanly own the           ║
+║    default than to fog the internals.                         ║
+╚═══════════════════════════════════════════════════════════════╝
+```
+
+This is the "defaulted-to" mode being owned well: you didn't deeply
+evaluate HNSW's internals, you took pgvector's default, and the right
+move is to say *exactly that* — confidently — not to dress it up.
+
+---
+
+### What you'd change about the choices
+
+The choice I'd most reconsider is the eval gap. The whole portfolio
+thesis behind buffr is "measure, don't vibe-check" — and I shipped the
+retrieval eval but left faithfulness unwired, which means the
+generation half of the system is unmeasured. If I were re-prioritizing
+today, I'd wire the `RubricJudge` before adding any new feature, because
+an unmeasured generation path undercuts the project's own argument.
+Everything else I'd keep: pgvector, local models, the library boundary,
+the dropped FK are all calls I'd make again at this scale.
+
+---
+
+## One-page summary — Chapter 3
+
+**Core claim:** Every choice gets the same shape — alternatives,
+criterion, cost. "Good for this" is filler. Eight choices carry real
+weight.
+
+**The eight, one line each:**
+
+- **Build vs Hermes** — build the judgment layer (provider, RAG, evals),
+  reuse the loop + vector search, borrow trajectory-capture discipline.
+- **pgvector / one Postgres** — colocation: one transaction covers vector
+  + relational. Cost: default HNSW degrades past ~10k chunks.
+- **Local models** — privacy + cost + ownership. Cost: Gemma is the
+  reliability ceiling (emulated tool calls miss).
+- **aptkit boundary** — dependency inversion; payoff is zero-agent-change
+  store swap; the memory extract-up round-trip is the star.
+- **Dropped FK** — preserves `VectorStore` parity + lets memory rows live
+  in `chunks`. Cost: no DB-level orphan protection. Deliberate.
+- **Ink/React TUI** — Ink is React; plays to frontend strength, no
+  browser/server. Cost: technical-user interface only.
+- **Gemma tool emulation** — schema-in-prompt, parse JSON back; no arg
+  validation → empty-query coercion is the dominant failure.
+- **Evals** — precision@k/recall@k wired; faithfulness (RubricJudge)
+  not wired. The retrieval/generation eval seam, named honestly.
+
+**Pull quotes:**
+
+```
+  ┃ Building everything is a red flag. So is building nothing.
+
+  ┃ A relaxed constraint defended as a deliberate tradeoff is
+  ┃ senior; the same one called "tech debt" apologetically is
+  ┃ junior.
+
+  ┃ "Tool-calling" isn't magic — it's schema-in-prompt and
+  ┃ parse-JSON-back when the model has no native API.
+```
+
+**The "I don't know":** HNSW internals — own the default, name the shape
+(small-world graph, recall/build tradeoff), don't fake the paper.
+
+**What you'd change:** Wire the faithfulness eval (RubricJudge) before
+any new feature — the unmeasured generation path undercuts the "measure,
+don't vibe-check" thesis.

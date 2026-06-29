@@ -1,104 +1,82 @@
-# AI features in buffr
+# How buffr-laptop uses AI
 
-> Updated: 2026-06-24 — `ask` → `chat` (`session.ts`/`chat.tsx`); added Conversation memory (retrieval-based episodic memory) feature; `tokens_used` now populated; trace captures all 6 events.
+buffr is an LLM application end to end — there is exactly one user-facing AI feature (ask a question, get a grounded answer), but it's built from a stack of AI-engineering patterns worth naming individually. Everything runs on Ollama on your own laptop: `gemma2:9b` generates, `nomic-embed-text:v1.5` embeds at 768 dimensions. No cloud model is called.
 
-> What this codebase actually does with AI, per the spec's per-codebase feature table. Every feature is grounded in real files. buffr is an LLM-application-engineering shape — retrieval over a personal corpus + a bounded agent loop + retrieval-based episodic memory + offline retrieval evals.
-
-## AI features table
+## AI features
 
 ```
-  ┌──────────────────────┬────────────────────────┬──────────────────────────┐
-  │ Feature              │ Pattern used           │ Why this pattern         │
-  ├──────────────────────┼────────────────────────┼──────────────────────────┤
-  │ Corpus indexing      │ chunk → embed → upsert  │ make docs searchable as  │
-  │ (index)              │ (RAG index path, 01)    │ 768-dim vectors          │
-  ├──────────────────────┼────────────────────────┼──────────────────────────┤
-  │ Grounded Q&A (chat)  │ agent loop + emulated   │ model decides when to    │
-  │                      │ tool call (03, 04)      │ search; answers cite KB  │
-  ├──────────────────────┼────────────────────────┼──────────────────────────┤
-  │ Retrieval (inside    │ embed → ANN cosine →    │ semantic match without   │
-  │ chat + eval)         │ rank (RAG query, 02)    │ keyword overlap          │
-  ├──────────────────────┼────────────────────────┼──────────────────────────┤
-  │ Personalization      │ profile injection (07)  │ "my stack" resolves; KB  │
-  │                      │                         │ is the author's own      │
-  ├──────────────────────┼────────────────────────┼──────────────────────────┤
-  │ Conversation memory  │ retrieval-based         │ recall relevant past     │
-  │ (chat, cross-session)│ episodic memory (08) —  │ exchanges by similarity; │
-  │                      │ RAG over chat history   │ shared store, kind=memory│
-  ├──────────────────────┼────────────────────────┼──────────────────────────┤
-  │ Retrieval eval       │ precision@k/recall@k    │ measure retrieval before │
-  │ (eval)               │ (06)                    │ optimizing it            │
-  ├──────────────────────┼────────────────────────┼──────────────────────────┤
-  │ Trajectory capture   │ trace sink → DB, all 6  │ persist every event for  │
-  │ (chat)               │ events (conv./messages) │ replay; fills tokens_used│
-  └──────────────────────┴────────────────────────┴──────────────────────────┘
+  the AI features in buffr-laptop
+
+  ┌──────────────────────┬──────────────────┬─────────────────────────┐
+  │ Feature              │ Pattern used     │ Why this pattern        │
+  ├──────────────────────┼──────────────────┼─────────────────────────┤
+  │ Answer a question    │ RAG + bounded    │ private corpus the model│
+  │ (the chat loop)      │ agent loop       │ never trained on        │
+  ├──────────────────────┼──────────────────┼─────────────────────────┤
+  │ Retrieve passages    │ dense retrieval  │ semantic match over     │
+  │                      │ (embed→ANN→rank) │ paraphrased questions   │
+  ├──────────────────────┼──────────────────┼─────────────────────────┤
+  │ Call the search tool │ Gemma tool-call  │ Gemma has no native     │
+  │                      │ emulation        │ tool API → prompt+parse │
+  ├──────────────────────┼──────────────────┼─────────────────────────┤
+  │ Remember past turns  │ retrieval-based  │ recall by relevance     │
+  │                      │ episodic memory  │ across sessions         │
+  ├──────────────────────┼──────────────────┼─────────────────────────┤
+  │ Personalize answers  │ profile-as-      │ inject me.md into the   │
+  │                      │ context          │ system prompt           │
+  ├──────────────────────┼──────────────────┼─────────────────────────┤
+  │ Score retrieval      │ precision@k /    │ offline eval gate on    │
+  │ quality (offline)    │ recall@k         │ a labeled query set     │
+  └──────────────────────┴──────────────────┴─────────────────────────┘
 ```
 
 ## Per-feature spec
 
-### Corpus indexing (`index`)
+### Answer a question (the chat loop)
 
-- **Inputs:** one or more markdown file paths (`src/cli/index-cmd.ts:14`).
-- **Outputs:** one `agents.documents` row + N `agents.chunks` rows per file, each chunk a 768-dim vector.
-- **Model and provider:** `nomic-embed-text:v1.5` via Ollama (`OllamaEmbeddingProvider`).
-- **Token/cost:** local Ollama — no dollar cost; cost is laptop compute. Not measured.
-- **Failure modes observed:** orphaned chunks on re-index of a shrunk document (upsert never deletes, `01-rag-index-path.md`); two-write non-atomicity between `documents` and `chunks` (`src/runtime.ts:11`).
-- **Eval set:** none for indexing directly; retrieval eval (`eval/queries.json`) exercises the result.
+- **Inputs:** `question: string` (free text from the Ink TUI).
+- **Outputs:** `answer: string` (grounded natural-language answer; citations are in the tool results captured in `messages`, not yet rendered to the user).
+- **Model + provider:** `gemma2:9b` via `GemmaModelProvider` (Ollama, `http://localhost:11434`), wrapped in `ContextWindowGuardedProvider` at `maxTokens: 8192` — `src/session.ts:46`.
+- **Approximate token cost per call:** $0 in dollars (local). The ledger that matters is latency and the 8192-token input budget. The trace sink persists per-call `inputTokens + outputTokens` into `agents.messages.tokens_used` from each `model_usage` event — `src/supabase-trace-sink.ts:73-78`. A single answer spends up to 6 model turns (each an input pass over system prompt + profile + retrieved chunks).
+- **Failure modes observed:** the dominant one is the tool-arg miss (model emits the wrong key → empty search → ungrounded or refused answer). Secondary: context-window-guard trip when the profile + retrieved chunks exceed 8192 estimated tokens (throws `ContextWindowExceededError`, surfaced as a `warning` trace event). Faithfulness (hallucination over good chunks) is **unmeasured** — see below.
+- **Eval set:** `eval/queries.json` (3 labeled query→relevant-doc pairs). Scores retrieval, not answer faithfulness — `src/cli/eval-cmd.ts`.
 
-### Grounded Q&A (`chat`)
+### Retrieve passages (dense retrieval)
 
-- **Inputs:** a natural-language question typed into the Ink REPL (`src/cli/chat.tsx`), passed to `session.ask()` (`src/session.ts:60`). Unlike the retired one-shot `ask` CLI, a single warm conversation is held across every turn.
-- **Outputs:** a text answer citing retrieved sources, persisted conversation turns, *and* a remembered exchange embedded into the memory store.
-- **Model and provider:** `gemma2:9b` via Ollama, wrapped in `ContextWindowGuardedProvider(maxTokens: 8192)` (`src/session.ts:46`).
-- **Token/cost:** `prompt_eval_count`/`eval_count` flow back from Ollama and are now *persisted* — the trace sink handles `model_usage` and writes summed tokens into `agents.messages.tokens_used` (`src/supabase-trace-sink.ts:73`). Captured but not yet acted on (no budget, no cost rollup).
-- **Failure modes observed:** emulated tool-call JSON failures (Gemma has no native tools, `04-gemma-tool-call-emulation.md`); the `{`-heuristic for retry; no argument-schema validation so a wrong-key tool call searches empty string; no repeated-tool-call loop detection. Memory writes are best-effort: a `memory.remember` failure is swallowed so the answer the user already has isn't lost (`src/session.ts:65-69`).
-- **Eval set:** retrieval is scored by `eval`; **faithfulness is unscored** — the answer's groundedness is not measured (`06-evals-precision-and-recall.md`).
+- **Inputs:** `query: string`, `k` (default floor `minTopK: 4`, set at `src/session.ts:43`).
+- **Outputs:** ranked `Hit[]` — `{ id, score, meta:{ docId, chunkIndex, text } }`, cosine similarity score = `1 - distance` (`src/pg-vector-store.ts:67-85`).
+- **Model + provider:** `nomic-embed-text:v1.5` via `OllamaEmbeddingProvider`, 768-dim.
+- **Storage:** `agents.chunks`, `embedding vector(768)`, HNSW `vector_cosine_ops` index, scoped by `app_id` (`src/pg-vector-store.ts:67-78`).
+- **Failure modes observed:** dense-only retrieval misses exact-term/identifier queries (no BM25/sparse fallback). Empty-query search when the tool arg is wrong (see RAG seam). Stale embeddings if a document's text changes without re-index (no `embedding_stale_at` tracking).
 
-### Retrieval
+### Call the search tool (Gemma tool-call emulation)
 
-- **Inputs:** a query string (from the agent's tool call, from memory `recall`, or from `eval`).
-- **Outputs:** ranked `Hit[]` with cosine-similarity scores and citation metadata — documents and `kind=memory` exchanges share the same ranked space.
-- **Model and provider:** `nomic-embed-text` (query side) + pgvector HNSW cosine `<=>` (`src/pg-vector-store.ts:67`).
-- **Token/cost:** one embed call per query; local.
-- **Failure modes observed:** dense-only — no sparse fallback for exact identifiers, no rerank, no hybrid (`02-rag-query-path.md`).
-- **Eval set:** `eval/queries.json` (3-item golden set), scored precision@1 / recall@3.
+- **Inputs:** the model's free text, expected to contain `{"tool":"search_knowledge_base","arguments":{"query":"..."}}`.
+- **Outputs:** parsed `{ name, input }` or `null` — `parseToolCall()` in aptkit's gemma provider (`packages/providers/gemma/src/gemma-provider.ts:168-182`).
+- **Model + provider:** `gemma2:9b`. The tool schema is rendered into the system prompt (`buildSystemText()`, gemma-provider.ts:133-165); the JSON is parsed back with `parseAgentJson` (bounded-substring scan).
+- **Approximate token cost:** the rendered tool schema is fixed overhead on every turn until the forced-synthesis turn drops it.
+- **Failure modes observed:** **no argument-schema validation.** A wrong arg key passes straight through `InMemoryToolRegistry.callTool` to the handler, which coerces a missing `query` to `''`. This is the reliability ceiling — see `04-agents-and-tool-use/02-tool-calling.md`.
 
-### Personalization (profile injection)
+### Remember past turns (retrieval-based episodic memory)
 
-- **Inputs:** the most-recent `agents.profiles` row for the app (`src/profile.ts:6`).
-- **Outputs:** the profile text prepended to the system prompt under a heading.
-- **Model and provider:** consumed by Gemma as system-prompt context.
-- **Token/cost:** profile text counts against the 8192-token window; length is untuned.
-- **Failure modes observed:** no length budget — a large profile crowds out retrieved chunks (`07-profile-as-context.md`).
-- **Eval set:** none — and notably the `eval` path skips the agent, so it never exercises the profile.
+- **Inputs:** `{ conversationId, question, answer }` after each successful turn — `src/session.ts:65`.
+- **Outputs:** none directly; the exchange is embedded and upserted into the **same** `chunks` store, tagged `meta.kind='memory'`, id `memory:<conv>:<n>` (aptkit `createConversationMemory`, `packages/memory/src/conversation-memory.ts:74-87`).
+- **Recall:** relevant past exchanges resurface through the *same* `search_knowledge_base` tool next turn — it's RAG over conversation history, not a separate recall call. The dropped FK on `chunks.document_id` is what lets memory rows exist with no parent document.
+- **Failure modes observed:** memory-write is best-effort (`try/catch` swallow at `src/session.ts:66-69`) — a write failure never loses the user's answer. No sequential in-prompt turn history yet (`RagQueryAgent.answer()` treats each question independently — `src/session.ts:25-27`).
 
-### Conversation memory (retrieval-based episodic memory)
+### Personalize answers (profile-as-context)
 
-- **Inputs:** the `{ conversationId, question, answer }` of each completed chat turn (`src/session.ts:66`).
-- **Outputs:** one memory vector per exchange, upserted into the same `agents.chunks` store, tagged `kind=memory` with the formatted exchange text in `meta`. Recallable on later turns (including future sessions) via the same `search_knowledge_base` tool.
-- **Model and provider:** `OllamaEmbeddingProvider` (`nomic-embed-text`, the same 768-dim embedder as documents) + `PgVectorStore`, wired into `createConversationMemory({ embedder, store })` (`src/session.ts:53`). The engine is aptkit's published `@aptkit/memory` (bundled in aptkit-core 0.4.1), extracted *up* from buffr; buffr injects only the store.
-- **Token/cost:** one embed call per remembered turn; local. Recall over-fetches (`max(k*4, 20)`) then filters to `kind=memory` because the `VectorStore` contract has no metadata filter.
-- **Failure modes observed:** best-effort write — `remember` is wrapped in try/catch so a failure never costs the user their answer (`src/session.ts:65-69`). Sharing the store with documents means memory mixes into the same ranked results (intended), and slightly widens the prompt-injection surface (a remembered exchange can later be recalled into context). Counters are per-process, so ids namespace by `kind:conversationId:n`.
-- **Eval set:** none — recall quality is unmeasured; the retrieval `eval` scores documents only.
+- **Inputs:** the `me.md`-style profile row from `agents.profiles` — `src/profile.ts`.
+- **Outputs:** injected at the **start** of the system prompt under heading "About the person you are assisting" (`RagQueryAgent` constructor, `packages/agents/rag-query/src/rag-query-agent.ts:52-59`).
+- **Failure modes observed:** empty profile (`loadProfile` returns `''`) → no personalization, no error. Profile counts against the 8192-token budget.
 
-### Retrieval eval (`eval`)
+### Score retrieval quality (offline eval)
 
-- **Inputs:** `eval/queries.json` (query → relevant docIds).
-- **Outputs:** per-query and mean precision@1 / recall@3 (`src/cli/eval-cmd.ts:31-33`).
-- **Model and provider:** `nomic-embed-text` for retrieval; **no judge model** (the library's `RubricJudge` is not wired).
-- **Token/cost:** embed per query; local.
-- **Failure modes observed:** golden-set-only (no adversarial, no regression); 3 items too few to trust a percentage; faithfulness entirely unmeasured.
-- **Eval set:** is itself the eval; size 3, at `eval/queries.json`.
+- **Inputs:** `eval/queries.json` — `{ query, relevant: string[] }[]`.
+- **Outputs:** mean P@1 and mean R@3 over the set — `src/cli/eval-cmd.ts`.
+- **Model + provider:** embeddings only (no generation in the eval path).
+- **Failure modes observed:** measures retrieval, **not faithfulness**. A hallucinated answer over perfect chunks scores nothing here because answers are never scored. The `RubricJudge` that could score faithfulness ships in aptkit but is wired into nothing — see `05-evals-and-observability/02-eval-methods.md`.
 
-### Trajectory capture
+## The honest summary
 
-- **Inputs:** all six `CapabilityEvent` variants emitted by the agent loop (`src/supabase-trace-sink.ts:53`).
-- **Outputs:** `agents.conversations` + `agents.messages` rows for `step`, `tool_call_start` (args), `tool_call_end` (result + durationMs + error), `model_usage` (tokens), and `warning`/`error` — ordered by the event's own timestamp written into `created_at`.
-- **Model and provider:** n/a (persistence layer).
-- **Token/cost:** DB writes, queued and flushed after the run; `tokens_used` now filled from `model_usage` (`:73`).
-- **Failure modes observed:** this is the *observability* trajectory, distinct from the recallable memory vectors (`08-conversation-memory.md`) — it is not retrieved back into prompts (by design; that's memory's job). Now captures the full signal that previously got dropped; missing only per-step model latency and any replay tooling on top.
-- **Eval set:** none.
-
-## What's not here (honest gaps)
-
-No fine-tuning (the ceiling — both models stock; the now-full-signal trajectories are the FT corpus), no reranking, no hybrid/sparse search, no streaming, no caching, no chunking-strategy tuning, no faithfulness/LLM-as-judge eval (still the live evals gap), no token/cost *action* (tokens are now logged but unread), no memory *management* (summarization/decay — out of scope in `@aptkit/memory`), no prompt-injection defense, no rate limiting/circuit breaker. Each is named with file-level grounding in `audit.md`. None is a defect at single-device personal scale; all are the visible next moves.
+buffr exercises the full LLM-application stack: RAG, a bounded agent loop, tool-calling (emulated), episodic memory, profile context, and offline retrieval evals with token observability. What it does not yet exercise: streaming, caching, faithfulness eval, hybrid retrieval, reranking, prompt-injection defenses, and fine-tuning on its own captured trajectories. Each is a named "how to make it apply" in the relevant section.

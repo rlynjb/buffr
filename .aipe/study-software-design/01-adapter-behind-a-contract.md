@@ -1,84 +1,75 @@
-# Adapter behind a contract — `PgVectorStore` ⊳ `VectorStore`
+# 01 — Adapter behind a contract
 
-> Updated: 2026-06-24 — `PgVectorStore` is unchanged, but it now backs a *second*
-> consumer: aptkit's `createConversationMemory({ embedder, store })`
-> (`src/session.ts:53`) writes memory chunks through the same `upsert`/`search`
-> meta round-trip. The store is now built in `src/session.ts:41` (chat),
-> `cli/index-cmd.ts:19`, and `cli/eval-cmd.ts:15` — the deleted `ask-cmd.ts` no
-> longer builds it. Constructor now takes `appId`. The adapter's body is the same.
-
-**Subtitle:** Adapter / Ports-and-Adapters port implementation — *Industry standard*.
-The deep module of the repo: aptkit defines the `VectorStore` port; buffr writes
-the pgvector adapter behind it.
+**Industry name(s):** Adapter pattern / Ports-and-Adapters (Hexagonal) /
+"deep module implementing an interface." **Type:** Industry standard.
 
 ---
 
 ## Zoom out, then zoom in
 
-Here's the whole retrieval path, and the one box this file is about. aptkit owns
-the *pipeline* — embed, store, search — but it doesn't know about Postgres.
-buffr's job is to plug a real database in behind aptkit's `VectorStore` interface
-without aptkit ever learning the word "pgvector."
+aptkit ships a `VectorStore` *contract* — an interface with `dimension`,
+`upsert`, and `search`. Its default implementation keeps vectors in memory.
+buffr's entire reason to exist is to keep them in **Postgres + pgvector**
+instead — persistent, single-device — without the rest of aptkit noticing.
+`PgVectorStore` is that swap.
 
 ```
-  Zoom out — where PgVectorStore lives
+  Zoom out — where the adapter lives
 
-  ┌─ aptkit-core (library) ──────────────────────────────────────┐
-  │  RetrievalPipeline    →   needs a thing that can store +      │
-  │  RagQueryAgent            search vectors. Calls it a          │
-  │                           VectorStore. Doesn't care how.      │
-  └───────────────────────────┬──────────────────────────────────┘
-                              │  the VectorStore contract (narrow seam)
-                              │  upsert(chunks) · search(vec,k) · dimension
-  ┌─ buffr persistence ──────▼───────────────────────────────────┐
-  │  ★ PgVectorStore ★   implements VectorStore over pgvector     │ ← we are here
-  └───────────────────────────┬──────────────────────────────────┘
-                              │  SQL (begin/insert/commit · KNN order by <=>)
-  ┌─ Storage ────────────────▼───────────────────────────────────┐
-  │  Postgres + pgvector   agents.chunks   HNSW vector_cosine_ops │
-  └──────────────────────────────────────────────────────────────┘
+  ┌─ aptkit (the contract owner, never edited here) ───────────┐
+  │  RagQueryAgent → RetrievalPipeline → interface VectorStore │
+  │                                         { dimension,        │
+  │                                           upsert, search }  │
+  └──────────────────────────────┬─────────────────────────────┘
+                                 │  implements
+  ┌─ buffr (the adapter) ───────▼──────────────────────────────┐
+  │  ★ PgVectorStore ★   pg-vector-store.ts                     │ ← here
+  │  hides: txn · dim guard · encoding · distance flip · meta   │
+  └──────────────────────────────┬─────────────────────────────┘
+                                 │  pool.query(...)
+  ┌─ Storage ───────────────────▼──────────────────────────────┐
+  │  Postgres + pgvector   agents.chunks  (HNSW cosine index)   │
+  └─────────────────────────────────────────────────────────────┘
 ```
 
-**Zoom in.** The pattern is an *adapter*: aptkit declares a port (`VectorStore`),
-buffr supplies the implementation. Two methods, `upsert` and `search`, plus a
-`dimension` field. That's the entire surface aptkit sees. Everything else — the
-transaction, the dimension check, the JS-array→pgvector encoding, the
-distance→similarity flip, the meta round-trip — is hidden behind those two names.
-This is APOSD's deep module: small interface, large body.
+Zoom in: an adapter is a deep module whose *interface* is dictated by
+someone else (the contract) and whose *body* is free to be as deep as the
+real storage demands. The skill is making the body hide everything pgvector
+forces on you, so aptkit's code stays exactly the same as it was for the
+in-memory store. The question this file answers: **what does
+`PgVectorStore` hide, and where's the one place it leaks?**
 
 ---
 
-## Structure pass — layers · axis · seams
+## Structure pass
 
-Three layers stack here: aptkit (pipeline), the `VectorStore` seam, the pgvector
-adapter. The axis worth tracing is **who owns the data shape** — because that's
-what flips across the seam and explains every line of the adapter.
+**Layers.** The contract sits above the adapter; the driver sits below.
 
 ```
-  Axis traced = "who owns the shape of the data?"
+  three layers, one axis traced: "who knows it's pgvector?"
 
-  ┌─ aptkit pipeline ─┐   seam: VectorStore   ┌─ PgVectorStore ──┐
-  │  owns Chunk {     │ ═════════╪═══════════► │  owns ROWS:      │
-  │   id, vector,     │     (shape flips)      │  columns +       │
-  │   meta }          │                        │  vector(768)     │
-  └───────────────────┘                        └──────────────────┘
-        ▲                                              ▲
-        └──── in-memory JS objects ──── on disk, typed columns ────┘
-              the adapter's whole job is translating between these
+  ┌─ contract (aptkit) ─────────┐  knows: nothing. just VectorStore.
+  │  upsert(chunks) / search()  │
+  └──────────────┬──────────────┘
+        seam ◄── the abstraction flips here ──►
+  ┌─ adapter (PgVectorStore) ───▼┐  knows: EVERYTHING pgvector-specific
+  │  SQL · ::vector · <=> · txn  │
+  └──────────────┬──────────────┘
+  ┌─ driver (pg.Pool) ──────────▼┐  knows: connections, wire protocol
+  └──────────────────────────────┘
 ```
 
-- **Horizontal seam (load-bearing):** `VectorStore`. Above it the data is a JS
-  `Chunk` with a `number[]` vector and a free-form `meta` bag. Below it the data
-  is a typed Postgres row with a `vector(768)` column and dedicated
-  `document_id`/`chunk_index`/`content` columns. The *shape* of the data flips
-  across this seam — that's what makes it load-bearing, and that flip is the
-  adapter's entire reason to exist.
-- **The contract's promise upward:** "give me chunks, I'll make them durable and
-  searchable; ask me for the top-k, I'll give you scored hits." aptkit reasons
-  about the pipeline without knowing Postgres exists.
-- **What the seam buys you:** drop-in parity. aptkit ships an in-memory
-  `VectorStore` for tests; buffr's `PgVectorStore` is a same-shaped swap. The
-  pipeline code doesn't change between them.
+**Axis traced — "who knows it's pgvector?"** Above the adapter: nobody.
+aptkit calls `store.search(vec, k)` identically whether the store is in
+memory or in Postgres. Below: the driver knows TCP and SQL text but nothing
+about vectors. **Only the adapter layer knows it's pgvector.** That's the
+whole value — the knowledge is contained in one file.
+
+**Seam.** The `implements VectorStore` line (`pg-vector-store.ts:19`) is the
+load-bearing seam. The axis "who knows it's pgvector?" flips across it: above
+is storage-agnostic, below is storage-specific. A seam where an axis flips is
+exactly what makes a boundary worth a contract — substitute the in-memory
+store back in and aptkit doesn't change a line.
 
 ---
 
@@ -86,261 +77,257 @@ what flips across the seam and explains every line of the adapter.
 
 ### Move 1 — the mental model
 
-You've written a React component that takes a `props` interface and the parent
-doesn't care how you render it internally — same idea here, one level down. aptkit
-hands you a *contract* (`VectorStore`) the way a parent hands you props; you
-implement the body however you want as long as the two method signatures hold.
-The underlying strategy: **invert the dependency** — the library depends on an
-interface, you depend on the same interface, and neither depends on the other's
-internals.
+You know how a React component takes `props` and you can swap *which*
+component renders behind the same prop shape, and the parent doesn't care?
+An adapter is that, for storage. aptkit defines the prop shape
+(`VectorStore`); buffr supplies a different component behind it. The
+underlying strategy: **hold the interface fixed, make the body deep.**
 
 ```
-  The adapter shape — two methods, one hidden body
+  the adapter kernel — narrow interface, deep body
 
-         aptkit calls                    you implement
-       ┌──────────────┐               ┌────────────────────┐
-   ──► │ upsert(chunks)│ ────────────► │ validate · txn ·   │ ──► rows
-       └──────────────┘               │ encode vector ·    │
-       ┌──────────────┐               │ ON CONFLICT upsert │
-   ──► │ search(vec,k) │ ────────────► │ KNN · score · meta │ ──► hits
-       └──────────────┘               └────────────────────┘
-            narrow                          deep body
-         (the contract)                  (hidden from aptkit)
+   in:  upsert(chunks)              in:  search(vec, k)
+        │                                │
+        ▼                                ▼
+   ┌─────────────────────────────────────────────┐
+   │  [guard dim] [encode vec] [open txn]         │  ← the hidden body:
+   │  [build meta] [SQL upsert] [commit/rollback] │    none of this is
+   │  [flip distance→score] [rebuild meta]        │    in the interface
+   └─────────────────────────────────────────────┘
+        │                                │
+        ▼                                ▼
+   out: void                       out: Hit[] (id, score, meta)
 ```
 
 ### Move 2 — the step-by-step walkthrough
 
-**The dimension guard — the part that protects every other part.** Before any
-work, both methods call `assertDim`. The project constraint is that embeddings are
-768-dim and a mismatch must *throw*, never silently truncate. Drop this guard and
-a 512-dim vector reaches Postgres, the `vector(768)` column rejects it with a
-cryptic driver error deep inside a transaction, and you've lost the clear failure.
-The guard pulls that failure up to a readable throw at the entrance.
+Five decisions are hidden in the body. Each one is a thing aptkit's code
+*doesn't* have to know. Walk them one at a time.
 
-```
-  assertDim — the gate before the work
+**Part 1 — the dimension guard (what breaks: silent corruption).**
 
-   upsert(chunks) ──► for each chunk: assertDim(vector) ──► txn
-   search(vec,k)  ──► assertDim(vec) ──────────────────► query
-                          │
-                          └─ length != 768 ?  ─► throw "dimension mismatch"
-                             (load-bearing: without it the error surfaces
-                              as an opaque pg error mid-transaction)
+**File:** `src/pg-vector-store.ts` · **Function:** `assertDim` ·
+**Lines:** 32-36, called at 39 and 68.
+
+```ts
+private assertDim(v: number[]): void {
+  if (v.length !== this.dimension) {
+    throw new Error(`dimension mismatch: got ${v.length}, store is ${this.dimension}`);
+  }
+}
 ```
 
-**The vector encoding — translating JS to pgvector's wire format.** pgvector does
-not accept a JS array. It wants a text literal: `[0.1,0.2,...]`. `toVectorLiteral`
-joins the array into that string and the SQL casts it `$1::vector`. This is the
-smallest, most easily-forgotten part of the adapter and it's exactly the kind of
-encoding detail the contract lets you hide — aptkit never sees it.
+Called before every `upsert` (`:39`) and every `search` (`:68`). The
+context.md constraint is "768 everywhere; a mismatch must throw, never
+silently truncate." Strip this guard and a 512-dim vector reaches
+`embedding vector(768)` and Postgres either errors cryptically or, worse, a
+mismatched index degrades retrieval quietly. The guard turns a silent data
+bug into a loud exception at the boundary. **Load-bearing.**
 
-```
-  number[]  ──► toVectorLiteral ──► "[0.1,0.2,0.3]" ──► $1::vector ──► column
-   (JS)            join(',')            text literal       cast        vector(768)
-```
+**Part 2 — JS `number[]` → pgvector literal (what breaks: the write fails).**
 
-**The transactional upsert — all-or-nothing chunk writes.** `upsert` takes one
-pool connection, wraps every chunk insert in a single `begin`/`commit`, and on any
-throw issues `rollback` before re-raising — then always `release`s the connection
-in `finally`. The boundary condition: index a 200-chunk document, fail on chunk
-180, and *without* the transaction you'd have 179 orphaned chunks half-indexing
-the doc. With it, the document is all-in or all-out.
+**File:** `src/pg-vector-store.ts` · **Function:** `toVectorLiteral` ·
+**Lines:** 14-17, used at 55 and 77.
 
-```
-  Transaction skeleton — what breaks if each part is removed
-
-   connect ─► begin ─► [insert chunk]×N ─► commit ─► release
-                │                            ▲          ▲
-        on throw│                            │          │ finally (always)
-                └──► rollback ──► re-throw ──┘   drop release → pool leak;
-                     drop rollback → partial doc stays committed
+```ts
+function toVectorLiteral(v: number[]): string {
+  return `[${v.join(',')}]`;          // [0.1,0.2,0.3,...]
+}
 ```
 
-**The search — KNN with a distance→similarity flip.** `search` runs an `order by
-embedding <=> $1::vector limit k`. pgvector's `<=>` is *cosine distance* (0 =
-identical, 2 = opposite), but callers want a *similarity score* where higher is
-better. So the SELECT computes `1 - (embedding <=> $1)` as `score`. Forget the
-inversion and your "best" match sorts last in the agent's citation list.
+pgvector's text input format is `[0.1,0.2,...]`. node-postgres has no native
+vector type, so the adapter serializes to that string in JS, then casts
+`$1::vector` *inside the SQL* (`:55,77`). This split — serialize in JS, cast
+in SQL — is the one non-obvious spot (audit §7). Drop the serialization and
+you pass a raw JS array, which node-postgres turns into a Postgres *array*
+literal `{0.1,0.2}`, not a `vector`, and the cast fails. **Load-bearing, and
+the place to add a comment.**
 
-**The meta round-trip — keeping citations alive.** This is the subtle one.
-aptkit's chunker puts `docId`, `chunkIndex`, and `text` *inside* `meta` on the way
-in; buffr reads those keys to fill dedicated columns on `upsert`, then on `search`
-rebuilds the same in-memory `meta` shape from those columns so aptkit's
-`search_knowledge_base` tool can render citations. The adapter has to speak both
-languages: columns on disk, `meta` bag in memory.
+**Part 3 — the transaction (what breaks: half-written batches).**
+
+**File:** `src/pg-vector-store.ts` · **Function:** `upsert` · **Lines:**
+40-64.
+
+```ts
+const client = await this.pool.connect();
+try {
+  await client.query('begin');
+  for (const c of chunks) {
+    // ... insert ... on conflict (id) do update set ...
+  }
+  await client.query('commit');
+} catch (err) {
+  await client.query('rollback');     // ← all-or-nothing
+  throw err;
+} finally {
+  client.release();                   // ← pool leak guard
+}
+```
+
+A batch of N chunks commits together or not at all. Remove the txn and a
+crash mid-batch leaves the store half-indexed — a state aptkit's in-memory
+store can never be in, so aptkit's code assumes it can't happen. The adapter
+*upholds the in-memory store's implicit guarantee* (writes are atomic per
+call) on a backend that doesn't give it for free. That's the deepest thing an
+adapter does: preserve invariants the contract never stated but callers rely
+on. **Load-bearing — this is what "deep" means here.**
+
+**Part 4 — cosine distance → similarity score (what breaks: ranking
+inverts).**
+
+**File:** `src/pg-vector-store.ts` · **Function:** `search` · **Line:** 69.
+
+```sql
+1 - (embedding <=> $1::vector) as score
+order by embedding <=> $1::vector
+limit $3
+```
+
+pgvector's `<=>` is cosine **distance** (0 = identical, 2 = opposite).
+aptkit's pipeline expects a **similarity score** (1 = identical). The adapter
+flips it: `score = 1 - distance`. But note the ordering clause still uses raw
+`<=>` ascending — nearest first — because ordering by distance and ordering by
+`1-distance` descending are the same set, and ordering by the raw operator
+lets the HNSW index do its job. Get the flip wrong (return raw distance as
+"score") and every consumer ranks results backwards. **Load-bearing, and the
+comment at `:69` is the right call.**
+
+**Part 5 — the `meta` round-trip (what breaks: citations go blank). THE
+LEAK.**
+
+**File:** `src/pg-vector-store.ts` · **Lines:** 44-46 (write), 83 (read).
+
+```ts
+// write side (upsert):
+const docId      = typeof c.meta.docId === 'string'    ? c.meta.docId    : null;
+const chunkIndex = typeof c.meta.chunkIndex === 'number'? c.meta.chunkIndex: 0;
+const content    = typeof c.meta.text === 'string'      ? c.meta.text     : '';
+
+// read side (search), rebuilding the shape aptkit handed in:
+meta: { ...(r.meta ?? {}), docId: r.document_id, chunkIndex: r.chunk_index, text: r.content }
+```
+
+Here's the leak the audit (§3, Leak 2) flagged. Three string keys —
+`docId`, `chunkIndex`, `text` — are a contract between buffr, aptkit's
+pipeline (which *sets* them on index), and the `search_knowledge_base` tool
+(which reads `meta.text` to build citations, per the comment at `:79`). The
+adapter destructures them out of `meta` into real columns on write, and
+reconstructs *exactly those keys* on read so the round-trip is invisible.
+
+What breaks if it's wrong: rename `text` → `content` on one side only and
+`search` returns hits with empty `text`, so the agent cites sources with no
+quotable content — and **nothing throws**. The `typeof` guards mean a missing
+key silently becomes `''` or `0`, not an error. This is the deepest module's
+most fragile coupling, and it has no type and no interface comment.
+
+**The fix (audit §3):** name the contract.
+
+```ts
+type ChunkMeta = { docId: string; chunkIndex: number; text: string };
+//  + a one-line comment: "aptkit's pipeline fills these; search_knowledge_base
+//    reads meta.text for citations. Keys are a cross-module contract."
+```
+
+That doesn't remove the crossing — the adapter's *job* is to bridge buffr's
+columns and aptkit's `meta` shape, so the knowledge must cross the seam. It
+makes the crossing *visible and checked*. A leak you can't avoid, you name.
 
 ### Move 3 — the principle
 
-The contract is what makes the module deep. Because aptkit froze the interface at
-two methods, every decision below it — transactions, encoding, the score flip — is
-yours to make and yours to hide. **A narrow interface you didn't design is a gift:
-it's an upper bound on how much complexity you're allowed to leak.** That's why
-buffr, a tiny codebase, has a genuinely deep module — it didn't have to invent the
-discipline, it inherited it from the port.
+An adapter is the purest form of "deep module": the interface isn't yours to
+widen, so all your design budget goes into the body. The measure of a good
+one is invariants it upholds that the contract never mentions — atomic
+writes, dimension safety, score orientation — so the layer above can stay
+exactly as simple as it was. The failure mode is the *implied* interface: the
+`meta` keys that are a contract in fact but not in type. Make implied
+interfaces explicit, or they leak silently.
 
 ---
 
 ## Primary diagram
 
-The whole adapter in one frame.
+The whole adapter in one frame — interface narrow, body deep, one leak named.
 
 ```
-  PgVectorStore — the full adapter
+  PgVectorStore — adapter behind aptkit's VectorStore contract
 
-  ┌─ aptkit (in-memory JS) ──────────────────────────────────────┐
-  │  Chunk{ id, vector:number[], meta{docId,chunkIndex,text} }    │
-  └───────────────┬───────────────────────────▲──────────────────┘
-       upsert      │                           │ search → Hit{id,score,meta}
-  ┌────────────────▼───────────────────────────┴──────────────────┐
-  │ PgVectorStore   (src/pg-vector-store.ts:19-86)                 │
-  │  assertDim ──► txn{ begin → insert×N → commit/rollback } 38-65 │
-  │  toVectorLiteral: number[] → "[...]"                    15-17  │
-  │  search: order by <=> ; score = 1 - distance ; meta rebuild 67│
-  └────────────────┬───────────────────────────▲──────────────────┘
-       SQL          │                           │ rows
-  ┌────────────────▼───────────────────────────┴──────────────────┐
-  │ Postgres: agents.chunks  vector(768)  HNSW vector_cosine_ops   │
-  └────────────────────────────────────────────────────────────────┘
-```
-
----
-
-## Implementation in codebase
-
-**Use cases.** Reached for in three flows now: `cli/index-cmd.ts` builds a
-`PgVectorStore` and hands it to `createRetrievalPipeline`, which calls `upsert`
-when indexing markdown (`src/cli/index-cmd.ts:19-20`); `src/session.ts` (chat) and
-`cli/eval-cmd.ts` build the same store so the pipeline's `query`/`search` runs KNN
-against stored chunks (`src/session.ts:41-42`, `src/cli/eval-cmd.ts:15-16`). And
-new: in the chat path the *same store instance* is also injected into aptkit's
-`createConversationMemory` (`src/session.ts:53`), so conversation memory `upsert`s
-and `search`es through this exact adapter — one store, two aptkit consumers
-(retrieval + memory). The store is constructed once per process and the embedder's
-`dimension` is threaded in so store and embedder agree.
-
-**Code side by side.**
-
-```
-  src/pg-vector-store.ts  (upsert, lines 38-65)
-
-  for (const c of chunks) this.assertDim(c.vector);  ← gate ALL before any write
-  const client = await this.pool.connect();          ← one connection for the txn
-  try {
-    await client.query('begin');                     ← open the all-or-nothing window
-    for (const c of chunks) {
-      const docId = typeof c.meta.docId === 'string'      ← read the meta contract:
-        ? c.meta.docId : null;                            these 3 keys are an
-      const chunkIndex = typeof c.meta.chunkIndex         undocumented coupling with
-        === 'number' ? c.meta.chunkIndex : 0;             aptkit's chunker (Lens 7)
-      const content = typeof c.meta.text === 'string'
-        ? c.meta.text : '';
-      await client.query(`insert ... on conflict (id)     ← idempotent re-index:
-        do update set ...`, [c.id, docId, this.appId,        same id overwrites,
-        chunkIndex, content,                                 not duplicates
-        toVectorLiteral(c.vector),                        ← JS array → "[...]"
-        this.embeddingModel, c.meta]);                    ← $6::vector casts it
-    }
-    await client.query('commit');                      ← all chunks land together
-  } catch (err) {
-    await client.query('rollback');                    ← or none do
-    throw err;                                          ← re-raise: caller decides
-  } finally {
-    client.release();                                  ← always return the conn
-  }                                                       (drop this → pool leak)
-```
-
-```
-  src/pg-vector-store.ts  (search, lines 67-85)
-
-  this.assertDim(vector);                              ← same gate on the way out
-  const { rows } = await this.pool.query(
-    `select id, content, chunk_index, document_id, meta,
-       1 - (embedding <=> $1::vector) as score          ← <=> is DISTANCE;
-     from agents.chunks                                    1 - it = similarity
-     where app_id = $2                                  ← tenant scoping by app
-     order by embedding <=> $1::vector                  ← KNN: nearest first
-     limit $3`, [toVectorLiteral(vector), this.appId, k]);
-  return rows.map((r) => ({
-    id: r.id, score: Number(r.score),
-    meta: { ...(r.meta ?? {}), docId: r.document_id,    ← rebuild the in-memory
-            chunkIndex: r.chunk_index, text: r.content },  meta shape so aptkit's
-  }));                                                     citation tool works
-       │
-       └─ the meta rebuild IS the round-trip: columns on disk become the
-          meta bag in memory. Drop it and citations lose docId/text.
+  aptkit ── upsert(chunks) ──────────────►┐
+            search(vec,k) ◄──── Hit[] ─────┤   NARROW interface (3 members)
+                                           │
+  ┌── PgVectorStore body (DEEP) ───────────▼──────────────────────────┐
+  │  ① assertDim        guard 768, else throw          (:32-36)        │
+  │  ② toVectorLiteral  number[] → "[..]"               (:14-17)        │
+  │  ③ begin/commit/    atomic batch, rollback on err   (:40-64)        │
+  │     rollback                                                        │
+  │  ④ 1 - (<=> )       distance → similarity score     (:69)          │
+  │  ⑤ meta round-trip  docId/chunkIndex/text  ◄── THE LEAK (:44-46,83)│
+  └──────────────────────────────┬─────────────────────────────────────┘
+                                 │  pool.query  ($N::vector cast in SQL)
+  ┌─ Postgres + pgvector ───────▼──────────────────────────────────────┐
+  │  agents.chunks   embedding vector(768)   HNSW vector_cosine_ops     │
+  └─────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
 ## Elaborate
 
-This is the Ports-and-Adapters (hexagonal) pattern, narrowed to one port. The
-"port" is `VectorStore`; the "adapter" is `PgVectorStore`. The pattern exists to
-keep a domain core (aptkit's retrieval pipeline) independent of infrastructure
-(Postgres) so the infrastructure can be swapped — in-memory for tests, pgvector
-for production — without touching the core. The vendor here (pgvector 0.x in one
-Postgres instance) is the implementation detail the port hides; swap to Qdrant or
-Weaviate and only this file changes. The adjacent concept is dependency inversion
-(`04-dependency-as-a-boundary.md`): the contract is the inversion point, the
-adapter is one concrete plug.
+The pattern comes from Hexagonal Architecture (Alistair Cockburn) and the GoF
+Adapter: define a *port* (interface) the application owns, supply *adapters*
+that implement it for specific tech. APOSD reframes it as depth — the port is
+the narrow interface, the adapter is where you bury complexity so it stops
+amplifying upward.
+
+This is the same shape you shipped in **AdvntrCue** (pgvector behind a RAG
+pipeline), but buffr makes the contract *explicit* (`implements VectorStore`)
+because aptkit owns it. The context.md note about the **dropped FK** on
+`chunks.document_id` is part of this discipline: aptkit's in-memory store has
+no notion of a documents table, so memory chunks (`kind=memory`) and
+profile-less chunks must be insertable without a parent row. Keeping the FK
+would break drop-in parity with the contract. That's an adapter preserving the
+contract's *permissiveness*, not just its method signatures.
+
+Read next: `03-dependency-as-a-boundary.md` (why the contract is imported,
+never forked) and `05-deep-session-facade.md` (the adapter's biggest
+consumer).
 
 ---
 
 ## Interview defense
 
-**Q: Defend the no-foreign-key decision between `chunks.document_id` and
-`documents.id`.** The `VectorStore` contract upserts chunks with no notion of a
-documents row — that's aptkit's model, not buffr's. A hard FK would mean
-`upsert` could only run after a `documents` insert, which breaks drop-in parity
-with aptkit's in-memory store (it has no documents table at all). So the link is
-*soft*: `document_id` is a column, not a constraint (`sql/001_agents_schema.sql:15-17`).
-The cost: a chunk can reference a document that doesn't exist. The buy: the adapter
-honors the contract exactly. Right call — and as of 2026-06-24 it pays off twice:
-aptkit's `createConversationMemory` writes *memory* chunks with no documents row at
-all (`src/session.ts:53`), which only works because the FK was dropped. A hard FK
-would have blocked conversation memory from sharing this store.
+**Q: Why implement someone else's interface instead of just writing your own
+Postgres store?**
+Because the value is the *swap being invisible*. aptkit's `RagQueryAgent` and
+`RetrievalPipeline` are written against `VectorStore`; implementing it means
+the entire pgvector graduation touched zero lines of aptkit. If I'd written my
+own API, every aptkit call site would need rewiring, and I'd lose the
+in-memory store as a test double.
 
 ```
-  hard FK                          soft link (chosen)
-  ─────────                        ──────────────────
-  chunks.document_id ─FK─►docs     chunks.document_id (plain col)
-  upsert REQUIRES doc row first    upsert works standalone
-  breaks in-memory parity          matches the contract
+  swap is invisible because the seam holds the contract
+
+  agent ─► VectorStore ─► { in-memory }   ← tests, fast
+                       └─► { PgVectorStore } ← prod, persistent
+           same interface, agent never knows which
 ```
 
-**Q: What's the load-bearing part people forget in this adapter?** The
-transaction's `finally { client.release() }`. Everyone remembers
-begin/commit/rollback; the connection release is the one that, if dropped, leaks a
-pool connection per failed upsert until the pool is exhausted and the next query
-hangs forever. Naming that is the signal you've actually run this under load, not
-just read it.
+**Q: What's the weakest part of this design?**
+The `meta` magic-keys contract (`pg-vector-store.ts:44-46,83`). Three string
+keys are a cross-module contract with no type — `docId`, `chunkIndex`, `text`.
+Rename one and retrieval silently returns empty citations; the `typeof` guards
+swallow the mismatch into `''`. The fix is a `ChunkMeta` type plus an interface
+comment. It's the deepest module's most fragile coupling, and it's the one
+implied interface I'd make explicit first.
 
-**Q: Is `PgVectorStore` too deep — does hiding the transaction hurt
-testability?** No. The pool is injected (`opts.pool`), so a test substitutes a
-fake pool and asserts the SQL. Depth and testability aren't in tension here
-because the dependency is a constructor arg, not a hidden `new`.
-
----
-
-## Validate
-
-1. **Reconstruct:** from memory, name the two public methods of `VectorStore` and
-   the four things `upsert` hides behind them. (Answer: `upsert`/`search`; hides
-   the txn, `assertDim`, `toVectorLiteral`, the ON CONFLICT upsert.)
-2. **Explain:** why does `search` compute `1 - (embedding <=> $1)` instead of
-   sorting on `<=>` and returning it as the score? (`src/pg-vector-store.ts:72`.)
-3. **Apply:** aptkit ships a new chunk meta key `pageNumber`. What breaks in
-   `upsert`, and where would you add the read? (`src/pg-vector-store.ts:44-46`.)
-4. **Defend:** a reviewer says "just put a foreign key on `document_id`, it's
-   cleaner." Refute it using the contract. (`sql/001_agents_schema.sql:15-17`.)
+**Anchor:** "A good adapter upholds invariants the contract never stated —
+atomic writes, dimension safety — so the layer above stays simple."
 
 ---
 
 ## See also
 
-- `audit.md` — Lens 2 (deepest module), Lens 1 (the `meta` unknown-unknown).
-- `04-dependency-as-a-boundary.md` — why the contract is the inversion point.
-- `03-sync-interface-async-work.md` — the sibling adapter (`SupabaseTraceSink`)
-  that implements a *different* aptkit contract.
-- `study-system-design` → the retrieval flow at the architecture altitude.
-- `study-testing` → the injected pool is the seam that makes this testable.
+- `audit.md` §2 (deep vs shallow), §3 (the meta leak), §6 (the transaction).
+- `03-dependency-as-a-boundary.md` — the contract as an imported boundary.
+- `05-deep-session-facade.md` — the facade that constructs this adapter.
+- `.aipe/study-system-design/` *(when generated)* — the storage architecture
+  at the system altitude.

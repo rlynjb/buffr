@@ -1,157 +1,221 @@
-# Chapter 2 — Scope Cuts and Non-Goals
+# 02 — Scope, Cuts, and Non-Goals
 
-Here's the counterintuitive part: the strongest signal in this whole project isn't what you built. It's what you *refused* to build. Anyone can sprawl a personal project into a half-finished platform — the phone brain, the sync layer, the multi-platform gateway, fine-tuning, all stubbed, none working. What's rare, and what reads as senior, is the discipline to ship **one agent end-to-end with measured numbers** and consciously defer everything else behind a named door. Scope discipline is the thing junior engineers can't fake, because faking it means *not building* the shiny stuff, and the pull to build the shiny stuff is exactly what they can't resist.
+The previous file justified *that* the problem is worth solving. This file justifies *how
+narrowly* you scoped it — and scope discipline is itself a senior signal. A staff engineer
+is not the one with the longest feature list; it's the one who can name the smallest slice
+that validates the premise and defend every cut. This file is the cut list, with the
+reasoning attached to each cut.
 
-```
-  THE SCOPE LINE — what's in, what's deferred behind a door
+## Zoom out — the scope onion
 
-  ┌─ IN SCOPE (v1b — built and verified) ─────────────────┐
-  │  ONE agent, end to end, single device:                │
-  │   • Gemma provider + tool-call emulation              │
-  │   • RAG pipeline (chunk→embed→pgvector→search→rank)   │
-  │   • centralized agents schema, app_id-keyed           │
-  │   • trajectory capture (every turn → messages)        │
-  │   • precision@k / recall@k evals                      │
-  └────────────────────────┬───────────────────────────────┘
-                           │  HARD LINE — drawn deliberately
-  ┌─ DEFERRED (named, not built — one-way doors) ─────────▼─┐
-  │   • the phone brain (RN, on-device model)             │
-  │   • laptop↔phone memory sync/merge                    │
-  │   • the multi-platform gateway (Telegram, etc.)       │
-  │   • Edge Functions / HTTP API · RLS policies          │
-  │   • trajectory → fine-tune (the ceiling)              │
-  └────────────────────────────────────────────────────────┘
-```
-
-The line is the chapter. Everything below the line was deferred *on purpose*, with a reason, and the reasons are the senior signal.
-
-## The biggest cut: the two-brain body
-
-  ┌─────────────────────────────────────────────────────────┐
-  │ THEY ASK                                                 │
-  │   "Your design talks about a laptop brain and a phone    │
-  │    brain. Why didn't you build the phone?"              │
-  │                                                         │
-  │ WHAT THEY'RE TESTING                                     │
-  │   Do you defer to avoid hard work, or to avoid a         │
-  │   one-way door? The first is laziness; the second is     │
-  │   judgment. They want to see you name the door.         │
-  └─────────────────────────────────────────────────────────┘
-
-The two-brain body — laptop with full Gemma, phone with an on-device Gemini-Nano-class model, both sharing one memory plane in Supabase — is in the design doc as a *deferred* decision, on purpose. Your own spec says it: *"build the parts first, get them real and hand-tested in isolation, then decide the body. This dodges the one-way doors."*
-
-> "I deliberately deferred the phone brain, and the reason is one-way doors. The moment you have two brains sharing one memory, you have a sync-and-merge problem — which is the exact canonical-local-with-cloud-mirror pattern I already hit in buffr, and it's genuinely hard. My design says it explicitly: build the laptop brain first so the sync problem is the *second* thing I solve, not the first. If I'd started with two brains, I'd have spent all my time on conflict resolution and never proven the agent actually retrieves and answers well. So the cut wasn't 'the phone is too much work' — it was 'the phone forces a hard, irreversible decision before I've validated the easy, reversible part.'"
-
-That's the distinction the interviewer is mining for. You didn't defer to dodge effort. You deferred to **sequence the one-way doors after the reversible work** — build the cheap, decision-independent pieces now, postpone the irreversible body decision until you have evidence to make it with.
+See the whole thing the product *could* be, with a hard line drawn around the slice you
+actually built.
 
 ```
-  WHY DEFER THE BODY — sequence reversible before irreversible
+  Zoom out — what's in the slice vs what's deliberately outside it
 
-  ┌─ reversible (build now) ──────────────────────────────┐
-  │  the packages: provider, RAG, profile, evals, the     │
-  │  laptop brain. Swap a vector store, swap an embedder  │
-  │  (with reindex) — all changeable later.               │
-  └───────────────────────────┬────────────────────────────┘
-                              │  validate HERE first
-  ┌─ irreversible (decide later) ─────▼────────────────────┐
-  │  two-brain topology · sync/merge semantics · the       │
-  │  gateway. Get these wrong and you rebuild. So you      │
-  │  wait until you have evidence to decide them right.    │
-  └────────────────────────────────────────────────────────┘
+  ┌─ the full Hermes-shaped vision (NOT the scope) ──────────────────────┐
+  │  ░ two-brain body (laptop + phone)   ░ multi-platform gateway        │
+  │  ░ multi-app HTTP API   ░ enforced RLS   ░ fine-tuning (the ceiling) │
+  │                                                                       │
+  │   ┌─ THE SLICE YOU BUILT (v1b) ─────────────────────────────────┐    │
+  │   │  ★ one laptop brain ★                                        │    │ ← we are here
+  │   │  Gemma + pgvector + chat CLI + trajectory capture            │    │
+  │   │  single device · single writer · direct pg · measured        │    │
+  │   └──────────────────────────────────────────────────────────────┘    │
+  └───────────────────────────────────────────────────────────────────────┘
 ```
 
-  ┃ "I didn't defer the phone because it's hard. I
-  ┃  deferred it because it forces an irreversible
-  ┃  decision before I've validated the reversible part."
+Zoom in. The slice is *"one good agent end-to-end with measured eval numbers — not a
+platform"* (`agent-layer-plan.md:6`). Everything outside the inner box is named, dated, and
+deferred — not forgotten. The discipline that sorts "in" from "out" is reversibility: lock
+the one-way doors, defer everything additive (taught in full at
+`.aipe/study-system-design/07-deferred-body.md`).
 
-## The cut that's also an architecture decision: centralize the agent, not the data
+## Structure pass
 
-  ┌─────────────────────────────────────────────────────────┐
-  │ THEY ASK                                                 │
-  │   "You said it centralizes data across your apps —       │
-  │    so you migrated all your apps into one schema?"      │
-  │                                                         │
-  │ WHAT THEY'RE TESTING                                     │
-  │   Did you understand the difference between centralizing │
-  │   data (a migration nightmare, tight coupling) and       │
-  │   centralizing the agent layer (a clean boundary)?      │
-  └─────────────────────────────────────────────────────────┘
+**Layers:** the scope splits three ways — the slice (built now), the cuts (deferred,
+reversible), and the one-way doors (decided now even though not built out, because
+reversing them later is expensive).
 
-This is a scope cut disguised as an architecture choice, and it's one of the sharpest decisions in the whole plan. The naive version of "a personal agent that centralizes my data" is: pull every app's data into one schema. That's a disaster — you'd be rewriting every app's storage and coupling them all to the agent. You cut that explicitly. Your plan says it in bold: *"Centralize the agent layer, not the data. Existing per-app schemas stay where they are."*
+**Axis — *reversibility. Is this decision a one-way door?*** Trace it across every scope
+choice and the sort falls out automatically:
 
-> "I'm centralizing the *agent layer*, not the *data*. Every app keeps its own schema, untouched. The new `agents` schema holds only RAG infrastructure — corpus copies, chunks, conversations, the trajectory log — and apps write *into* it with their own `app_id` when they want something indexed. They never touch each other's tables and they never touch the agent's internals; the only contract is 'write a document with your app_id.' That's the whole point of the cut: centralizing the data would mean migrating and coupling every app, which is exactly the kind of irreversible, sprawling work I refused to take on. Centralizing only the agent layer keeps every app independent and keeps the boundary clean."
+```
+  one axis — "is reversing this expensive?" — sorts every scope decision
 
-The senior signal here is that you saw the *cheap, wrong* version (centralize the data) and the *expensive-looking but correct* version (centralize only the agent layer) and chose correctly — and can articulate *why* the cheap version is a trap. (The full architecture walk lives in `.aipe/study-system-design/04-library-as-dependency-boundary.md`; here it's the scope argument.)
+  decision ─────► is reversing it expensive (a one-way door)?
+                    │                              │
+                   YES                            NO
+                    ▼                              ▼
+             DECIDE NOW                    is the seam cheap to scaffold now?
+        (embedding dim = 768)               │                    │
+                                           YES                   NO
+                                            ▼                     ▼
+                                   SCAFFOLD NOW            CUT / DEFER
+                                (app_id, embedding_model   (phone, sync, gateway,
+                                 column, the contracts)     RLS, fine-tuning, HTTP)
+```
 
-## The cut that proves the discipline: one agent, not a platform
+**Seam:** the `VectorStore` and `CapabilityTraceSink` contracts are the seam every cut
+plugs back into later. That's *why* the cuts are safe and not procrastination — each
+deferred phase "reuses this schema and the `VectorStore` contract — no rework"
+(`...graduation-design.md:188`). The seam is load-bearing because it lets the scope stay
+small without painting the growth path into a corner.
 
-  ┌─────────────────────────────────────────────────────────┐
-  │ THEY ASK                                                 │
-  │   "AptKit ships five agents. Why didn't you build the    │
-  │    fleet, the gateway, the whole platform?"             │
-  │                                                         │
-  │ WHAT THEY'RE TESTING                                     │
-  │   Do you know that 'one thing that works, measured'      │
-  │   beats 'five things stubbed'? This is the core scope-   │
-  │   discipline test.                                      │
-  └─────────────────────────────────────────────────────────┘
+## How the slice was chosen — the smallest useful scope
 
-Your plan opens with this, in its own words: *"The deliverable is one good agent with measured eval numbers — not a platform."* And under "What NOT to do": *"Don't ship a platform before one good agent works end-to-end."*
+### Move 1 — the mental model
 
-> "AptKit's five packaged agents are templates, not the product. I built one — a RAG query agent — end to end, and measured it, because one agent with real eval numbers is worth more than five stubbed agents and a gateway diagram. The whole thesis of the project is *measured evidence*: precision@5, faithfulness, JSON validity. You can't measure a platform you haven't finished. So the scope discipline isn't a limitation I'm apologizing for — it's the design. Ship one, measure it, then maybe generalize. The Phase 4 one-pager with the actual numbers is the deliverable; a half-built fleet would have no numbers at all."
+You've shipped a feature behind a flag: the column and the dormant code path go in now,
+the feature flips on later, so you never do a big-bang rewrite. The scope here is that move
+at the *system* level. Build the laptop brain now with `app_id` and the contracts in place;
+the phone, the gateway, and RLS flip on later by plugging into seams that already exist —
+no schema migration, no agent rewrite.
 
-  ┃ "One agent with real eval numbers beats five stubbed
-  ┃  agents with a gateway diagram. You can't measure a
-  ┃  platform you never finished."
+```
+  the smallest-useful-slice test — does it validate the premise?
 
-## The non-goals, named honestly
+  premise to validate:  "I can build the engineering under a real RAG
+                         agent AND prove it with numbers"
 
-These are in your design doc's "Out of scope" and "What NOT to do" lists. Naming them *as deliberate non-goals* — not as "things I didn't get to" — is the move:
+  smallest slice that validates it:
+    ┌────────────────────────────────────────────────────┐
+    │ one device · one user · real corpus · real Gemma   │
+    │ provider · RAG from scratch · precision@k measured │
+    └────────────────────────────────────────────────────┘
+       ▲ remove any one and the premise is no longer proven:
+         - drop the eval → "built it" but not "measured it"
+         - drop RAG-from-scratch → it's a tool config, not engineering
+         - drop the Gemma provider → no provider-contract signal
+         - add a second device → unproven sync scope, no new proof
+```
 
-| Non-goal | Why it's cut (in your words) |
-|----------|------------------------------|
-| Edge Functions / HTTP API | "Single device has one client; HTTP API is YAGNI until phone/app #2." Direct `pg` now. |
-| RLS policies | "RLS unneeded for one user." Gated on app #2 writing — and named as a hard prerequisite before then. |
-| `agents.tool_runs` cache | "YAGNI for a single device." |
-| Fine-tuning | "The ceiling, and only after Phase 4 evidence demands it. Never pre-train." |
-| Multi-platform gateway | Deferred with the body; needs the topology decided first. |
+Notice what the test rejects: **adding** a second device proves nothing new about the
+premise — it just adds the sync/merge problem (the hardest part) with no extra evidence
+that you can build-and-measure a RAG agent. So it's cut. That's the discipline: the slice
+is the *narrowest* thing that still proves the claim, and anything that doesn't add proof
+is out.
 
-Notice every "cut" comes with a *reason* and, where it matters, a *re-entry condition* — RLS is gated on "a second app writes," fine-tuning is gated on "Phase 4 evidence." That's the difference between a deferral and an abandonment. A deferral has a trigger. An abandonment is just "I gave up." You only have deferrals.
+## The cut list — what's deliberately NOT built, and why each is safe
 
-## When you're cornered
+```
+  Phase A — IN the slice (built)        cut → why it's safe to defer
 
-  ╔═════════════════════════════════════════════════════════╗
-  ║ IF THEY SAY                                              ║
-  ║   "So you basically built a small single-device RAG app  ║
-  ║    and called it a personal agent platform."            ║
-  ║                                                         ║
-  ║ DON'T                                                    ║
-  ║   Get defensive or oversell the deferred parts as if     ║
-  ║   they're almost done. They're not built. Own it.       ║
-  ║                                                         ║
-  ║ DO                                                       ║
-  ║   "Yes — and that's the point. I built the smallest      ║
-  ║    thing that validates the premise: one agent that      ║
-  ║    retrieves and answers from my own corpus, measured.   ║
-  ║    The platform framing is the *roadmap*, and every      ║
-  ║    deferred piece is named with a re-entry condition —   ║
-  ║    RLS when app #2 writes, the phone after the laptop    ║
-  ║    brain is validated, fine-tuning only if Phase 4       ║
-  ║    numbers demand it. I'd rather ship one validated      ║
-  ║    slice with a clear roadmap than five broken pieces.   ║
-  ║    The restraint is the senior skill, not the gap."     ║
-  ╚═════════════════════════════════════════════════════════╝
+  one laptop brain (Gemma+pgvector)     —
+  trajectory capture (messages table)   —
+  precision@k / recall@k eval           —
+  profile injection (me.md as context)  —
+  ────────────────────────────────────  ─────────────────────────────────────────
+  CUT: phone brain (RN, on-device)      two brains = sync/merge problem; build
+                                        laptop-first so sync is the SECOND thing
+                                        solved, not the first (...aptkit-
+                                        packages-design.md:76)
+  CUT: laptop↔phone memory sync         the buffr canonical-local-with-cloud-mirror
+                                        problem; only bites once both brains live
+  CUT: HTTP API / Edge Functions        "single device has one client; HTTP API is
+                                        YAGNI until phone/app #2" (...graduation-
+                                        design.md:27) — adding it later wraps the
+                                        same SQL, additive
+  CUT: enforced RLS                     unneeded for one user; the app_id column is
+                                        scaffolded so RLS flips on with no migration
+                                        (...graduation-design.md:29)
+  CUT: multi-app consumers              centralize the agent LAYER not the data;
+                                        apps keep their schemas, consume later over
+                                        HTTP (agent-layer-plan.md:83)
+  CUT: fine-tuning                      the CEILING, gated on Phase-4 evidence, never
+                                        assumed (agent-layer-plan.md:19); trajectory
+                                        capture ships now so it's ANSWERABLE later
+  CUT: reranking / hybrid retrieval     dense-only is enough to hit the precision@5
+                                        gate for v1; revisit only if retrieval misses
+                                        dominate (agent-layer-plan.md:116)
+```
 
-## The one-page version
+Every cut has a citation. That's the point — in the room, "I cut the phone" sounds like
+giving up; "I cut the phone because two brains is the sync/merge problem and laptop-first
+makes sync the second thing I solve, not the first" sounds like sequencing risk. Same cut,
+opposite signal.
 
-**Core claim:** The scope is one agent, end to end, single device, with measured evals — and everything else is deferred behind a named door with a re-entry condition. The restraint is the signal: you cut the two-brain body to sequence reversible work before the irreversible sync decision, you centralize the *agent layer* not the data to keep every app independent, and you ship one measured agent instead of a stubbed platform.
+## The one-way doors — decided now, on purpose
 
-**The questions, one-line answers:**
-- "Why no phone?" → It forces an irreversible sync decision before I've validated the reversible parts. Laptop first.
-- "You centralized all your data?" → No — only the *agent layer*. Apps keep their schemas; they write in with an app_id.
-- "Why one agent, not the platform?" → One agent with real numbers beats five stubbed. The measured one-pager is the deliverable.
-- "Isn't it just a small RAG app?" → Yes, deliberately — the smallest thing that validates the premise, with a named roadmap.
+These are NOT cuts. They're decisions locked early *because* reversing them is expensive,
+even though the thing they enable isn't built yet.
 
-**The pull quote you keep:** *"I didn't defer the phone because it's hard. I deferred it because it forces an irreversible decision before I've validated the reversible part."*
+```
+  one-way doors — what's locked and the cost of reversing it later
 
-→ Next: Chapter 3, options and opportunity cost. The scope is justified — now the crux question: why build *any* of it instead of installing Hermes?
+  ┌─ embedding dimension = 768 ──────────────────────────────────────────┐
+  │  LOCKED. A corpus embedded at nomic's 768 can't be searched by a      │
+  │  1536-dim query. Swapping the embedder after indexing = re-embed the  │
+  │  WHOLE corpus. So: store carries its dimension, mismatch throws loud,  │
+  │  reindex is first-class.   agent-layer-plan.md:115                    │
+  └───────────────────────────────────────────────────────────────────────┘
+```
+
+Naming a one-way door you decided *early and on purpose* is a stronger signal than any
+feature. It says you can tell reversible decisions from irreversible ones — the core of
+scoping under uncertainty.
+
+## Non-goals — stated flat, no apology
+
+```
+  non-goals — what this project is explicitly NOT
+
+  ✗ NOT a platform        — one agent, measured (agent-layer-plan.md:6)
+  ✗ NOT Hermes            — no sub-agents, no skill auto-gen, no fine-tuned
+                            models; steals the patterns, not the machinery
+                            (agent-layer-plan.md:13-20)
+  ✗ NOT a fleet of agents — ship ONE end-to-end, measure, then maybe generalize
+  ✗ NOT centralized DATA  — centralize the agent LAYER; apps keep their schemas
+  ✗ NOT a product seeking — it's a portfolio + learning project; the audience for
+    product-market fit     the evidence is a reviewer, not a market
+```
+
+State these without flinching. "This is not a platform" is not a weakness to soften — it's
+the deliberate scope that makes the eval numbers meaningful. A platform with no users and
+no numbers is weaker than one measured agent with both.
+
+## The principle
+
+The expensive mistake is never building the small thing — it's building the small thing in
+a way that forces a rewrite to grow it, or scoping it so broadly that nothing in it is
+*proven*. Sort by reversibility: lock the one-way doors, scaffold the cheap seams, defer
+everything additive. The slice you keep is the narrowest one that still validates the
+premise; every cut plugs back into a seam that already exists. Scope discipline isn't
+saying no to features — it's proving you know which decisions are irreversible and which
+can wait for evidence.
+
+## Interview defense
+
+**Q: You built a personal agent but it only runs on one device and serves one user. Isn't
+that under-scoped?**
+It's *correctly* scoped. The premise I'm validating is "I can build the engineering under a
+RAG agent and measure it." A single device, single user, real corpus, and a precision@k
+gate is the narrowest thing that proves that. A second device adds the sync/merge problem —
+the hardest part — with zero additional proof of the premise, so it's deferred, not
+dropped. Anchor: smallest-useful-slice + `...aptkit-packages-design.md:76`.
+
+```
+  remove any part of the slice → premise unproven
+  add a part beyond it → scope to defend with evidence I don't have
+```
+
+**Q: How do you know the cuts won't force a rewrite when you do build the phone?**
+Because every deferred phase has a named seam it plugs into: the Edge-Fn store → the
+`VectorStore` contract; RLS → the `app_id` column already on every table; fine-tuning → the
+trajectory already captured. The scaffolding is built; only the policies and adapters are
+deferred. Anchor: `...graduation-design.md:188`.
+
+**Q: Why lock the embedding dimension so early?**
+Because it's a one-way door for *data*, not code. The adapters keep the code swappable any
+time, but a corpus embedded at 768 can't be searched by a 1536-dim query — swapping after
+indexing means re-embedding everything. So I locked 768, made the store carry its
+dimension, and made mismatch throw loud and reindex first-class. Anchor:
+`agent-layer-plan.md:115`.
+
+## See also
+
+- `01-problem-brief.md` — why the problem is worth solving at all.
+- `03-options-and-opportunity-cost.md` — build vs buy, and `do nothing` as a real option.
+- `.aipe/study-system-design/07-deferred-body.md` — the deferral strategy taught in full.
+- `agent-layer-plan.md` — the "what NOT to do" list every cut cites.

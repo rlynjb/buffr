@@ -1,267 +1,249 @@
-# WebSockets, SSE, Streaming & Realtime
+# WebSockets, SSE, Streaming, and Realtime
 
-**Long-lived connections & token streaming** · Industry standard
+**Industry name(s):** long-lived connections / server-sent events /
+token streaming / realtime transports. **Type:** Industry standard.
 
 ## Zoom out, then zoom in
 
-Verdict first: **buffr exercises none of this.** No WebSocket, no Server-Sent
-Events, no token streaming. Every network call is request/response — fire,
-block, get the whole answer, move on. That's a real and *defensible* choice for
-a single-user CLI, and the most useful thing this file does is show you exactly
-where streaming *would* slot in (aptkit even ships the machinery) and why buffr
-doesn't reach for it.
+This is the file where the honest answer is *none of it, yet* — and the
+reason is precise and worth understanding. buffr's chat is **request →
+wait → full response**. No WebSocket, no SSE, no token-by-token streaming.
+The Ink spinner spins, `agent.answer()` resolves to one complete string,
+and the whole answer appears at once. That's a real architectural choice
+with a visible UX cost, not an oversight.
 
 ```
-  Zoom out — realtime's place (empty in buffr)
+  Zoom out — where streaming WOULD live (but doesn't)
 
-  ┌─ Provider layer ────────────────────────────────────────────────┐
-  │   Ollama :11434 — CAN stream tokens, but buffr asks for one shot │
-  └──────┬───────────────────────────────────────────────────────────┘
-         │ HTTP request/response (NOT a stream)
-  ┌─ Realtime transport ────────────────────────────────────────────┐
-  │   ★ NOT YET EXERCISED ★                                          │ ★ THIS FILE ★
-  │   no WebSocket · no SSE · no chunked token stream                │
-  └──────┬───────────────────────────────────────────────────────────┘
-         │
-  ┌─ Service layer ─────────────────────────────────────────────────┐
-  │   agent.answer(question) → awaits ONE complete string           │
-  └──────────────────────────────────────────────────────────────────┘
+  ┌─ UI (Ink) ───────────────────────────────────────────────┐
+  │  chat.tsx: <Spinner/> thinking…   then the WHOLE answer   │ ← ★ would
+  └─────────────────────────────┬─────────────────────────────┘   stream
+                                │  ONE Promise<string>            here, but
+  ┌─ Orchestration ─────────────▼────────────────────────────┐   doesn't
+  │  session.ask → agent.answer()  → resolves ONCE, complete │
+  └─────────────────────────────┬─────────────────────────────┘
+                                │  one HTTP req/resp
+  ┌─ Ollama ─────────────────────▼───────────────────────────┐
+  │  generates the full answer, returns it (no token stream  │
+  │  consumed by buffr)                                       │
+  └──────────────────────────────────────────────────────────┘
 ```
 
-Zoom in: realtime transports answer "*how do I get data as it's produced
-instead of waiting for all of it?*" buffr's answer is: it doesn't — it waits.
-For a terminal that prints one final answer, that's fine. This file teaches the
-pattern so you recognize the seam where it'd plug in.
+Zoom in. The concept is **realtime transports**: ways to deliver data
+incrementally over a held-open connection (WebSocket = bidirectional, SSE =
+server→client one-way, HTTP chunked streaming = response body arrives in
+pieces). buffr uses *none* — it uses plain request/response. Understanding
+this file is understanding *why one string and not a stream*, and what it
+would take to change.
 
 ## Structure pass
 
-**Layers.** Ollama (can stream) → transport (one-shot) → agent (awaits whole) →
-CLI (prints once). Trace *lifecycle* — when do bytes arrive — down.
+**Layers.** UI (renders the answer) → orchestration (`agent.answer`) →
+Ollama (generates). One axis tells the whole story.
 
-**Axis — "when do the response bytes arrive?"**
+**Axis — guarantees / "does data arrive incrementally or all at once?"**
 
 ```
-  One question down the response stack
+  axis: "incremental or atomic delivery?"
 
-  "when do bytes arrive?"
+  ┌─ chat.tsx render ──────────┐  → ATOMIC: spinner, then full text
+  └────────────────────────────┘
+  ┌─ session.ask return type ──┐  → ATOMIC: Promise<string>, one value
+  └────────────────────────────┘
+  ┌─ agent.answer() ───────────┐  → ATOMIC: resolves once, complete
+  └────────────────────────────┘
 
-  ┌─ Ollama ────────────────────────┐  → COULD emit token-by-token
-  │  generation is incremental       │     (stream:true in /api/chat)
-  └──────────────────────────────────┘
-      ┌─ aptkit transport ──────────┐  → asks for the WHOLE response,
-      │  fetch → await res.json()    │     awaits the full body
-      └──────────────────────────────┘
-          ┌─ agent.answer() ────────┐  → returns one complete string
-          └──────────────────────────┘
-              ┌─ CLI ───────────────┐  → prints once, at the end
-              └──────────────────────┘
-
-  the answer is "all at once, at the end" at every layer below Ollama.
-  the streaming seam is the transport — and it's closed.
+  every layer agrees: atomic. there is no incremental seam anywhere.
 ```
 
-**Seam.** The seam where streaming would live is the transport's `await
-res.json()`. Today it collects the full body before returning. To stream, that
-single await becomes a loop over a chunked body — and the change ripples up
-through `agent.answer()` (return type goes from `string` to an async iterable)
-to the CLI (print incrementally). The seam is identifiable; it's just not open.
+**Seam.** Here the *absence* of a seam is the finding. A streaming app has
+a seam where tokens flow incrementally (an async iterator, an
+`EventSource`, a `ReadableStream`). buffr has no such seam — the return
+type is `Promise<string>` top to bottom (`session.ts:29-30`,
+`chat.tsx:28`). No place to intercept a partial result, because there are
+no partial results.
 
 ## How it works
 
 ### Move 1 — the mental model
 
-Streaming flips the response from "one big value you await" to "a sequence you
-consume as it lands" — the difference between `await fetch().then(r => r.json())`
-and `for await (const chunk of stream)`. You've seen the second shape in any
-typewriter-effect chat UI.
+You know the difference between `const data = await fetch(url).then(r =>
+r.json())` — one atomic value — and consuming a `ReadableStream` where you
+`for await` chunks as they arrive. buffr is firmly the first kind. The
+mental model is just: *fire one request, await one complete answer, render
+it.* No stream to consume.
 
 ```
-  Request/response  vs  streaming — the shape difference
+  Request/response vs streaming — buffr is the left shape
 
-  REQUEST/RESPONSE (buffr today)        STREAMING (not exercised)
-  send ──►                              send ──►
-         ⌛ block on whole body                ◄── token
-  ◄── [entire answer]                         ◄── token
-  print once                                  ◄── token  (print each)
-                                              ◄── [done]
-
-  same request; the response is one value vs a sequence over time
+  buffr (atomic):                streaming (NOT here):
+  ┌─────────┐                    ┌─────────┐
+  │ ask(q)  │                    │ ask(q)  │
+  └────┬────┘                    └────┬────┘
+       │ await (spinner)              │ for await chunk:
+       ▼                              │   render token…
+  ┌─────────┐                         │   render token…
+  │ full    │                         │   render token…
+  │ string  │                         ▼
+  └─────────┘                    (text grows live)
 ```
 
-### Move 2 — the three realtime transports (and why none fit here)
+### Move 2 — walk the (non-)realtime path
 
-**Streaming HTTP (chunked / NDJSON) — the one buffr is closest to.** Ollama's
-`/api/chat` supports `stream: true`, emitting newline-delimited JSON, one token
-chunk per line. The client reads the response body as a stream instead of
-awaiting `.json()`. aptkit *ships* an ndjson stream reader — but buffr's path
-(`RagQueryAgent.answer()`) uses the non-streaming transport that awaits the
-whole body. So the capability exists one dependency away and buffr declines it.
+**The return type is atomic, all the way up.** Trace the type of an
+answer from bottom to top:
 
 ```
-  Layers-and-hops — where streaming WOULD plug in
+  the answer's type — atomic at every hop
 
-  ┌─ Ollama ─────┐  NDJSON line per token   ┌─ transport ──┐
-  │ stream:true  │ ───────────────────────► │ for await    │  (this loop
-  │              │  {token}\n{token}\n...    │ over body     │   doesn't run
-  └──────────────┘                           └──────┬───────┘   in buffr)
-                                            instead buffr does:
-                                            await res.json()  ← one shot
+  agent.answer(question)        → Promise<string>   (session.ts:62)
+        │ awaited once
+  session.ask(): Promise<string>                    (session.ts:29-30,60)
+        │ awaited once
+  chat.tsx onSubmit:
+     const answer = await session.ask(q);           (chat.tsx:28)
+     setTurns(t => [...t, { role:'buffr', text:answer }]); (chat.tsx:29)
+        │
+        ▼  one setState with the COMPLETE string — never appended to
 ```
 
-**Server-Sent Events (SSE) — a server→client one-way stream over HTTP.** Used
-when a server pushes updates to a browser (`text/event-stream`, auto-reconnect
-built in). buffr has no browser and no server, so SSE has no place. Not yet
-exercised.
+There is no `for await`, no async iterator, no partial-append anywhere in
+the chain. `session.ask` is typed `Promise<string>` (`src/session.ts:30`),
+`agent.answer` is awaited as one value (`src/session.ts:62`), and the UI
+sets the turn text once with the whole string (`src/cli/chat.tsx:28-29`).
 
-**WebSockets — full-duplex, both directions, one long-lived connection.** Used
-for chat apps, live cursors, multiplayer. buffr's interactions are strictly
-request→response with a clear end; there's no need for a persistent bidirectional
-channel. Not yet exercised.
-
-**The load-bearing absence: no reconnect logic.** Every realtime transport's
-hard part is reconnection — what happens when the long-lived connection drops
-mid-stream. buffr has *zero* of this because it has no long-lived connection;
-each `fetch` is a complete, short request. That's the upside of request/response:
-there's no stream to lose, so there's no reconnect to get wrong.
-
-### Move 2.5 — current vs future state
+**The UX cost is the spinner.** `chat.tsx:13` sets `busy = true` before
+the await and back to `false` after. While busy, the UI renders
+`<Spinner/> thinking…` (`chat.tsx:48-51`). For a 9B model generating a long
+answer locally, that's potentially many seconds of an opaque spinner, then
+the full answer drops in at once. A streaming UI would show tokens as they
+generate — same total time, far better perceived latency. That's the
+concrete cost of the atomic choice, paid on every turn.
 
 ```
-  Phase A (now): request/response       Phase B (if streaming added)
-  ┌──────────────────────────────┐      ┌──────────────────────────────┐
-  │ agent.answer(): string        │      │ agent.answer(): AsyncIterable │
-  │ await res.json()              │      │ for await (chunk of body)     │
-  │ CLI prints once at the end    │      │ CLI prints token-by-token     │
-  │ no reconnect, no partial state│      │ must handle mid-stream drops  │
-  └──────────────────────────────┘      └──────────────────────────────┘
+  Move 2.5 — current state vs streaming future
 
-  what DOESN'T have to change: the pg wire, the embed call, the retrieval.
-  only the chat transport + answer() return type + CLI print loop move.
+  ┌─ NOW (atomic) ───────────┐   ┌─ IF STREAMED (not built) ──────┐
+  │ busy=true                │   │ busy=true                      │
+  │ <Spinner> thinking…      │   │ tokens append live:            │
+  │   …(N seconds opaque)…   │   │   "The" "answer" "is" …        │
+  │ setTurns(full string)    │   │ no opaque wait                 │
+  │ busy=false               │   │ busy=false at [DONE]           │
+  └──────────────────────────┘   └────────────────────────────────┘
+
+  what would have to change: aptkit's GemmaModelProvider would need a
+  streaming variant (consume Ollama's chunked/NDJSON stream), agent.answer
+  would yield an async iterator instead of returning a string, session.ask
+  would expose that, and chat.tsx would append per chunk instead of one
+  setState. buffr can't add this without an aptkit-side change — aptkit is
+  consumed, never edited here.
 ```
 
-The honest take: for a CLI that prints one answer, streaming buys *perceived*
-latency (tokens appear sooner) but nothing functional. It's a UX upgrade with a
-real cost (reconnect handling, partial-output state). Declining it today is the
-right call; the seam is documented so it's a small, contained change later.
+**Ollama can stream; buffr doesn't consume it.** Ollama's generate
+endpoint supports a streaming response (NDJSON, one token-ish chunk per
+line). aptkit's `GemmaModelProvider`, as buffr uses it, returns a complete
+string — buffr awaits one value (`session.ts:62`). Whether aptkit requests
+non-streaming or buffers the stream internally is aptkit's business; from
+buffr's seam it's atomic either way. `not yet exercised`: buffr consuming
+a token stream.
+
+**WebSockets and SSE: structurally absent.** Both need a *server* holding
+a connection open to push to a client. buffr has no inbound server (file
+`01`) and no browser client, so there's no place for either. The Ink UI
+"updates live" via React re-renders driven by local state, not by a pushed
+network event. `not yet exercised`: WebSocket, SSE — and like CORS, not in
+this shape ever.
+
+**Reconnect logic: nothing to reconnect.** No long-lived push connection
+exists, so there's no reconnect/backoff/heartbeat machinery. The one
+long-lived thing is the pg *pool* (file `03`), but that's pooled
+request/response, not a realtime channel. `not yet exercised`: reconnect
+logic.
 
 ### Move 3 — the principle
 
-Realtime transports trade simplicity for immediacy. Request/response is the
-simplest possible contract — one send, one receive, a clear end, nothing to
-reconnect. You reach for streaming, SSE, or WebSockets only when *time-to-first-
-byte* or *bidirectionality* is worth the reconnect-and-partial-state complexity
-they impose. buffr's workload — index a corpus, ask a question, get an answer —
-has no such requirement, so the simplest contract wins.
+**Request/response is the right default until perceived latency forces
+streaming — and streaming is a cross-layer commitment, not a flag.** buffr
+chose atomic, which is simpler at every layer (a `Promise<string>` end to
+end). The cost is the opaque spinner on slow local generation. Switching
+to streaming isn't a config change — it ripples through aptkit's provider,
+the agent's return type, the session API, and the render loop. Knowing
+that ripple is knowing why "just stream it" is a real piece of work, not a
+toggle.
 
 ## Primary diagram
 
-buffr's actual realtime posture: request/response everywhere, streaming seam
-marked but closed.
+The atomic flow in full, with the streaming counterfactual marked.
 
 ```
-  buffr realtime posture — what's exercised
+  Realtime transports — buffr's atomic path (streaming absent)
 
-  ┌─ buffr ──────┐  POST /api/chat (no stream)  ┌─ Ollama ─────┐
-  │ agent.answer │ ───────────────────────────► │ generate ALL │
-  │   awaits     │  ◄─── [entire answer] ─────── │ then respond │
-  └──────┬───────┘                               └──────────────┘
-         │ return once
-         ▼
-   Ink renders the turn (session.ask → chat.tsx:28-29)
+  ┌─ UI: chat.tsx ───────────────────────────────────────────┐
+  │  onSubmit → busy=true → <Spinner/> thinking…  (:13,48)   │
+  │  answer = await session.ask(q)            (:28)          │
+  │  setTurns([...t, { text: answer }])  ← ONE setState (:29)│
+  └─────────────────────────────┬─────────────────────────────┘
+                                │ Promise<string> (atomic)
+  ┌─ session.ts ────────────────▼────────────────────────────┐
+  │  agent.answer(question) → resolves once, complete  (:62) │
+  └─────────────────────────────┬─────────────────────────────┘
+                                │ one HTTP req/resp (file 05)
+  ┌─ Ollama ─────────────────────▼───────────────────────────┐
+  │  full generation (could stream NDJSON; buffr awaits one)  │
+  └──────────────────────────────────────────────────────────┘
 
-  ✗ no WebSocket   ✗ no SSE   ✗ no token stream   ✗ no reconnect
-  seam for streaming = the await in aptkit's transport (closed)
-  NB: chat IS long-lived — but in-process (one session), not a streamed socket
-```
-
-## Implementation in codebase
-
-**Use cases.** None — this is the empty-set file. The closest thing is the
-single blocking await in `session.ask()` that waits for the whole answer, which
-the Ink UI then renders as one turn. Note the *session* is long-lived (one pg
-pool, one conversation held across turns) but nothing on the *wire* is — each
-`fetch` is still a short request/response.
-
-**Code side by side.** The non-streaming shape is right here:
-
-```
-  src/session.ts  (lines 62-63)  +  src/cli/chat.tsx  (lines 28-29)
-
-  const answer = await agent.answer(question);   ← ONE await, whole answer
-  await trace.flush();                            ← (session.ts)
-  ...
-  const answer = await session.ask(q);            ← (chat.tsx) one string back
-  setTurns((t) => [...t, { role: 'buffr', text: answer }]);  ← rendered once
-            │
-            └─ `answer` is a complete string. there is no chunk loop, no
-               for-await, no partial output. if buffr streamed, ask() would
-               return an iterable and chat.tsx would append tokens as they land.
-```
-
-For contrast, aptkit *has* the streaming primitive buffr doesn't call (shown to
-prove the capability exists one layer away — not buffr's code):
-
-```
-  @rlynjb/aptkit-core .../runtime/ndjson-stream  (exists, unused by buffr)
-
-  // a for-await NDJSON reader with signal support — the machinery for
-  // token streaming is in the dependency; buffr's answer() path doesn't
-  // use it, so no streaming reaches buffr.
+  ABSENT: WebSocket · SSE · token streaming consumed by buffr ·
+          reconnect/backoff  →  all `not yet exercised`
 ```
 
 ## Elaborate
 
-The three realtime transports map to three needs: chunked/NDJSON for *progressive
-single responses* (LLM tokens), SSE for *server-push notifications* to browsers,
-WebSockets for *bidirectional* live interaction. They share one hard problem —
-connection liveness and reconnection — which is precisely the complexity
-request/response avoids by being stateless and short. buffr lives in the
-request/response world deliberately; the agent-loop's multi-turn behavior
-(`study-agent-architecture`) happens *within* blocking calls, not across a
-persistent stream.
+Streaming is the one absence here with a clear upgrade path and a clear
+owner problem. The UX win (tokens appearing live) is real and well-known —
+it's why AdvntrCue in `me.md` streams its GPT-4 responses. buffr doesn't,
+and the blocker is the seam: the streaming capability would have to come
+from aptkit's model provider, which buffr consumes rather than edits. So
+this isn't "buffr forgot to stream" — it's "buffr's answer type is
+`Promise<string>` because that's what its provider hands back, and changing
+it is an aptkit-side commitment." That's the honest framing: a deliberate
+atomic design, gated on an upstream change.
 
 ## Interview defense
 
-**Q: Does your agent stream tokens?**
+**Q: "Does the chat stream tokens? Why or why not?"**
+
+> No. `agent.answer()` resolves to one complete string (`session.ts:62`),
+> `session.ask` is typed `Promise<string>`, and `chat.tsx` does a single
+> setState with the full answer — there's no async iterator or partial
+> append anywhere. The cost is an opaque spinner while a local 9B model
+> generates, then the whole answer at once. Streaming would need a
+> streaming provider from aptkit, a yielding agent return type, and a
+> per-chunk render loop — and aptkit is consumed, not edited here, so it's
+> an upstream change, not a buffr toggle.
 
 ```
-  agent.answer() ─► await whole response ─► print once
-  (Ollama could stream; buffr asks for one shot)
+  Promise<string> end-to-end → atomic
+  spinner (opaque) → then full answer (one setState, chat.tsx:29)
+  streaming = aptkit provider + agent iterator + render loop change
 ```
 
-Answer: "No. `agent.answer()` awaits one complete string and the CLI prints it
-once. Ollama supports `stream:true` and aptkit even ships an NDJSON reader, but
-my path uses the non-streaming transport. For a CLI that emits one final answer,
-streaming is a UX nicety that buys time-to-first-token at the cost of reconnect
-and partial-state handling — not worth it here. And note `chat` being long-lived
-doesn't change this: the session persists in-process, but each LLM call is still
-a one-shot request/response." Anchor: `src/session.ts:62`, `src/cli/chat.tsx:28-29`.
+Anchor: *"`session.ts:30` types `ask(): Promise<string>` — atomic by
+return type, top to bottom."*
 
-**Q: What's the hardest part of streaming you avoided?**
+**Q: "Any WebSockets or SSE?"**
 
-Answer: "Reconnection. Every long-lived transport has to handle the connection
-dropping mid-stream — resuming or restarting cleanly. Request/response has no
-stream to lose, so there's no reconnect logic to get wrong. That's the main
-thing buffr's simplicity buys."
+> None, and structurally none possible in this shape: both need a server
+> holding a connection open to push, and buffr has no inbound server and no
+> browser. The UI updates via local React state, not pushed network events.
 
-## Validate
-
-1. **Reconstruct:** the difference between awaiting one body and consuming a
-   chunk sequence.
-2. **Explain:** why is there no reconnect logic in buffr? (no long-lived
-   connection; each `fetch` is short — `05`.)
-3. **Apply:** you want token-by-token output. Name every layer that changes.
-   (transport await→loop, `answer()` / `session.ask()` return type, Ink render
-   loop — `src/session.ts:62`, `src/cli/chat.tsx:28-29`.)
-4. **Defend:** justify request/response over streaming for this CLI. (single
-   final answer; streaming adds reconnect/partial-state cost for UX-only gain.)
+Anchor: *"No inbound server (file `01`) ⇒ no push transport ⇒ WS/SSE are
+`not yet exercised`."*
 
 ## See also
 
-- `05-http-semantics-caching-and-cors.md` — the request/response calls this
-  file says aren't streamed.
-
-Updated: 2026-06-24 — Repointed the non-streaming-shape code off the deleted `ask-cmd.ts` onto `src/session.ts:62` + `src/cli/chat.tsx:28-29` (Ink renders the whole answer once). Added the key distinction: `chat` is now long-lived, but in-process (one session, one pool, one conversation) — NOT a streamed socket; every LLM `fetch` is still one-shot request/response, so this file stays the empty-set file.
-- `07-timeouts-retries-pooling-and-backpressure.md` — the blocking await with no
-  timeout is its own risk.
-- `study-agent-architecture` — the multi-turn loop that runs inside blocking calls.
+- `05-http-semantics-caching-and-cors.md` — the single request/response
+  exchange that streaming would replace.
+- `01-network-map.md` — the absent inbound server that rules out WS/SSE.
+- `07-timeouts-retries-pooling-and-backpressure.md` — the spinner has no
+  timeout, so a hung generation spins forever.
+- `study-system-design` — where a streaming boundary would sit.

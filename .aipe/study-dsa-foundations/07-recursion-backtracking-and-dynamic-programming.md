@@ -1,326 +1,287 @@
 # Recursion, Backtracking, and Dynamic Programming
 
-**recursion / call stack / backtracking / memoization / tabulation** — *Mostly not yet exercised*
+**Industry names:** recursion · call stack · backtracking · memoization ·
+tabulation · dynamic programming (DP) · overlapping subproblems · optimal
+substructure. **Type:** Language-agnostic.
+
+---
 
 ## Zoom out, then zoom in
 
-Honest verdict up front: this is the thinnest file in the guide, because buffr
-exercises almost none of it. There's recursion riding the call stack (everywhere,
-implicitly), a trace of iteration-budgeted control in the agent loop, and *zero*
-dynamic programming or backtracking in buffr's source. That absence is itself the
-lesson — so this file teaches the fundamentals and points at where you'd
-practice, rather than over-claiming repo evidence.
+The honest verdict: this is the **biggest gap** in both the repo and your
+portfolio. buffr's source has no recursion, no backtracking, and no DP — its
+control flow is flat loops over `k=3` hits. Your reincodes work touched
+recursion (the `Tree.ts` traversals, the recursive BST insert/delete) and *state-
+space search* (`PG.ts` river-crossing via BFS), but classic DP — memoize the
+overlapping subproblems, tabulate the bottom-up table — you've only brushed via
+recursion-with-memoization. This file teaches the foundation and is blunt about
+where it would land if the repo grew into it.
 
 ```
-  Zoom out — state-space techniques, by layer (mostly empty)
+  Zoom out — where DP would live (it doesn't, yet)
 
-  ┌─ buffr source layer ─────────────────────────────────┐
-  │  recursion: implicit on the JS call stack (free)      │ ← present
-  │  backtracking: NONE                                    │ ← gap
-  │  dynamic programming: NONE                             │ ← gap
-  └───────────────────────────┬──────────────────────────┘
-                              │
-  ┌─ aptkit runtime layer ────▼──────────────────────────┐
-  │  agent loop: bounded iteration (a flat state machine, │ ← bounded, not
-  │              not recursion) — hard step budget         │   recursive
-  └───────────────────────────┬──────────────────────────┘
-                              │
-  ┌─ your reincodes (anchor) ─▼──────────────────────────┐
-  │  Tree.ts traversals (recursion + call-stack viz)      │ ← you own recursion
-  │  PG.ts river-crossing → BFS over a state graph         │ ← state-space search
-  │  (recursion-with-memoization patterns — your baseline) │
-  └───────────────────────────────────────────────────────┘
+  ┌─ buffr TS ────────────────────────────────────────────────┐
+  │  flat loops: for each query, for each of k hits — no recur │ ← we are here
+  │  ★ DP / backtracking: NOT EXERCISED anywhere ★             │
+  └──────────────────────────┬─────────────────────────────────┘
+                             │  where it COULD appear:
+  ┌─ hypothetical future ────▼─────────────────────────────────┐
+  │  chunking by token budget (knapsack-flavored) · edit dist  │
+  │  on strings · re-ranking with a DP scoring pass            │
+  └─────────────────────────────────────────────────────────────┘
 ```
 
-Zoom in: **recursion** solves a problem by calling itself on a smaller input,
-using the call stack as implicit state. **Backtracking** is recursion that
-explores choices and *undoes* them when they dead-end. **Dynamic programming** is
-recursion plus a cache (memoization) — or its bottom-up twin, tabulation — for
-problems with overlapping subproblems. The question this file answers: *which of
-these does buffr actually touch, and which are deliberate gaps to drill?*
+Zoom in: **recursion** is a function calling itself, with the call stack as the
+implicit state. **Backtracking** is recursion that *undoes* a choice when it
+hits a dead end — DFS over a decision tree. **Dynamic programming** is the
+optimization for when those recursive subproblems *overlap*: compute each once,
+cache it (memoization, top-down) or build a table (tabulation, bottom-up). The
+trigger for DP is always the same — *overlapping subproblems + optimal
+substructure*. Nothing in buffr has that shape. Yet.
+
+---
 
 ## The structure pass
 
-Trace **one axis — "how is intermediate state stored across sub-problems?" —
-across the three techniques.**
+**Layers** — the recursion family by how they handle repeated work:
 
 ```
-  Axis = "where does the state of sub-problems live?"
+  recursion → backtracking → DP : handling repeated subproblems
 
-  ┌─ plain recursion ──────────────────────┐
-  │ state on the CALL STACK, discarded on   │  no reuse
-  │ return                                   │
+  ┌─ plain recursion ─────────────────────┐  recompute everything  O(2ⁿ) risk
+  │  Tree.ts traversals (you built this)    │
   └──────────────────────┬──────────────────┘
-                         │  seam: discard vs undo
-  ┌─ backtracking ────────▼────────────────┐
-  │ state on the stack, EXPLICITLY UNDONE    │  try → undo → try next
-  │ before trying the next choice            │
-  └──────────────────────┬──────────────────┘
-                         │  seam: recompute vs remember
-  ┌─ dynamic programming ─▼────────────────┐
-  │ state in a CACHE/TABLE, REUSED across    │  overlapping subproblems
-  │ overlapping subproblems                  │  computed once
-  └──────────────────────────────────────────┘
+       ┌─────────────────▼────────────────┐  recurse + prune dead ends
+       │ backtracking (DFS over choices)    │  PG.ts state search (adjacent)
+       └─────────────────┬────────────────┘
+            ┌────────────▼───────────────┐   recurse + CACHE overlaps
+            │ dynamic programming          │   ★ not exercised — the real gap
+            │ memoize (top-down) / tabulate │
+            └──────────────────────────────┘
 ```
 
-The load-bearing **seam**: between recursion (state dies on return) and DP (state
-is *kept* and reused). DP exists only when subproblems *overlap* — when naive
-recursion would recompute the same answer. buffr has no such structure, so it
-never crosses this seam. Recognizing "do my subproblems overlap?" is the entire
-trigger for reaching for DP — and the honest answer in this repo is no.
+**Axis — state (where does the in-progress work live?).** Trace it: plain
+recursion keeps state on the *call stack* (implicit, vanishes on return);
+backtracking adds a mutable *choice set* it pushes/pops; DP adds an *explicit
+cache/table* that *outlives* a single recursive path. The state moving from
+implicit-stack to explicit-table is the whole story of DP.
+
+**Seam — the "do subproblems repeat?" boundary.** This is the seam that decides
+whether you need DP at all. If recursive calls hit the *same* subproblem
+multiple times (overlapping), caching collapses exponential to polynomial — DP
+wins. If every subproblem is unique (like a tree traversal), there's nothing to
+cache and plain recursion is correct. buffr has no recursion at all, so it never
+reaches this seam — which is exactly why DP is `not yet exercised`.
+
+---
 
 ## How it works
 
 ### Move 1 — the mental model
 
-You own recursion — `Tree.ts` traversals with call-stack visualizers, the
-recursive insert/delete in `BinarySearchTree.ts`. The mental model: recursion is
-a loop where the *stack* holds your loop variables for you. DP is that same
-recursion with a sticky note cache so you never solve the same subproblem twice.
+You built the recursion foundation: `Tree.ts` pre/post-order with generators,
+recursive BST `insert`/`delete`, and `PG.ts` searching a state space. The mental
+model for DP is one realization on top of that: **a recursion tree where the same
+node appears many times is doing the same work many times — cache it.**
 
 ```
-  The three shapes — what happens to a subproblem's answer
-
-  RECURSION    f(n) → f(n-1) → f(n-2)        answer used, then discarded
-                stack grows, unwinds, gone
-
-  BACKTRACK    try A → dead end → UNDO → try B   explore + reverse
-                choose → recurse → un-choose
-
-  DP (memo)    f(n)?  cache hit → return         answer SAVED, reused
-                miss → compute → cache → return
-```
-
-The single sentence: **recursion forgets, backtracking undoes, DP remembers.**
-Which one you need is decided entirely by whether subproblems repeat and whether
-choices need reversing.
-
-### Move 2 — each technique against the repo
-
-**Recursion — present, implicit, everywhere.**
-Every nested call in buffr rides the JS call stack: JSON serialization of `meta`,
-the library's chunk mapping, the agent's internal calls. Bridge: it's the exact
-structure your `Tree.ts` visualizers animate — each frame a box on the stack.
-Where it breaks: unbounded recursion overflows the stack. buffr never writes deep
-recursion in its own source, so it never risks this — but it's why the agent loop
-(below) is *iterative*, not recursive.
-
-```
-  Call stack as implicit state — recursion (the only form buffr has)
-
-  serialize(meta)
-    serialize(meta.foo)        ← push
-      serialize(meta.foo.bar)  ← push, deepest
-      return                   ← pop
-    return                     ← pop
-  return                       ← stack empty
-       │
-       └─ the stack IS the state. buffr leans on this, never hand-rolls it.
-```
-
-**Backtracking — absent in buffr; your `PG.ts` is the near-miss.**
-Backtracking explores a choice, recurses, and *undoes* the choice on failure —
-N-queens, Sudoku, permutation generation. buffr has none. Your reincodes
-river-crossing `PG.ts` is the closest thing in your world, but it's BFS over a
-state graph (`05`), not backtracking proper — it explores forward with a visited
-set, it doesn't undo-and-retry. Bridge: backtracking is DFS that mutates and
-reverts shared state; BFS state-space search (what you built) keeps separate
-states and never reverts. Where it matters: knowing the difference is the gap —
-you've done state-space *search*, not constraint *backtracking*.
-
-```
-  Backtracking — choose / recurse / un-choose (NOT in buffr — the gap)
-
-  solve(row):
-    for each column c:
-      place queen at (row,c)        ← choose
-      if safe and solve(row+1):     ← recurse
-        return true
-      remove queen at (row,c)       ← UN-CHOOSE (the backtrack)
-    return false
-       │
-       └─ the un-choose is the load-bearing part. Your PG.ts BFS has no
-          un-choose — it's forward search, not backtracking.
-```
-
-**Dynamic programming — fully absent; the cleanest gap in the guide.**
-DP applies when subproblems overlap: Fibonacci, edit distance, longest common
-subsequence, knapsack, sequence alignment. buffr has *nothing* with overlapping
-subproblems — retrieval is a graph walk, chunking is a linear scan, scoring is a
-count. Bridge: DP is your recursion-with-memoization, scaled to a table. Where
-it's relevant: it isn't, in this repo — and `me.md` flags DP beyond basic
-memoization as thin in your portfolio too, so this is a *real* curriculum gap,
-not a repo quirk.
-
-```
-  DP — memoize overlapping subproblems (NOT in buffr — pure gap)
+  the DP trigger — overlapping subproblems (fib, the canonical case)
 
   fib(5)
    ├ fib(4)
-   │  ├ fib(3) ──┐
-   │  └ fib(2)   │ fib(3) computed AGAIN here without memo →
-   └ fib(3) ◄────┘ overlapping subproblem
-       │
-       └─ DP caches fib(3) once. buffr has no such overlap anywhere —
-          which is precisely why it has no DP. The trigger never fires.
+   │  ├ fib(3)         ← fib(3) computed here
+   │  │  ├ fib(2) ...
+   │  └ fib(2)
+   └ fib(3)            ← fib(3) computed AGAIN — overlap!
+      ├ fib(2) ...
+
+  plain recursion: O(2ⁿ) — recomputes fib(3), fib(2)... over and over
+  memoized:        O(n)   — compute fib(3) once, cache it, reuse
 ```
 
-#### Move 2.5 — the agent loop: bounded iteration, not recursion
+That repeated `fib(3)` is the signal. A cache (memoization) turns the exponential
+tree into a linear walk. Tabulation is the same answer built bottom-up: fill
+`table[0], table[1], ... table[n]` in order, no recursion. Two roads to one
+result.
 
-One thing that *looks* like it might recurse but deliberately doesn't: the
-aptkit agent loop (consumed by `RagQueryAgent`, built in `src/session.ts`). An agent
-that reasons → calls a tool → reasons again is naturally expressible as
-recursion, but the library implements it as a *bounded iterative loop* with a hard
-step budget — flat state machine, not a growing stack.
+### Move 2 — the three operations (and why none are in buffr)
+
+**Recursion — present in your reincodes, absent in buffr.** Your `Tree.ts`
+traversals are the clean case: each node is visited exactly once, no overlap, so
+plain recursion is optimal — no DP needed. buffr's source has none; even the
+tree-shaped work (the HNSW graph walk) happens inside Postgres' C, not in
+recursive TypeScript.
 
 ```
-  Bounded iteration vs the recursion it could have been
+  plain recursion — call stack IS the state (no cache needed when no overlap)
 
-  RECURSIVE (rejected):           ITERATIVE (shipped):
-  step(state):                    for i in 0..MAX_STEPS:
-    if done: return                 if done: break
-    return step(next(state))        state = next(state)
-       │                                 │
-  stack grows per step,           flat — no stack growth,
-  overflow risk, no budget        hard cap on iterations
+  traverse(node):
+    if node is null: return          ── base case: stack unwinds
+    visit(node.value)
+    for child in node.children:      ── each child once, no repeats
+      traverse(child)                ── push frame, recurse, pop on return
+
+  no overlapping subproblems → nothing to memoize → recursion is enough
 ```
 
-Why it matters: a recursive agent loop has no natural ceiling and can blow the
-stack or the token budget. The bounded iterative form makes the step budget a
-first-class control. This is the closest buffr's stack comes to "recursion as a
-design decision" — and the decision was *not* to recurse.
+**Backtracking — adjacent in your `PG.ts`, absent in buffr.** Backtracking is
+DFS over a *decision* tree: make a choice, recurse, and if it dead-ends, *undo*
+the choice and try the next. Your river-crossing puzzle (`PG.ts`, state-space BFS)
+is the cousin — it explores a state graph; backtracking is the same exploration
+with explicit make/undo and depth-first order.
+
+```
+  backtracking — choose, recurse, UNDO on dead end
+
+  solve(state):
+    if state is a solution: record it; return
+    for choice in legal_moves(state):
+      apply(choice)                  ── make the choice (mutate state)
+      solve(next_state)              ── recurse deeper
+      undo(choice)                   ── ★ BACKTRACK: the part people forget
+
+  drop the undo() → state leaks across branches → wrong answers
+```
+
+The undo is the load-bearing part — name it and you've shown you built one.
+
+**Dynamic programming — the real gap, exercised nowhere.** DP needs two
+properties together: *overlapping subproblems* (the same subproblem recurs) and
+*optimal substructure* (the best answer is built from best answers to
+subproblems). When both hold, memoize or tabulate.
+
+```
+  the two DP roads — same result, opposite directions
+
+  TOP-DOWN (memoization)            BOTTOM-UP (tabulation)
+  ──────────────────────            ──────────────────────
+  recurse from the goal             fill a table from the base up
+  cache[subproblem] on first solve  table[i] = f(table[i-1], ...)
+  lazy: only solves what's needed   eager: solves all subproblems
+  cache = hash map (file 02)        table = array (file 02)
+
+  both turn O(2ⁿ) → O(n·states); choose by whether all subproblems are needed
+```
+
+Where it would land in *this* repo if it grew: **chunking under a token budget**
+is knapsack-flavored (maximize relevant content subject to a size cap —
+`ContextWindowGuardedProvider`'s `maxTokens: 8192` in `session.ts:46` is the
+budget that would make it a real optimization). **Edit distance** over strings is
+the textbook DP if buffr ever did fuzzy id matching. **Re-ranking** retrieved
+candidates with a sequence-scoring pass can be DP. None exist today — `not yet
+exercised`, and the honest highest-value drill.
+
+### Move 2.5 — current vs future state
+
+```
+  Phase A (now): no recursion/DP        Phase B (if it earned its place)
+  ──────────────────────────────        ──────────────────────────────
+  flat loops over k=3 hits              token-budget chunk selection (knapsack)
+  no overlapping subproblems anywhere   memoized re-ranking / edit-distance
+  context.md, eval-cmd.ts, session.ts   gated on: corpus + budget pressure
+```
+
+DP is absent because the repo has no problem with overlapping subproblems — and
+forcing DP where it isn't needed is over-engineering. The honest framing: the
+foundation matters for interviews and for the day a token-budget optimization
+shows up, not because the current code needs it.
 
 ### Move 3 — the principle
 
-**Reach for the technique the subproblem structure demands — and most code
-demands none of them.** Recursion when the problem is self-similar; backtracking
-when choices must be reversed; DP only when subproblems overlap. buffr's honesty
-here is that its problems are linear scans, graph walks, and counts — none with
-the overlap or reversal that DP and backtracking exist for. The skill is
-recognizing their *absence* as correctly as their presence.
+DP is recursion plus a cache, and you reach for it *only* when subproblems
+overlap and have optimal substructure — otherwise plain recursion (or a loop) is
+correct and simpler. The repo has neither property anywhere, so DP is rightly
+absent; the skill is recognizing the *trigger*, not applying DP everywhere.
+
+---
 
 ## Primary diagram
 
-The four state-space techniques, mapped to presence/absence in buffr.
+The recursion family mapped onto what you've built vs the gap.
 
 ```
-  State-space techniques across buffr — recap (mostly gaps)
+  recursion / backtracking / DP — built, adjacent, gap
 
-  TECHNIQUE        STATE LIVES        IN BUFFR?         YOUR ANCHOR
-  ──────────────────────────────────────────────────────────────────
-  recursion        call stack         yes (implicit)    Tree.ts, BST.ts
-  bounded iteration flat loop var      yes (agent loop)  — (new pattern)
-  backtracking     stack + undo        NO                — (gap; PG.ts is BFS)
-  DP (memo/tab)    cache / table       NO                — (real gap)
+  BUILT (reincodes):
+   ┌ recursion: Tree.ts traversals, recursive BST insert/delete
+   └ state-space search: PG.ts river-crossing (BFS over states)
+
+  ADJACENT (you have the instinct, not the explicit build):
+   └ backtracking: DFS + make/undo — PG.ts is the cousin
+
+  GAP — NOT EXERCISED (buffr ⊘, reincodes ⊘):
+   ┌ memoization (top-down DP, cache = hash map)
+   ┌ tabulation (bottom-up DP, table = array)
+   └ classic DP problems (knapsack, edit distance, LIS, coin change) ★ drill
 ```
 
-## Implementation in codebase
-
-**Use cases.** Recursion is reached for implicitly on every nested data
-structure walk (serializing `meta` jsonb, mapping chunks). The bounded iteration
-is reached for on every `npm run chat` turn — the agent reasons and calls tools
-in a capped loop. Backtracking and DP are reached for *nowhere*.
-
-```
-  src/session.ts  (lines 57, 62) — the bounded agent loop, not recursion
-
-  const agent = new RagQueryAgent({ model, tools, profile, trace });
-  const answer = await agent.answer(question);
-       │
-       └─ inside the library, answer() runs a BOUNDED iterative loop:
-          reason → maybe call search_knowledge_base → reason → stop.
-          It's a flat state machine with a step ceiling, deliberately NOT
-          recursion — no growing call stack, a hard cap on iterations.
-          buffr writes zero explicit recursion, backtracking, or DP here.
-```
-
-There is no DP or backtracking code to show — and that's the accurate finding.
-The only explicit iteration in buffr's own source is the upsert loop:
-
-```
-  src/pg-vector-store.ts  (lines 38–43) — flat iteration, no recursion
-
-  for (const c of chunks) this.assertDim(c.vector);   ← flat loop, O(n)
-  ...
-  for (const c of chunks) { ... await client.query(...) }
-       │
-       └─ buffr's own logic is flat iteration over arrays — no self-call,
-          no stack growth, no memo table. The repo's control flow is linear.
-```
+---
 
 ## Elaborate
 
-Dynamic programming was named by Bellman in the 1950s (the name was chosen partly
-to sound impressive to a skeptical Secretary of Defense — the "dynamic" is mostly
-marketing). The real content: optimal substructure + overlapping subproblems.
-Backtracking traces to the same era (the term is Lehmer's). Both are recursion
-specialized — backtracking adds the undo, DP adds the cache.
+Dynamic programming (Bellman, 1950s — the name was deliberately vague to hide
+that it was math, the lore goes) is the highest-ceiling topic in interview DSA and
+the one most worth deliberate practice, because the pattern transfers: once you
+see "overlapping subproblems + optimal substructure → memoize," a huge family of
+problems collapses (sequence alignment, shortest paths via Bellman-Ford,
+resource allocation, parsing). Its relationship to your existing work is direct:
+memoization is just recursion (which you've built) plus a hash map (file 02,
+which you use); tabulation is just a loop filling an array (file 02). The
+*missing* skill isn't a new structure — it's recognizing the trigger and choosing
+top-down vs bottom-up. Backtracking is the sibling for *search* rather than
+optimization — DFS with undo — and it's one short step from your `PG.ts` state
+search. These are the file-08 drills with the most leverage precisely because
+they're absent from both the repo and the portfolio.
 
-For *you* specifically, `me.md` is direct about this: you're strong on recursion
-with call-stack visualization and "the classic recursion-with-memoization
-patterns," but DP *beyond* that — tabulation, the harder optimization DPs (edit
-distance, knapsack, interval DP) — is thin, and backtracking proper hasn't shown
-up in your projects. buffr doesn't exercise any of it, so it can't build the
-muscle for you. This is the highest-value *curriculum* gap in the guide: it's
-absent from both the repo and your portfolio. The drill that closes it is a
-classic DP (edit distance or LCS), built bottom-up with a table, with a
-visualizer — exactly the format that makes things real for you.
+---
 
 ## Interview defense
 
-**Q: Does buffr use dynamic programming anywhere?**
+**Q: When do you reach for DP instead of plain recursion, concretely?**
 
 ```
-  the DP trigger: do subproblems overlap?
-
-  retrieval → graph walk (no overlap)
-  chunking  → linear scan (no overlap)
-  scoring   → count        (no overlap)
-  ──────────────────────────────────────
-  no overlap anywhere → no DP. Correct absence.
+  test BOTH must hold:
+   1. overlapping subproblems — same subproblem solved more than once
+      (fib(3) appears twice in fib(5)'s tree)
+   2. optimal substructure — best answer built from best sub-answers
+  if yes → memoize (cache) or tabulate (table): O(2ⁿ) → O(n·states)
+  if no  → plain recursion is correct and simpler (e.g. tree traversal)
 ```
 
-Answer: "No — and that's the right answer, not a gap in the code. DP applies when
-subproblems overlap, and buffr's work is a graph walk, a linear chunk scan, and a
-count. None overlap. Forcing DP in here would be a solution looking for a
-problem." Anchor: the flat iteration in `src/pg-vector-store.ts:38`.
+DP earns its place only when subproblems overlap *and* the problem has optimal
+substructure. A tree traversal (my `Tree.ts`) has neither overlap nor an
+optimization — so DP there is wrong, plain recursion is right. Naming that DP is
+a *conditional* tool, not a default, is the senior signal — most candidates
+reach for it reflexively.
 
-**Q: The agent loop could be recursive. Why isn't it?**
+**Q: Top-down or bottom-up, and how do you pick?**
 
-Answer: "An agent that reasons → calls a tool → reasons again is naturally
-recursive, but recursion has no natural ceiling — it can grow the stack or the
-token budget unbounded. The library implements it as a bounded iterative loop
-with a hard step cap, making the budget a first-class control. The decision was
-to *not* recurse." Anchor: `src/session.ts:62`.
+```
+  top-down (memo):  recurse from goal, cache on demand
+                    → use when not all subproblems are needed (sparse)
+  bottom-up (tab):  fill table base→goal
+                    → use when all subproblems needed; avoids stack depth
+```
 
-**Q: You built the river-crossing puzzle. Is that backtracking?**
+Top-down memoization is recursion plus a cache — lazy, solves only reachable
+subproblems, but risks deep call stacks. Bottom-up tabulation fills an array in
+dependency order — eager, no recursion, no stack-overflow risk. Pick bottom-up
+when you'll need the whole table anyway and depth is a concern; top-down when the
+reachable subproblem set is sparse. Both are "recursion + the right container
+from file 02."
 
-Answer: "No — it's BFS over a state graph. Backtracking is DFS that mutates shared
-state and *undoes* choices on dead ends. My `PG.ts` keeps separate states and uses
-a visited set; it explores forward, it never reverts. They're cousins, but the
-un-choose step that defines backtracking isn't there." Anchor: reincodes `PG.ts`
-vs the N-queens un-choose pattern.
+**Anchor:** "DP is recursion plus a cache, and only when subproblems overlap —
+the repo has no such problem, which is why it's correctly absent. The skill is
+spotting the trigger, not applying DP everywhere."
 
-## Validate
-
-1. **Reconstruct.** Write the three-line difference between recursion,
-   backtracking, and DP from memory (forgets / undoes / remembers).
-2. **Explain.** Why does buffr's agent loop use bounded iteration instead of
-   recursion? (`src/session.ts:62` — no unbounded stack/budget.)
-3. **Apply.** Name one feature you could add to buffr that *would* justify DP, and
-   say why. (E.g. fuzzy chunk-text matching via edit distance — overlapping
-   subproblems on substrings.)
-4. **Defend.** Argue why the *absence* of backtracking and DP in buffr is correct,
-   not a deficiency. (No overlapping subproblems, no reversible choices — the
-   triggers never fire.)
+---
 
 ## See also
 
-- `05-graphs-and-traversals.md` — the state-space *search* (BFS) that buffr's
-  HNSW and your `PG.ts` actually do, vs the backtracking they don't.
-- `03-stacks-queues-deques-and-heaps.md` — the call stack recursion rides on.
-- `08-dsa-foundations-practice-map.md` — where DP and backtracking rank in your
-  practice plan (high — absent from both repo and portfolio).
-
-
-Updated: 2026-06-24 — purged `npm run ask` / `src/cli/ask-cmd.ts` references; re-grounded the agent loop on `src/session.ts` (built `:57`, invoked `:62`) and the chat entrypoint `src/cli/chat.tsx`; noted `@aptkit/memory` reuses the same HNSW walk (no new DSA).
+- `02-arrays-strings-and-hash-maps.md` — the cache (hash map) and table (array)
+  that DP is built on
+- `05-graphs-and-traversals.md` — state-space search (`PG.ts`), the cousin of
+  backtracking
+- `08-dsa-foundations-practice-map.md` — DP and backtracking are the top-ranked
+  drills
+- `01-complexity-and-cost-models.md` — the O(2ⁿ) → O(n) collapse memoization buys

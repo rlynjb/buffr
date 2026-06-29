@@ -1,70 +1,43 @@
-# Study — Performance Engineering
+# Study — Performance Engineering · buffr-laptop
 
-Measurement and optimization of `buffr-laptop`: budgets, baselines, profiling,
-latency, throughput, memory, I/O, caching, batching, backpressure, cost — applied
-to this repo's real files, not in the abstract.
+What is measurably slow or expensive in this repo, why, and which change improves it
+without just moving the bottleneck. Grounded in the real files — no invented scale.
 
-The honest frame up front: this is a **single-device CLI RAG agent**. No traffic,
-no SLA, no second caller. So most server-shaped performance lenses come back
-`not yet exercised` — and that's the correct verdict, named with the condition
-that would make each one matter. What's left is real and is where the wall-clock
-time actually goes: **embedding over HTTP** and **Postgres round-trips**, with
-**HNSW approximate search** as the one deliberate performance win.
+This is a self-hosted, single-device personal RAG agent: Postgres + pgvector (HNSW
+cosine), Ollama-served embeddings (`nomic-embed-text:v1.5`, 768-dim) and generation
+(`gemma2:9b`), a long-lived Ink chat session. There is no load, no traffic, no SLA.
+That fact shapes every verdict below: most "costs" here are real but **don't matter at
+laptop scale yet** — and the guide says so honestly rather than inflating them.
 
 ## Reading order
 
-1. **`00-overview.md`** — the map: ranked findings, where time goes, the
-   `not yet exercised` list. Start here.
-2. **`audit.md`** — Pass 1, the 8-lens walk (budget · baselines/profiling ·
-   latency/throughput/tail · cpu/memory · I/O & DB · caching/batching/backpressure
-   · rendering · red-flags). Each lens grounded in `file:line` or honestly
-   `not yet exercised`.
+```
+  1. 00-overview.md   the map: where time and money go, ranked findings
+  2. audit.md         Pass 1 — the 8-lens walk, "not yet exercised" named honestly
+  3. 01..06           Pass 2 — the six performance patterns this repo actually exercises
+```
 
-Then the Pass 2 pattern files, the patterns this repo actually exercises:
+## Pass 2 — the patterns this repo exercises
 
-3. **`01-hnsw-approximate-search.md`** — the one real perf win. Sub-linear
-   retrieval via the HNSW graph index; untuned (`m` / `ef_search` at defaults).
-4. **`02-embedding-http-roundtrip.md`** — where indexing time lives. Chunks batch
-   into one `/api/embed` call (already done); files serialize (the open lever).
-5. **`03-per-chunk-insert-loop.md`** — the write path: row-at-a-time INSERTs in a
-   transaction; the multi-row INSERT it isn't. Lowest-consequence finding.
-6. **`04-connection-pool-reuse.md`** — the quiet win, strengthened: one warm
-   `pg.Pool` carries an entire `chat` session's query stream across many turns;
-   handshake paid once per process.
-7. **`05-no-caching.md`** — the lever not yet pulled: identical questions re-embed
-   and re-search every turn. Correct at single-user scale; named with its trigger.
-   (Profile is now loaded once per session; episodic memory adds per-turn work,
-   not a cache.)
+```
+  01-hnsw-approximate-search.md      sub-linear ANN recall — the main perf win, untuned
+  02-embedding-roundtrip.md          batched-per-doc embed, serial-across-files index
+  03-per-chunk-insert-loop.md        one INSERT per chunk inside a txn (no COPY / multi-row)
+  04-connection-pool-reuse.md        warm pg pool amortized across a whole chat session
+  05-per-turn-memory-and-trace-cost.md  the extra embed+upsert and write-amplified trace
+  06-no-caching.md                   identical query re-embeds every time (the absent layer)
+```
 
-## What this guide measures vs what neighbors explain
+The file list is the artifact: a senior engineer skimming it sees what's interesting
+about this repo's performance shape before opening anything.
 
-This generator **measures and improves observed bottlenecks**. It does not
-re-teach the mechanisms underneath them — it cross-links to the generators that
-own those:
+## Cross-links — adjacent guides
 
-- **`study-database-systems`** — HNSW as an index *type*, how `<=>` plans, `COPY`
-  vs multi-row INSERT, transaction/connection mechanics. *This guide measures the
-  index and the write; that guide explains the storage engine.*
-- **`study-networking`** — the `/api/embed` HTTP transport, connection pooling,
-  TLS, timeouts, retries. *This guide names the round-trip as the dominant cost;
-  that guide explains the transport.*
-- **`study-runtime-systems`** — the `for…await` serialization in `index-cmd`, the
-  event loop, `Promise.all` overlap, the trace flush. *This guide says the index
-  loop is serial; that guide explains why and how to overlap it.*
+```
+  study-database-systems   HNSW internals, txn/durability, index storage  ← the mechanism
+  study-networking         Ollama HTTP roundtrip, pg wire, pooling        ← the transport
+  study-ai-engineering     embeddings, RAG retrieval, eval harness        ← the AI layer
+```
 
-## The one-line takeaway
-
-The performance story of buffr is: **HNSW makes retrieval fast on purpose
-(untuned), embedding HTTP makes indexing slow by necessity (batched within docs,
-serial across them), Postgres is cheap (one pool held across a whole `chat`
-session, per-chunk inserts), each `chat` turn now pays a small extra
-embed+upsert for episodic memory and writes a few more trace rows, and there's no
-query cache yet (though `durationMs`/`tokens_used` are now persisted) — all
-correct for one user, each with a named trigger that flips it.**
-
----
-
-Updated: 2026-06-24 — `npm run ask` → `npm run chat` (`session.ts` + `chat.tsx`,
-aptkit-core 0.4.1). Reading-order entries for 04/05 reframed to the long-lived
-session; takeaway updated for the per-turn memory cost, trace write-amplification,
-and the now-persisted latency instruments.
+A finding belongs to the generator that owns the mechanism. This guide MEASURES; it
+cross-links rather than re-teaching how HNSW or TCP pooling work internally.

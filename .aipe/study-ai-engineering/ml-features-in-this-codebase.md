@@ -1,37 +1,47 @@
-# ML features in buffr
+# How buffr-laptop uses ML
 
-> Per the spec, this file is generated even when the codebase has no classical-ML features — and it says so honestly.
+Short version: it doesn't train one.
 
-## This codebase does not currently use any classical-ML features.
+buffr is a pure LLM application. It *consumes* two pre-trained models served by Ollama — `gemma2:9b` for generation and `nomic-embed-text:v1.5` for embeddings — but it never trains, fine-tunes, or evaluates a classical supervised model. There is no labeled training set (other than the 3-row retrieval eval, which is an information-retrieval eval, not a model-training set), no feature engineering pipeline, no train/val/test split, no confusion matrix, no on-device classifier, no recommender.
 
-buffr trains no model. There is no supervised-learning pipeline, no feature engineering, no labeled-data training set, no train/val/test split, no classifier, no recommender, no on-device *trained* inference, no drift detection, no retraining pipeline. The two models buffr uses — `nomic-embed-text` (embeddings) and `gemma2:9b` (generation) — are pre-trained and consumed as-is through Ollama. buffr never updates their weights.
+So the classical-ML sections of this guide — `08-machine-learning/` and `09-ml-system-design-templates/` — are covered as **study material**, not as walkthroughs of your code. Their Project-exercise blocks identify the ML features that *could* be added, framed against buffr's actual data.
 
-So the entire SECTION 04 surface of the AI-engineering spec is **not yet exercised** here. The ML system-design templates (recommender, anomaly detection, object detection / CV) are not generated as codebase patterns, because buffr's shape is pure LLM-application-engineering, not classical ML — the spec's rule is to skip ML concept files that don't match the codebase's shape rather than invent ML features.
-
-## Where ML *would* enter, if it ever did
-
-These are study hooks, not current features — named so the gap is a map, not a blank:
+## What would count as ML in buffr (and where it would attach)
 
 ```
-  ┌────────────────────────┬──────────────────────────────────────────┐
-  │ Hypothetical ML feature│ Where it would attach in buffr           │
-  ├────────────────────────┼──────────────────────────────────────────┤
-  │ Learned reranker       │ on top of cosine top-k in                │
-  │ (LightGBM on features  │ PgVectorStore.search — needs click logs  │
-  │  like score, recency)  │ as training signal (07-templates/01)     │
-  ├────────────────────────┼──────────────────────────────────────────┤
-  │ Query intent classifier│ before the agent loop — route easy       │
-  │ (heuristic + small LR)  │ queries past the LLM (heuristic-before-  │
-  │                        │ LLM, currently absent per audit)         │
-  ├────────────────────────┼──────────────────────────────────────────┤
-  │ Embedding drift monitor│ PSI on the chunk-embedding distribution  │
-  │ (population stability) │ over time — the anomaly-detection shape  │
-  │                        │ applied to the corpus, not yet built     │
-  └────────────────────────┴──────────────────────────────────────────┘
+  the ML-shaped surfaces buffr could grow (none built today)
+
+  ┌─ candidate ML feature ──────────┬─ attaches to ─────────────────┐
+  │ Learned reranker over cosine    │ src/pg-vector-store.ts        │
+  │  (rank top-50 → top-5)          │ search() results              │
+  ├─────────────────────────────────┼───────────────────────────────┤
+  │ Fine-tune gemma on trajectories │ agents.messages (the FT corpus│
+  │  (the ceiling — not done)       │ already being captured)       │
+  ├─────────────────────────────────┼───────────────────────────────┤
+  │ Embedding-drift / staleness     │ agents.chunks.embedding_model │
+  │  detector (PSI over corpus)     │ + a stale_at column           │
+  ├─────────────────────────────────┼───────────────────────────────┤
+  │ Anomaly flag on trace metrics   │ agents.messages.tokens_used,  │
+  │  (latency / token outliers)     │ durationMs in tool_results    │
+  └─────────────────────────────────┴───────────────────────────────┘
 ```
 
-## The reader's ML context (calibration, not buffr)
+The single most ML-relevant fact about buffr is that it is **already collecting the corpus a future trained model would need**: `agents.messages` captures the full-signal trajectory of every conversation (all six `CapabilityEvent` types — step, tool_call_start, tool_call_end, model_usage, warning, error), with deterministic replay order. That's the fine-tuning corpus and the drift-monitoring substrate. The data exists; the model does not.
 
-For the reader: classical ML beyond a single pipeline is named new ground. The one shipped ML pipeline (pose landmarking with MediaPipe → rep counter) lives in a *different* repo (contrl), not buffr — so it can't be anchored to buffr's files. buffr is the right place to be honest: it's an LLM-app codebase, and the ML concepts above are future ground to build *into* it (a learned reranker is the most natural first step, and it has a clean attach point at the retrieval layer), not refreshers of something already here.
+## ML features
 
-If you want a learned reranker as a real exercise, the buildable target is in `07-system-design-templates/01-search-ranking.md` ("How to make it apply", step 3) and `02-rag-query-path.md` (the retrieval path it would sit on top of) — both require click logging first, because a learned ranker needs an interaction signal buffr doesn't currently collect.
+```
+  ┌────────────────────┬────────────────┬────────────────┐
+  │ Feature            │ Model type     │ Inference loc. │
+  ├────────────────────┼────────────────┼────────────────┤
+  │ (none trained)     │ —              │ —              │
+  └────────────────────┴────────────────┴────────────────┘
+```
+
+There are no trained-model features to tabulate. The two models buffr runs are pre-trained and consumed as-is.
+
+## Where to go
+
+- The supervised-learning, evaluation, and on-device concepts are taught as new ground in `08-machine-learning/` (calibrated to the reader's one prior ML pipeline — contrl's MediaPipe pose pipeline — without assuming more).
+- The "reframe buffr as an ML system" interview prompts are in `09-ml-system-design-templates/`, with every "Applies to this codebase" bullet answered honestly (`no` or `partially`) and a concrete "how to make it apply".
+- The fine-tuning discussion — why it's the ceiling and why the trajectory capture is the prerequisite — lives in `05-evals-and-observability/04-llm-observability.md` (the trace) and is named throughout as buffr's not-yet-done frontier.

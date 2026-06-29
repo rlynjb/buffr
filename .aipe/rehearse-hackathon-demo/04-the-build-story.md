@@ -1,152 +1,149 @@
-# Chapter 04 — The Build Story   (8:00–8:45, 45 seconds)
+# Chapter 04 — The build story   (8:00–8:45, 45 seconds)
 
 ## Opening hook
 
-Forty-five seconds to prove this is a real build, not a pitch deck with a happy-path screen recording. The judges have seen a hundred demos that fall apart the moment you ask "is this actually working?" — and the ones that win answer that question *before* it's asked, by naming the genuine hard part and how they cracked it. You have a real hard part, and it's the most interesting thing about the build: **you're running stock `gemma2:9b`, which has no native tool-calling at all.** You made an agent that uses tools out of a model that can't call tools. That's the story.
+Forty-five seconds to prove this is a working build, not a mockup, and to show you cracked one genuinely hard thing. The temptation is to list every feature you shipped. Don't — you don't have the time and the room doesn't care about the feature count. Name what actually shipped in one breath, then spend the rest on the *one hard part* and how you got it to work. The hard part is the proof: anyone can paste a UI together; cracking a real problem under a clock is the signal that you built the thing.
 
-The move here is not to hide the rough edge — it's to own it with the confidence of someone who shipped under a clock. The tool-calling is *emulated*: the system prompt teaches Gemma the tool schema in prose, and a forgiving parser reads a JSON object back out of free text, with one corrective retry. It's the most fragile seam in the system and you know exactly where it lives. Naming that is the strongest possible signal that you built this and understand it — far stronger than pretending it's bulletproof.
+For buffr the honest hard part is the best part of the story, because it's where you own a rough edge with confidence. Gemma — the local model you're running — has no native tool-calling. So the agent loop needs the model to call a search tool, and the stock model literally can't, the way Anthropic's or OpenAI's API can. The crack was making tool-calling work anyway, on an emulated path, and then choreographing the demo around the failure mode it leaves. That's a real engineering story and you tell it straight.
 
 ## The time-budget bar
 
-You own forty-five seconds. Name what shipped, name the hard part, then move to the close.
+You own 8:00 to 8:45. One breath on what shipped, the rest on the one hard part — then move.
 
 ```
-  ┌──────────────────────────────────────────────────────────┐
-  │ ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░▓▓▓░░░░░░░░░░░░░░░ │
-  │ 0:00                  8:00 ─ 8:45 ──────────────── 10:00  │
-  │        THE BUILD STORY — you own 8:00 to 8:45 (45 sec)     │
-  └──────────────────────────────────────────────────────────┘
+  ┌──────────────────────────────────────────────────────┐
+  │ ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░▓▓░░░░░░░░░░░░ │
+  │ 8:00 ─ 8:45 ──────────────────────────────────────── 10:00 │
+  │       THE BUILD STORY — you own 8:00 to 8:45 (45 sec) │
+  └──────────────────────────────────────────────────────┘
 ```
 
-## The chapter-opening diagram — the hard part, in one picture
+## The chapter-opening diagram — what shipped, and the one hard part
 
-This is the obstacle and the crack, drawn once. The loop expects a model that can request a tool. Gemma can't. The provider is the adapter that fakes it in both directions.
-
-```
-  THE HARD PART — making a no-tools model use a tool
-
-  ┌─ Agent loop ─────────────────────────────────────────────┐
-  │  expects: a structured tool_use request from the model    │
-  └───────────────────────────┬──────────────────────────────┘
-                              │  but gemma2:9b has NO tool API
-  ┌─ The emulation (the crack) ▼──────────────────────────────┐
-  │  OUTBOUND: render the tool schema into the system prompt   │
-  │            "respond with ONLY {tool, arguments}"           │
-  │  INBOUND:  parse JSON back out of free text                │
-  │            null? looks like a tool attempt? → retry once   │
-  └───────────────────────────┬──────────────────────────────┘
-                              │  plain text in, plain text out
-  ┌─ Ollama: gemma2:9b ───────▼──────────────────────────────┐
-  │  no tools parameter, no tool_use response — just text     │
-  └───────────────────────────────────────────────────────────┘
-
-  the contract is a prose instruction the model MAY follow;
-  the only enforcement is the forgiving parser on the way back
-```
-
-That picture is the build story: an honest obstacle, a real mechanism, and a named fragility. Now say it in two sentences.
-
-## The body — the beats in order
-
-### Beat 1 — what shipped (8:00–8:20)
-
-Name the real, working surface fast. You're not listing every file — you're proving the path runs end to end.
+The visual is a quick inventory with the hard part flagged. You don't read it out — it's the shape behind your forty-five seconds.
 
 ```
-┃ "What's running here is real: a migration sets up the schema,
-┃  I index a corpus into Postgres, and the chat surface retrieves,
-┃  grounds, answers, and remembers — all of it on this laptop."
+  WHAT SHIPPED — and the crack
+
+  ┌─ shipped, working on the happy path ──────────────────────────┐
+  │  npm run migrate   transactional schema runner                │
+  │  npm run index     embed a corpus into pgvector (768-dim)     │
+  │  npm run chat      long-lived Ink session, one conversation   │
+  │  npm run eval      precision@k / recall@k over the retrieval  │
+  │  + retrieval-based memory across sessions (the money shot)    │
+  └───────────────────────────────────────────────────────────────┘
+
+  ┌─ THE HARD PART ★ ─────────────────────────────────────────────┐
+  │  Gemma (gemma2:9b) has NO native tool-calling.                │
+  │  The agent loop needs a tool call out of the model.           │
+  │  → aptkit EMULATES it: render the tool schema into the prompt,│
+  │    parse a JSON tool-call back out of free text.              │
+  │  → cost owned honestly: it can occasionally skip the tool and │
+  │    answer ungrounded. The demo is choreographed around that.  │
+  └───────────────────────────────────────────────────────────────┘
 ```
 
-### Beat 2 — the hard part, owned (8:20–8:45)
+## The body — the two beats
 
-Now the genuine obstacle, named without flinching. This is the sentence that separates you from the mockups:
+### Beat 1 — what shipped (8:00–8:15): one breath
 
-```
-┃ "The hard part: stock Gemma has no native tool-calling. So I
-┃  emulate it — teach the tool schema in the prompt, parse the JSON
-┃  back out, retry once if it drifts. It's the most fragile seam in
-┃  the system, and I know exactly where it lives."
-```
-
-Then connect it to your track record — you've done on-device AI for real before, so this isn't your first local-model rodeo. One line, true, no overclaiming:
+Say it fast, as a single list, so the room registers "this is a real, runnable system" and you move on.
 
 ```
-┃ "I've shipped on-device AI before — pose-tracking in contrl,
-┃  Gemini Nano on-device in dryrun — so running the model local
-┃  was the part I trusted; the tool emulation was the puzzle."
+┃ "This actually runs: one command migrates the schema, one indexes
+┃  a corpus, one opens the chat, one scores the retrieval. And on top,
+┃  cross-session memory — the thing you just saw."
 ```
 
-That reference is real and load-bearing: it tells the room the local-AI instinct is earned, not improvised for a hackathon. And the RAG fundamentals trace back to AdvntrCue (pgvector, GPT-4, tool-calling, session memory) — buffr is the local-first, self-hosted evolution of a shape you've already shipped in the cloud.
+You're naming the four scripts (`migrate`, `index`, `chat`, `eval` — all real in `package.json`) plus the memory feature. That's the "it's real" proof in fifteen seconds. Resist adding more.
 
-## Strong vs weak — the build story
+### Beat 2 — the one hard part (8:15–8:45): the emulated tool-calling crack
+
+This is the story. Tell it as a problem you hit and solved, and own the rough edge in the same breath — that's what confidence under a clock looks like.
 
 ```
-  WEAK BUILD STORY                   STRONG BUILD STORY
-  ─────────────────────────────      ─────────────────────────────────
-  "it all works great, super         "the hard part: Gemma has no native
-   smooth, no issues" — then a         tool-calling, so I emulate it and
-   judge finds the rough edge and      retry once if it drifts. It's the
-   the whole thing wobbles             most fragile seam — here's where"
-
-  hides the emulation; hopes          owns the emulation; names the
-  nobody asks                          fragility before anyone asks
-
-  → looks like a mockup that          → looks like an engineer who built
-     might be faked                       it, shipped under a clock, and
-                                          knows exactly what's load-bearing
+  SHOW (on screen / slide)            SAY (out loud)
+  ────────────────────────────────    ─────────────────────────────────
+  the "hard part" box from the        "The hard part: I'm running a
+  diagram                              local model, Gemma, that has no
+                                       native tool-calling — it can't
+                                       call my search tool the way a
+                                       cloud API can."
+  (no live action — you're telling     "So tool-calling is emulated — the
+   a story)                            schema goes into the prompt, and I
+                                       parse the model's reply back into a
+                                       tool call. It works."
+                                       "The honest rough edge: sometimes
+                                       it skips the tool and answers
+                                       ungrounded. So I built the demo to
+                                       recover from exactly that — re-ask,
+                                       and it grounds."
 ```
+
+That last line does double duty: it owns the limitation *and* it explains why your demo had a recovery built in. You're not hiding the rough edge — you're showing you engineered around it on purpose. That reads as someone who shipped under a clock and knew exactly where the bodies were buried.
+
+```
+┃ "I knew tool-calling was the weak seam, so I built the demo to
+┃  recover from it. That's the difference between a build and a slide."
+```
+
+Here's the contrast, because the apologetic version of this story is the failure mode.
+
+```
+  WEAK build story                    STRONG build story
+  ──────────────────────────────      ──────────────────────────────────
+  "Unfortunately Gemma doesn't        "Gemma has no native tool-calling,
+   really support tools so it's        so I emulated it — and choreographed
+   a bit unreliable, sorry, it         the demo around the one failure
+   mostly works though…"               mode it leaves. It's a known seam,
+                                       not a surprise."
+  → sounds like an excuse             → sounds like an engineer
+```
+
+This anchors to real, shipped work: on-device AI is your lane (dryrun runs Gemini Nano on-device; contrl runs MediaPipe on-device, no cloud). buffr is the local-first evolution — and you've shipped classic cloud RAG too (AdvntrCue, pgvector + GPT-4). If a judge asks "have you done this before," that's your answer: buffr composes the on-device thread and the RAG thread you've each shipped separately.
 
 ## The IF-IT-BREAKS box
 
-No live app beat here — it's two diagrams and four sentences. The only thing that breaks is overrunning into territory that belongs in the Q&A.
+No live beat here — it's a told story. The failure mode is a judge challenging the honesty mid-story ("so it's broken?"). Don't retreat.
 
 ```
 ╔══════════════════════════════════════════════════════════════════╗
-║ IF IT BREAKS — a judge interrupts with "so it's not reliable?"   ║
-║                                                                   ║
-║ Don't get defensive. Say: "for a stock local model, it's a known ║
-║ tradeoff — I accept some fragility to run fully local and free.  ║
-║ A native-tool model would remove it; that's a swap, not a rebuild,║
-║ because of the provider seam." Then move to the close. The full   ║
-║ answer is loaded in Chapter 06 — don't spend the clock on it now. ║
+║ IF IT BREAKS (challenged on the rough edge)                       ║
+║                                                                    ║
+║ "So it doesn't actually work reliably?" → "It works — the seam is  ║
+║ the emulated tool-calling, which is a known property of running    ║
+║ tools on a model with no native tool API. The fix is argument-     ║
+║ schema validation on the parsed call; that's the next commit." Own ║
+║ it, name the fix, don't flinch. (Detail: study-ai-engineering/     ║
+║ 04-agents-and-tool-use/02-tool-calling.md.)                       ║
 ╚══════════════════════════════════════════════════════════════════╝
 ```
 
-## The "tighten it" treatment
+## The "tighten it" cut
 
-This is already 45 seconds. If you're behind, drop to the single hard-part sentence.
+Under a tight slot, cut beat 1 to a half-sentence ("it's four real commands plus the memory") and keep the hard-part story, because the hard part is the proof and the feature list isn't. The floor: the room hears *one* genuine engineering obstacle you cracked. If you cut the hard part, you've cut the only thing in this chapter that separates you from a pitch deck.
 
-```
-  TIGHTEN IT
-    cut:    Beat 1 (what shipped) — the demo already proved it runs.
-            And the contrl/dryrun/AdvntrCue track-record line.
-    keep:   the hard-part sentence only — "Gemma has no native tools,
-            so I emulate them and retry once; it's the fragile seam."
-    floor:  the room must hear ONE genuine hard part owned honestly.
-            That's what makes the build real. Don't cut below it.
-```
-
-## The one-page run sheet — THE BUILD STORY
+## The one-page run sheet — CHAPTER 04
 
 ```
-  ┌─ RUN SHEET · 04 BUILD STORY · 8:00–8:45 ───────────────────────┐
-  │                                                                 │
-  │  GOAL: prove it's real + own the hard part, in 45 sec          │
-  │                                                                 │
-  │  SAY, in order:                                                 │
-  │   1. "migration → index a corpus → chat retrieves, grounds,    │
-  │       answers, remembers — all on this laptop"                 │
-  │   2. THE HARD PART: "stock Gemma has no native tool-calling,   │
-  │       so I emulate it — schema in the prompt, parse JSON back, │
-  │       retry once. Most fragile seam, I know where it lives."   │
-  │   3. "I've shipped on-device AI before (contrl, dryrun) — the  │
-  │       local model I trusted; the tool emulation was the puzzle"│
-  │                                                                 │
-  │  IF CHALLENGED ("not reliable?"): "known tradeoff for a stock  │
-  │   local model — fragility for fully-local + free. Native-tool  │
-  │   model is a swap not a rebuild." Then move on.                │
-  │                                                                 │
-  │  TIGHTEN: hard-part sentence only. Floor = one real hard part. │
-  └─────────────────────────────────────────────────────────────────┘
+  ┌─ BUILD STORY ─ 8:00–8:45 ─ 45 sec ──────────────────────────┐
+  │                                                              │
+  │  BEAT 1 (8:00–8:15) what shipped — one breath:               │
+  │    ┃ "runs: migrate, index, chat, eval — plus cross-session  │
+  │    ┃  memory."                                               │
+  │                                                              │
+  │  BEAT 2 (8:15–8:45) the hard part:                           │
+  │    "Gemma has no native tool-calling → I emulated it →       │
+  │     it can skip the tool → so I built the demo to recover."  │
+  │    ┃ "I knew tool-calling was the weak seam, so I built the  │
+  │    ┃  demo to recover from it. Build, not slide."            │
+  │                                                              │
+  │  NAIL THIS LINE: "build, not a slide."                       │
+  │  IF CHALLENGED: "known seam — fix is arg-schema validation,  │
+  │                  that's the next commit."                    │
+  │  TIGHTEN: cut beat 1 to half a sentence. Floor: one real     │
+  │           obstacle you cracked.                              │
+  └──────────────────────────────────────────────────────────────┘
 ```
+
+On to chapter 05 — the close.

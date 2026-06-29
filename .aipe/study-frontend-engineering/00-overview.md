@@ -1,99 +1,77 @@
-# 00 — Overview: the frontend layer of buffr-laptop
+# Frontend Engineering — Overview
 
-One page. If you skim only this file, you know what the UI is.
+One page. If you read only this, you know what the frontend layer of `buffr-laptop` is.
 
-## The rendering mode, in one sentence
+**The one-sentence rendering mode:** a single long-lived React component (`<Chat>`,
+`src/cli/chat.tsx:9`) rendered to the *terminal* by Ink instead of to the DOM by
+react-dom — same reconciler, same hooks, same controlled inputs, different host.
 
-It's a **client-side React app whose host is the terminal, not the browser** —
-Ink reconciles a React tree and paints it as text to stdout, repainting the
-whole frame on every state change. No SSR, no hydration, no virtual-DOM-to-real-DOM;
-the "DOM" is the terminal screen.
-
-## The whole UI in one diagram
-
-The entire frontend surface is two files. `chat.tsx` is the view; `session.ts`
-is the data layer it talks to. Everything below `session.ask()` is somebody
-else's guide.
-
-```
-  buffr-laptop — the frontend layer and where it stops
-
-  ┌─ Terminal (the host) ─────────────────────────────────────┐
-  │  stdin (raw-mode TTY)        stdout (text frames)          │
-  └────────┬──────────────────────────────▲───────────────────┘
-           │ keypresses                    │ paint
-  ┌─ UI layer  src/cli/chat.tsx ───────────┴───────────────────┐
-  │  <Chat session> ── useState: turns / input / busy          │
-  │     TextInput (controlled)   Spinner (busy)   turns.map()  │
-  └────────┬───────────────────────────────────────────────────┘
-           │  session.ask(q)  ◄── the ONE data seam
-  ┌─ Data layer  src/session.ts ───────────────────────────────┐
-  │  ChatSession { ask, close }                                │  ← frontend
-  │  builds: pool · embedder · store · pipeline · tool ·       │     guide
-  │          model · profile · memory · agent · trace          │     STOPS
-  └────────┬───────────────────────────────────────────────────┘     here
-           │  (agent loop, retrieval, Ollama HTTP, pg wire)
-           ▼
-   study-system-design · study-runtime-systems · study-networking
-```
-
-The line that matters: **the UI knows exactly one thing about the backend —
-that `session.ask(string)` returns a `Promise<string>`.** It doesn't know there's
-a pg pool, an Ollama model, a vector store, or an agent loop. That ignorance is
-the whole design, and it's pattern `02`.
+This is the one topic in the whole study set where you are the expert. Every primitive
+here — `useState`, the controlled-input loop, the loading-state triad, `.map()` with a
+`key` — is something you have shipped for seven years. The only new idea is that the
+render target is stdout, not a document. Read the rest of this guide as "my React
+knowledge, applied to a terminal."
 
 ## The state architecture, in one diagram
 
-Three pieces of local component state. No store, no context, no URL state, no
-form library. This is `useState` in its purest form.
+```
+  All state lives in <Chat>, all transitions in onSubmit
+
+  ┌─ <Chat session=… >  src/cli/chat.tsx:9 ─────────────────────┐
+  │                                                             │
+  │   useState turns: Turn[]   ← append-only transcript  :11    │
+  │   useState input: string   ← controlled buffer       :12    │
+  │   useState busy:  boolean  ← in-flight flag          :13    │
+  │                                                             │
+  │   onSubmit(value)  :15 ──────────────────────────────┐      │
+  │     guard busy / /exit / empty        :17-24          │      │
+  │     setInput('')                      :24             │      │
+  │     setTurns(+you)  ; setBusy(true)   :25-26          │      │
+  │     try   answer = await session.ask  :28  ──────────┼──┐   │
+  │     then  setTurns(+buffr)            :29             │  │   │
+  │     catch setTurns(+error)            :31             │  │   │
+  │     finally setBusy(false)            :33             │  │   │
+  │                                                       │  │   │
+  │   render: header / turns.map / (Spinner | TextInput) │  │   │
+  └──────────────────────────────────────────────────────┘  │   │
+                                                             │   │
+                          session.ask(q)  src/session.ts:60 ◄┘   │
+                          persist → agent.answer → flush → remember
+```
+
+## The network seam, in one diagram
+
+There is no HTTP client in the UI. The seam is a single awaited function call that fans
+out to a database, a model server, and the aptkit agent loop — but from `<Chat>`'s view
+it is exactly a `fetch()` with loading/success/error states.
 
 ```
-  state graph — all of it lives in <Chat>, src/cli/chat.tsx:11-13
+  The async seam — one await, three sinks
 
-  ┌──────────────────────────────────────────────────────────┐
-  │ turns:  Turn[]    the transcript      append-only         │
-  │                   { role:'you'|'buffr', text }            │
-  │ input:  string    the in-progress     controlled by       │
-  │                   text field          TextInput           │
-  │ busy:   boolean    is a turn in        gates input ↔       │
-  │                    flight?             spinner             │
-  └──────────────────────────────────────────────────────────┘
-
-  one transition (onSubmit) touches all three:
-    input → ''           (clear the field)
-    turns → [...t, you]  (echo the question)
-    busy  → true         (swap input for spinner)
-       … await session.ask …
-    turns → [...t, buffr](append the answer)
-    busy  → false        (swap spinner back for input)
+  ┌─ UI ─────────────┐  await session.ask(q)   ┌─ Data layer ───────────┐
+  │ <Chat> onSubmit  │ ──────────────────────► │ ChatSession.ask()      │
+  │ chat.tsx:28      │                         │ session.ts:60          │
+  │ busy=true ───────┤                         │  1 persistMessage (pg) │
+  │ <Spinner/>       │                         │  2 agent.answer(q)     │
+  │                  │  answer string          │     → Ollama + pgvector │
+  │ busy=false ◄─────┤ ◄────────────────────── │  3 trace.flush (pg)    │
+  │ setTurns(+buffr) │                         │  4 memory.remember     │
+  └──────────────────┘                         └────────────────────────┘
 ```
 
-## The three highest-leverage patterns
+## The three highest-leverage patterns (with files)
 
-Ranked by what you'd lose if you stripped them out:
+1. **react-without-the-dom** — the reconciler runs; Ink is the host renderer painting to
+   a TTY. `src/cli/chat.tsx:2,63`. → `01-react-without-the-dom.md`
+2. **async-ui-with-a-busy-flag** — `try/catch/finally` + `busy` + `<Spinner>`, the
+   loading-state triad. `src/cli/chat.tsx:26-33,48-50`. → `03-async-ui-with-a-busy-flag.md`
+3. **session-as-the-data-layer** — `<Chat>` owns display state; `session.ts` owns the
+   canonical persisted state; the seam between them is one `ask()` call.
+   `src/cli/chat.tsx:5,28` ↔ `src/session.ts:34,60`. → `04-session-as-the-data-layer.md`
 
-1. **`02-the-session-as-the-data-layer`** — `src/session.ts` + the single
-   `session.ask()` call at `chat.tsx:28`. Strip it and the view would have to
-   construct a pg pool, an embedder, a vector store, a model, and an agent
-   inside a React component. This is container-vs-presentational discipline,
-   and it's the most load-bearing decision in the UI.
+## What is NOT here (named honestly)
 
-2. **`04-async-ui-with-a-busy-flag`** — the `busy` flag at `chat.tsx:13` and
-   the spinner at `chat.tsx:48-57`. Strip it and the terminal freezes silently
-   for the seconds an LLM turn takes, with no feedback and no guard against a
-   double-submit.
-
-3. **`01-react-without-the-dom`** — the Ink reconciler. The `<Box>`/`<Text>`
-   primitives, `jsx: react-jsx`, the `render()` call at `chat.tsx:63`. Strip it
-   and there's no React at all — you're back to `console.log` and `readline`.
-
-The other two (`03-hooks-state-in-a-cli`, `05-controlled-text-input`) are the
-mechanics those three rest on.
-
-## What's not here
-
-`audit.md` does the full sweep, but the headline: **routing, CSS/styling,
-client-side HTTP fetch, the browser platform (Storage/Worker/etc.), and the
-bundler/deploy artifact are all `not yet exercised`.** This is a terminal app
-built straight from `tsc`. Don't go looking for a Vite config or a stylesheet —
-there isn't one, and that's correct for what this is.
+Routing, CSS/styling beyond color props, DOM/browser APIs, SSR/hydration, bundlers,
+HTTP client-fetch, web accessibility, design tokens, state stores. The terminal has no
+analog for most of these, and the surface is one screen. See `audit.md` lenses 5–7 for
+the `not yet exercised` entries.

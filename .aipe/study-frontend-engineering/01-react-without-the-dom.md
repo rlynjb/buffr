@@ -1,329 +1,267 @@
-# 01 — React without the DOM
+# react-without-the-dom
 
-**Industry name(s):** custom React reconciler / alternate host renderer
-(Ink). **Type:** Industry standard (the reconciler pattern); project
-exercises it via Ink.
+*Reconciler / host-renderer split · React custom renderer (Ink) · Industry standard*
 
 ## Zoom out, then zoom in
 
-You've shipped React to the browser for years. The thing you never had to
-think about is that "React" and "the DOM" are two separate libraries that
-happen to ship together. `react` is the component model and the
-reconciler — the diffing brain. `react-dom` is just *one* host that knows
-how to turn the diff into `document.createElement` calls. Swap that host
-and React paints somewhere else entirely. Here, the somewhere-else is the
-terminal.
+You have shipped React to browsers for years. Every one of those apps had two halves you
+never had to think about as separate: the **reconciler** (the part that diffs your
+component tree and decides what changed) and the **host renderer** (the part that takes
+those changes and mutates a real output — for the browser, `react-dom`, which mutates DOM
+nodes). They ship together in `react-dom`, so they feel like one thing.
+
+Ink splits them back apart. The reconciler is the same `react` package you always use.
+The host renderer is `ink` — it takes the reconciler's output and paints box-drawing
+characters to stdout instead of mutating DOM nodes. That is the entire trick. Here is
+where it sits:
 
 ```
-  Zoom out — where the reconciler sits in buffr-laptop
+  Zoom out — where the renderer swap lives
 
-  ┌─ Terminal (the host surface) ───────────────────────────┐
-  │  stdout: a grid of characters, repainted in frames       │
-  └───────────────────────────────▲─────────────────────────┘
-                                   │ paint (text frames)
-  ┌─ Render layer ────────────────┴─────────────────────────┐
-  │  ★ Ink reconciler ★   diffs the React tree,              │ ← we are here
-  │  computes Yoga layout, writes characters to stdout       │
-  └───────────────────────────────▲─────────────────────────┘
-                                   │ React elements
-  ┌─ Component layer  src/cli/chat.tsx ─────────────────────┐
-  │  <Chat> → <Box>/<Text>/<TextInput>/<Spinner>            │
-  └──────────────────────────────────────────────────────────┘
-```
-
-Zoom in: the pattern is **alternate host renderer**. Same React you know —
-`useState`, JSX, reconciliation, keys, the component tree. Different host:
-instead of `react-dom` writing to `document`, Ink writes to a terminal.
-The question this answers: *how does a React tree become pixels when there
-is no DOM to mutate?*
-
-## Structure pass
-
-**Layers.** Three, stacked: the component layer (`chat.tsx`, your JSX),
-the reconciler layer (Ink, the diffing brain plus Yoga layout), and the
-host surface (the terminal's character grid). React's component model is
-identical across all React apps; only the bottom two layers differ from
-what you ship to the browser.
-
-**Axis — trace "what is a host instance?" down the stack.** This is the
-one question that makes the browser-vs-terminal contrast pop:
-
-```
-  one question, held constant down the layers
-
-  "what does a rendered element become?"
-
-  ┌─────────────────────────────────────┐
-  │ component layer:  <Text>hello</Text> │  → a React element (same everywhere)
-  └─────────────────────────────────────┘
-      ┌─────────────────────────────────────┐
-      │ reconciler (react-dom): host node    │  → an HTMLElement, appended to DOM
-      └─────────────────────────────────────┘
-      ┌─────────────────────────────────────┐
-      │ reconciler (Ink):  host node         │  → a layout box, painted as chars
-      └─────────────────────────────────────┘
-```
-
-The answer flips at the reconciler: a `<Text>` becomes an `HTMLElement`
-under react-dom and a Yoga layout box under Ink. That flip is the whole
-lesson.
-
-**Seam.** The load-bearing seam is the **host config** — the contract
-between the reconciler and the host. `react-reconciler` calls a fixed set
-of host methods (`createInstance`, `appendChild`, `commitUpdate`,
-`removeChild`…); react-dom implements them against the DOM, Ink implements
-them against a terminal buffer. Your component code sits entirely *above*
-this seam and never sees it. That's why every React instinct transfers.
-
-## How it works
-
-#### Move 1 — the mental model
-
-You know how `react-dom` takes `<div>` and produces a real DOM node? The
-reconciler doesn't do that part. The reconciler does the *diff* — it walks
-your element tree, compares it to the previous tree, and produces a list
-of host operations: "create this node, update that one's text, remove this
-one." A separate object, the **host config**, knows how to execute those
-operations against a specific surface. React is the diff; the host config
-is the hands.
-
-```
-  the reconciler pattern — diff brain, swappable hands
-
-   your tree   ──►  ┌──────────────┐  ──► host ops  ──► ┌────────────┐
-   <Chat/>          │  reconciler  │  create/update/    │ host config│
-   (React           │  (diff brain)│  remove            │  (hands)   │
-    elements)       └──────────────┘                    └─────┬──────┘
-                          ▲                                    │
-                          │ same brain                         ▼
-                          │ for every host             react-dom → DOM
-                                                        Ink       → terminal
-```
-
-#### Move 2 — the walkthrough
-
-**The element tree is host-agnostic.** Bridge from what you know: when you
-write `<Box flexDirection="column">` in `chat.tsx`, that's the same kind
-of React element as `<div style={{display:'flex'}}>` in a browser app — a
-plain object describing *what* to render, not *how* to paint it. `Box` and
-`Text` are Ink's host components, the terminal's answer to `div` and
-`span`. Nothing about the element creation knows it's headed for a
-terminal. Where it breaks if you forget this: you can't use `<div>` here,
-because there's no host config method that knows what a `div` is — Ink only
-registers `Box`, `Text`, and a few others.
-
-```
-  Pattern — host components are the only "primitives" the host knows
-
-  browser host:   div  span  input  ...   (react-dom knows these)
-  terminal host:  Box  Text  ...          (Ink knows these)
-
-  <Box>   ── reconciler asks host config ──► "make a layout box"
-  <div>   ── reconciler asks host config ──► ✗ Ink has no method for this
-```
-
-**The reconciler diffs, exactly like react-dom.** When `setBusy(true)`
-runs, React re-renders `<Chat>` and produces a new element tree. The
-reconciler diffs new-vs-old and finds: the `<TextInput>` subtree is gone,
-a `<Text>` with the spinner is new. It emits "remove the input box, create
-the spinner text." This is the identical algorithm you rely on in the
-browser — same keyed reconciliation, same bailout rules, same `key`
-semantics on the `turns.map()`.
-
-**The host config commits to the terminal.** This is the only layer that's
-different from your browser work. Instead of `parent.appendChild(node)`,
-Ink's host config records the change in an off-screen layout tree, runs
-**Yoga** (a flexbox layout engine compiled to JS) to compute where every
-box sits in character-grid coordinates, renders that to a string, and
-writes it to `stdout` — erasing and repainting the changed region of the
-terminal frame.
-
-```
-  Layers-and-hops — a state change crossing the three layers
-
-  ┌─ Component  chat.tsx ─┐  hop 1: setBusy(true) → re-render
-  │  <Chat> returns new   │ ──────────────────────────────────►
-  │  element tree         │
-  └───────────────────────┘
-                            ┌─ Reconciler (Ink) ─────────────┐
-              hop 2: diff   │  old tree vs new tree           │
-              ───────────►  │  → [remove input, add spinner]  │
-                            └──────────────┬──────────────────┘
-                              hop 3: commit │ + Yoga layout
-                                            ▼
-                            ┌─ Host surface (terminal) ───────┐
-                            │  write chars to stdout,          │
-                            │  repaint changed region          │
-                            └──────────────────────────────────┘
-```
-
-**Move 2 variant — the load-bearing skeleton.** Strip the renderer to its
-kernel and three parts remain, each named by what breaks without it:
-
-1. **The reconciler (diff brain).** Drop it and you have no React at all —
-   you're back to manually computing what changed and calling
-   `console.log`. This is `react`, the package, untouched from the browser.
-2. **The host config (the hands).** Drop it and the reconciler computes a
-   diff with nowhere to send it. This is the *entire* difference between
-   react-dom and Ink — same brain, different hands.
-3. **The commit-to-stdout step.** Drop it and the layout tree updates in
-   memory but the terminal never repaints — the UI freezes while state
-   keeps changing. This is Ink's "render to a string and diff the
-   string against the last frame" step.
-
-Optional hardening on top: Yoga layout (you could position by hand),
-output throttling (Ink batches writes), alternate-screen-buffer handling.
-The kernel is brain + hands + commit.
-
-#### Move 3 — the principle
-
-React is not a UI library; it's a *reconciliation* library with a default
-UI host bolted on. Once you internalize that the host is swappable —
-terminal (Ink), native mobile (React Native), 3D (react-three-fiber), PDF
-(react-pdf) — your React knowledge stops being "browser knowledge" and
-becomes "any-tree-that-changes-over-time knowledge." That's the transfer.
-
-## Primary diagram
-
-The whole renderer, one frame: your component code on top, the swappable
-reconciler in the middle, the terminal at the bottom.
-
-```
-  React-without-the-DOM — the full picture in buffr-laptop
-
-  ┌─ Component layer  src/cli/chat.tsx ─────────────────────────┐
-  │  function Chat() {                                            │
-  │    useState ...           ← same hooks as browser            │
-  │    return <Box><Text/><TextInput/></Box>  ← Ink primitives   │
-  │  }                                                            │
-  └────────────────────────────┬─────────────────────────────────┘
-                               │ React elements (host-agnostic)
-  ┌─ Reconciler  react + Ink host config ──▼─────────────────────┐
-  │  react:  diff old tree vs new tree → host ops                │
-  │  Ink:    createInstance/appendChild/commitUpdate against a    │
-  │          terminal buffer + Yoga flexbox layout                │
-  └────────────────────────────┬─────────────────────────────────┘
-                               │ characters + cursor moves
-  ┌─ Host surface  the terminal ───────────▼─────────────────────┐
-  │  stdout: repaint the changed region of the frame             │
+  ┌─ Your code (unchanged) ─────────────────────────────────────┐
+  │  <Chat/>   src/cli/chat.tsx:9     useState, JSX, props       │
+  └───────────────────────────────┬──────────────────────────────┘
+                                  │  same React elements
+  ┌─ Reconciler (react ^18.3.1) ──▼──────────────────────────────┐
+  │  virtual-DOM diff: what changed since last render?           │ ← same as always
+  └───────────────────────────────┬──────────────────────────────┘
+                                  │  a list of mutations
+  ┌─ Host renderer ★ THE SWAP ★ ──▼──────────────────────────────┐
+  │  react-dom  →  mutate <div>, <span> in a document            │
+  │  ★ ink      →  lay out <Box>/<Text> via Yoga, paint to TTY ★ │ ← we are here
+  └───────────────────────────────┬──────────────────────────────┘
+                                  │  bytes
+  ┌─ Output ──────────────────────▼──────────────────────────────┐
+  │  browser: pixels      ·      ink: stdout characters          │
   └──────────────────────────────────────────────────────────────┘
 ```
 
-## Implementation in codebase
+**Zoom in.** The pattern is *pluggable host renderer*: React's reconciler is host-agnostic,
+and the host renderer is a swappable backend that knows how to create, update, and remove
+"instances" in some output medium. `react-dom` is one backend; `ink` is another;
+`react-native` is a third. Your `<Chat>` component does not know or care which one is
+mounted under it. That is the whole concept, and it is why everything you know about React
+transfers to this file with zero translation.
 
-**Use cases.** This pattern is reached for exactly once — at app boot —
-and then it's invisible. Every state change in `<Chat>` rides it without
-the component knowing. The two concrete touchpoints: the `render()` call
-that hands the tree to Ink, and the JSX that uses Ink's primitives instead
-of DOM elements.
+## Structure pass
 
-```
-  src/cli/chat.tsx  (lines 1-2, 62-63)
-
-  import { useState } from 'react';                ← line 1
-       │  only useState — NOT React itself, because
-       │  jsx: react-jsx (tsconfig.json:13) injects the
-       │  JSX runtime automatically. No `import React`.
-       │
-  import { render, Box, Text, useApp } from 'ink'; ← line 2
-       │  render = Ink's entry point (the react-dom.render
-       │  equivalent). Box/Text = the host primitives.
-       │
-  const session = await createChatSession();       ← line 62
-  render(<Chat session={session} />);              ← line 63
-       │  this single call mounts the tree into Ink's
-       │  reconciler. Drop it and nothing ever paints —
-       │  the component is defined but never hosted.
-```
+Before the mechanics, read the skeleton. Two layers, and we trace **one axis: who decides
+what the output looks like?**
 
 ```
-  src/cli/chat.tsx  (lines 37-47) — Ink primitives, not DOM
+  One axis — "who decides the output?" — held down the stack
 
-  return (
-    <Box flexDirection="column">          ← line 38
-         │  Box ≈ a flex <div>; Yoga lays it out as a
-         │  column of stacked rows in the char grid.
-      <Box marginBottom={1}>              ← line 39
-        <Text dimColor>buffr chat …</Text>← line 40
-             │  Text ≈ <span>; dimColor is a terminal
-             │  attribute, not a CSS property.
-      </Box>
-      {turns.map((t, i) => (              ← line 42
-        <Box key={i} …>                   ← line 43  same keyed
-             │  reconciliation you use in the browser —
-             │  React diffs this list by key exactly as react-dom would.
+  ┌──────────────────────────────────────┐
+  │ your component  <Chat/>  chat.tsx:9   │  → YOU decide (declarative JSX)
+  └──────────────────────────────────────┘
+       ┌────────────────────────────────────┐
+       │ reconciler (react)                 │  → REACT decides WHAT changed
+       └────────────────────────────────────┘
+           ┌──────────────────────────────────┐
+           │ host renderer (ink)              │  → INK decides HOW to paint it
+           └──────────────────────────────────┘
+
+  the answer flips at each layer — that contrast is the lesson
 ```
 
-The JSX target is set at `tsconfig.json:13` (`"jsx": "react-jsx"`), which
-is why `chat.tsx:1` can import `useState` alone — the automatic runtime
-supplies the element factory. Compilation is plain `tsc`
-(`package.json:7`), output run with `node dist/src/cli/chat.js`
-(`package.json:12`).
+- **Layers:** your component → reconciler → host renderer → output medium.
+- **Axis traced:** "who decides the output?" You declare *intent* (JSX). React decides
+  *what diffed*. Ink decides *how to realize it* on the terminal.
+- **The load-bearing seam:** between the reconciler and the host renderer. That boundary
+  is a fixed contract (React's reconciler calls a renderer with `createInstance`,
+  `appendChild`, `commitUpdate`, `removeChild`…). Because it is a contract, you can swap
+  `react-dom` for `ink` on the underside and your component on the topside never notices.
+  *This is the boundary that makes the whole pattern work* — study it before either side's
+  internals.
+
+The other seam — between your component and the reconciler — does *not* flip the axis
+(you always write declarative JSX, React always diffs it). That is the seam you already
+know cold from browser React, so we spend our attention on the renderer seam.
+
+## How it works
+
+### Move 1 — the mental model
+
+You know how `react-dom` takes `<div className="x">hi</div>` and produces a real DOM node
+with that text? Ink does the same dance with a different vocabulary: `<Text color="cyan">`
+becomes a styled run of characters in a flexbox-laid-out terminal frame. The reconciler in
+the middle is *identical*. The shape:
+
+```
+  The pattern — one reconciler, swappable backends
+
+         your JSX
+            │
+            ▼
+     ┌─────────────┐     "what changed?"
+     │ reconciler  │ ─── diff old tree vs new tree
+     │  (react)    │     produces a mutation list
+     └──────┬──────┘
+            │  createInstance / commitUpdate / removeChild
+            ▼
+     ┌─────────────┐         ┌─────────────┐
+     │  react-dom  │   OR    │     ink     │   ← pick a backend; tree code unchanged
+     │  → DOM      │         │  → stdout   │
+     └─────────────┘         └─────────────┘
+```
+
+The underlying strategy: **React separates "deciding what changed" from "applying the
+change," and only the second half is host-specific.** Swap the second half, keep all your
+component code.
+
+### Move 2 — the walkthrough
+
+#### The mount — one `render()` call, top level
+
+In the browser you call `ReactDOM.createRoot(el).render(<App/>)`. Here it is one line, and
+the element it renders into is the terminal itself, not a DOM node:
+
+```tsx
+// src/cli/chat.tsx:62-63
+const session = await createChatSession();   // build the data layer first (top-level await)
+render(<Chat session={session} />);          // ink's render — mounts <Chat> to stdout
+```
+
+`render` here is imported from `ink` (`chat.tsx:2`), not `react-dom`. That import *is* the
+backend selection. From this point on, every `setState` inside `<Chat>` triggers the
+reconciler, which hands a mutation list to Ink, which repaints the terminal frame. The
+boundary condition to notice: this is `await createChatSession()` at module top level
+(`chat.tsx:62`) — if it rejects (DB down), the app crashes *before* mount, with no rendered
+error state. That is the renderer-swap's one rough edge: there is no error boundary above
+`render()` to catch a pre-mount throw.
+
+#### The host primitives — `<Box>` and `<Text>`, not `<div>` and `<span>`
+
+Ink gives you exactly two structural primitives, and they map cleanly onto what you know:
+
+```tsx
+// src/cli/chat.tsx:37-41
+<Box flexDirection="column">          {/* <Box> ≈ a <div> with display:flex always on */}
+  <Box marginBottom={1}>
+    <Text dimColor>buffr chat — …</Text>   {/* <Text> ≈ a <span>; styling via props */}
+  </Box>
+```
+
+`<Box>` is a flex container — Ink runs the **Yoga** layout engine (the same flexbox engine
+React Native uses) to compute positions, then paints. `flexDirection`, `marginBottom`
+(`chat.tsx:38-39`) are real flexbox properties, resolved to terminal rows/columns instead
+of CSS pixels. `<Text>` is the only thing that may hold a string; styling is props
+(`dimColor`, `bold`, `color`) because there is no stylesheet to cascade from. The boundary
+condition: a bare string *must* live inside `<Text>` — Ink throws if you put raw text
+directly in a `<Box>`, the same way the terminal has no concept of an unstyled text node
+floating in a flex container.
+
+#### The re-render — identical to the browser, paints a frame instead of mutating nodes
+
+This is the part where your instincts are already correct. When `onSubmit` calls
+`setBusy(true)` (`chat.tsx:26`), the reconciler re-runs `<Chat>`, diffs the new tree
+against the old, and finds the footer changed from `<TextInput>` to `<Spinner>`
+(`chat.tsx:48-57`). It hands Ink that diff; Ink recomputes the Yoga layout and writes the
+changed region to stdout.
+
+```
+  Layers-and-hops — one setState, browser vs terminal
+
+  ┌─ component ─┐ hop 1: setBusy(true)   ┌─ reconciler ─┐ hop 2: diff   ┌─ host ──────┐
+  │ <Chat>      │ ─────────────────────► │ react        │ ────────────► │ ink         │
+  │ chat.tsx:26 │                        │ re-runs Chat │  footer flips │ Yoga layout │
+  └─────────────┘                        └──────────────┘  TextInput→   └──────┬──────┘
+                                                            Spinner        hop 3│ paint
+                                                                                ▼
+                                                                         ┌─ TTY ───────┐
+                                                                         │ stdout frame│
+                                                                         └─────────────┘
+```
+
+The only difference from your browser apps is hop 3: instead of mutating a `<span>`, Ink
+writes ANSI escape sequences to stdout. Everything left of hop 3 is the React you already
+know.
+
+### Move 3 — the principle
+
+**A renderer is a backend, and React's reconciler is backend-agnostic by design.** Once you
+see that `react-dom` is just *one* implementation of a fixed renderer contract, the whole
+ecosystem opens up — `ink` (terminal), `react-native` (native views), `react-three-fiber`
+(WebGL scene graph), `react-pdf` (PDF). They all reuse your component knowledge and swap
+only the "apply the change" half. The transferable lesson: when you learn a new React
+target, you are only ever learning a new set of host primitives and a new `render()` entry
+point. The reconciler, the hooks, the diffing — those never change.
+
+## Primary diagram
+
+The full picture: your unchanged component on top, the shared reconciler in the middle, the
+swapped Ink backend painting the terminal at the bottom.
+
+```
+  react-without-the-dom — the complete frame
+
+  ┌─ UI layer (your code, host-agnostic) ───────────────────────┐
+  │  <Chat session={session}/>          src/cli/chat.tsx:9       │
+  │   JSX · useState · props — identical to a browser component  │
+  └───────────────────────────────┬──────────────────────────────┘
+                                  │  React elements
+  ┌─ Reconciler — react ^18.3.1 ──▼──────────────────────────────┐
+  │  diff prev tree vs next tree → mutation list                 │
+  │  (the part that is the SAME in every React target)           │
+  └───────────────────────────────┬──────────────────────────────┘
+              renderer contract:   │  createInstance / commitUpdate /
+              ★ load-bearing seam ★ │  appendChild / removeChild
+  ┌─ Host renderer — ink ^5.0.1 ──▼──────────────────────────────┐
+  │  build <Box>/<Text> instances · Yoga flexbox layout ·        │
+  │  paint changed region to stdout as ANSI + box-drawing        │
+  │  entry: render(<Chat/>)             src/cli/chat.tsx:63       │
+  └───────────────────────────────┬──────────────────────────────┘
+                                  │  bytes
+  ┌─ Output ──────────────────────▼──────────────────────────────┐
+  │  the terminal frame the user sees                            │
+  └──────────────────────────────────────────────────────────────┘
+```
 
 ## Elaborate
 
-The reconciler-as-a-library idea comes from React 16's rewrite (Fiber),
-which deliberately split the diffing engine (`react-reconciler`) from the
-renderers so third parties could target new hosts. Ink, React Native,
-react-three-fiber, and react-pdf are all the same move: implement the host
-config, get React's component model for free. Ink specifically reuses
-**Yoga** — the same flexbox engine React Native uses — which is why
-`flexDirection` and `marginBottom` feel familiar even though there's no
-CSS; you're driving the same layout engine, just rendering its output as
-characters instead of native views.
-
-What to read next: `03-hooks-state-in-a-cli.md` (the state that drives the
-re-renders this file's reconciler diffs) and `05-controlled-text-input.md`
-(the input side, where the raw-mode TTY replaces the browser's keydown).
+The reconciler/renderer split exists because React's authors wanted the *programming model*
+(declarative components, diffing, hooks) decoupled from the *output target*. They published
+`react-reconciler` as a package precisely so anyone could write a backend; Ink is one of the
+most-used third-party ones. The historical pivot was React 16's "Fiber" rewrite, which made
+the reconciler re-entrant and pluggable enough for this. For your purposes the takeaway is
+narrow and useful: this codebase is not doing anything exotic — it is using React exactly as
+designed, just pointed at a terminal. The next file, `02-hooks-state-in-a-cli.md`, drops into
+the component itself and walks the `useState` triad that drives this rendering.
 
 ## Interview defense
 
-**Q: "It's a CLI — why is React even involved? Isn't that overkill?"**
-Verdict first: it's the right tool the moment the UI has state that
-changes over time. The transcript grows, the input updates per keystroke,
-the spinner toggles — that's a reactive UI, and React's reconciler does
-the "figure out the minimal repaint" work that you'd otherwise hand-roll
-with cursor math. The kernel I'd name: React is a reconciliation library,
-and the host is swappable — Ink is just a host config that commits to
-stdout instead of the DOM.
+**Q: This is a CLI. Why is React even involved — isn't that overkill for terminal output?**
 
 ```
-   <Chat/> ──► reconciler (diff) ──► host config ──► terminal
-                  same brain          swappable        repaint
-                  as react-dom        hands            only the delta
+  the alternative: hand-managed terminal state
+
+  manual:  print line → user types → clear screen → reprint everything
+           you track cursor position, diff by hand, redraw on every keystroke
+
+  ink:     declare the tree → setState → reconciler diffs → ink repaints only the delta
 ```
 
-**Q: "What's the one thing that's actually different from a browser React
-app?"** The host config — the layer that turns the diff into side effects.
-Above it (components, hooks, keys, reconciliation) is identical. Below it,
-react-dom calls `appendChild` on real DOM nodes; Ink records layout
-changes, runs Yoga, and writes characters to stdout. Anchor:
-`render(<Chat/>)` at `chat.tsx:63` is the only line where "this is a
-terminal app" actually shows up.
+React buys the same thing in the terminal it buys in the browser: you *declare* what the UI
+should look like for a given state, and the reconciler figures out the minimal repaint. The
+transcript-plus-input-plus-spinner UI (`chat.tsx:37-58`) would be fiddly cursor math by hand;
+as declarative JSX it is 20 lines. The reconciler earns its place the moment the UI has more
+than one mutable region. Anchor: *"Ink is React's reconciler with a stdout backend instead of
+a DOM backend — same model, different host."*
 
-**If you don't know:** the honest recovery is "I know React splits the
-reconciler from the renderer, and Ink implements the renderer half for the
-terminal — I'd have to check Ink's host config to name the exact methods,
-but the contract is `react-reconciler`'s host-instance interface."
+**Q: What's the load-bearing piece — the part that makes the swap possible?**
 
-## Validate
-
-1. **Reconstruct:** draw the three layers (component / reconciler / host)
-   and label what a `<Text>` element becomes in each. Name the line that
-   mounts the tree (`chat.tsx:63`).
-2. **Explain:** why can `chat.tsx:1` import `useState` without importing
-   `React`? (Answer ties to `tsconfig.json:13`.)
-3. **Apply:** if you added `<button>` to the JSX, what happens and why?
-   (No host config method for it — Ink only knows `Box`/`Text`.)
-4. **Defend:** someone says "rewrite this with `readline` and
-   `console.log`, drop React." What specifically do you lose? (The
-   reconciler's minimal-repaint diff; you'd manually track what changed
-   on the screen.)
+The **renderer contract** between the reconciler and the host renderer (the seam in the
+structure pass). React's reconciler never touches a DOM node directly; it calls
+`createInstance`/`commitUpdate`/`removeChild` on whatever renderer is mounted. Ink implements
+those against terminal layout. Drop that contract and you would have to fork React for every
+target. Naming this — not just "Ink renders to the terminal" — is the signal that you
+understand *why* the swap is even possible. Anchor: *"the reconciler is host-agnostic; the
+renderer contract is the seam, and `ink` implements it for the TTY."*
 
 ## See also
 
-- `00-overview.md` — where this sits among the top three patterns.
-- `03-hooks-state-in-a-cli.md` — the state changes this reconciler diffs.
-- `05-controlled-text-input.md` — the input/platform side of the host.
-- `study-runtime-systems` — the Node event loop the reconciler runs on.
-- `study-performance-engineering` — repaint cost as numbers.
+- `00-overview.md` — the whole frontend surface in two diagrams.
+- `02-hooks-state-in-a-cli.md` — the `useState` triad that drives these re-renders.
+- `03-async-ui-with-a-busy-flag.md` — what triggers the re-render this file paints.
+- `05-jsx-to-esm-build.md` — how `react-jsx` compiles the JSX this file mounts.
+- Cross-link: `study-runtime-systems` — the event loop and raw-mode stdin under Ink.

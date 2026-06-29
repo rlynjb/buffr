@@ -1,319 +1,334 @@
-# Security Audit — buffr-laptop (Pass 1)
+# Security audit — buffr-laptop
 
-The 8-lens walk. Every lens gets a verdict: what the code actually does,
-with `file:line` grounding, or `not yet exercised` when the single-device
-shape hasn't built the boundary yet.
+> Pass 1 of the two-pass audit. Eight lenses, walked against the real
+> repo with `file:line` grounding. Where a finding is load-bearing
+> enough to deserve a deep walk, it cross-links to a Pass 2 pattern
+> file. Where the repo doesn't exercise a lens yet, it says so plainly
+> and names the buildable target — no invented vulnerabilities, no
+> softened real ones.
 
-**The one thing to take away first:** this is a single-operator,
-single-device tool with no network listener. That collapses most of the
-classic attack surface — there is no authenticated request to forge, no
-session to hijack, no CORS to misconfigure. The trust model is "if you can
-run `npm run chat`, you already own the laptop." So the audit is honest
-about what's deferred and spends its weight on the three boundaries that
-*do* carry a trust decision: the SQL sink, the `app_id` tenant shape, and
-the LLM context.
+The verdict up front: **for the single-device laptop phase this repo's
+trust posture is honest and mostly correct.** Every SQL sink is
+parameterized, the agent runs on a one-tool least-privilege allowlist
+with hard turn/tool budgets, and secrets stay in a gitignored `.env`
+that was never committed. The real exposure is not a bug — it's a
+*deferred control*: tenant isolation is shape-only (an `app_id` column
+with no RLS and no token binding), and `DATABASE_URL` is a
+full-privilege connection string held by the client process. Both are
+acceptable while the only client is your laptop. Both become the first
+thing you fix the day a phone or edge function holds that string.
+
+The single worst exposure ranked across the whole audit:
+**`DATABASE_URL` is a full-privilege Postgres credential held in the
+application process** (`src/db.ts:4`, `src/config.ts:11`). On the
+laptop it's you trusting your own machine. The moment that process
+moves off the laptop, that one string is the whole castle.
+
+---
+
+## the trust map — read this first
+
+Before the lenses, the one diagram the whole audit hangs on: where
+untrusted input enters, and what each boundary does (or doesn't)
+enforce.
+
+```
+  Trust-boundary map — buffr-laptop (laptop phase)
+
+  ┌─ TRUSTED: your laptop ──────────────────────────────────────────┐
+  │                                                                  │
+  │  ┌─ UI (Ink TUI) ───────────┐                                    │
+  │  │ src/cli/chat.tsx         │  you type a question               │
+  │  │  onSubmit(value)         │                                    │
+  │  └───────────┬──────────────┘                                    │
+  │              │ in-process call (no network, no auth hop)         │
+  │  ┌─ Session ─▼──────────────┐                                    │
+  │  │ src/session.ts ask()     │  builds agent once, holds 1 convo  │
+  │  └───────────┬──────────────┘                                    │
+  │              │                                                   │
+  │  ┌─ Agent loop (aptkit) ────▼─────────────────────────────────┐ │
+  │  │ RagQueryAgent.answer()  policy: 1 tool, maxTurns 6,        │ │
+  │  │   allowlist = [search_knowledge_base]   maxToolCalls 4     │ │
+  │  └───────────┬───────────────────────────────────────────────┘ │
+  │              │ DATABASE_URL (full-privilege string)              │
+  └──────────────┼───────────────────────────────────────────────────┘
+                 │  ▲ network boundary — TLS to Postgres
+  ┌─ SEMI-TRUSTED: Supabase Postgres (reindb / agents) ────────────┐
+  │  parameterized SQL only ($1..$8, $1::vector)                   │
+  │  app_id column on every table  ── NO RLS, NOT token-derived ◄──┼─ the gap
+  │  documents · chunks(+memory) · conversations · messages       │
+  └────────────────────────────────────────────────────────────────┘
+                 │  ▲ HTTP (localhost) — Ollama
+  ┌─ LOCAL PROVIDER: Ollama (gemma2:9b, nomic-embed) ──────────────┐
+  │  model output + retrieved chunks re-enter the prompt as        │
+  │  tool results  ── indirect prompt-injection surface ───────────┤
+  └────────────────────────────────────────────────────────────────┘
+```
+
+Two untrusted inputs cross into trusted code: (1) your typed question
+(but you are the attacker model here — single-user), and (2) **content
+that comes back from the database as tool results** — indexed
+documents *and now recalled conversation memory* — which re-enter the
+model's context. That second one is the only adversarial-content path
+that matters at this phase, and its blast radius is small by design.
 
 ---
 
 ## 1. trust-boundaries-and-attack-surface
 
-The whole attack surface in one frame — where untrusted input crosses into
-trusted code.
+The attack surface is deliberately tiny because the whole app runs in
+one process on one machine. There is **no HTTP server, no request
+body, no query param, no header, no uploaded file** — the entry point
+is `onSubmit` in the Ink TUI (`src/cli/chat.tsx:15`), a local keyboard
+event. Nothing listens on a port.
 
-```
-  Inputs crossing into trusted code
+Three boundaries are real and worth naming:
 
-  source                         enters at                  trust today
-  ─────────────────────────────  ─────────────────────────  ───────────
-  prompt "your question"         chat.tsx:55 → session.ts:60 operator = trusted
-  *.md file contents             index-cmd.ts:23 (readFile) operator-chosen
-  indexed chunk text → LLM       run-agent-loop.js:104      ★ semi-trusted ★
-  recalled memory text → LLM     session.ts:53,66 → search  ★ semi-trusted ★
-  Ollama HTTP responses          session.ts:40,46           local, trusted
-  DATABASE_URL                   config.ts:11               operator secret
-```
+- **TUI → session**, in-process (`src/cli/chat.tsx:28` →
+  `src/session.ts:60`). No serialization, no auth hop. The "request"
+  is a function call. Trust assumption: the person at the keyboard is
+  authorized. True on a laptop, false the moment this is exposed.
+- **Process → Postgres**, over the network (`src/db.ts:4`). Carries
+  the full-privilege `DATABASE_URL`. → see `01-parameterized-sql-boundary.md`
+  for what crosses this and how it's defended.
+- **Process → Ollama**, localhost HTTP (`src/session.ts:40,46`). The
+  return path is where adversarial content can ride in — model output
+  and retrieved chunks. → see `03-indirect-prompt-injection-surface.md`.
 
-The real boundary is rows three and four. Everything the operator types or
-chooses to index is trusted by definition — it's their laptop. But once a
-document is indexed, its **text re-enters the model's context as a tool
-result** (`run-agent-loop.js:104`, where `toolResults` are pushed as a
-`user` message). That is the place where content the operator may not
-have *written* (a downloaded README, a scraped page) gets to influence the
-model. The chat session now adds a second retrievable source: after each
-turn, the question+answer exchange is embedded into the **same** vector
-store as `kind=memory` chunks (`session.ts:53,66`), so past conversation
-turns also become retrievable context on later turns. That widens *what
-can be surfaced* — but it's the same surface and the same one read-only
-tool, so the blast radius is unchanged. → `03-indirect-prompt-injection-surface.md`.
-
-The classic red flag — "trusted because it comes from our own frontend" —
-doesn't fire here because there *is* no frontend and no second origin. The
-inverse risk applies instead: the design assumes the operator is the only
-actor, so the day a network listener is added (the phone/edge phase the
-plan names in `agent-layer-plan.md`), every one of these rows needs
-re-checking.
-
----
+The red flag this lens hunts for — *input trusted because it came from
+"our own frontend"* — is present but defanged: the TUI is the only
+frontend and it's local. The honest statement: this isn't "we
+validated the input," it's "there's only one user and it's you." That
+distinction is the whole laptop-phase security story.
 
 ## 2. authentication-and-authorization
 
-**`not yet exercised`** — and deliberately so.
+**Not yet exercised.** There is no authentication layer and no
+authorization layer. There are no sessions, no tokens, no login, no
+per-resource checks. `agents.conversations.user_id` and
+`agents.profiles.user_id` columns exist (`sql/001_agents_schema.sql:35,55`)
+but are never written — they're schema shape waiting for an identity
+that doesn't exist yet.
 
-There is no authentication layer: no login, no token, no session. The CLI
-trusts `process.argv` and `process.env` directly (`session.ts:35-37`,
-`config.ts:9-16`). Authorization is shape-only: every table carries
-`app_id` (`sql/001_agents_schema.sql:6,19,34,54`) and every query filters
-on it (`pg-vector-store.ts:74`, `profile.ts:6`, `supabase-trace-sink.ts:6`),
-but `app_id` is a **constant from the environment** (`config.ts:12`,
-default `'laptop'`), not derived from any authenticated identity. There is
-no per-resource authz check because there is no caller identity to check
-against.
+This is correct for single-device. There is exactly one principal (you)
+and nothing to authorize against. Naming it as a gap would be
+dishonest about the phase: you don't authenticate a process talking to
+its own laptop.
 
-This is correct for the laptop phase — there is one operator and one
-device. The gap becomes real the moment a second tenant shares the database.
-→ `02-shape-only-tenant-isolation.md` walks why the shape is there now and
-what flips it on.
-
-The classic authz gap (authn present, authz assumed) can't fire yet because
-neither exists. The buildable target: when the HTTP phase lands, derive
-`app_id` from a verified token claim, never from a request field or env
-default.
-
----
+The buildable target, stated so it's concrete: when buffr grows a
+second client (the phone/edge phase), `app_id` stops being a constant
+`'laptop'` (`src/config.ts:11`) and must become **token-derived** —
+extracted from a verified session, not read from an env default — and
+the database must enforce it with RLS, not trust the app to pass the
+right value. That's the jump from "shape-only isolation" to "enforced
+isolation." → see `02-shape-only-tenant-isolation.md` for why the
+shape is already in place and what flips when the control turns on.
 
 ## 3. input-validation-and-injection
 
-This is where the repo earns its strongest mark. **Every SQL sink is
-parameterized.** Walked one by one:
+This is where the repo is genuinely strong, and it's worth being
+precise about why.
 
-- **Vector upsert** — `pg-vector-store.ts:47-56`. Values bound as
-  `$1..$8`, the embedding cast `$6::vector`. The vector itself is built by
-  `toVectorLiteral` (`:15-17`) as a string, but it's still passed as a
-  *bound parameter*, not concatenated into the SQL text. **Memory writes
-  reuse this exact sink:** `createConversationMemory({ embedder, store })`
-  (`session.ts:53`) and `memory.remember(...)` (`session.ts:66`) embed the
-  exchange and call the same `PgVectorStore.upsert` — no new SQL path, same
-  parameterization.
-- **Vector search** — `pg-vector-store.ts:70-78`. The query vector
-  (`$1::vector`), `app_id` (`$2`), and `k` (`$3`) are all bound. `<=>` is
-  the pgvector distance operator, not interpolated user data.
-- **Document insert** — `runtime.ts:11-16`. `id`, `app_id`, `source_path`,
-  `content` all bound `$1..$4`.
-- **Profile read** — `profile.ts:5-6`. `app_id` bound `$1`.
-- **Conversation / message inserts** — `supabase-trace-sink.ts:5-7,27-36`.
-  All bound; the `created_at` value is bound and coalesced
-  (`coalesce($8::timestamptz, now())`).
+**SQL injection: resistant everywhere.** Every query that touches
+user- or model-derived data uses parameterized placeholders — the
+value never becomes part of the SQL string. Verified at every sink:
 
-There is no string-built query anywhere in `src/`. **`session.ts`** — the
-new long-lived chat session — contains *no SQL of its own*: every database
-touch goes through `startConversation` / `persistMessage` (the
-trace-sink helpers) or through `PgVectorStore` (search + memory upsert),
-all parameterized. The migration runner
-(`migrate.ts:13`) executes a whole SQL *file* as one statement, but that
-file is repo-controlled (`sql/001_agents_schema.sql`), not user input — not
-an injection sink. → `01-parameterized-sql-boundary.md` for the deep walk.
+- `src/pg-vector-store.ts:47` — chunk upsert, `$1..$8`, embedding as
+  `$6::vector`.
+- `src/pg-vector-store.ts:70` — vector search, `$1::vector`, `app_id`
+  `$2`, `k` `$3`. Even the kNN order-by binds the vector as a parameter.
+- `src/runtime.ts:11` — documents upsert, `$1..$4`.
+- `src/profile.ts:5` — profile read, `app_id` `$1`.
+- `src/supabase-trace-sink.ts:27` — message insert, `$1..$8`.
+- `src/supabase-trace-sink.ts:5` — conversation insert, `$1,$2`.
 
-**Other injection classes:**
-- *Command injection* — `not exercised`. No `exec`/`spawn` anywhere.
-- *Path traversal* — the only `fs` reads are operator-supplied argv paths
-  (`index-cmd.ts:23`, `eval-cmd.ts:20`). On a single-device tool the
-  operator already has the filesystem; no privilege boundary is crossed.
-- *SSRF* — `ollamaHost` comes from env (`config.ts:14`), used by the
-  embedder and model provider in `session.ts:40,46`, not from request
-  data, so the model HTTP target isn't attacker-controllable today.
-- *Prompt injection* — fires. → lens 7.
+The one place a vector becomes text — `toVectorLiteral`
+(`src/pg-vector-store.ts:15`) builds `[0.1,0.2,...]` — is **not** a SQL
+hole: the string is passed as a bound parameter (`$1::vector`,
+`src/pg-vector-store.ts:55,70`), not concatenated into the query. The
+numbers come from the embedder, not free text, and pg casts the bound
+literal. → `01-parameterized-sql-boundary.md` walks the one trap
+(building a `vector` literal) that *looks* like string-building but
+isn't.
 
----
+The session and memory paths add **no new SQL** — memory writes go
+through `PgVectorStore.upsert` (`src/session.ts:53` →
+`@aptkit/memory` → the parameterized upsert), so they inherit the same
+defense. No string-built query exists in this repo.
+
+**Migration runner: trusted-by-design.** `runMigration`
+(`src/migrate.ts:12`) executes a whole SQL file as one statement. That
+*is* arbitrary SQL execution — but the input is a file you wrote and
+ship in the repo (`sql/001_agents_schema.sql`), not user input. The
+trust assumption (the migration file is author-controlled) holds; this
+is not an injection sink.
+
+**Prompt injection: present, bounded.** See lens 7.
+
+**Command / path / SSRF / XSS:** N/A. No shell exec, no
+user-controlled filesystem path in the chat path (the `index` CLI
+reads paths from `argv`, `src/cli/index-cmd.ts:14` — operator input,
+not remote), no browser DOM, no user-controlled outbound URLs.
 
 ## 4. secrets-and-configuration
 
-One secret: `DATABASE_URL`. Hygiene is correct, with one forward-looking
-flag.
+Clean for the phase. The findings, ranked:
 
-- **Where it lives** — `.env`, read via `dotenv` (`session.ts:35`,
-  `migrate.ts:24`, `index-cmd.ts:10`, etc.) into `loadConfig`
-  (`config.ts:11`). Never hard-coded.
-- **What's in the repo** — `.env` is gitignored (`.gitignore:2`), and
-  `.env.example` (`:6`) ships an empty `DATABASE_URL=` with a "never commit
-  real creds" comment. The example file is the right pattern. (A real `.env`
-  exists on disk locally but is gitignored — confirm it was never committed
-  with `git log --all --full-history -- .env`.)
-- **No client bundle** — there's no browser build, so no secret can leak
-  into shipped JS. The `dist/` output is server-side Node only.
-- **Logs** — the secret is never written to stdout. Error messages on a
-  missing URL say `'DATABASE_URL is not set (see .env)'` (`session.ts:37`),
-  not the value.
+- **`.env` is the single secret store and it's gitignored.**
+  `.gitignore:2` lists `.env` and `.env.local`. `.env.example` ships
+  empty placeholders (`DATABASE_URL=`) with the warning "never commit
+  real creds." A history scan found no `.env` ever committed and no
+  `postgres://` / password literal in any tracked `src/` or `sql/`
+  file. Secrets are loaded at runtime via `dotenv`
+  (`src/session.ts:35`, `src/migrate.ts:24`, `src/cli/index-cmd.ts:10`).
+- **No secret reaches a client bundle.** There is no client bundle —
+  the Ink TUI runs in the same Node process that holds the env. There
+  is no browser, no `NEXT_PUBLIC_`-style leak vector.
+- **No secret in logs.** Errors surface as
+  `error: ${(err as Error).message}` in the TUI
+  (`src/cli/chat.tsx:31`) — a message string, never the connection
+  config. The trace sink persists model/tool events
+  (`src/supabase-trace-sink.ts`), never the `DATABASE_URL`.
 
-**The forward flag — full-privilege credential, client-held.** The
-connection string is a *full-privilege* Postgres credential: whoever holds
-it can read and write every row in `agents.*`, across every `app_id`, with
-no RLS to stop them. On the laptop that's fine — the operator owns the DB.
-But the plan (`agent-layer-plan.md`) names a centralized Supabase and a
-future phone/edge phase. The moment this credential lives on a device you
-don't physically control, "full-privilege connection string in a client"
-becomes the finding. The fix for that phase: a scoped role + RLS, or a
-server tier that holds the credential and the client holds a short-lived
-token. Named now so it's not a surprise later. → `02-` covers the RLS half.
-
-Secret rotation: `not yet exercised` — there's no rotation mechanism, which
-is fine for one local credential and a gap for a shared one.
-
----
+The one structural risk to flag — and it's a *posture* risk, not a
+leak: **`DATABASE_URL` is a full-privilege connection string held in
+the application process** (`src/db.ts:4`, `src/config.ts:11`). The
+laptop process can do anything to `reindb` because the credential
+grants everything. Acceptable now (the client is your own machine; the
+blast radius is your own data). The control to add at the phone/edge
+phase: the client should hold a *scoped, short-lived* credential (a
+Supabase anon/role key behind RLS, or a token-minted connection), not
+the owner string. Naming this now is the point — the schema already
+carries `app_id` so the isolation the scoped credential would enforce
+is pre-shaped. → `02-shape-only-tenant-isolation.md`.
 
 ## 5. data-exposure-and-privacy
 
-Single operator, single device — there's no "caller entitled to less than
-they get," because the caller is entitled to everything. So most of this
-lens is structurally N/A. Two real notes:
+Low surface, one thing to watch.
 
-- **Trajectory capture stores everything — and now stores *more*.**
-  `agents.conversations` and `agents.messages` persist every turn. The
-  trace sink now captures **all six** `CapabilityEvent` variants, not just
-  assistant steps and tool results: `step`, `tool_call_start` (with the
-  tool *args* — the cause), `tool_call_end` (result + `durationMs` + error),
-  `model_usage` (provider/model + token counts), `warning`, and `error`
-  (`supabase-trace-sink.ts:56-84`). That's *intended* — a complete,
-  replayable trajectory for future fine-tuning (`agent-layer-plan.md`),
-  and it fills the previously-orphaned `tokens_used` column. But it's a
-  minor data-at-rest consideration: tool-call arguments and model usage now
-  live in Postgres indefinitely alongside the question text, with no
-  redaction and no TTL. Memory chunks (`session.ts:66`) add a second copy of
-  the exchange in `agents.chunks`. On a shared DB that's a privacy surface;
-  on the laptop it's your own data.
-- **Error verbosity.** Errors throw raw (`pg-vector-store.ts:60-64`
-  re-throws after rollback; CLI errors throw strings). There's no error
-  handler that leaks a stack to a *remote* caller because there's no remote
-  caller. When the HTTP phase lands, raw error propagation becomes a
-  data-exposure finding — Postgres errors can echo SQL and column names.
-
-No PII in logs beyond what the operator types. No over-fetching across a
-trust boundary, because there's only one tenant reaching its own rows.
-
----
+- **No over-fetching to a caller.** Queries select only what's used:
+  `search` returns id/content/score/meta (`src/pg-vector-store.ts:71`),
+  `loadProfile` selects `content` only (`src/profile.ts:5`). There's no
+  API returning rows to an untrusted client — the only consumer is the
+  in-process agent.
+- **Error messages are not verbose.** The TUI shows `err.message`
+  (`src/cli/chat.tsx:31`), not a stack trace or DB internals. Pool
+  errors that would carry the connection string are not surfaced to a
+  rendered string.
+- **The privacy detail worth naming: full-signal trajectory capture.**
+  `SupabaseTraceSink` (`src/supabase-trace-sink.ts`) persists *every*
+  `CapabilityEvent` — step content, tool-call args, tool results,
+  token usage — into `agents.messages`. Your questions, the retrieved
+  passages, and recalled memory all land in the database in cleartext.
+  On a single-user laptop writing to your own `reindb` that's a feature
+  (replayable trajectory). It becomes a data-exposure concern the
+  moment that DB is multi-tenant without RLS: the `messages` and
+  `chunks` (memory) rows of one `app_id` are protected only by the app
+  remembering to filter on `app_id` — see the next lens-7 and
+  `02-shape-only-tenant-isolation.md`. The control that closes it is
+  the same one (RLS), so it's not a second fix.
 
 ## 6. dependencies-and-supply-chain
 
-Small, lockfiled, low surface.
-
-- **Lockfile present** — `package-lock.json` exists at the root.
-  Reproducible installs.
-- **Runtime deps** — `@rlynjb/aptkit-core@^0.4.1` (the agent/RAG toolkit,
-  first-party), `dotenv`, `pg`, plus the chat TUI stack: `ink`,
-  `ink-spinner`, `ink-text-input`, `react` (`package.json:13-20`). `pg` is
-  battle-tested node-postgres; `dotenv` is tiny. The `ink`/`react` deps are
-  the new surface — they render the terminal UI (`cli/chat.tsx`) and never
-  touch the network or the database, so they don't sit on a trust boundary.
-  The largest trust surface is still `aptkit-core` itself — it's your own
-  published package, so the supply-chain risk is really "do you trust your
-  own build pipeline," a different question from a random transitive dep.
-- **No postinstall scripts** in the direct deps' manifest surface worth
-  flagging here; the install footprint is small.
-- **Update posture** — `not yet exercised`. No `npm audit` in CI (there's
-  no CI config in the repo), no Dependabot. For a three-dep local tool the
-  exposure is low, but running `npm audit` before the HTTP phase is the
-  cheap move.
-
-No known-CVE red flag fires on this dependency set as shaped.
-
----
+- **Lockfile present.** `package-lock.json` exists (35 KB, tracked).
+  Installs are reproducible; no "no lockfile" red flag.
+- **Tight, current dependency set.** `package.json` pins one app
+  toolkit (`@rlynjb/aptkit-core ^0.4.1`) plus `pg`, `dotenv`, `ink`,
+  `react`. No sprawling transitive web framework. aptkit-core
+  `bundledDependencies` the `@aptkit/*` workspace packages, so the
+  agent loop, tools, memory, and providers come from one vetted bundle
+  you author — not anonymous npm packages.
+- **Update / audit posture: not yet exercised.** There is no `npm
+  audit` step, no Dependabot/Renovate config, no CI running a
+  dependency check. No evidence of a postinstall-script risk in the
+  direct deps, but nothing *verifies* that on every install. The
+  buildable target: add `npm audit --omit=dev` (or `audit-ci`) to a CI
+  job so a known-CVE in `pg` or a transitive dep fails the build. One
+  line of CI; not present today.
 
 ## 7. llm-and-agent-security
 
-This is the lens that matters most for an AI repo, and buffr does two
-things right and carries one inherent surface.
+This is the lens that matters most for an AI repo, and buffr gets the
+two big decisions right.
 
-**The surface — indirect prompt injection.** The agent's only tool is
-`search_knowledge_base` (`session.ts:43`). When the model calls it, the
-retrieved chunk text is JSON-stringified and pushed back into the
-conversation as a `user` message (`run-agent-loop.js:79,97-104`). That text
-came from whatever was indexed (`index-cmd.ts:23-24` → `runtime.ts:17`) —
-*and now also from recalled conversation memory*. After each turn the chat
-session embeds the question+answer into the **same** vector store tagged
-`kind=memory` (`createConversationMemory`, `session.ts:53`; `memory.remember`,
-`session.ts:66`), so past turns surface through the very same search tool on
-later turns. So a document — or an earlier exchange that captured hostile
-text — containing "ignore your instructions and..." is now sitting in the
-model's context as data the model reads. This is the classic RAG injection
-surface and it's *inherent* to retrieval; memory slightly **widens** what can
-be surfaced (past turns are now retrievable) without changing the blast
-radius — it's still the one read-only tool. → `03-indirect-prompt-injection-surface.md`.
+- **Least-privilege tool scope — the strongest control in the repo.**
+  The agent is granted exactly one tool. `ragQueryToolPolicy` declares
+  `allowedTools: [SEARCH_KNOWLEDGE_BASE_TOOL_NAME]`
+  (`@aptkit/agent-rag-query`), `filterToolsForPolicy` builds an
+  allowlist `Set` and filters the catalog down to it
+  (`@aptkit/tools` `tool-policy.js`), and buffr only ever registers
+  that one tool (`src/session.ts:43-44`). The tool is **read-only** —
+  a knowledge-base search, no write/exec/network-egress capability.
+  Even if the model is fully hijacked, the worst it can do is *search*.
+  → `04-least-privilege-tool-scope.md` for the full walk.
+- **Bounded turns — the budget the loop can't exceed.** `runAgentLoop`
+  runs `for (let turn = 0; turn < maxTurns; turn++)` and forces a final
+  answer when `toolCalls.length >= maxToolCalls`
+  (`@aptkit/runtime` `run-agent-loop.js:25,27`). RagQueryAgent passes
+  `maxTurns: 6, maxToolCalls: 4`. There is no unbounded
+  reason-act loop; a hijack can't spin forever or fan out tool calls.
+- **Indirect prompt injection — present, low blast radius.** Indexed
+  documents come back as tool results (`src/pg-vector-store.ts:80`),
+  and *now so does recalled conversation memory* — memory rows live in
+  the same `chunks` table tagged `meta.kind='memory'` and resurface
+  through the **same** `search_knowledge_base` tool (`src/session.ts:52-53`,
+  `@aptkit/memory`). So a poisoned passage — or a poisoned earlier
+  turn that got remembered — re-enters the model's context as
+  retrieved content. The trust assumption "retrieved text is data, not
+  instructions" is *not* enforced by a gate; it's held by the two
+  controls above. Why that's acceptable: the agent is allowlisted to
+  one read-only tool with a 4-call budget, so the model can be *talked
+  into* a bad answer but cannot be talked into *an action* — there's no
+  write tool, no exec, no exfil channel to redirect. The blast radius
+  is a wrong answer, not a breach. → `03-indirect-prompt-injection-surface.md`.
+- **Output handling.** Model output flows to the TUI as display text
+  (`src/cli/chat.tsx:29`). It does **not** flow into any SQL, shell, or
+  fs sink — the only thing built from data near the model is the vector
+  literal, and that's from the embedder, bound as a parameter. No
+  "model emits SQL → we run it" path exists. Correct.
 
-**Control 1 — least-privilege tool scope.** The blast radius of that
-injection is small because the agent can only *search*. The policy
-`ragQueryToolPolicy` allows exactly one tool
-(`rag-query-agent.js:7-11`), and `filterToolsForPolicy`
-(`tool-policy.js:2-10`) strips the model's tool menu down to that allowlist
-before every run (`rag-query-agent.js:36-37`). There is no write tool, no
-shell tool, no fetch tool. An injected instruction can at worst make the
-model run another search — it can't exfiltrate, can't delete rows, can't
-call out to the network. → `04-least-privilege-tool-scope.md`.
-
-**Control 2 — bounded loop.** Hard caps stop a runaway or a
-prompt-injection-induced loop: `maxTurns: 6`, `maxToolCalls: 4`
-(`rag-query-agent.js:48-49`), enforced in `run-agent-loop.js:25-28` with a
-forced synthesis turn when the budget is spent (`:30-32`,
-`buildSynthesisInstruction` at `:17-19`). Tool output is also truncated at
-16K chars (`run-agent-loop.js:2-7`) — a blast-radius limiter, not a
-sanitizer.
-
-**Output handling.** Model output is *not* treated as code or SQL. The
-`agent.answer()` return is a plain string rendered to the terminal as a
-React text node (`session.ts:63` → `cli/chat.tsx:29,46`). No `eval`, no
-model-emitted SQL reaching a query sink. The one place model output
-influences a query is the tool's `filter`
-arg, and the tool deliberately treats a hallucinated filter key as a no-op
-rather than letting it wipe results (`search-knowledge-base-tool.js:48-53`).
-
-**The honest gap:** there's no input/output content gate on the retrieved
-text — nothing scans an indexed chunk for injection markers before it
-reaches the model. That's acceptable now (low blast radius, single
-operator, you chose what to index), and it becomes worth building when the
-corpus includes content from sources you don't control.
-
----
+The honest gap at this lens: there's **no content-level injection
+defense** (no delimiting of retrieved text, no instruction-stripping,
+no separate "data" channel). It's not needed yet *because* the tool
+scope makes injection low-value. It becomes worth adding the day the
+agent gets a second, non-read-only tool. That's the same trigger as
+the auth/RLS work — the controls turn on together.
 
 ## 8. security-red-flags-audit
 
-The consolidated checklist, marked against this repo.
+The capstone checklist, fired against this repo.
 
 ```
-  red flag                                fires?  where / why
-  ──────────────────────────────────────  ──────  ───────────────────────────
-  String-built SQL with user input        NO      all sinks parameterized
-                                                   (pg-vector-store.ts:47,70;
-                                                   memory reuses same upsert)
-  Input trusted "from our own frontend"   N/A     no frontend exists
-  Endpoint checks authn not authz         N/A     no auth layer yet (lens 2)
-  Secret in source / client bundle        NO      .env gitignored (.gitignore:2)
-  Secret in logs                          NO      only "not set" messages
-  Full-privilege cred on a client         DEFERRED .env DATABASE_URL — fine on
-                                                   laptop, flag for edge phase
-  No tenant isolation (RLS)               DEFERRED app_id is shape-only, no RLS
-                                                   (sql/001 — no policies). → 02
-  No lockfile                             NO      package-lock.json present
-  Known-CVE dep unpatched                 NO      3 small deps, none flagged
-  Command injection sink                  NO      no exec/spawn
-  Path traversal across priv boundary     NO      operator-supplied paths only
-  SSRF (request-controlled URL)           NO      ollamaHost from env, not input
-  Agent tool set exceeds task             NO      one read-only tool, allowlisted
-                                                   (rag-query-agent.js:7-11) → 04
-  Model output into a sink ungated        NO      output is a printed string
-  Prompt injection via indexed content    FIRES   inherent RAG surface, now
-    AND recalled conversation memory               also recalled memory
-                                                   (session.ts:53,66); low
-                                                   blast radius → 03
-  Unbounded agent loop                    NO      maxTurns/maxToolCalls capped
-  Raw error to remote caller              N/A     no remote caller yet (lens 5)
-  Secret rotation mechanism               DEFERRED none — fine for one local cred
+  flag                                 status   where / why
+  ───────────────────────────────────  ───────  ─────────────────────────
+  string-built SQL with user input     DOESN'T  all sinks parameterized
+                                                 ($1..$8, $1::vector)
+  secret in source / bundle / logs     DOESN'T  .env gitignored, never
+                                                 committed; no client bundle
+  no lockfile                          DOESN'T  package-lock.json tracked
+  endpoint checks authn not authz      N/A      no endpoints, no auth yet
+  verbose error leaks internals        DOESN'T  TUI shows err.message only
+  agent tool set exceeds task          DOESN'T  1 read-only tool, allowlist
+                                                 enforced (lens 7)
+  unbounded agent loop                 DOESN'T  maxTurns 6 / maxToolCalls 4
+  model output into a sink (SQL/exec)  DOESN'T  output → display only
+  ───────────────────────────────────  ───────  ─────────────────────────
+  tenant isolation enforced (RLS)      FIRES    app_id shape-only, no RLS,
+                                       (defer)   not token-derived
+                                                 → acceptable: single user
+  client holds full-priv credential    FIRES    DATABASE_URL = owner string
+                                       (defer)   in process (src/db.ts:4)
+                                                 → acceptable: own laptop
+  indirect prompt injection gated      FIRES    no content gate on retrieved
+                                       (low)     docs + recalled memory
+                                                 → low blast radius (lens 7)
+  dependency CVE check in CI           FIRES    no npm audit / CI gate
+                                       (defer)   → add one-line audit job
 ```
 
-**Verdict.** Two findings *fire or defer* with weight: tenant isolation is
-shape-only (DEFERRED, the most important one) and indexed content is an
-indirect-prompt-injection surface (FIRES, but low blast radius behind a
-one-tool allowlist). Everything else is either clean or honestly `not yet
-exercised` because the single-device shape hasn't built the boundary it
-would guard. The repo's security posture is *appropriate to its phase* —
-the parameterized-SQL discipline and the least-privilege tool scope are
-real, deliberate controls, not accidents.
-
-Updated: 2026-06-24 — purged `ask`/`ask-cmd.ts` refs → `chat` (`session.ts` + `cli/chat.tsx`); re-verified all SQL sinks incl. `session.ts` (no new SQL, memory upsert reuses parameterized `PgVectorStore`); noted recalled conversation memory widens the injection surface (lens 1, 7, 8); trace sink now persists all 6 events incl. tool args + model usage (lens 5); aptkit-core 0.4.1 + ink/react TUI deps (lens 6); re-grounded file:line.
+Three flags fire as *deferred* and one as *low-severity-by-design*.
+None is a bug; each is a control whose absence is justified by the
+single-device phase, with a named trigger (a second client, a second
+tool) that turns the work on. The two-pass split below makes the
+deliberate controls — the ones that *are* doing work today — into
+their own files.

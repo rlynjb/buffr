@@ -1,95 +1,128 @@
-# Overview — what's interesting about this data model
+# 00 · Overview — the data model at a glance
 
-One page. The verdict, then the five things worth opening a file for.
+One page. The entity-relationship diagram for `buffr-laptop`, the three
+highest-cost findings, and a one-line verdict per audit lens. Open `audit.md`
+for the full lens walk; open the numbered pattern files for the deep reads.
 
-## The verdict
+## The whole schema in one frame
 
-buffr-laptop persists a RAG agent into one Postgres instance (`reindb`,
-schema `agents`). Five tables, one schema, one `vector(768)` column, one
-HNSW index, one real foreign key. The model is small and honest — it does not
-hide structure in a JSON blob, and it indexes the one hot path correctly.
-
-What makes it worth studying is the **tension between a relational schema and
-an external `VectorStore` contract**. aptkit's `VectorStore` interface
-(`src/pg-vector-store.ts:38`) speaks only `{id, vector, meta}` — it has never
-heard of a `documents` row. The schema bends in two visible places to honor
-that contract, and both bends are the kind of decision you defend in an
-interview.
-
-Two things changed since the first pass and are now true of the live data:
-(1) `chunks` holds a **second population** — episodic-memory rows
-(`memory:<conv>:<n>`, `meta.kind='memory'`, `document_id=null`) written by
-`@aptkit/memory` through the same store (`src/session.ts:53,67`); this is the
-dropped FK earning its keep. (2) The trajectory table is now **fully written** —
-the fixed trace sink populates `tool_calls`/`tool_results`/`model`/`tokens_used`
-and sets `created_at` from the event timestamp (previously those columns sat
-null). The driver is now `npm run chat` (a long-lived session), not the
-deleted one-shot `ask` CLI.
-
-## The map: which axis flips where
-
-Trace one axis — *who guarantees this fact is correct?* — across the schema,
-and watch the answer flip at the seams.
+Five tables in the `agents` schema, one real foreign key, one deliberately
+dropped one. Read this before anything else.
 
 ```
-  axis traced: "who enforces correctness here?"
+  agents schema (database reindb) — entities, columns, cardinality
 
-  ┌─ messages → conversations ──────────────────────┐
-  │  the DATABASE (FK + on delete cascade)           │  ← strongest
-  └──────────────────────────────────────────────────┘
-                       seam: FK present vs FK dropped
-  ┌─ chunks → documents ────────────────────────────┐
-  │  NOBODY (soft link, FK explicitly dropped :27)   │  ← weakest
-  └──────────────────────────────────────────────────┘
-                       seam: column vs auth boundary
-  ┌─ app_id tenant isolation ───────────────────────┐
-  │  the APP, if it remembers `where app_id=$2`      │  ← hopeful
-  │  (no RLS, not token-derived)                      │
-  └──────────────────────────────────────────────────┘
-                       seam: one column vs two stores
-  ┌─ chunk text correctness ────────────────────────┐
-  │  NOBODY — stored in content AND meta.text,        │  ← redundant
-  │  nothing keeps them equal                          │
-  └──────────────────────────────────────────────────┘
+  ┌─ documents ──────────────┐         ┌─ chunks ─────────────────────┐
+  │ id            text  (pk) │ 1     N │ id            text  (pk)     │
+  │ app_id        text       │◄- - - - │ document_id   text  (soft)   │
+  │ source_type   text       │  soft   │ app_id        text           │
+  │ source_path   text       │  link   │ chunk_index   int            │
+  │ content       text       │ no FK   │ content       text  ◄┐ same  │
+  │ meta          jsonb      │         │ embedding     vec(768)│ text  │
+  │ created_at    tstz       │         │ embedding_model text │ twice │
+  └──────────────────────────┘         │ meta          jsonb ─┘ (.text)│
+                                       └──────────────────────────────┘
+                                        idx: hnsw(embedding cosine), app_id
+
+  ┌─ conversations ──────────┐         ┌─ messages ───────────────────┐
+  │ id            uuid  (pk) │ 1     N │ id            uuid  (pk)     │
+  │ app_id        text       │◄════════│ conversation_id uuid (FK,    │
+  │ user_id       text       │  REAL   │   on delete cascade)         │
+  │ agent_name    text       │  FK     │ role / content text          │
+  │ created_at    tstz       │         │ tool_calls    jsonb          │
+  └──────────────────────────┘         │ tool_results  jsonb          │
+                                       │ model / tokens_used          │
+  ┌─ profiles ───────────────┐         │ created_at    tstz           │
+  │ id  uuid (pk) / app_id   │         └──────────────────────────────┘
+  │ user_id / content / upd  │
+  └──────────────────────────┘
+
+  ══ enforced FK (cascade)   - - soft link, FK dropped on purpose
+  every table carries app_id default 'laptop'; no RLS anywhere
 ```
 
-Same schema, four different answers to "who keeps this true." That spread —
-from a real cascade FK down to no enforcement at all — is the lesson.
+Two clusters. The **retrieval cluster** (`documents` + `chunks`) is where RAG
+lives — and where the integrity is deliberately loosened so the chunk table can
+double as a `VectorStore`. The **trajectory cluster** (`conversations` +
+`messages`) is where every agent run is recorded, and it's the only place a real
+foreign key shows up. `profiles` stands alone.
 
-## The five (six) things worth a file
+## The three highest-cost findings
 
-1. **`01-vector-column-and-ann-index`** — the `vector(768)` column + HNSW
-   `vector_cosine_ops`. This is the load-bearing structure: it turns a
-   full-table distance scan into a graph walk. The pattern that makes the app
-   a RAG app.
+Ranked worst-first by what they'd cost you when the data grows or the second
+device shows up.
 
-2. **`02-text-stored-twice`** — chunk text in `chunks.content` *and* inside
-   `chunks.meta` jsonb. The worst normalization finding, and a deliberate one.
-   The DB analog of information leakage.
+### 1. The document→chunk write is non-atomic across two transactions
 
-3. **`03-deterministic-chunk-ids`** — `id = "<docId>#<index>"`. The id
-   *encodes* its identity, which is what makes the `on conflict (id) do
-   update` re-indexing idempotent with no `unique(document_id, chunk_index)`.
+`indexDocumentRow` writes the `documents` row on the pool (one implicit
+transaction), then calls `pipeline.index(...)` which lands in
+`PgVectorStore.upsert` — its **own** `begin/commit` on a *different* pooled
+connection. Crash between them and you get a `documents` row with no chunks, or
+(on a partial pipeline failure) the inverse. Nothing rolls the pair back
+together.
 
-4. **`04-soft-link-no-fk`** — `chunks.document_id` with the FK explicitly
-   dropped for `VectorStore` drop-in parity. The schema bending to a
-   document-store contract.
+```
+  File: src/runtime.ts:11-17   +   src/pg-vector-store.ts:40-65
+  Cost: orphaned half-writes; silent corpus drift; no way to detect it
+  Fix:  thread one client through both writes, or make indexing
+        idempotent + add a reconciliation pass. → 07-non-atomic-...md
+```
 
-5. **`05-app-id-tenant-column`** — `app_id` on every table. Multi-tenant in
-   shape only: no RLS, not token-derived. The future seam, not a current
-   boundary.
+### 2. Chunk text is stored twice, editable in two places
 
-6. **`06-trajectory-tables`** — conversations/messages, append-only event
-   capture across a chat session, and the one genuine FK with `on delete
-   cascade`. The counter-example to the soft link: here the schema *does*
-   enforce integrity. Now also the place to see a *fully populated* event log —
-   all six `CapabilityEvent` types written, `tool_calls`/`tool_results`/`model`/
-   `tokens_used` filled, `created_at` from the event timestamp.
+Every chunk's text lives in `chunks.content` (a real column) **and** in
+`chunks.meta.text` (jsonb). `upsert` writes both from the same source;
+`search` reads `content` back out and *re-injects* it as `meta.text`. Two copies
+of one fact, no constraint keeping them equal. This is information leakage in
+data form.
 
-Start with `audit.md` for the full lens sweep; come here for the shortlist;
-open the numbered files for the deep walks.
+```
+  File: src/pg-vector-store.ts:46-56 (write both) / 80-84 (read+rebuild)
+  Cost: an update to one copy silently disagrees with the other
+  Fix:  pick content as SSOT, drop meta.text, project it on read. → 02-...md
+```
 
----
-Updated: 2026-06-24 — `chunks` now has a second (memory) population; trajectory
-columns now populated by the fixed trace sink; driver is `npm run chat` not the
-deleted `ask` CLI.
+### 3. `app_id` looks like tenancy but enforces nothing
+
+Every table has `app_id text default 'laptop'`. It's filtered in the hot
+search path (`where app_id = $2`) but there's **no RLS**, and `app_id` is a
+constructor default, **not** derived from any auth token. Today (single device)
+that's fine. The moment a second app or a second user shares this database, this
+column is a filter you can forget, not a boundary the DB enforces.
+
+```
+  File: sql/001_agents_schema.sql (every table) / pg-vector-store.ts:74
+  Cost: cross-tenant read the day isolation actually matters
+  Fix:  RLS policies keyed on a token-derived app_id. → 05-...md (+ study-security)
+```
+
+## Verdict per lens
+
+```
+  lens                        verdict
+  ──────────────────────────  ─────────────────────────────────────────
+  1 schema shape              clean 5-table relational model; 2 clusters,
+                              jsonb escape hatches used with discipline
+  2 normalization             one real duplication (text stored twice);
+                              otherwise normalized → 02
+  3 indexes vs queries        hot search path fully covered (HNSW + app_id);
+                              messages-by-conversation read has NO index → audit
+  4 transactions/integrity    upsert is atomic; the cross-call doc+chunk
+                              write is NOT; one real FK, rest soft → 07, 03
+  5 migrations/evolution      single idempotent file, transactional runner;
+                              no versioning table, no down-migrations → audit
+  6 access pattern/storage    Postgres earns its place (vector + relational
+                              colocated); SQLite-primary is system-design → audit
+  7 red-flags capstone        4 flags fired, all understood + deliberate → 07-file
+```
+
+## The one-line summary
+
+The dominant shape is a **vector store wearing a relational schema**: the
+`chunks` table is engineered to be a drop-in `VectorStore`, which is why its
+foreign key is dropped and its text is duplicated — both are parity costs paid
+on purpose. The single highest-leverage fix is making the document+chunk write
+atomic (finding 1); it's the only finding that corrupts data rather than merely
+risking it later. Mostly N/A for this repo: partitioning, soft-deletes, schema
+versioning beyond `001`, and RLS — all named honestly in `audit.md` as *not yet
+exercised*, with the buildable target for each.

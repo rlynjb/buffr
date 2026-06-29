@@ -1,173 +1,277 @@
-# Chapter 1 — The Problem Brief
+# 01 — Problem Brief
 
-Three questions, in order, and you have to land all three: **what's the problem, why now, and why you.** Most engineers can answer "what" — they describe the thing they built. The senior move is answering "why now" and "why you" without hand-waving, because those are the two that prove the project was *chosen* rather than stumbled into. A project you stumbled into is a hobby. A project you chose, for a reason, at a moment when the reason was sharp — that's a portfolio.
+**The load-bearing file.** Everything else in this bundle is a cut of this one. If you
+rehearse one file before a senior interview or a promo conversation, rehearse this. By the
+end you should be able to justify the problem *before* you've described the solution — and
+hold every follow-up.
 
-```
-  THE PROBLEM BRIEF — three questions, one shape
+## Zoom out — where the problem sits
 
-  ┌─ WHAT ────────────────────────────────────────────────┐
-  │  a self-hosted personal agent that centralizes your    │
-  │  data across your apps and "knows you over time"       │
-  │  (Hermes-shaped: lives on your machine, gets smarter)  │
-  └────────────────────────┬───────────────────────────────┘
-                           │
-  ┌─ WHY NOW ─────────────▼────────────────────────────────┐
-  │  you are at the pivot point — 7 yrs frontend → AI       │
-  │  engineering. The portfolio IS the pivot. No artifact, │
-  │  no proof, no pivot. The cost compounds every month.   │
-  └────────────────────────┬───────────────────────────────┘
-                           │
-  ┌─ WHY YOU ─────────────▼────────────────────────────────┐
-  │  it composes work you already shipped: AdvntrCue RAG,  │
-  │  dryrun/contrl on-device AI, aipe tooling, me.md. This │
-  │  is the project that ties the scattered packages into  │
-  │  one case for the frontend+AI combination.             │
-  └────────────────────────────────────────────────────────┘
-```
-
-That's the brief. The rest of the chapter is each box, expanded into the answer you say out loud.
-
-## What the problem actually is
-
-  ┌─────────────────────────────────────────────────────────┐
-  │ THEY ASK                                                 │
-  │   "So what is this thing?"                               │
-  │                                                         │
-  │ WHAT THEY'RE TESTING                                     │
-  │   Can you state the problem without reciting features?  │
-  │   Do you know the shape of the thing, or just its       │
-  │   parts? A features list is a junior answer; a problem  │
-  │   statement is a senior one.                             │
-  └─────────────────────────────────────────────────────────┘
-
-The north star, in your own design doc's words, is *"an agent that lives across your surfaces, owns a model of you, and acts"* — Hermes' framing of "not a chatbot; an agent that lives on your machine and gets smarter." Don't lead with "it's a RAG app." Lead with the shape:
-
-> "The problem is that my data and my context are scattered across every app I use, and nothing knows me over time. I wanted a self-hosted personal agent — one that centralizes the *agent layer* across my apps, holds a persistent model of me, and runs on my own machine so the data stays mine. It's Hermes-shaped: an agent that lives on your machine and gets smarter, not a chatbot you re-explain yourself to every session."
-
-Notice what that answer does. It names the *pain* (scattered data, no memory, nothing that's actually yours) before it names the solution. The features — pgvector, the agent loop, the trajectory capture — are downstream of that. If you start at the features, the interviewer doesn't know what they're *for*.
-
-  ┃ "Lead with the pain, not the parts. 'My context is
-  ┃  scattered and nothing remembers me' is a problem.
-  ┃  'It uses pgvector' is a feature."
-
-## Why now — the pivot is the clock
-
-  ┌─────────────────────────────────────────────────────────┐
-  │ THEY ASK                                                 │
-  │   "Why build this now? What changed?"                   │
-  │                                                         │
-  │ WHAT THEY'RE TESTING                                     │
-  │   Is there a real forcing function, or did you just     │
-  │   have a free weekend? "Why now" is where most          │
-  │   personal projects collapse — there's no clock, so     │
-  │   the project reads as aimless.                         │
-  └─────────────────────────────────────────────────────────┘
-
-This is the one that's specifically *yours*, and it's the strongest card you hold. You are not building this in a vacuum — you're at a deliberate career pivot, and the clock is the pivot itself.
-
-> "I'm seven-plus years into frontend — Vue and React, shipped to FedEx, Amazon, CoreWeave — and I'm deliberately pivoting into AI engineering. The pivot isn't a plan; it's happening now. And a pivot needs proof. I can say 'I do AI engineering' in an interview all day, but the thing that actually moves a hiring manager is an artifact that *shows* it — provider contracts, a RAG pipeline I built, eval numbers I can defend. The cost of not building it isn't zero; it compounds. Every month without the portfolio case is a month I'm pitching the pivot on assertion instead of evidence. So 'why now' is: the pivot is the forcing function, and the longer I wait, the weaker the pitch."
-
-The "cost compounds" framing is the senior move here. A junior says "I had time." A senior names the *cost of not solving it* — and frames it as a compounding cost, not a one-time miss. (The full cost-of-doing-nothing argument is Chapter 3's `do nothing` option; here you just plant the flag.)
+Before the pain, see the whole shape: a career pivot, a portfolio, and one project that
+has to carry the weight of proving a combination is real.
 
 ```
-  WHY NOW — the cost of waiting compounds
+  Zoom out — the problem lives at the pivot point, not in the product
 
-  pitch strength
-    │
-  strong ┤                            ● with portfolio artifact
-    │                          ╱
-    │                    ╱
-    │              ╱
-  weak  ┤━━━━━━━━━━━━━━━━━━━━━━━━━━━●  assertion only, drifting down
-    │   the pivot started here    every month without proof
-    └──────────────────────────────────────────► time
-          "I'm pivoting"      "here are the numbers"
-
-  the gap between the two lines IS the cost of not building it
+  ┌─ Career layer (the actual problem) ──────────────────────────────────┐
+  │  7yr frontend engineer  →  ★ PIVOT POINT ★  →  AI engineer           │ ← we are here
+  │  Vue/React, FedEx/Amazon/CoreWeave, ~$700K savings                    │
+  │  the pivot is unproven until ONE artifact proves the combination      │
+  └───────────────────────────────┬──────────────────────────────────────┘
+                                  │ the artifact must EXPOSE engineering, not hide it
+  ┌─ Product layer (the vehicle) ─▼──────────────────────────────────────┐
+  │  self-hosted personal agent — centralizes the AGENT LAYER, knows her  │
+  │  over time (Hermes-shaped)                                            │
+  └───────────────────────────────┬──────────────────────────────────────┘
+                                  │ built end-to-end, measured
+  ┌─ Engineering layer (the proof) ▼─────────────────────────────────────┐
+  │  provider contract · RAG from scratch · evals with numbers           │
+  │  the parts "a turnkey tool hides" (agent-layer-plan.md:25)           │
+  └───────────────────────────────────────────────────────────────────────┘
 ```
 
-## Why you — the project composes what you already shipped
+Zoom in. The pain is not "I lack a personal assistant." Plenty of those exist to buy. The
+pain is **"my pivot from frontend to AI engineering is unproven, and the thing that would
+prove it has to be a system whose hard parts I built myself."** The product is the vehicle.
+The career proof is the cargo. Confuse the two and you'll defend the wrong problem in the
+room.
 
-  ┌─────────────────────────────────────────────────────────┐
-  │ THEY ASK                                                 │
-  │   "Why are you the right person to build this — or       │
-  │    why does this project make sense for you             │
-  │    specifically?"                                       │
-  │                                                         │
-  │ WHAT THEY'RE TESTING                                     │
-  │   Is this a random project, or does it sit on top of    │
-  │   real prior work? A project that composes your past    │
-  │   shipped work is credible; a from-nothing project      │
-  │   reads as a tutorial you followed.                     │
-  └─────────────────────────────────────────────────────────┘
+## Structure pass
 
-This is where you stop being "a frontend engineer who tried an AI project" and become "the engineer for whom this exact project is the obvious next move." The argument is *composition* — every package this agent needs, you've shipped a version of before:
+**Layers:** career (the real problem) → product (the vehicle) → engineering (the proof).
+The justification has to be coherent across all three at once.
+
+**Axis — *who is this evidence for?*** Trace it down the layers and watch it flip:
 
 ```
-  WHY YOU — the agent's packages map to your shipped work
+  one axis — "who is the audience for the evidence?" — traced down
 
-  this agent needs…          you already shipped…
-  ─────────────────────       ──────────────────────────────
-  RAG / retrieval        ◄──  AdvntrCue (Next.js + pgvector +
-                              GPT-4, classic RAG, shipped)
-  on-device / local AI   ◄──  dryrun (Gemini Nano on-device),
-                              contrl (MediaPipe real-time ML)
-  local-first storage    ◄──  buffr (SQLite primary + Supabase
-                              mirror), dryrun (GitHub-as-store)
-  the skills / tooling   ◄──  aipe (markdown-as-source-of-truth,
-                              prompt templates as code)
-  a model of you         ◄──  me.md (hand-built profile, now a
-                              row in agents.profiles)
-
-  none of these is new to you. the project ties them
-  into ONE case for the frontend+AI combination.
+  ┌─ career layer ────────────────┐   audience = a hiring manager / promo committee
+  │ proves the pivot is real      │   evidence = a shipped, measured artifact
+  └───────────────┬───────────────┘
+  ┌─ product layer ▼──────────────┐   audience = future-her (the one user)
+  │ an agent that knows her       │   evidence = it works on her own data
+  └───────────────┬───────────────┘
+  ┌─ engineering layer ▼──────────┐   audience = a senior engineer reviewing the code
+  │ the parts Hermes hides        │   evidence = numbers (precision@k, faithfulness)
+  └───────────────────────────────┘
 ```
 
-Said out loud:
+The axis-answer flips at every layer — and *that contrast is the whole brief*. The single
+user is the right audience at the product layer; the hiring manager is the audience at the
+career layer; the senior engineer is the audience at the engineering layer. The brief is
+strong precisely because it doesn't pretend one audience is all three.
 
-> "I'm the right person for this because it composes work I've already shipped, not work I'm learning from scratch. I built classic RAG in AdvntrCue with pgvector and GPT-4. I built on-device AI in dryrun with Gemini Nano and real-time on-device ML in contrl with MediaPipe. I built local-first storage in buffr — SQLite primary, Supabase mirror — and markdown-as-source-of-truth tooling in aipe. And me.md is a model-of-me I hand-built before this project existed. This agent isn't a new skill. It's the project that *ties those five scattered things together* into one coherent case for the frontend-plus-AI combination I'm pivoting into. That's why it's the right project for me specifically — nobody else's portfolio composes exactly these pieces."
+**Seam:** the load-bearing boundary is the one between **"buy a tool that works"** and
+**"build the parts that signal skill."** That's where the problem's value lives — the
+build-vs-buy decision (deep-walked in `03-options-and-opportunity-cost.md`). The moment you
+choose *buy*, the career-layer evidence evaporates, even though the product-layer pain is
+satisfied. The seam is load-bearing because the axis-answer "who is the evidence for?"
+flips across it: buying satisfies future-her, building satisfies the hiring manager.
 
-  ┃ "The strongest 'why me' isn't 'I'm smart.' It's
-  ┃  'I already shipped every piece of this separately —
-  ┃  this is the project that composes them.'"
+## The brief — answered in order
 
-## When you're cornered
+### 1. User or operational problem — who experiences what pain
 
-  ╔═════════════════════════════════════════════════════════╗
-  ║ IF THEY SAY                                              ║
-  ║   "This sounds like a personal hobby. Where's the real   ║
-  ║    user, the real problem?"                             ║
-  ║                                                         ║
-  ║ DON'T                                                    ║
-  ║   Invent users. Don't claim "thousands of people need   ║
-  ║   this." You have one user. Pretending otherwise is the ║
-  ║   fastest way to lose the room.                         ║
-  ║                                                         ║
-  ║ DO                                                       ║
-  ║   "There's one user — me — and that's deliberate. The   ║
-  ║    real problem this solves isn't a market problem,     ║
-  ║    it's a *proof* problem: I need defensible evidence    ║
-  ║    that I can do AI engineering, and a self-hosted       ║
-  ║    personal agent is the densest single artifact that   ║
-  ║    exercises a provider contract, a RAG pipeline, a      ║
-  ║    centralized schema, and measured evals all at once.   ║
-  ║    The honesty about scope is the point — I built one    ║
-  ║    good agent and measured it, instead of faking a       ║
-  ║    platform with imaginary users."                      ║
-  ╚═════════════════════════════════════════════════════════╝
+**The user is Rein.** One user, deliberately. The pain has two faces and you must name
+both:
 
-The trap here is the temptation to inflate. Don't. The honest framing — *this is a portfolio case with one user and a real purpose* — is stronger than a fabricated market, because it's defensible under follow-up and a fabricated market isn't. The moment you claim users you don't have, the interviewer's next question dismantles you.
+- **Product-face pain:** her data lives scattered across her apps (`buffr`, `contrl`,
+  `blooming_insights`, …), and no single agent reasons over it or "knows her over time."
+  Each app has its own schema; nothing composes them into one model-of-her.
+- **Career-face pain (the real one):** she's mid-pivot from frontend to AI engineering,
+  and the pivot is **unproven**. A résumé that says "7 years Vue/React + now AI" is a
+  claim with no artifact behind it. The portfolio is *"the case for that combination"*
+  (`me.md`, "WHO YOU ARE"). Without one end-to-end, measured AI-engineering build, the
+  combination is asserted, not demonstrated.
 
-## The one-page version
+Lead with the career-face pain in any interview. The product is real, but the product is
+the *vehicle* — the engineering judgment it forces you to exercise is the deliverable.
 
-**Core claim:** The problem is a self-hosted personal agent that centralizes the agent layer across your apps and knows you over time. *Why now*: you're at a deliberate frontend-to-AI pivot, and the portfolio artifact is the proof the pivot needs — the cost of not building it compounds every month. *Why you*: it composes five things you've already shipped (AdvntrCue RAG, dryrun/contrl on-device AI, buffr local-first, aipe tooling, me.md) into one coherent case.
+### 2. Evidence and current cost — what's documented vs inferred
 
-**The questions, one-line answers:**
-- "What is it?" → A Hermes-shaped self-hosted personal agent; centralizes the agent layer, holds a model of you, runs on your machine.
-- "Why now?" → The pivot is the clock; without the artifact the pivot is assertion, and that cost compounds.
-- "Why you?" → It composes my five shipped projects; nobody else's portfolio composes exactly these.
-- "Isn't it a hobby?" → One user, deliberately. The problem is a *proof* problem, not a market problem, and I'm honest about that.
+**Distinguish hard evidence from inference. Say which is which — a brief that blurs them
+loses the room on the first follow-up.**
 
-**The pull quote you keep:** *"The strongest 'why me' isn't 'I'm smart' — it's 'I already shipped every piece of this separately, and this is the project that composes them.'"*
+```
+  evidence ledger — documented vs inferred
 
-→ Next: Chapter 2, the scope cuts. Once they accept the problem is real, they ask why you built so *little* of it. That restraint is its own signal.
+  ┌─ DOCUMENTED (cite these) ────────────────────────────────────────────┐
+  │ • "a turnkey tool hides exactly the parts that signal engineering    │
+  │    skill"                              agent-layer-plan.md:25         │
+  │ • the deliverable is "one good agent with measured eval numbers —    │
+  │    not a platform"                     agent-layer-plan.md:6          │
+  │ • build-vs-buy evaluated against Hermes DIRECTLY, chose build        │
+  │                                        agent-layer-plan.md:13-35      │
+  │ • centralize the AGENT LAYER, not the DATA  agent-layer-plan.md:83   │
+  │ • Phase-4 one-pager is THE portfolio artifact  agent-layer-plan.md:33│
+  │ • the build was actually shipped to v1b (laptop brain, persistent,   │
+  │    live against reindb 2026-06-19)  ...graduation-design.md:199-217  │
+  │ • 7yr frontend, FedEx/Amazon/CoreWeave, ~$700K savings  me.md        │
+  │ • adjacent pieces already shipped: AdvntrCue RAG, dryrun/contrl      │
+  │    on-device AI, aipe  me.md (system-design portfolio)               │
+  └───────────────────────────────────────────────────────────────────────┘
+
+  ┌─ INFERRED (label it when you say it) ────────────────────────────────┐
+  │ • that this artifact will MOVE a specific hiring decision — likely,  │
+  │    but not yet proven; the eval numbers don't exist yet              │
+  │ • that "knows her over time" delivers daily product value — the      │
+  │    one user hasn't lived with it long enough to confirm             │
+  └───────────────────────────────────────────────────────────────────────┘
+```
+
+**The current cost** of the problem unsolved: the pivot stays a claim. Every month the
+combination is unproven is a month of interviews where "I'm moving into AI engineering"
+has no artifact to anchor it — and a frontend engineer *asserting* an AI pivot reads very
+differently from one who can open a repo and walk a measured RAG agent end-to-end.
+
+### 3. Why now — what changed, what compounds
+
+```
+  why now — the timing argument as a layered diagram
+
+  ┌─ what changed ───────────────────────────────────────────────────────┐
+  │  she is AT the pivot point (me.md: "this is where you are"), working  │
+  │  IK's frontend program in parallel with building AI-native projects   │
+  └───────────────────────────────┬──────────────────────────────────────┘
+                                  │ and the adjacent pieces already exist
+  ┌─ what's newly possible ───────▼──────────────────────────────────────┐
+  │  AdvntrCue proved RAG · dryrun/contrl proved on-device AI · aipe      │
+  │  proved meta-tooling — the parts are SHIPPED, ready to compose        │
+  └───────────────────────────────┬──────────────────────────────────────┘
+                                  │ and the cost compounds
+  ┌─ what compounds if deferred ──▼──────────────────────────────────────┐
+  │  every month unproven = interviews with no artifact + the adjacent    │
+  │  skills going stale instead of composing into one case                │
+  └───────────────────────────────────────────────────────────────────────┘
+```
+
+"Why now" is not "the technology is new." It's **"the pieces are already shipped and the
+pivot needs proof today, not eventually."** The build composes work she's *already done*
+(`me.md`'s five system shapes) into the one artifact the pivot lacks. Waiting doesn't make
+the parts easier to assemble — it lets them age separately while the claim stays unbacked.
+
+### 4. Beneficiaries and exclusions — who's in, who's deliberately out
+
+```
+  who benefits · who is intentionally outside scope
+
+  ┌─ IN scope (beneficiaries) ───────────┐  ┌─ OUT of scope (excluded) ──────────┐
+  │ • Rein — the one user AND the one     │  │ • other users / a user base        │
+  │   engineer whose portfolio this is    │  │   → "not a platform" (plan:6)      │
+  │ • future hiring managers / reviewers  │  │ • her other apps as consumers YET  │
+  │   (the evidence audience)             │  │   → HTTP API deferred (...graduation│
+  │                                       │  │     -design.md:27, YAGNI till app#2)│
+  │                                       │  │ • the phone brain / two-brain body  │
+  │                                       │  │   → deferred one-way door (07-      │
+  │                                       │  │     deferred-body.md)              │
+  └───────────────────────────────────────┘  └─────────────────────────────────────┘
+```
+
+The exclusions are the senior move. Naming who you *won't* serve — no user base, no
+multi-app HTTP consumers yet, no phone — is what separates a scoped portfolio problem from
+a wishlist. Each exclusion is documented as a deliberate cut, not an oversight (see
+`02-scope-cuts-and-non-goals.md`).
+
+### 5. Constraints — visible from the repo and the documented decisions
+
+```
+  constraints — what bounds the problem before solution design
+
+  ┌─ technical ──────────────────────────────────────────────────────────┐
+  │  • build-locally-first on an M-series Mac (Ollama gemma2:9b +         │
+  │     nomic-embed-text, both local)  context.md / agent-layer-plan.md   │
+  │  • embedding dimension is a ONE-WAY DOOR for data (768, locked)       │
+  │     agent-layer-plan.md:115                                           │
+  │  • Gemma has no native tool-calling — the riskiest piece              │
+  │     ...aptkit-packages-design.md:136                                  │
+  ├─ product ────────────────────────────────────────────────────────────┤
+  │  • one good agent end-to-end, measured — NOT a platform  plan:6       │
+  │  • centralize the agent layer, not the data — apps keep schemas plan:83│
+  ├─ time / resourcing ──────────────────────────────────────────────────┤
+  │  • one developer; ~4-week phase plan, each phase ends in a            │
+  │     hand-testable artifact  agent-layer-plan.md:89                    │
+  ├─ migration / reversibility ──────────────────────────────────────────┤
+  │  • defer the two-brain laptop+phone body to dodge one-way doors       │
+  │     07-deferred-body.md                                               │
+  └───────────────────────────────────────────────────────────────────────┘
+```
+
+These constraints aren't excuses — they're the frame that makes the scope honest. "One
+developer, four weeks, locally on a Mac, one user" is *why* the smallest-useful-slice
+discipline in `02` is the right call, not a compromise.
+
+## The "why her" close — the strongest single answer
+
+When a reviewer asks *"why are you the person to build this?"*, this is the answer that
+lands. It's not ambition — it's **composition of shipped work.**
+
+```
+  why her — the portfolio composes, it doesn't start over
+
+  ┌─ already shipped (me.md system-design portfolio) ────────────────────┐
+  │  AdvntrCue   → classic RAG, pgvector + GPT-4 (the retrieval layer)    │
+  │  dryrun      → on-device AI, Gemini Nano + fallback (local-first)     │
+  │  contrl      → real-time on-device ML pipeline (the AI substrate)     │
+  │  aipe        → markdown-as-source, prompt-as-code (meta-tooling)      │
+  │  +7yr frontend, Vue/React, FedEx/Amazon/CoreWeave, ~$700K savings     │
+  └───────────────────────────────┬──────────────────────────────────────┘
+                                  │ buffr COMPOSES these into one case
+  ┌─ what buffr adds that none had alone ────────────────────────────────┐
+  │  • a provider contract she wrote (Gemma ModelProvider)               │
+  │  • RAG rebuilt from scratch (NOT ported from AdvntrCue's OpenAI weld) │
+  │  • evals with NUMBERS — the separator between "played with an LLM"    │
+  │     and "does AI engineering"  agent-layer-plan.md:30                 │
+  └───────────────────────────────────────────────────────────────────────┘
+```
+
+Say it like this: *"I'm not pivoting from zero. I shipped the RAG, the on-device AI, and
+the meta-tooling separately. buffr is the artifact that composes them into one measured
+system — and it forces me to build the parts a turnkey tool would hide: a provider
+contract, retrieval from scratch, and evals with real numbers."* That's the close. It's
+documented, it's specific, and it doesn't overclaim.
+
+## The principle
+
+A problem is worth investing in when the **cost of not solving it compounds** and the
+**person solving it is uniquely positioned to**. Here both hold and both are documented:
+the pivot stays unproven every month it lacks an artifact (compounding cost), and the
+adjacent pieces are already shipped and waiting to compose (unique position). The product
+is real, but the problem you're actually justifying is the *career proof* — and the
+strongest version of that case never invents a market, a user base, or a number. It says:
+*one user, measured, composing work I've already shipped, exposing the engineering a tool
+would hide.*
+
+## Interview defense
+
+**Q: Isn't a personal agent for one user just a toy?**
+No — it's a *proof problem, not a market problem*. The deliverable is "one good agent with
+measured eval numbers — not a platform" (`agent-layer-plan.md:6`). One user is the correct
+scope for proving I can build the engineering under a real AI product. More users would be
+scope I'd have to defend without evidence — the opposite of a measured portfolio piece.
+Anchor: `agent-layer-plan.md:6`.
+
+```
+  one user = right scope for the claim "I can build + measure this"
+  more users = scope to defend with evidence I don't have yet
+```
+
+**Q: Why does this prove anything a take-home or a Leetcode round wouldn't?**
+Because it shows the parts a turnkey tool hides — a provider contract I wrote, RAG rebuilt
+from scratch, evals with numbers — end to end, on my own data, shipped to a persistent v1b.
+That's "does AI engineering," not "played with an LLM" (`agent-layer-plan.md:30`).
+Anchor: `agent-layer-plan.md:25,30`.
+
+**Q: Why you, specifically?**
+Because I've already shipped the adjacent pieces separately — RAG (AdvntrCue), on-device
+AI (dryrun/contrl), meta-tooling (aipe) — and buffr is the one artifact that composes them
+into a measured system. I'm not starting over; I'm composing 7 years of frontend plus four
+shipped AI system shapes into the case for the combination. Anchor: `me.md` system-design
+portfolio.
+
+## See also
+
+- `02-scope-cuts-and-non-goals.md` — the smallest useful slice and what's deliberately cut.
+- `03-options-and-opportunity-cost.md` — build vs buy, decided against Hermes directly.
+- `agent-layer-plan.md` — the parent thesis every claim here cites.
+- `.aipe/study-system-design/07-deferred-body.md` — the one-way-door reasoning behind the cuts.

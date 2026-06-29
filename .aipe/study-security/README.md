@@ -1,80 +1,107 @@
 # Study — Security (buffr-laptop)
 
-The trust axis, made into an audit. One question runs through every file here:
+> The trust axis as a discipline: what can each side see, reach, or
+> tamper with? This guide audits buffr-laptop's real files against the
+> only question that matters — *what can an attacker reach, and what
+> happens when they do?*
 
-> **what can an attacker reach, and what happens when they do?**
+## The through-line
 
-This repo is a single-device laptop RAG agent. There is no server, no
-network listener, no second user. That shapes the whole audit: most of the
-classic web attack surface (request bodies, auth tokens, CORS, session
-fixation) is **not yet exercised** — there is no boundary for it to cross.
-The real findings live in three places: the SQL sink, the tenant-isolation
-*shape*, and the LLM/agent path where indexed documents flow back into the
-model's context.
-
-## Trace the trust axis across the boundaries
+Every finding here ties to one trace: follow untrusted input across
+every boundary and ask, at each one, whether the boundary *enforces* a
+trust decision or *leaks* one.
 
 ```
-  buffr-laptop — where untrusted input enters
+  trace the trust axis across buffr's boundaries
 
-  ┌─ Operator (you, the laptop user) ───────────────────────────┐
-  │  prompt: "your question"  ·  .md files you choose to index   │  TRUSTED
-  └───────────────────────────┬─────────────────────────────────┘
-                              │  no auth — single device
-  ┌─ Node process ───────────▼─────────────────────────────────┐
-  │  CLI (chat/index/eval)  →  PgVectorStore  →  RagQueryAgent   │
-  └──────┬───────────────────────────┬──────────────────┬───────┘
-         │ parameterized SQL         │ HTTP             │ prompt + tool results
-         ▼                           ▼                  ▼
-  ┌─ Postgres (reindb) ┐   ┌─ Ollama :11434 ┐   ┌─ Gemma 2 (LLM) ───────────┐
-  │  agents.* tables   │   │  local models   │   │  reads indexed doc text   │ ← real
-  │  full-privilege    │   │  no secret      │   │  AND recalled memory as   │   surface
-  │  DATABASE_URL      │   │                 │   │  data (injection surface) │
-  └────────────────────┘   └─────────────────┘   └───────────────────────────┘
+  where does untrusted input enter?   → your question (you=user) +
+                                         retrieved docs & recalled memory
+  who is allowed past this boundary?  → no auth yet; single-device
+  what's hidden, what's exposed?      → .env gitignored; DATABASE_URL =
+                                         full-priv string in-process
+  what do dependencies let in?        → lockfile present; no CVE CI gate
+  what can the agent reach?           → ONE read-only tool, bounded loop
 ```
 
-The seams that carry a real trust decision: the **SQL boundary** (is the
-query parameterized?), the **tenant boundary** (does `app_id` actually
-isolate anyone?), and the **LLM context boundary** (does indexed content
-get treated as data or as instructions?). Everything else is `not yet
-exercised` because the single-device shape hasn't built the boundary yet.
+The verdict: **for the laptop phase the posture is honest and mostly
+correct.** SQL is parameterized at every sink, the agent runs
+least-privilege with hard budgets, secrets never left the machine. The
+real exposures are *deferred controls*, not bugs — shape-only tenant
+isolation and a client-held full-privilege credential — each acceptable
+because there's one user (you), each with a named trigger that turns
+the work on.
+
+## The map
+
+```
+  ┌─ TRUSTED: laptop ──────────────────────────────────────────┐
+  │  Ink TUI → session → agent (1 read-only tool, maxTurns 6,   │
+  │                              maxToolCalls 4)                │
+  └──────────────────┬─────────────────────────────────────────┘
+                     │ DATABASE_URL (full-privilege)  ▲ TLS
+  ┌─ Postgres (reindb / agents) ───────────────────────────────┐
+  │  parameterized SQL only · app_id everywhere, NO RLS ◄ gap   │
+  └──────────────────┬─────────────────────────────────────────┘
+                     │ retrieved chunks + recalled memory  ▲ HTTP
+  ┌─ Ollama (gemma2:9b, nomic-embed) ──────────────────────────┐
+  │  tool results re-enter prompt ── injection surface (low)    │
+  └────────────────────────────────────────────────────────────┘
+```
 
 ## Reading order
 
-1. **`audit.md`** — Pass 1. The 8-lens walk. Start here for the full map of
-   what fires, what doesn't, and what's honestly deferred.
-2. **`01-parameterized-sql-boundary.md`** — the one control the repo gets
-   unambiguously right: every SQL sink is parameterized, including the
-   pgvector literal. Read this to see what injection-resistance looks like.
-3. **`02-shape-only-tenant-isolation.md`** — `app_id` is everywhere in the
-   schema and every query, but it's a default constant, not a token-derived
-   identity, and there's no RLS. The isolation is shaped but not enforced.
-   The most important deferred finding.
-4. **`03-indirect-prompt-injection-surface.md`** — indexed documents *and*
-   recalled conversation memory flow back into the model's context as tool
-   results. The classic RAG injection surface, now slightly widened: past
-   turns are embedded into the same store (`session.ts:53,66`) and become
-   retrievable. Low blast radius today because the only tool is read-only
-   search.
-5. **`04-least-privilege-tool-scope.md`** — the agent can call exactly one
-   tool, enforced by an allowlist policy and a hard call budget. The control
-   that keeps the prompt-injection blast radius small.
+Start with the audit for the full sweep, then the pattern files for the
+controls that are actually doing work.
 
-## Cross-links to the other study guides
+1. **`audit.md`** — Pass 1. The 8-lens audit, every lens walked with
+   `file:line` grounding, the red-flags checklist as the capstone.
+   Read this first; it cross-links to the pattern files below.
 
-The trust axis touches three other guides. Where a finding is really about
-*structure* or *flow* rather than *trust*, it belongs to them:
+Then the Pass 2 discovered-pattern files — the security-shaped
+mechanisms this repo actually exercises, named after the control, not
+the lens:
 
-- **`study-data-modeling`** — the `app_id` column, the missing FK on
-  `agents.chunks`, the JSONB `meta` shape. The audit here asks whether
-  `app_id` *isolates*; data-modeling asks whether it's *modeled* well.
-  → `02-shape-only-tenant-isolation.md` cross-links here.
-- **`study-system-design`** — the request/index flow, the
-  canonical-Postgres boundary, the provider abstraction over Ollama. The
-  audit here asks what an attacker reaches across those hops.
-- **`study-agent-architecture`** — the ReAct loop, the tool registry, the
-  trajectory-capture sink. The audit here asks what the agent is *allowed*
-  to do and what its tool output is *trusted* to be.
-  → `03-` and `04-` cross-link here.
+2. **`01-parameterized-sql-boundary.md`** — why every DB write/read is
+   injection-resistant, and the one place that *looks* like
+   string-building but is a bound parameter.
+3. **`02-shape-only-tenant-isolation.md`** — `app_id` on every table
+   with no RLS and no token binding: a control *pre-shaped* for the
+   phone/edge phase. What flips when it turns on (almost nothing).
+4. **`03-indirect-prompt-injection-surface.md`** — indexed docs *and
+   now recalled conversation memory* re-enter the prompt as tool
+   results. Why the blast radius is low (it's capped by file 04).
+5. **`04-least-privilege-tool-scope.md`** — the strongest control in
+   the repo: one read-only tool, default-deny allowlist, bounded loop.
+   The reason a hijacked agent's worst case is a wrong answer.
 
-Updated: 2026-06-24 — purged `ask` refs (now `chat` via `session.ts` + `cli/chat.tsx`); noted conversation memory widens the injection surface (`03-`).
+## Not yet exercised (honest)
+
+These lenses don't apply yet. Each is correct-by-phase, not an
+oversight — named here so the gap is visible and the target is
+buildable:
+
+- **Authentication & authorization** — no auth layer, no sessions, no
+  per-resource checks. One principal (you). Target: token-derived
+  `app_id` + RLS at the phone/edge phase (see file 02).
+- **Row-level security** — `app_id` is shape-only. Target: Postgres
+  RLS policy keyed on a session-set tenant (file 02).
+- **Rate limiting** — no request throttle. N/A with a single local
+  user and a bounded agent loop.
+- **Secret rotation** — `.env` is static. Target: scoped, short-lived
+  credentials once the credential leaves the laptop (audit lens 4).
+- **Dependency-audit / CI** — lockfile present, but no `npm audit` /
+  Dependabot / CI gate. Target: one-line `npm audit` CI job (audit
+  lens 6).
+
+## Cross-links
+
+- **`../study-data-modeling/`** — the *shape* of `app_id`, `chunks`,
+  `documents`, `messages`. This guide asks who may read/write them; that
+  one asks how they're structured.
+- **`../study-system-design/`** — the local-first architecture, the
+  retrieval + memory pipeline, the agent loop these controls sit on.
+- **`../study-database-systems/`** — how Postgres parses-then-binds (the
+  mechanism under file 01) and how RLS would enforce file 02.
+- **agent-architecture** (not yet generated) — the future home for the
+  `runAgentLoop` control-flow deep walk that files 03/04 reference for
+  the *security* read only.

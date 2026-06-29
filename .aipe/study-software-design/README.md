@@ -1,84 +1,80 @@
-# study-software-design — buffr-laptop
+# Study — Software Design (A Philosophy of Software Design, applied to buffr-laptop)
 
-> Updated: 2026-06-24 — reconciled against current code: `ask-cmd.ts` deleted,
-> chat wiring now in `src/session.ts` (deep module, `ask`/`close`) + Ink/React UI
-> `src/cli/chat.tsx` (new ink/react deps); memory is aptkit's
-> `createConversationMemory` with buffr's store injected up; trace sink handles all
-> 6 event types; aptkit ^0.4.1. The three top fixes below are unchanged.
+This guide audits **buffr-laptop** through the design primitives in John
+Ousterhout's *A Philosophy of Software Design* (APOSD) — deep modules,
+information hiding, complexity, layering, readability — and grounds every
+finding in real files at real line ranges. It does not teach the book in
+the abstract; it teaches what *your* code does with the book's ideas.
 
-A software-design audit of **this repo** through the primitives in John
-Ousterhout's *A Philosophy of Software Design* (APOSD): deep modules, information
-hiding, complexity, layering, readability. The product is the **findings about
-your code**, grounded in real `file:line` references — not a restatement of the
-book.
+> **Source.** The primitives come from *A Philosophy of Software Design*,
+> John Ousterhout (2nd ed., 2021). The ideas are taught here in original
+> words and applied to your repo. Read the book for the full conceptual
+> treatment — this guide is the application, not the textbook.
 
-> **Source.** The framework is APOSD (Ousterhout). This guide teaches the ideas
-> in original words and points to `read-aposd` for the full conceptual treatment.
-> Read the book — it's short and it's the substrate under every file here.
+---
 
 ## The through-line
 
-**Complexity is the enemy; the deep module is the weapon.** A deep module hides a
-lot of behavior behind a small interface, so callers learn a few names and inherit
-a lot of correctness. buffr is small but unusually well-shaped, and the reason is
-structural: it implements `@rlynjb/aptkit-core`'s contracts instead of designing
-its own interfaces. When the interface is decided *for* you, you can't leak — the
-contract is an upper bound on how much complexity escapes upward.
+```
+  Complexity is the enemy. Deep modules are the weapon.
+
+  ┌─ a deep module ─────────────────────────────────┐
+  │  small interface  ░░░░░░░░  (what callers see)   │
+  │  ───────────────────────────────────────────    │
+  │  big body         ████████████████████████████   │
+  │                   ████████████████████████████   │  (what it hides)
+  └──────────────────────────────────────────────────┘
+       ▲                              ▲
+       │                              │
+   cheap to use                  pays its way:
+   (1 line at the call site)     hides decisions you'd
+                                 otherwise repeat everywhere
+```
+
+buffr's whole job is to take aptkit's in-memory `VectorStore` contract and
+implement it over Postgres + pgvector *without the rest of the system
+noticing the swap*. That is APOSD's central move — a deep module behind a
+narrow interface — and it's the spine of this audit.
+
+---
 
 ## Reading order
 
-```
-  1. 00-overview.md                    ← orientation + ranked verdict + top fixes
-  2. audit.md                          ← Pass 1: the 8-lens APOSD walk (the core)
-  3. 01-adapter-behind-a-contract.md   ← Pass 2: PgVectorStore ⊳ VectorStore
-  4. 02-pure-core-impure-shell.md      ←         loadConfig vs the cli/* edges
-  5. 03-sync-interface-async-work.md   ←         trace sink emit() / flush()
-  6. 04-dependency-as-a-boundary.md    ←         aptkit imported, never edited
-```
+1. **`00-overview.md`** — the audit at a glance. The complexity profile,
+   the three highest-cost hotspots, and a one-line verdict per primitive.
+   Read this first; if you read nothing else, read this.
+2. **`audit.md`** — Pass 1. The 8-lens APOSD walk, each lens grounded in
+   `file:line` or honestly marked `not yet exercised`. The capstone lens
+   is the red-flag checklist sorted by severity for this repo.
+3. **Pass 2 — discovered patterns.** The design moves buffr makes
+   deliberately, each a full concept file:
+   - `01-adapter-behind-a-contract.md` — `PgVectorStore` implementing
+     aptkit's `VectorStore` so the swap is invisible.
+   - `02-pure-core-impure-shell.md` — `loadConfig` as a pure testable
+     seam vs the CLIs that own all the I/O.
+   - `03-dependency-as-a-boundary.md` — aptkit imported as a contract;
+     conversation memory extracted *up* and re-consumed.
+   - `04-sync-interface-async-work.md` — the trace sink's sync `emit()`
+     queuing async DB writes drained by `flush()`.
+   - `05-deep-session-facade.md` — `createChatSession` holding
+     pool/agent/memory/conversation behind a 2-method `ask`/`close`.
 
-Start with `00-overview.md` for the verdict, then `audit.md` for the full read.
-The Pass 2 files are deep walks of the four design moves the repo makes
-deliberately — read `04` first if you want the boundary that makes the others
-possible, or `01` first if you want the single deepest module.
-
-## What the file list tells you
-
-The four pattern files *are* a teaching artifact — a senior engineer skimming them
-learns what's interesting about buffr before opening anything:
-
-- **adapter-behind-a-contract** — buffr's deepest module is a pgvector adapter
-  behind an aptkit port.
-- **pure-core-impure-shell** — config is a pure function; the CLIs are the
-  effectful shell.
-- **sync-interface-async-work** — the trace sink bridges aptkit's sync `emit` to
-  async DB writes via a deferred `flush`.
-- **dependency-as-a-boundary** — aptkit is a hard, immutable boundary, and that's
-  what generates the design quality.
-
-## Top 3 fixes (ranked across the repo)
-
-1. **The dead `schema` knob.** `loadConfig` computes `cfg.schema`
-   (`src/config.ts:13`) but every SQL string hardcodes `agents.` across five
-   files. Pick a side: delete the field or thread it through. (audit Lens 3 + 5.)
-2. **The undocumented `meta` contract.** `upsert` reads magic keys
-   `docId`/`chunkIndex`/`text` off `meta` (`src/pg-vector-store.ts:44-46`) with no
-   interface comment. Add one line. (audit Lens 7.)
-3. **Unvalidated `k`.** `search` passes `k` straight to SQL `limit`
-   (`src/pg-vector-store.ts:76`); clamp it `>= 1`. (audit Lens 5.)
-
-## Honest scope — what this repo is too small to exercise yet
-
-Named in the audit, not padded into fake findings: error aggregation /
-special-case sprawl (Lens 6 — the error model is uniform "throw and bubble," which
-is correct for a single-device CLI), deep multi-layer layering (the repo has 1-2
-layers, not 5), and classitis (the one thin module, `db.ts`, is a test seam, not a
-shallow abstraction). These become real as the codebase grows; the audit says what
-to watch for.
+---
 
 ## Cross-links
 
-- `read-aposd` — the APOSD framework itself, taught in book form.
-- `study-system-design` — the same repo at the architecture altitude (services,
-  flows, scale) rather than module/interface level.
-- `study-testing` — the injected pool and the pure `loadConfig` are the seams that
-  make this repo testable; that guide is the payoff of this one's design.
+- **Learn the primitives** (book-style, abstract): `.aipe/read-aposd/`
+  *(not yet generated in this repo — run `/aipe:read-aposd`)*.
+- **System architecture** (services, boundaries, scale): a different
+  altitude — `.aipe/study-system-design/`
+  *(not yet generated — run `/aipe:study-system-design`)*. When a finding
+  is about a service boundary or data-flow rather than a module/interface,
+  it belongs there, not here.
+- **Testing & the eval seam:** `.aipe/study-testing/`
+  *(not yet generated — run `/aipe:study-testing`)*. The `loadConfig`
+  pure-seam finding and the `test/` mirror are the design half of what
+  that guide audits for coverage.
+
+The rule when two guides want the same finding is **altitude**:
+module / interface / complexity lives here; service / architecture lives
+in system-design.

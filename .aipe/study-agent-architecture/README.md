@@ -1,93 +1,57 @@
-# Study — Agent Architecture (buffr)
+# Agent architecture study guide — buffr-laptop
 
-Agent reasoning patterns, agentic retrieval, and orchestration as exercised by
-**buffr** — the laptop "brain" of a self-hosted personal RAG agent. Generated
-per `study-agent-architecture` spec, audit-style two-pass shape.
+A topic-focused companion to `/aipe:study` covering everything *above
+one agent*: reasoning patterns beyond ReAct, retrieval as a control
+loop, and multi-agent orchestration topologies. Per-repo, for
+buffr-laptop.
 
-## The one-line verdict
+**Codebase shape: single-agent.** One `RagQueryAgent` running a bounded
+ReAct loop (`maxTurns:6` / `maxToolCalls:4`, forced synthesis) over one
+read-only tool (`search_knowledge_base`) against a local Gemma2:9b.
+SECTION A (reasoning) and SECTION B (agentic retrieval) describe what
+buffr runs; SECTION C (multi-agent) is study material, honestly marked
+"Not yet implemented" where it doesn't apply.
 
-buffr is a **single-agent, bounded ReAct loop** with one read-only tool
-(`search_knowledge_base`) over stock Gemma 2:9b, via `@rlynjb/aptkit-core`.
-buffr adds Postgres/pgvector persistence, trajectory capture, profile context,
-and CLIs. It is **not** multi-agent (deliberately — see `agent-layer-plan.md`),
-**not** a chain, and tool calling is **emulated** (prompt + parse) because Gemma
-has no native tool API.
+## Start here
 
-## Reading order
+- `00-overview.md` — the whole agent surface in one map + the shape
+- `agent-patterns-in-this-codebase.md` — the patterns this repo uses
+
+## Recommended cross-sub-section order: A → B → D → C → E → F
+
+A and B describe the running system; D is the cross-cutting
+infrastructure it exercises; C and E are study material for what's
+deferred; F is the interview framing.
+
+## Sub-sections
 
 ```
-  00-overview.md                       ← start here: the whole system in one frame
-       │
-  audit.md                             ← Pass 1: every lens, file:line or "not yet exercised"
-       │
-  01-bounded-react-loop.md             ← the spine; read first among the patterns
-  02-single-tool-capability-scope.md
-  03-agentic-retrieval.md
-  04-trajectory-as-memory.md
-  05-emulated-tool-calling.md
-  06-profile-as-standing-context.md
-  07-orchestration-templates.md        ← SECTION F + the honest multi-agent "not yet" material
+  01-reasoning-patterns/        SECTION A — how one model thinks
+  02-agentic-retrieval/         SECTION B — retrieval as a control loop
+  03-multi-agent-orchestration/ SECTION C — everything above one agent
+  04-agent-infrastructure/      SECTION D — context, memory, tools, eval, control
+  05-production-serving/        SECTION E — serving a loop / topology
+  06-orchestration-system-design-templates/  SECTION F — buffr as interview templates
 ```
 
-## The files
+## The five-minute path
 
-| File | What it covers | Shape |
-| ---- | -------------- | ----- |
-| `00-overview.md` | One-page orientation, the system diagram, the verdict | — |
-| `audit.md` | Pass 1: 8 lenses, grounded or "not yet exercised" | — |
-| `01-bounded-react-loop.md` | ReAct loop + turn/tool budget + **forced synthesis** | single-agent |
-| `02-single-tool-capability-scope.md` | Allowlist policy → one read-only tool, small blast radius | single-agent |
-| `03-agentic-retrieval.md` | Model decides whether/what to search vs static RAG | single-agent |
-| `04-trajectory-as-memory.md` | Full-signal capture to Postgres + relevance recall via shared vector store; **no** in-prompt history yet | single-agent |
-| `05-emulated-tool-calling.md` | Prompt-render + JSON-parse tool calls on stock Gemma | single-agent |
-| `06-profile-as-standing-context.md` | `me.md` profile injected into the system prefix | single-agent |
-| `07-orchestration-templates.md` | 3 interview templates; multi-agent refactor targets | multi-agent (design-only) |
-
-## What's "not yet exercised" (honest inventory)
-
-buffr is one agent. These are taught as study material / refactor targets, not
-current code:
-
-- **Multi-agent orchestration** — no supervisor, worker, pipeline, fan-out,
-  debate, swarm, graph, or handoff. Deliberate (`agent-layer-plan.md:13-18`).
-  Refactor targets in `07-orchestration-templates.md`.
-- **Plan-and-execute, reflexion/self-critique, tree-of-thoughts, routing** — no
-  planner, critic, branching, or router stage (`audit.md` Lens 1).
-- **Self-corrective RAG, query decomposition, retrieval routing** — single
-  source, no relevance grader (`audit.md` Lens 2).
-- **Sequential in-prompt history** — relevance recall now works (past exchanges
-  are embedded into the shared store and surface by similarity, cross-session —
-  `04-trajectory-as-memory.md`), but `RagQueryAgent.answer()` still threads no
-  running transcript into the prompt. That's the remaining memory gap.
-- **MCP, trajectory eval, cross-turn caching, per-tool circuit breaking** —
-  `audit.md` Lenses 7-8. (Retrieval eval *is* present: `src/cli/eval-cmd.ts`.)
-
-## Honest framing on emulation
-
-Tool calling on Gemma is **emulated** (prompt-render outbound, JSON-parse
-inbound, one retry). The *agent-architecture* placement is in
-`05-emulated-tool-calling.md`; the prompt-craft of reliable JSON and
-structured-output evals are prompt-engineering / ai-engineering concerns,
-cross-linked there, not re-taught.
+1. `01-reasoning-patterns/02-agent-loop-skeleton.md` — the kernel
+   everything refers back to.
+2. `01-reasoning-patterns/03-react.md` — the pattern buffr runs.
+3. `02-agentic-retrieval/01-agentic-rag.md` — the loop's one tool.
+4. `04-agent-infrastructure/02-agent-memory-tiers.md` — the memory model
+   and its honest gap (relevance recall yes, threading no).
+5. `03-multi-agent-orchestration/01-when-not-to-go-multi-agent.md` — why
+   buffr is correctly single-agent.
 
 ## Cross-links to sibling guides
 
-- **System design** (exists): `.aipe/study-system-design/` —
-  `02-retrieval-pipeline.md` (RAG mechanics), `03-trajectory-capture.md` (sink
-  write-path), `06-profile-injection-as-context.md` (injection seam).
-- **Security** (exists): `.aipe/study-security/` —
-  `03-indirect-prompt-injection-surface.md` (indexed-content injection),
-  `04-least-privilege-tool-scope.md` (the allowlist threat model).
-- **AI engineering** (sibling generator, not yet generated):
-  `.aipe/study-ai-engineering/` — ReAct mechanics, tool-calling mechanics, RAG,
-  structured outputs, agent memory. Cross-referenced by canonical path.
-- **Prompt engineering** (sibling generator, not yet generated):
-  `.aipe/study-prompt-engineering/` — structured-output / self-critique craft.
-
----
-
-Updated: 2026-06-24 — `04` re-titled and reframed (capture + relevance recall;
-no in-prompt history). Moved cross-session memory out of the "not yet exercised"
-inventory (now exercised via `createConversationMemory`); the remaining gap is
-sequential in-prompt history. Entry point is `npm run chat` (long-lived session,
-`ask-cmd.ts` deleted).
+- `.aipe/study-system-design/` — request flow, vector store, trajectory
+  capture, retrieval-as-memory
+- `.aipe/study-prompt-engineering/` — the three-owner prompt assembly
+- `.aipe/study-security/` — least-privilege tool scope, indirect prompt
+  injection surface
+- `study-ai-engineering/` — *not yet generated in this repo*; this guide
+  cross-references its canonical paths (ReAct/RAG/tool-calling/memory
+  mechanics) where they would live.

@@ -1,160 +1,144 @@
-# Chapter 01 — The Cold Open   (0:00–1:00, 1 minute)
+# Chapter 01 — The cold open   (0:00–1:00, 60 seconds)
 
 ## Opening hook
 
-You have sixty seconds before the room decides whether to pay attention, and you are going to spend zero of them on a title slide. Here is the trap I have watched kill a hundred hackathon demos: the presenter opens with "hi, I'm X, and today I want to talk about a problem that affects all of us…" — and by the time the actual thing appears on screen, the judges have already half-checked-out. Don't do that. Open with buffr *already answering a question*, grounded in your own docs, on your own laptop. The thing working is the hook. The introduction comes after the room is already leaning in.
+You have sixty seconds, and the room decides inside the first fifteen whether this is real or a slide deck. Do not introduce yourself. Do not say "so, our project is about personal AI assistants and we were thinking about privacy." The clock is running and you just spent your opening on throat-clearing. Open on the thing working: your laptop, the chat already up, a question already typed, and an answer that comes back grounded and cited. The room sees a real system respond before they've heard a single sentence of pitch.
 
-The cold open does two jobs and then gets out of the way: land the **hook** (the app visibly working) and land the **one-liner** (what this is, in one breath). That's it. No architecture, no "let me set the stage," no apologizing for the terminal UI. You are in motion before you say your name.
+The job of this minute is narrow: get one real answer on screen, then drop the one-liner that tells them what they just watched. That's it. The wow isn't here yet — the wow is the money shot at 2:30. This minute buys you the room's attention so they're still watching when it lands.
 
 ## The time-budget bar
 
-You own the first minute. Get the app answering and the one-liner said, then hand straight to the demo.
+You own the first sixty seconds. Get a live, cited answer on screen and say the one-liner — nothing else.
 
 ```
-  ┌──────────────────────────────────────────────────────────┐
-  │ ▓▓▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ │
-  │ 0:00 ── 1:00 ────────────────────────────────────── 10:00 │
-  │        THE COLD OPEN — you own 0:00 to 1:00 (1 min)        │
-  └──────────────────────────────────────────────────────────┘
+  ┌──────────────────────────────────────────────────────┐
+  │ ▓▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ │
+  │ 0:00 ─ 1:00 ──────────────────────────────────── 10:00 │
+  │        THE COLD OPEN — you own 0:00 to 1:00 (60 sec)   │
+  └──────────────────────────────────────────────────────┘
 ```
 
-## The chapter-opening diagram — the room's attention curve
+## The attention curve — what you're managing
 
-Here is what you are actually managing in this minute: the room's attention. It is highest the instant you start and decays fast if nothing happens. Your job is to spend a spike of attention on the thing working before it decays, so the room is already invested when the real demo starts.
-
-```
-  THE ATTENTION CURVE — spend the opening spike on the thing WORKING
-
-  attention
-    high │█
-         │█▆                      ← weak open: title slide + "hi, I'm…"
-         │█ ▆▅▄▃▂▁                   curve decays, room drifts
-         │█        ▁▂▃ ...slow climb if you ever get to the demo
-    low  └────────────────────────────► time
-         0:00     0:30      1:00
-
-    high │█▇▇▇▇▇▇▇▇▇▇▇▇▇▇          ← strong open: app answering on screen
-         │█              ▇▇▇▇▇▇      one-liner lands while attention is high
-         │█                          room is INVESTED before the demo proper
-    low  └────────────────────────────► time
-         0:00     0:30      1:00
-
-    the strong open keeps the curve high through the handoff to 02
-```
-
-Hold that curve in mind: the screen should show buffr working before you finish your first sentence. Now here is the choreography.
-
-## The body — the two beats in order
-
-### Beat 1 — the hook (0:00–0:35): open on it working
-
-The terminal is already up with `npm run chat` running. You do not boot it on stage — it is warm, the conversation is live, the cursor is blinking. Your first action is to ask a question grounded in your indexed corpus, and let Gemma answer it grounded and cited while you talk.
+The room's attention is highest at second zero and falls fast unless something holds it. This is the curve you're presenting into. Open cold on a working answer and you catch attention while it's still high; open on a self-intro and you spend it.
 
 ```
-  SHOW (on screen)                 SAY (out loud)
-  ───────────────────────────      ─────────────────────────────────
-  chat REPL, cursor blinking       "This is running entirely on my
-                                    laptop — no cloud, no API key."
+  the room's attention over the cold open
 
-  type a known-good question,      "Watch — I ask it something only
-  e.g. about your stack/work       my own notes know the answer to…"
-  → press enter
+  high │█                                    ★ money shot
+       │█▓                                     (ch 02, 2:30)
+       │█▓▓░                                      ▲
+  attn │█▓▓▓░░░          live answer lands         │
+       │█▓▓▓▓▓░░░░░  ──► holds the line ──────────►│
+       │█▓▓▓▓▓▓▓▓▓▓░░░  one-liner reframes it
+  low  └────────────────────────────────────────────────
+       0:00      0:30      1:00 ───────────► toward the demo
 
-  the spinner, then a grounded,    "…and it answers from my docs,
-  cited answer streams in          grounded, with the source."  ← hook lands
+   you OPEN at peak attention. don't waste it on "hi, we're team X."
 ```
 
-Notice the SAY track never says "now I'm typing a question." It speaks the *value* — local, grounded, yours — while your hands do the typing. That separation is the whole discipline: narrate the meaning, not the mechanics.
-
-### Beat 2 — the one-liner (0:35–1:00): name what it is
-
-The answer is on screen. Now, and only now, you name the thing. One sentence, said with your chest, close to verbatim:
+The trap is the slow on-ramp. Here's the move you make instead, side by side.
 
 ```
-┃ "buffr is a personal RAG agent that runs entirely on my own
-┃  laptop — it knows me from a stored profile, and it remembers
-┃  me across sessions, because I built it on my own AI toolkit."
+  WEAK cold open                  STRONG cold open
+  ──────────────────────────      ──────────────────────────────
+  "Hi, I'm Rein. So personal      [chat already open, question
+   AI is a big space and we        already typed, you hit enter]
+   wanted to explore memory       "Watch this — I ask my own
+   and privacy, so we built…"       notes a question, on my
+                                    laptop, no cloud."
+  → 30 sec gone, nothing shown    → an answer is on screen by 0:15
 ```
 
-Then the bridge into the demo — one line, and you move:
+## The body — the two beats
+
+### Beat 1 — the hook (0:00–0:30): a live, cited answer
+
+The chat is already running (`npm run chat`, started before you walked up — see the pre-flight in the overview). The question is pre-typed in the input. You hit enter and talk over the spinner while Gemma answers.
 
 ```
-┃ "Let me show you the part that surprised me."
+  SHOW (on screen)                    SAY (out loud)
+  ────────────────────────────────    ─────────────────────────────────
+  npm run chat already open,          "This is running on my laptop
+  cursor in the input, question        right now — my model, my data,
+  pre-typed                            no API key, nothing leaves the
+                                       machine."
+  ── you hit enter ──                  (let it think; don't narrate the
+  the dots spinner: "thinking…"        spinner)
+  the answer prints — grounded in      "And there's the answer — pulled
+  your indexed notes, with a           straight from my own notes, and
+  citation to the source doc           it tells me where it got it."  ◄ hook lands
 ```
 
-That sentence is doing real work: it promises a payoff and pulls the room toward the money shot. Don't explain what's coming. Promise it and go.
+Do not read the whole answer aloud. The room can read. You point at the citation — the fact that it grounded the answer in a real source doc — and move.
 
-## Strong vs weak — the open
+### Beat 2 — the one-liner (0:30–1:00)
 
-The contrast here is the most common single failure in hackathon demos. Put it where your eye catches it on stage.
+Now that they've seen it work, tell them what it is. One sentence, said slowly, then a half-beat of silence so it sits.
 
 ```
-  WEAK OPEN                          STRONG OPEN
-  ─────────────────────────────      ─────────────────────────────────
-  "Hi, I'm Rein. So, the problem     app is already answering a real
-   with AI assistants is that         question, grounded and cited,
-   they don't really know you,         before you finish sentence one
-   and privacy is a concern, and…"
-                                      one-liner lands AFTER the room has
-  three slides before anything        seen it work — "buffr is a personal
-  runs; attention already gone        RAG agent that runs on my laptop…"
-
-  → room waits for proof             → room already has proof, now leans in
+┃ "buffr is a personal AI agent that knows me and remembers me —
+┃  running entirely on my own laptop, on my own database."
 ```
+
+That's the one-liner: *X is a Y that does Z for W.* buffr (X) is a personal AI agent (Y) that knows you and remembers you, self-hosted (Z), for you, the person whose data it is (W). Say it close to verbatim. It's the sentence you want a judge repeating to another judge in the hallway.
+
+Then the bridge into the demo — short, forward-leaning:
+
+```
+┃ "Let me show you the part that made me sit up — it remembers
+┃  a conversation we had earlier."
+```
+
+That line is a promise. It tells the room the money shot is coming and tells them what to watch for, so when it lands at 2:30 they recognize it instead of missing it.
 
 ## The IF-IT-BREAKS box
 
-The cold open is live, so it can fail live. The risk is real and named: stock Gemma's tool-calling is *emulated*, so it can occasionally skip the search tool and answer ungrounded. If your hook question whiffs, you do not freeze and you do not re-type it twice.
+The hook beat is the riskiest sixty seconds in the whole demo, because it's live and it's first. The most likely failure is the one the build honestly has: Gemma's tool-calling is emulated, so it can occasionally skip the search tool and answer ungrounded — no citation. Have a known-good question ready, and a clip behind that.
 
 ```
 ╔══════════════════════════════════════════════════════════════════╗
-║ IF IT BREAKS — the cold-open question whiffs (ungrounded answer)  ║
-║                                                                   ║
-║ Gemma answered without citing a doc → DON'T re-ask the same Q.   ║
-║ Say: "let me ask that a sharper way" and fire your KNOWN-GOOD    ║
-║ question (the one you verified pre-flight cites a source). The    ║
-║ retry reads as confidence, not a stumble.                         ║
-║                                                                   ║
-║ Total whiff (no terminal, app won't start) → cut to the 20-sec   ║
-║ recorded clip. Say: "here it is from a run a minute ago" and      ║
-║ keep the energy up. Never apologize twice. Keep moving.           ║
+║ IF IT BREAKS                                                       ║
+║                                                                    ║
+║ Answer comes back ungrounded / no citation (Gemma skipped the     ║
+║ search tool) → stay calm, retype your KNOWN-GOOD question (the     ║
+║ one you verified in pre-flight) and re-ask. Say: "let me ask       ║
+║ that more directly." The retry almost always grounds.             ║
+║                                                                    ║
+║ Two misses in a row, OR chat won't start → switch to the          ║
+║ 25-second recorded clip. Say: "here it is from a run a few         ║
+║ minutes ago" and keep the energy up. Never apologize twice.       ║
 ╚══════════════════════════════════════════════════════════════════╝
 ```
 
-## The "tighten it" treatment
+## The "tighten it" cut
 
-If you are already behind before you start (a previous presenter ran over, the slot got cut), compress the cold open to a single beat.
+If the slot is shorter than ten minutes, the cold open compresses but never disappears — you always open on the thing working. The cut: **drop the bridge line into the demo** (the "made me sit up" promise) and go straight from the one-liner to the first demo beat. The floor you must not cut below: one live cited answer on screen plus the one-liner. If you cut the live answer, you've cut the cold open's whole reason to exist.
 
-```
-  TIGHTEN IT
-    drop:  the spoken framing in Beat 1 — just ask the question,
-           let the grounded answer appear, then say the one-liner.
-    floor: the room must SEE one grounded answer + hear the one-liner.
-           Never cut below "app working on screen + one sentence of
-           what it is." That's the minimum cold open.
-```
-
-## The one-page run sheet — COLD OPEN
+## The one-page run sheet — CHAPTER 01
 
 ```
-  ┌─ RUN SHEET · 01 COLD OPEN · 0:00–1:00 ─────────────────────────┐
-  │                                                                 │
-  │  GOAL: app answering on screen + one-liner, before 1:00         │
-  │                                                                 │
-  │  SAY, in order:                                                 │
-  │   • "running entirely on my laptop — no cloud, no API key"      │
-  │   • "watch — something only my own notes know…" (type the Q)    │
-  │   • "…answers from my docs, grounded, with the source"          │
-  │                                                                 │
-  │  THE LINE TO NAIL:                                              │
-  │   "buffr is a personal RAG agent that runs entirely on my own   │
-  │    laptop — it knows me, and it remembers me across sessions."  │
-  │   then: "Let me show you the part that surprised me."           │
-  │                                                                 │
-  │  IF IT BREAKS: ungrounded answer → fire the known-good Q.       │
-  │                no app → 20-sec recorded clip. Never apologize 2x.│
-  │                                                                 │
-  │  TIGHTEN: skip Beat-1 framing; floor = one grounded answer +    │
-  │           the one-liner.                                        │
-  └─────────────────────────────────────────────────────────────────┘
+  ┌─ COLD OPEN ─ 0:00–1:00 ─ 60 sec ────────────────────────────┐
+  │                                                              │
+  │  PRE-FLIGHT DONE: chat open, question pre-typed, corpus      │
+  │  indexed, clip ready.                                        │
+  │                                                              │
+  │  BEAT 1 (0:00–0:30) — hit enter on the pre-typed question    │
+  │    SAY: "running on my laptop — my model, my data, no cloud" │
+  │    SAY (on answer): "pulled from my own notes — and it cites │
+  │         where it got it"                                     │
+  │                                                              │
+  │  BEAT 2 (0:30–1:00) — the one-liner, said slowly:            │
+  │    ┃ "buffr is a personal AI agent that knows me and          │
+  │    ┃  remembers me — on my own laptop, my own database."      │
+  │    bridge: "let me show you the part that made me sit up —   │
+  │             it remembers a conversation we had earlier."     │
+  │                                                              │
+  │  NAIL THIS LINE: the one-liner.                              │
+  │  IF IT BREAKS: re-ask known-good Q once → else 25-sec clip.  │
+  │  TIGHTEN: drop the bridge line. Floor: one live cited answer │
+  │           + the one-liner.                                   │
+  └──────────────────────────────────────────────────────────────┘
 ```
+
+On to chapter 02 — the demo, and the money shot.

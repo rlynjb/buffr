@@ -1,304 +1,307 @@
-# Trajectory Tables (conversations / messages)
+# 06 · Trajectory tables
 
-**Industry names:** event/turn log · append-only trajectory capture ·
-parent-child with cascade. **Type:** Industry standard.
+**Subtitle:** event-log capture of an agent run — `conversations` + `messages`
+as a fully-populated, replayable trace — *Industry standard (agent observability)*.
+
+---
 
 ## Zoom out, then zoom in
 
-Here's where the agent's run gets written down, and the one real foreign key
-in the whole schema.
+Every agent run leaves a complete record: the user's question, each assistant
+step, every tool call with its arguments, every tool result with its duration and
+errors, the model and token cost per inference, and any warnings. That record
+lives in two tables — `conversations` (one row per session) and `messages` (one
+row per event) — and it's the only place in the schema with a real foreign key.
 
 ```
-  Zoom out — where the trajectory tables live
+  Zoom out — where the trajectory is written
 
-  ┌─ CLI / agent layer ─────────────────────────────────┐
-  │  RagQueryAgent.answer()  →  emits CapabilityEvents   │
-  └───────────────────────────┬──────────────────────────┘
-                              │  SupabaseTraceSink.emit()
-  ┌─ Storage layer (Postgres) ▼──────────────────────────┐
-  │  conversations  (one per chat session)               │
-  │       │  conversation_id  FK ──► on delete cascade   │ ★ the ONE real FK
-  │  messages       (one per event: every CapabilityEvent)│ ← we are here
-  └──────────────────────────────────────────────────────┘
+  ┌─ Agent layer ───────────────────────────────────────────┐
+  │  RagQueryAgent.answer() emits CapabilityEvents           │
+  └───────────────────────────┬─────────────────────────────┘
+                              │  6 event types → emit()
+  ┌─ Trace layer ─────────────▼─────────────────────────────┐
+  │  SupabaseTraceSink.emit → persistMessage(...)            │
+  └───────────────────────────┬─────────────────────────────┘
+                              │  insert per event
+  ┌─ Storage: agents ─────────▼─────────────────────────────┐
+  │  conversations  1 ──FK cascade──► N  messages  ★ here ★  │
+  │  tool_calls/tool_results/model/tokens_used POPULATED      │
+  └─────────────────────────────────────────────────────────┘
 ```
 
-**Zoom in.** A `conversations` row is created once per `npm run chat` session
-(`src/session.ts:55`), not per question — every turn appends into that single
-conversation. `messages` rows append per *event*: the user question, each
-assistant step, tool-call args, tool results, model/token usage, and
-warning/error events. Every column on the row is now written (`tool_calls`,
-`tool_results`, `model`, `tokens_used`, `created_at`), so the table is a
-complete replayable trajectory rather than a half-filled log. Unlike the
-corpus side, this pair *keeps* its foreign key, with `on delete cascade`. The
-question: *why does the schema enforce integrity here but not on chunks?*
+Zoom in: the question is "can you reconstruct exactly what the agent did, in
+order, after the fact?" The shape that answers yes is an append-only event log
+with enough columns to replay the run — not just "user said X, agent said Y," but
+the full causal chain including the tool args (the cause) and the durations and
+token costs (the effect).
 
 ## The structure pass
 
-**Layers:** (1) `conversations` — the parent, one per run, uuid PK. (2)
-`messages` — children, append-only, FK to the parent. (3) the cascade — the
-parent's delete reaches the children.
+One axis: **lifecycle** — when is each row written, and is it ever changed? Trace
+it across the two tables.
 
-**Axis — who guarantees the parent exists:** trace the same axis you traced
-on chunks (`04`), and watch it answer *differently*. Here the **database**
-guarantees it: `messages.conversation_id references conversations(id)`. Insert
-a message for a non-existent conversation and the DB rejects it. Delete a
-conversation and its messages cascade. This is the opposite answer from
-`chunks → documents`, and the contrast is the whole point.
+```
+  axis = "when is this row written, and does it mutate?"
 
-**Seam:** the load-bearing boundary is **why the FK survives here**. The
-trace sink writes messages through *buffr's own code*
-(`src/supabase-trace-sink.ts`), not through an external `VectorStore`
-contract. Nothing forbids the FK, so the schema keeps it. The seam between
-`04` (FK dropped) and this file (FK kept) is "is there an external contract
-that forbids referential integrity?" — chunks: yes; messages: no.
+  ┌─ conversations ────────────────┐  written once, at session start
+  │  one row per createChatSession │  → never updated; the parent anchor
+  └────────────────┬────────────────┘
+                   │ seam: FK cascade — child lifecycle tied to parent
+  ┌─ messages ─────▼────────────────┐  written per event, append-only
+  │  one row per CapabilityEvent    │  → never updated; delete only via
+  └─────────────────────────────────┘    parent cascade
+```
+
+The seam is the FK with `on delete cascade`. It's the one place in the schema
+where a child's lifecycle is bound to a parent's: delete the conversation, the
+messages go with it. Both tables are append-only — rows are inserted, never
+updated — which is exactly the shape of an event log.
 
 ## How it works
 
 ### Move 1 — the mental model
 
-You know how a todo app models "a list has many items," and deleting the list
-should delete its items? `conversations → messages` is exactly that
-parent-child with `on delete cascade`. The agent run is the list; each turn is
-an item; drop the run and the turns go with it.
+The shape is an **append-only event log with a parent envelope** — the same
+structure as a request log grouped by trace id, or git commits grouped by branch.
+The conversation is the envelope; each message is one immutable event stamped with
+when it happened. Replay = read the events in timestamp order.
 
 ```
-  parent-child with cascade — one conversation, many events
+  event log under one envelope (pattern)
 
-  conversations  ●  id = c1
-                 │  on delete cascade
-       ┌─────┬─────┼─────┬──────────┬────────────┐
-       ▼     ▼     ▼     ▼          ▼            ▼
-  messages user  step tool_call  tool       model_usage  (append-only)
-            "q"  text  +args     +result     model+tokens
-       └─────────────── delete c1 ───────────────┘
-            every message cascade-deleted by the DB
+  conversation (envelope)
+  ├─ msg: user "what's X?"            t0
+  ├─ msg: step  (assistant thinking)  t1
+  ├─ msg: tool_call  search(args)     t2   ← the CAUSE (args captured)
+  ├─ msg: tool       result+duration  t3   ← the EFFECT
+  ├─ msg: model_usage  tokens         t4   ← the COST
+  └─ msg: step  (final answer)        t5
+
+  read in t-order → exact replay of the run
 ```
 
-### Move 2 — the step-by-step walkthrough
+### Move 2 — the walkthrough
 
-**Conversation is created once per session, returns its id.**
-`startConversation` inserts a `conversations` row and `returning id` hands
-back the uuid (`src/supabase-trace-sink.ts:4-8`), called from
-`createChatSession` (`src/session.ts:55`) — once, then held for every turn.
-The DB generates the uuid (`gen_random_uuid()`, `sql/001_agents_schema.sql:33`)
-— surrogate key, because a conversation has no natural identity (contrast the
-corpus side's deterministic ids, `03`).
+**The parent: one conversation per session.**
 
-**Messages append against that id.** The user question goes in first
-(`src/session.ts:61`, `persistMessage(... 'user', question)`), then the sink
-emits assistant/tool/usage events as the agent runs
-(`src/supabase-trace-sink.ts:53-84`). Each insert carries `conversation_id` —
-and the FK *checks it exists*. You cannot append a message to a conversation
-that isn't there; the DB rejects it. This is the integrity that `chunks` gave
-up.
+```
+  File: sql/001_agents_schema.sql + src/supabase-trace-sink.ts
+  Lines: 32-38 (schema) / 4-8 (startConversation)
 
-**Every column is written now — not just role + content.** `persistMessage`
-inserts all eight columns (`src/supabase-trace-sink.ts:27-37`), and the sink
-fills them per event type (`:56-84`): `tool_call_start` writes the call args
-into `tool_calls`; `tool_call_end` writes result + error + durationMs into
-`tool_results`; `model_usage` writes `model` (`provider/model`) and
-`tokens_used` (`inputTokens + outputTokens`). Earlier these columns existed in
-the DDL but nothing wrote them — they were orphaned/null. They're now
-populated, so the row carries the *cause* (tool args, token cost), not just
-the effect.
+    create table agents.conversations (
+      id uuid primary key default gen_random_uuid(),    ← surrogate key
+      app_id text not null default 'laptop',
+      agent_name text not null default 'rag-query-agent',
+      created_at timestamptz not null default now()
+    );
+    // startConversation: one insert, returns the id, held for the session
+```
 
-**`created_at` is client-supplied, not server `now()`.** Each event carries a
-`timestamp`, and the insert binds it as `coalesce($8::timestamptz, now())`
-(`src/supabase-trace-sink.ts:30`) — so the row's `created_at` is the moment
-the event *emitted*, falling back to server `now()` only when absent. This
-matters for ordering (next paragraph).
+A conversation row is created once in `createChatSession` (`session.ts:55`) and
+its id is held in-process across every turn. It's the trace id every message
+hangs off.
 
-**The sink batches, then flushes.** aptkit's `emit` is synchronous (the
-contract), so the sink pushes each write's promise into a `pending` array and
-`flush()` awaits them all after the run (`:50,87-93`). The inserts race, so
-*insert* order within a run isn't strictly guaranteed — but because
-`created_at` is now the event timestamp (not the random insert moment), an
-`order by created_at` replays events in true emit order rather than the
-flush race order.
+**The child: one message per event, with the causal columns populated.**
+The schema gives `messages` columns for the *full* signal — not just role and
+content, but the tool payloads, the model, and the token count.
 
-**Cascade on delete.** Drop a `conversations` row and every `messages` row
-with that `conversation_id` is deleted by the DB, atomically, no app code
-involved (`sql/001_agents_schema.sql:42`, `on delete cascade`). This is the
-one place the schema enforces a multi-row invariant for you.
+```
+  File: sql/001_agents_schema.sql
+  Lines: 40-50
+
+    create table agents.messages (
+      id uuid primary key default gen_random_uuid(),
+      conversation_id uuid references agents.conversations(id)
+        on delete cascade,                ← the one real FK + cascade
+      role text not null,
+      content text not null default '',
+      tool_calls jsonb,        ← the tool name + ARGS (the cause)
+      tool_results jsonb,      ← result + error + durationMs (the effect)
+      model text,              ← which model produced the inference
+      tokens_used int,         ← input+output tokens (the cost)
+      created_at timestamptz not null default now()
+    );
+```
+
+The comment-worthy part: `tool_calls`, `tool_results`, `model`, and `tokens_used`
+are all **populated**, not left null. The trace sink fills each one from the
+matching event type.
+
+**The sink: every event variant maps to a row.**
+`SupabaseTraceSink.emit` is a switch over all six `CapabilityEvent` types, each
+writing the columns its event carries.
+
+```
+  File: src/supabase-trace-sink.ts
+  Function: SupabaseTraceSink.emit
+  Lines: 53-85
+
+    case 'tool_call_start':                          ← the CAUSE
+      persistMessage(..., 'tool_call', event.toolName, {
+        toolCalls: { toolName, args: event.args },   ← args captured
+        createdAt: at });
+    case 'tool_call_end':                            ← the EFFECT
+      persistMessage(..., 'tool', event.toolName, {
+        toolResults: { result, error, durationMs },  ← outcome + timing
+        createdAt: at });
+    case 'model_usage':                              ← the COST
+      persistMessage(..., 'model_usage', '', {
+        model: `${event.provider}/${event.model}`,
+        tokensUsed: (inputTokens ?? 0) + (outputTokens ?? 0),
+        createdAt: at });
+```
+
+Each `case` populates exactly the columns that event knows about. `tool_call_start`
+captures the args — the *cause* of a tool action, which the comment at
+`supabase-trace-sink.ts:39-48` notes was "previously dropped on the floor."
+`tool_call_end` captures the *effect* and timing. `model_usage` fills the
+otherwise-orphaned `tokens_used` column.
+
+**The replay-order discipline: `created_at` from the event, not the insert.**
+This is the subtle, load-bearing part. The writes are queued and flushed
+concurrently (`flush()` awaits a `Promise.all`), so insert order is a race. If
+`created_at` defaulted to `now()` at insert time, the replay order would scramble.
+Instead, the event's own timestamp is threaded through.
+
+```
+  File: src/supabase-trace-sink.ts + sql/001_agents_schema.sql
+  Lines: persistMessage 26-36 / event timestamp at:55-56 / schema :49
+
+    // persistMessage:
+    const createdAt = extra?.createdAt?.length ? extra.createdAt : null;
+    insert into agents.messages (..., created_at)
+      values (..., coalesce($8::timestamptz, now()))  ← event time, else now()
+    // emit: const at = event.timestamp;  ← the event's own clock
+```
+
+So replay order = `order by created_at`, which matches *emit* order, not the
+concurrent-flush insert race. That's the difference between a log you can replay
+and a log that's merely append-only.
+
+```
+  Layers-and-hops — sync emit, queued async write
+
+  ┌─ agent ───────┐ emit(event)      ┌─ trace sink ─────────┐
+  │ answer()      │ ───(sync)──────► │ push(persistMessage) │ queue
+  └───────────────┘                  └──────────┬───────────┘
+                                       hop: flush()│ Promise.all
+                                                   ▼ (concurrent inserts)
+                                       ┌─ messages ──────────┐
+                                       │ created_at = event  │ ← order preserved
+                                       │ time, NOT insert now│   despite the race
+                                       └─────────────────────┘
+```
+
+**The boundary condition.** The append-only event-per-row shape means a single
+agent turn produces *many* message rows (user + step + tool_call + tool + model +
+step). Reconstructing "what was the assistant's final answer" means filtering by
+role, not reading the last row. And — tying back to `audit.md` Lens 3 — there's
+**no index on `conversation_id`**, so the `order by created_at where
+conversation_id = ?` replay query that this shape is built for would seq-scan
+until that index is added. The table is write-only today, so the gap is latent,
+but it's pre-loaded into exactly the read this design exists to serve.
 
 ### Move 2 variant — the load-bearing skeleton
 
-The kernel of trajectory capture, named by what breaks:
+```
+  the kernel of a replayable trajectory
+    1. a parent envelope (conversation) with a stable id
+    2. an append-only child row per event
+    3. enough columns to reconstruct cause→effect→cost
+    4. an ordering key that reflects EMIT time, not insert time
+```
 
-- **the FK `conversation_id → conversations(id)`.** Drop it and a message can
-  reference a dead conversation — orphan turns with no run, exactly the
-  `chunks` problem. Keep it: every message provably belongs to a real run.
-- **`on delete cascade`.** Drop it (plain FK) and deleting a conversation
-  *fails* while messages reference it, or leaves orphans if you force it.
-  Cascade is what makes "delete a run" a single safe operation.
-- **append-only + client-supplied `created_at`.** No updates, no deletes of
-  individual turns — the trajectory is an immutable log. `created_at` is now
-  the event's emit timestamp (`:30`), so replay order is faithful even though
-  inserts race. Remove the append-only discipline and you lose the ability to
-  replay/audit a run faithfully.
-
-**Skeleton vs hardening.** Kernel: parent + FK + cascade + append-only.
-Hardening *now present*: the `tool_calls` / `tool_results` / `model` /
-`tokens_used` columns are filled per event (`:56-84`), and `created_at` carries
-the event timestamp for ordering — none of which existed as live data before.
-Hardening still not present: a strict integer turn-sequence column (ordering
-leans on `created_at`, which is fine until two events share a millisecond),
-partitioning by time for retention, or `app_id`-scoped RLS (the column's
-there, `:34`, but unenforced — see `05`).
+- Drop **(4)** (use insert-time `now()`) → concurrent flushes scramble order;
+  the log is append-only but no longer *replayable*. This is the part people
+  forget.
+- Drop **(3)** (only role+content) → you see what was said, not why the agent
+  did it or what it cost — the trace is a transcript, not a trajectory.
+- Drop **(1)** the FK cascade → orphaned messages when a conversation is deleted.
 
 ### Move 3 — the principle
 
-When *you* own both sides of a relationship, enforce it in the database — a FK
-with cascade is free correctness you'd otherwise hand-roll in app code and get
-wrong. The reason `chunks` couldn't have this (`04`) is an external contract;
-the reason `messages` *does* is that nothing forbade it. Same schema, and the
-presence-or-absence of the FK tells you exactly where an external contract
-crosses the boundary.
+The difference between a transcript and a trajectory is causality. A transcript
+says "user asked, agent answered." A trajectory captures the tool args (why the
+agent did what it did), the durations and errors (what happened), and the token
+counts (what it cost) — enough to *replay and debug* the run, not just read it.
+The non-obvious requirement that makes it work is that the ordering key must come
+from when the event *happened*, not when the row was *written*, because real
+systems write concurrently. Get that wrong and you have all the data and none of
+the order.
 
 ## Primary diagram
 
-```
-  the run, captured — one frame
-
-  ┌─ session.ts ─────────────────────────────────────────┐
-  │  startConversation() → conversations row (uuid)  (1x) │
-  │  persistMessage('user', question)        (per turn)   │
-  └───────────────────────┬───────────────────────────────┘
-                          │  agent runs, sink emits per event
-  ┌─ SupabaseTraceSink ───▼───────────────────────────────┐
-  │  emit(step)           → push insert (content)          │
-  │  emit(tool_call_start)→ push insert (tool_calls=args)  │
-  │  emit(tool_call_end)  → push insert (tool_results)     │
-  │  emit(model_usage)    → push insert (model,tokens_used)│
-  │  emit(warning|error)  → push insert (message)          │
-  │  flush() → await all                                   │
-  └───────────────────────┬───────────────────────────────┘
-                          │  every insert carries conversation_id
-                          │  + created_at = event.timestamp
-  ┌─ Postgres ────────────▼───────────────────────────────┐
-  │  messages.conversation_id  FK ──► conversations.id     │
-  │                            on delete cascade           │
-  │  all cols filled: tool_calls/tool_results/model/tokens │
-  │  → orphans impossible; delete a run, events cascade    │
-  └─────────────────────────────────────────────────────────┘
-```
-
-## Implementation in codebase
-
-**Use case.** Every `npm run chat` session writes one conversation and, across
-its turns, N messages — the user turn, each assistant step, tool-call args,
-each tool result, and model/token usage. This is the agent's audit trail: what
-was asked, what the model said, what tools ran with what arguments, and what
-each turn cost in tokens — all replayable in emit order via `created_at`.
-
-**The FK + cascade — `sql/001_agents_schema.sql:40-50`:**
+The full trajectory shape — envelope, events, columns, ordering.
 
 ```
-  create table agents.messages (
-    id uuid primary key default gen_random_uuid(),
-    conversation_id uuid references agents.conversations(id)
-                         on delete cascade,        ← the ONE real FK + cascade
-    role text not null,                            ← user | assistant | tool
-    content text not null default '',
-    tool_calls jsonb,                              ← schemaless turn payloads
-    tool_results jsonb,
-    ...
-  );
-       │
-       └─ unlike chunks (FK dropped, 04), nothing forbids this FK here, so
-          the schema keeps it. Delete a conversation → messages cascade.
-```
+  Trajectory tables — replayable agent trace
 
-**The writes — `src/supabase-trace-sink.ts:4-8,27-37,53-84`:**
-
-```
-  insert into agents.conversations (app_id, agent_name)
-    values ($1, $2) returning id    ← surrogate uuid handed back (1x/session)
-
-  insert into agents.messages
-    (conversation_id, role, content, tool_calls, tool_results,
-     model, tokens_used, created_at)
-    values ($1,$2,$3,$4,$5,$6,$7, coalesce($8::timestamptz, now()))
-         │                                       │
-         │  FK checks $1 exists; reject if not   └─ $8 = event.timestamp:
-         │                                          replay = emit order,
-         └─ ALL eight cols bound — previously                NOT server now()
-            tool_calls/tool_results/model/tokens were null
-
-  switch (event.type) {                          ← every variant persisted
-    case 'tool_call_start': … tool_calls = {toolName, args}
-    case 'tool_call_end':   … tool_results = {result, error, durationMs}
-    case 'model_usage':     … model = `${provider}/${model}`,
-                              tokens_used = inputTokens + outputTokens
-    case 'warning'|'error': … role = type, content = message
-  }
-  async flush() { await Promise.all(this.pending); }  ← sync emit, deferred await
+  ┌─ conversations (envelope, written once) ────────────────┐
+  │  id uuid pk · app_id · agent_name · created_at           │
+  └──────────────────────────┬───────────────────────────────┘
+                  FK on delete cascade │ 1 → N
+  ┌─ messages (append-only event log) ▼─────────────────────┐
+  │  role  content  tool_calls  tool_results  model  tokens  │
+  │  ─────────────  (args=CAUSE) (result+dur)  ───── (COST)   │
+  │  created_at ← EVENT timestamp (coalesce $8, now())        │
+  │                                                          │
+  │  replay = SELECT * WHERE conversation_id=? ORDER BY      │
+  │           created_at   ← needs an index (latent gap)     │
+  └──────────────────────────────────────────────────────────┘
 ```
 
 ## Elaborate
 
-This is the standard agent-trajectory / event-log shape: an immutable,
-append-only child table under a per-session parent, with cascade so a run is
-one deletable unit. The `tool_calls` / `tool_results` jsonb columns absorb
-provider-specific event payloads without a column per field — the same
-jsonb-sidecar reasoning as the corpus `meta`, but here it's the *right* call
-(event shapes genuinely vary, and nothing duplicates them into columns, so no
-`02`-style redundancy). Note these columns are no longer aspirational: the
-trace sink fills them on every run (`:56-84`), turning what was a half-written
-log into a complete trajectory. The thing to carry away: this table is the
-counter-example that proves the `chunks` FK drop (`04`) was a *contract*
-decision, not a house style — when buffr owns both sides, it reaches for the
-FK every time.
+This is the agent-observability shape — the data side of what tracing systems
+(OpenTelemetry spans, LLM trace tools) capture: a parent trace with timestamped,
+typed events carrying enough structured payload to reconstruct the run. The
+deliberate choice here is to land it in *relational* rows with `jsonb` for the
+schemaless tool payloads, rather than a separate observability backend — which
+keeps the trajectory queryable with plain SQL and colocated with the rest of the
+agent's data. The honest gap is the missing `conversation_id` index: the schema
+is built to be replayed but not yet indexed for replay, because no read consumes
+it yet. The *debugging/observability* read of these same tables — what you'd
+actually do with the trace — lives in `study-debugging-observability`.
 
 ## Interview defense
 
-**Q: Your schema dropped the FK on `chunks` but kept it on `messages`. Isn't
-that inconsistent?**
+**Q: What makes your message log replayable rather than just append-only?**
+
+The `created_at` column is set from the *event's* timestamp, not the insert time.
+The trace sink queues writes and flushes them concurrently, so insert order is a
+race — if `created_at` defaulted to `now()`, replay order would scramble. By
+threading the event's own clock through `coalesce($8, now())`, `order by
+created_at` reproduces emit order exactly.
 
 ```
-  chunks → documents :  FK DROPPED  (external VectorStore contract forbids it)
-  messages → convos  :  FK KEPT     (buffr owns both sides, nothing forbids)
+  concurrent flush → insert order = race
+  created_at = event.timestamp → order by created_at = TRUE emit order
 ```
-Answer: it's consistent on the *rule* — enforce integrity in the DB unless an
-external contract forbids it. Chunks implement aptkit's `VectorStore`, which
-knows nothing about parents, so a FK breaks parity (`04`). Messages are
-written by my own trace sink with no such contract, so the FK + cascade stay.
-The presence of the FK is a marker of where an external contract crosses the
-boundary. **Anchor:** `:42` (kept) vs `:27` (dropped).
 
-**Q: How are turns ordered for replay?**
+Anchor: "append-only gives you the events; an emit-time ordering key gives you
+the order — replay needs both."
 
-By `created_at`, but it's the *event's emit timestamp* now, not server
-`now()` — the sink binds `coalesce($8::timestamptz, now())` with `$8 =
-event.timestamp` (`supabase-trace-sink.ts:30,55`). The sink's `emit` is sync
-and writes are fire-and-collect via `flush()`, so the *inserts* race and their
-DB-assigned order isn't meaningful — but `order by created_at` recovers true
-emit order regardless. The remaining gap: two events in the same millisecond
-tie; a strict integer `turn_index` would break the tie. **Anchor:**
-`supabase-trace-sink.ts:30,55,87-93`.
+**Q: Why capture `tool_calls` and `tool_results` separately instead of one row?**
 
-## Validate
+Because they're cause and effect at different times. `tool_call_start` carries the
+args — *why* the agent reached for the tool — and `tool_call_end` carries the
+result, error, and duration — *what came back*. Splitting them into two
+timestamped events preserves the causal sequence and the latency between
+request and response, which is exactly what you need to debug a slow or failing
+tool call.
 
-1. **Reconstruct:** draw the parent-child cascade and say what a manual
-   `delete from conversations` does to messages.
-2. **Explain:** why does `messages` keep its FK when `chunks` dropped one?
-   (`sql/001_agents_schema.sql:42` vs `:27`)
-3. **Apply:** two events emitted in the same millisecond can tie on replay
-   order. Why does `created_at` (event timestamp, `supabase-trace-sink.ts:30`)
-   fix the flush-race but not the same-ms tie, and what column would?
-4. **Defend:** justify surrogate uuid keys here vs the deterministic ids on
-   the corpus side (`03`).
+```
+  tool_call_start  args      t2   ← cause
+  tool_call_end    result    t3   ← effect (+ durationMs = t3 - t2)
+```
+
+Anchor: "two events, not one row — the gap between them is the tool's latency."
 
 ## See also
 
-- `04-soft-link-no-fk.md` — the FK that was dropped (the contrast).
-- `03-deterministic-chunk-ids.md` — surrogate vs natural key, the other side.
-- `05-app-id-tenant-column.md` — these tables carry `app_id` too, unenforced.
-- `audit.md` §4 — the one real FK, integrity enforced here.
-
----
-Updated: 2026-06-24 — trace sink now writes all 6 CapabilityEvent types, so
-`tool_calls`/`tool_results`/`model`/`tokens_used` columns are populated (were
-orphaned/null) and `created_at` is the client-supplied event timestamp (was
-server `now()`); conversation is per `npm run chat` session not per ask;
-purged `ask`/`ask-cmd.ts` refs → `session.ts`/`chat`.
+- `05-app-id-tenant-column.md` — why `messages` reaches its tenant through the FK
+  instead of carrying `app_id`.
+- `03-soft-link-no-fk.md` — the contrast: this cluster *keeps* its FK with cascade.
+- `audit.md` Lens 3 — the latent `conversation_id` index gap.
+- `study-debugging-observability` — what you do with this trace once it's captured.

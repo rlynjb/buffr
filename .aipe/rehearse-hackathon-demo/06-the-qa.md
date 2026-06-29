@@ -2,181 +2,182 @@
 
 ## Opening hook
 
-This chapter never touches the ten minutes. It runs *after* the timed slot, when the judges lean in and start probing. But you prep it like part of the demo, because the questions are predictable — judges ask the same five things at every hackathon, and the demo that has crisp, honest, speakable answers wins the room a second time. The trap here is getting defensive about the rough edges. Don't. In 2026 judges assume heavy AI-tool use and rough hackathon builds — candor reads better than polish-theater every single time. Own what's real, name what's next, never bluff a number you don't have.
+This chapter never counts against your ten minutes. It runs *after* the timed slot, when a judge walks up or the panel asks "okay, a few questions." Which means your only job here is preparation: have a crisp, honest, speakable answer ready for the five questions judges always ask, plus a decision tree for the follow-ups. The demo made them feel it; the Q&A is where they test whether you actually built it and understand it. Candor wins this room. A judge in 2026 assumes you used AI tools heavily — defensiveness about it reads worse than just owning what the tools did and what you did.
 
-The discipline for every answer below: short, true, anchored to the actual codebase, then stop. If you don't know, say "I don't know — here's how I'd find out." That answer beats a confident wrong one in front of anyone technical.
+The thread running through every answer below: you ground the claim in the codebase, you name the rough edge before they find it, and you point to where the depth lives if they want to go further. That posture — "here's what's real, here's the honest limit, here's the detail" — is what a senior engineer sounds like.
 
 ## The chapter-opening diagram — the five probes and where each goes
 
-Here are the five questions judges always ask, and the one-line spine of each answer. The rest of the chapter expands them.
+These are the five questions, and the one-word posture each one wants from you.
 
 ```
-  THE FIVE PROBES — and the spine of each answer
+  THE FIVE STANDARD PROBES → the posture each wants
 
-  ┌─ "Is this actually working?" ──────────────────────────────┐
-  │  → yes, you saw it live; the recall was real, not staged    │
-  └─────────────────────────────────────────────────────────────┘
-  ┌─ "What was the hard part?" ────────────────────────────────┐
-  │  → Gemma has no native tools; I emulate + retry once        │
-  └─────────────────────────────────────────────────────────────┘
-  ┌─ "What's the stack?" ──────────────────────────────────────┐
-  │  → TS/Node, Ollama (gemma2:9b + nomic), Postgres+pgvector,  │
-  │    my own aptkit toolkit, all local                         │
-  └─────────────────────────────────────────────────────────────┘
-  ┌─ "Did you build this in the hackathon?" ───────────────────┐
-  │  → yes; RAG/on-device instincts from prior shipped projects │
-  └─────────────────────────────────────────────────────────────┘
-  ┌─ "Is there a business / what's next?" ─────────────────────┐
-  │  → privacy-first personal AI; next is turn-history + sync   │
-  └─────────────────────────────────────────────────────────────┘
+  ┌─ "Is this actually working?" ──────────► SHOW, don't claim
+  │     re-run a live query, or the eval number
+  │
+  ├─ "What was the hard part?" ────────────► OWN the seam
+  │     emulated tool-calling; the recovery you built
+  │
+  ├─ "What's the stack?" ──────────────────► NAME it precisely
+  │     Gemma/Ollama + pgvector + aptkit, no vendor fog
+  │
+  ├─ "Did you build this in the window?" ──► CANDID on AI use
+  │     what shipped, what aptkit gave you, what AI helped
+  │
+  └─ "Is there a business / what's next?" ─► HONEST future
+        the privacy wedge, framed as direction not product
 ```
 
-## The body — each probe, with a speakable answer
+## The body — the five answers
 
-### "Is this actually working, or is it staged?"
+### Probe 1 — "Is this actually working, or is it staged?"
 
-```
-┃ "It's working — you saw the recall live. The money shot is a
-┃  paraphrased question pulling back a real exchange from a prior
-┃  session, retrieved by similarity from my Postgres. The one thing
-┃  I can't fully guarantee live is whether Gemma calls the search
-┃  tool every time — that's the emulation, and it's why I had a
-┃  backup ready."
-```
-
-Anchor: `src/session.ts` `memory.remember()` writes the exchange; recall comes back through the same `search_knowledge_base` tool. Honest edge: emulated tool-calling means occasional misses — own it, don't hide it.
-
-### "What was the hard part?"
+Don't argue it's real — *show* it's real. You have two pieces of live proof: re-run a query in front of them, and the eval number.
 
 ```
-┃ "Stock gemma2:9b has no native tool-calling — no tools parameter,
-┃  no structured tool_use response. So I emulate it: render the tool
-┃  schema into the system prompt, parse a JSON object back out of
-┃  free text, and retry once with a nudge if it drifts. It's the
-┃  single most fragile seam in the system, and I know exactly where
-┃  it lives."
+  SAY (out loud)
+  ─────────────────────────────────────────────────────────────────
+  "Happy to — let me ask it something you pick."  [take their
+  question, ask it live, let it answer grounded.]
+  "And it's measured, not vibes — I have a precision-at-k eval over
+  the retrieval. Let me run it."  [npm run eval — read the REAL
+  number off the screen.]
 ```
 
-Anchor: the `GemmaModelProvider` does outbound prompt-rendering + inbound `parseToolCall`, max two attempts. Deep version in `.aipe/study-ai-engineering/04-gemma-tool-call-emulation.md`.
-
-### "What's the stack?"
-
 ```
-┃ "TypeScript on Node, all local. Ollama serves two models — gemma2:9b
-┃  for generation, nomic-embed-text for 768-dim embeddings. Postgres
-┃  with pgvector and an HNSW cosine index stores the corpus AND the
-┃  conversation memory. The AI layer is my own toolkit, aptkit, which
-┃  buffr consumes as a library. The chat UI is Ink — React in the
-┃  terminal."
-```
-
-Anchor: `package.json` (`@rlynjb/aptkit-core ^0.4.1`, `ink`, `pg`), project context for the model + schema details.
-
-### "Did you build this during the hackathon? How much is AI-assisted?"
-
-```
-┃ "Yes, this build was the hackathon. The instincts behind it aren't
-┃  new though — I've shipped classic RAG before in AdvntrCue (pgvector,
-┃  GPT-4, tool-calling, session memory), and on-device AI in contrl
-┃  and dryrun. buffr is the local-first, self-hosted version of a shape
-┃  I've shipped in the cloud. And yes, I used AI tooling heavily to
-┃  build it — that's how I work; I direct it and I own every line."
+╔══════════════════════════════════════════════════════════════════╗
+║ NEVER FABRICATE THE EVAL NUMBER                                   ║
+║                                                                    ║
+║ Run `npm run eval` and read the actual P@1 / R@3 off the screen.  ║
+║ It scores 3 labeled query→doc pairs (work.md / stack.md /          ║
+║ coffee.md, eval/queries.json). Quote the number you SEE, today,    ║
+║ on your corpus — never a number you remember or hoped for. A       ║
+║ judge who catches one fabricated metric discards the whole demo.  ║
+╚══════════════════════════════════════════════════════════════════╝
 ```
 
-This is the candor move the spec calls for: matter-of-fact about AI assistance, no defensiveness. You directed the build; the tools accelerated it.
+Follow-up tree:
+- *"Can I pick a question it hasn't seen?"* → "Yes — go ahead." (This is the strongest possible proof; welcome it. If it answers ungrounded, own it: "that's the emulated-tool-calling seam — watch, I re-ask and it grounds.")
+- *"How big is your eval set?"* → "Three labeled pairs right now — small and honest. It's a regression gate, not a benchmark. The next step is faithfulness scoring on the generation, not just retrieval." (Detail: `study-ai-engineering/05-evals-and-observability/02-eval-methods.md`.)
 
-### "Is there a business here? What's next?"
+### Probe 2 — "What was the hard part?"
 
-```
-┃ "The bet is privacy-first personal AI — an assistant that knows you
-┃  and remembers you without your data leaving your machine. That's a
-┃  real wedge as people get uneasy about feeding their lives to cloud
-┃  models. What's next technically: sequential turn-history inside a
-┃  session (today each question is handled independently — recall is
-┃  relevance-based, not in-prompt history), a native-tool model to
-┃  harden the emulation, and multi-device sync. Today it's single-device,
-┃  no RLS — those are the honest gaps."
-```
-
-Anchor: the in-prompt-history gap is named in `src/session.ts`; single-device + no-RLS in the project context.
-
-## The follow-up decision tree
-
-When a judge keeps pulling on a thread, here's where each one goes. Don't improvise depth — route to the answer you already have.
+This is your chapter-04 story, told once more, tight. Lead with the seam.
 
 ```
-  FOLLOW-UP ROUTING
-
-  "but isn't recall just a chat-log scroll?"
-     → NO. It's retrieval by meaning: a PARAPHRASED query pulls the
-       past exchange by similarity. The messages table (the log) is
-       for observability; the vector memory is what makes recall work.
-       (Chapter 03 has the diagram.)
-
-  "why Gemma and not a model with real tools?"
-     → to run fully local and free. The fragility is the price. A
-       native-tool model is a PROVIDER SWAP behind the same seam, not
-       a rewrite — that's the payoff of the provider abstraction.
-
-  "how do you know retrieval is any good?"
-     → I have an offline eval — npm run eval scores precision@1 and
-       recall@k against a labeled query set (eval/queries.json). It's
-       small and honest; no LLM-judge yet. [Show your captured number
-       if you have it — never invent one.]
-
-  "what happens if two memories collide / how do you keep them apart?"
-     → namespaced ids (memory:<conversationId>:<n>) + a meta.kind tag.
-       Drop the tag and recall can't separate memory from documents;
-       drop the namespaced id and the second exchange overwrites the
-       first. (Chapter 03's shared-drawer diagram.)
-
-  "could this leak my data?"
-     → nothing leaves the laptop in the hot path — model on Ollama
-       localhost, corpus + memory in local Postgres. Honest caveat:
-       no RLS this phase, single-device — so it's not multi-user-safe
-       yet. That's named, not hidden.
+  SAY (out loud)
+  ─────────────────────────────────────────────────────────────────
+  "Running tools on a local model with no native tool-calling. Gemma
+  can't call a function the way a cloud API can, so aptkit emulates
+  it — renders the tool schema into the prompt, parses the JSON
+  tool-call back out. It works, but it can skip the tool and answer
+  ungrounded. So I choreographed the demo to recover from exactly
+  that. The next commit is argument-schema validation on the parsed
+  call."
 ```
 
-## The "I don't know" move
+Follow-up tree:
+- *"Why not use a model with native tools?"* → "Because the whole point is local and self-hosted — Gemma runs on my laptop with no cloud. Native tool-calling would mean an API and my data leaving the machine. I took the emulation cost to keep the privacy story." (That's an honest, deliberate tradeoff — name it without flinching.)
+- *"How often does it skip the tool?"* → "Often enough that I built a re-ask recovery into the demo. I don't have a hard rate; that's exactly what the eval should grow to measure."
 
-You will get a question you can't answer. The recovery is the same every time, and it's a strength, not a weakness:
+### Probe 3 — "What's the stack?"
 
-```
-┃ "I don't know that one. Here's how I'd find out: [the file or the
-┃  test I'd open / the experiment I'd run]. I'd rather give you that
-┃  than guess a number."
-```
-
-Never invent a metric. The eval numbers are real and small; if you didn't capture a specific figure, say "I ran the eval, it's a small labeled set — I'd want to show you the exact number rather than guess." That honesty is worth more than a fabricated precision score.
-
-## The one-page run sheet — Q&A PREP
+Name it precisely. No vendor fog, no "we use a vector database." Real names, real versions.
 
 ```
-  ┌─ RUN SHEET · 06 Q&A · after the clock ─────────────────────────┐
-  │                                                                 │
-  │  FIVE PROBES → spine:                                           │
-  │   • working? → yes, recall was live + real (emulation = caveat) │
-  │   • hard part? → Gemma no native tools; emulate + retry once    │
-  │   • stack? → TS/Node · Ollama (gemma2:9b + nomic) · pg+pgvector │
-  │              · my aptkit toolkit · Ink — all local              │
-  │   • built it? → yes; RAG from AdvntrCue, on-device from contrl/ │
-  │                 dryrun; AI-assisted, I own every line           │
-  │   • business/next? → privacy-first personal AI; next = turn-    │
-  │                       history + native-tool model + sync        │
-  │                                                                 │
-  │  ROUTE follow-ups: recall≠chatlog · Gemma=local/free tradeoff · │
-  │   eval=precision@1 (real number, never invent) · id+tag keep    │
-  │   memories apart · no-RLS/single-device is named not hidden     │
-  │                                                                 │
-  │  DON'T KNOW: "here's how I'd find out" + the file. Never bluff  │
-  │  a metric. Candor > polish — judges assume AI use + rough edges.│
-  └─────────────────────────────────────────────────────────────────┘
+  SAY (out loud)
+  ─────────────────────────────────────────────────────────────────
+  "TypeScript, ESM, Node 20. The model is gemma2:9b served by Ollama,
+  embeddings are nomic-embed-text, 768 dimensions. Storage is Postgres
+  with pgvector — an HNSW cosine index. The whole agent — the loop,
+  the retrieval pipeline, the tools, the memory engine — comes from my
+  own toolkit, aptkit, which buffr consumes as a library. The chat UI
+  is Ink, React in the terminal."
 ```
 
-## See also
+Follow-up tree:
+- *"What's aptkit?"* → "My own AI toolkit — the model-provider contract, the agent loop, retrieval, evals, and the conversation-memory engine. I actually extracted the memory engine *up* out of buffr into aptkit and re-consume it here. buffr is the app; aptkit is the substrate I built it on." (This is a strong signal — you built your own tools. Lean into it.)
+- *"Why pgvector and not a dedicated vector DB?"* → "Because the relational data and the vectors live in one Postgres instance — one store, one index, one place to back up. For one device that's the right call; a dedicated vector DB would be infrastructure I don't need yet." (Detail: `study-system-design/01-vector-store-adapter.md`.)
 
-- `00-overview.md` — the run-of-show and pre-flight checklist
-- `.aipe/rehearse-interview-defense/` — the deep "how does it actually work" answers
-- `.aipe/study-ai-engineering/08-conversation-memory.md` — the money shot's engine
-- `.aipe/study-ai-engineering/04-gemma-tool-call-emulation.md` — the honest risk, in full
-- `.aipe/study-ai-engineering/06-evals-precision-and-recall.md` — the eval numbers
+### Probe 4 — "Did you actually build this in the hackathon window? How much was AI?"
+
+Be matter-of-fact. Judges assume heavy AI use; candor reads as confidence, defensiveness as a tell.
+
+```
+  SAY (out loud)
+  ─────────────────────────────────────────────────────────────────
+  "Yes. The substrate — aptkit — I'd built before; buffr is the part
+  that graduated an in-memory RAG pipeline to persistent pgvector and
+  added the chat CLI and the cross-session memory wiring. I used AI
+  coding tools throughout — the same way I'd use them at work. The
+  architecture decisions, the schema, the choice to ride memory on the
+  same store as documents — those are mine. The tools accelerated the
+  typing, not the thinking."
+```
+
+Follow-up tree:
+- *"So aptkit was pre-existing — isn't that cheating?"* → "It's the library I depend on, like depending on React. The hackathon work is buffr: the persistence layer, the session, the memory wiring, the CLIs. I'd rather be honest that I stood on my own toolkit than pretend I wrote a vector store from scratch this weekend."
+- *"Which AI tools?"* → Name them plainly, no hedge. Then: "they wrote a lot of the boilerplate; the load-bearing decisions are in the design docs in `docs/superpowers/specs/`." (Honesty about process is the answer that lands.)
+
+### Probe 5 — "Is there a business here? What's next?"
+
+Frame the wedge honestly as a direction, not a product that exists. The privacy angle is the real one.
+
+```
+  SAY (out loud)
+  ─────────────────────────────────────────────────────────────────
+  "The wedge is privacy: a personal AI where your data and your model
+  never leave your machine. That's a real and growing want — people
+  don't want their second brain on someone else's server. Next steps
+  are indexing real personal corpora end-to-end and hardening the
+  tool-calling. I'm not claiming it's a company today — it's a working
+  proof that local-first personal AI is buildable now."
+```
+
+Follow-up tree:
+- *"Doesn't a cloud assistant just do this better?"* → "On raw capability, today, yes — a frontier cloud model is stronger. The trade is ownership: this one is mine, runs offline, and remembers me without sending anything anywhere. That's the bet."
+- *"How does this scale past one laptop?"* → "It doesn't yet, and on purpose — single-device is the whole privacy premise. The honest scaling question is sync across *your own* devices, not multi-tenant cloud. That's the next system-design problem, not a solved one." (Don't overclaim scale you haven't built — `me.md` is clear you haven't shipped horizontal-scale infra, so don't pretend.)
+
+## The AI-honesty posture, in one frame
+
+Because probe 4 is the one presenters fumble, here's the strong-vs-weak side by side. Memorize the right column's register.
+
+```
+  WEAK (defensive)                    STRONG (candid)
+  ──────────────────────────────      ──────────────────────────────────
+  "No no, I wrote most of it          "I used AI tools throughout, like at
+   myself, the AI just helped a        work. The architecture and the
+   little with syntax…"                schema decisions are mine; the tools
+                                       accelerated the typing."
+  → sounds like you're hiding         → sounds like a working engineer
+    something                            in 2026
+```
+
+## The "tighten it" treatment
+
+The Q&A doesn't run against a clock, so there's nothing to tighten for time. The discipline instead: **answer the question asked, then stop.** A judge asks "what's the stack" — name it and stop; don't volunteer the whole architecture. The follow-up trees exist so the depth comes out *when they pull for it*, not when you push it. Over-answering in Q&A is how a strong demo gets talked back down.
+
+## The one-page run sheet — CHAPTER 06
+
+```
+  ┌─ THE Q&A ─ after the clock ─ answer asked, then STOP ───────┐
+  │                                                              │
+  │  "working?"   → ask their question live + run npm run eval,  │
+  │                 read the REAL number. NEVER fabricate it.    │
+  │  "hard part?" → emulated tool-calling; recovery I built;     │
+  │                 next commit = arg-schema validation.         │
+  │  "stack?"     → gemma2:9b/Ollama, nomic-embed 768, pgvector  │
+  │                 HNSW, aptkit (my toolkit), Ink UI.           │
+  │  "built it?"  → yes; aptkit pre-existed (my library); buffr  │
+  │                 = persistence+CLI+memory. AI tools used,     │
+  │                 openly. Decisions mine, typing accelerated.  │
+  │  "business?"  → privacy wedge, framed as DIRECTION not       │
+  │                 product. Single-device is the premise.       │
+  │                                                              │
+  │  POSTURE: ground it, own the rough edge, point to the depth. │
+  │  Candor on AI use beats defensiveness. Answer, then stop.    │
+  └──────────────────────────────────────────────────────────────┘
+```
+
+That's the book. Rehearse front-to-back twice, hold the run sheets on demo day, and land the money shot by 3:00.

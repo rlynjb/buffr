@@ -1,148 +1,239 @@
-# Chapter 3 — Options and Opportunity Cost
+# 03 — Options and Opportunity Cost
 
-This is the crux chapter. Every other chapter supports this one. When an interviewer hears "self-hosted personal agent," the very next thought is *"Hermes already exists — why didn't you just use it?"* If you can't answer that, the whole project reads as reinventing a wheel out of ignorance. If you *can* answer it — cleanly, in a way that shows you evaluated the off-the-shelf option and rejected it for a specific reason — the project flips from "naive" to "deliberate." Build-vs-buy is the single most important problem-selection decision in the project, and you actually made it on the record.
+This is the **"why not the off-the-shelf option"** file. Every problem-selection brief that
+skips the alternatives is one good question away from collapse: *"couldn't you just use
+X?"* The strongest version of this project's case is that the build-vs-buy decision was made
+by **evaluating Hermes directly** — not dismissing it from a distance — and choosing to
+build *because the value lives in what the tool hides.* This file walks every option,
+including `do nothing`, and names the opportunity cost of each.
 
-```
-  THE OPTIONS — three real choices, named with their cost
+## Zoom out — the option space
 
-  ┌─ OPTION A: DO NOTHING ────────────────────────────────┐
-  │  keep pitching the pivot on assertion.                │
-  │  cost: the pivot stays unproven; the gap compounds.   │
-  └────────────────────────────────────────────────────────┘
-  ┌─ OPTION B: BUY (install Hermes) ──────────────────────┐
-  │  get a working personal agent today.                  │
-  │  cost: proves nothing about your engineering — a       │
-  │  turnkey tool HIDES the parts that signal skill.      │
-  └────────────────────────────────────────────────────────┘
-  ┌─ OPTION C: BUILD (this project) ──────────────────────┐ ◄── chosen
-  │  one agent, end to end, on AptKit + stock Gemma +      │
-  │  pgvector, borrowing Hermes' trajectory discipline.   │
-  │  cost: ~4 weeks of your time. buys: the portfolio      │
-  │  case — the exact parts Hermes would have hidden.     │
-  └────────────────────────────────────────────────────────┘
-```
-
-The verdict is Option C, and the *reason* is the whole game. Here's how you walk each option.
-
-## Option A — do nothing
-
-Always put `do nothing` on the table first; it's the option a sloppy answer forgets, and naming it shows you actually weighed cost against benefit.
-
-  ┌─────────────────────────────────────────────────────────┐
-  │ THEY ASK                                                 │
-  │   "Did you need to build anything at all? Couldn't you   │
-  │    just keep doing frontend?"                           │
-  │                                                         │
-  │ WHAT THEY'RE TESTING                                     │
-  │   Did you weigh the cost of inaction, or did you just    │
-  │   want to build something cool? 'Do nothing' is the      │
-  │   baseline every real decision is measured against.     │
-  └─────────────────────────────────────────────────────────┘
-
-> "Doing nothing is a real option, and it has a real cost. I'd keep my frontend career, which is fine — but the pivot into AI engineering would stay an *assertion*. In an interview I'd be saying 'I can do AI engineering' with AdvntrCue as my only evidence, and AdvntrCue welded OpenAI into the embedding path — it doesn't show I can build the provider contract or the eval layer that separate 'played with an LLM' from 'does AI engineering.' The cost of doing nothing is that the pivot stays slow and unproven, and that cost compounds every month I delay. So do-nothing is the baseline — and it loses, because the gap it leaves is the exact gap a hiring manager probes."
-
-## Option B — buy (install Hermes) — and why it loses
-
-This is the decision. Take your time on it. The interviewer is looking for one thing: did you *evaluate* the off-the-shelf option, or did you not know it existed? You evaluated it, and your design doc records exactly why it lost.
-
-  ┌─────────────────────────────────────────────────────────┐
-  │ THEY ASK                                                 │
-  │   "Hermes is a working self-hosted personal agent. Why   │
-  │    didn't you just install it?"                         │
-  │                                                         │
-  │ WHAT THEY'RE TESTING                                     │
-  │   The whole project's legitimacy. If your answer is      │
-  │   'I didn't know about it' or 'mine is better,' you      │
-  │   lose. The winning answer is 'buying defeats the        │
-  │   purpose, and here's the precise reason.'              │
-  └─────────────────────────────────────────────────────────┘
-
-> "I did evaluate using Hermes directly, and I chose to build instead — for one specific reason: a turnkey tool hides exactly the parts that signal engineering skill. If I install Hermes, I have a working agent and I've proven nothing. What a hiring manager wants to see is the engineering Hermes abstracts away: a provider contract with a real Gemma implementation, a RAG pipeline I actually built — chunking, embeddings, pgvector with an HNSW index, retrieval ranking — a centralized multi-tenant schema, and evals with *numbers*. That's the portfolio thesis in one line: building the route exposes the parts a turnkey tool hides. So I'm not competing with Hermes on features — Hermes wins on features, it's a whole platform. I'm borrowing its *discipline* — capturing every conversation as a trajectory so fine-tuning is answerable later — and building the rest myself, because the building *is* the deliverable."
-
-Then the part that proves you actually understand Hermes, not just that it exists:
-
-> "And I'm explicit about what I'm *not* copying. Hermes is a multi-agent Python platform running Nous Research's own fine-tuned models — Hermes is fine-tunes of Llama, Mistral, Qwen. I'm running stock Gemma 2 in TypeScript and stealing only the patterns, above all: capture every conversation as a trajectory *now* so fine-tuning is answerable *later*, not assumed. I'm not fine-tuned, I'm not a fleet, I'm not a platform. The contrast is deliberate — knowing precisely what Hermes is lets me take the one idea worth taking and leave the machinery I don't need."
+Four real options on the table, scored against the one thing that matters: does it produce
+the career-layer evidence?
 
 ```
-  BUILD vs BUY — what each option exposes vs hides
+  Zoom out — the options, scored on "does it produce the evidence?"
 
-                     │ BUY (Hermes)      │ BUILD (this)
-  ───────────────────┼───────────────────┼──────────────────
-  working agent      │ ✓ today           │ ✓ after ~4 weeks
-  provider contract  │ HIDDEN            │ ✓ you wrote it
-  RAG pipeline       │ HIDDEN            │ ✓ you built it
-  centralized schema │ HIDDEN            │ ✓ you designed it
-  eval numbers       │ HIDDEN            │ ✓ you measured them
-  ───────────────────┼───────────────────┼──────────────────
-  portfolio value    │ ~zero (it's       │ HIGH (the hidden
-                     │ someone's tool)   │ parts ARE the case)
-
-  buying optimizes for HAVING the agent.
-  building optimizes for PROVING you can build one.
-  your goal is the second, so you build.
+  ┌─ the goal ───────────────────────────────────────────────────────────┐
+  │  evidence that the frontend → AI-engineering pivot is real            │
+  └───────────────────────────────┬──────────────────────────────────────┘
+            ┌──────────────┬───────┴───────┬──────────────────┐
+            ▼              ▼               ▼                  ▼
+   ┌─ do nothing ─┐ ┌─ buy: use ─┐ ┌─ buy: assemble ─┐ ┌─ ★ BUILD ★ ─────┐
+   │ pivot stays  │ │ Hermes as- │ │ glue SaaS RAG   │ │ provider contract│ ← chosen
+   │ unproven     │ │ is         │ │ + hosted tools  │ │ + RAG from       │
+   │              │ │            │ │                 │ │ scratch + evals  │
+   │ evidence: ✗  │ │ evidence:  │ │ evidence:       │ │ evidence: ✓✓✓    │
+   │              │ │ weak ✗     │ │ partial ~       │ │ (the hard parts) │
+   └──────────────┘ └────────────┘ └─────────────────┘ └──────────────────┘
 ```
 
-  ┃ "I'm not competing with Hermes on features — it wins,
-  ┃  it's a platform. I'm borrowing its discipline and
-  ┃  building the rest, because the building is the
-  ┃  deliverable."
+Zoom in. The decisive axis isn't "which option ships a working agent fastest" — several do.
+It's **"which option produces the engineering evidence the pivot needs."** On that axis,
+buy collapses: a turnkey tool ships an agent *and hides the parts that signal skill*. Build
+wins not despite being more work, but *because* the work is the deliverable.
 
-## Option C — build, but don't over-build (the balance)
+## Structure pass
 
-The danger in "build" answers is over-correcting into "I built everything from scratch," which is its own red flag — it means you wasted time reinventing solved problems. Your plan has the balance written into it: *"build the glue and the judgment layer. Don't reinvent the agent loop or vector search — that costs scope and hides the interesting parts. Use AptKit, use Gemma off-the-shelf, use pgvector."*
+**Layers:** each option splits into "does it solve the product-face pain?" and "does it
+solve the career-face pain?" The two layers disagree, and that disagreement is the whole
+decision.
 
-> "Building doesn't mean building everything. I use AptKit for the agent loop and the runtime — reinventing the ReAct loop would cost scope and hide the interesting parts, not show them. I use stock Gemma off-the-shelf, not a fine-tuned model. I use pgvector, not a hand-rolled vector index. What I build is the *glue and the judgment layer*: the Gemma provider that emulates tool-calling because Gemma emits none, the RAG pipeline, the centralized schema, the eval scorers, and the measurement-driven decision about whether to ship, iterate, or fine-tune. That's the line — build the parts that show engineering judgment, buy the parts that are solved. Building the agent loop would prove I can follow a paper; building the eval-driven decision proves I can do the job."
+**Axis — *which pain does this option satisfy?*** Trace it across the options:
 
-This is also where the smaller build-vs-buy calls live, and each is a `do nothing`/`buy`/`build` decision in miniature:
+```
+  one axis — "which pain does it satisfy?" — traced across options
 
-| Decision | Bought / used off-the-shelf | Built |
-|----------|------------------------------|-------|
-| Agent loop | AptKit's `run-agent-loop` (bounded ReAct) | — |
-| Vector search | pgvector + HNSW (not hand-rolled) | the `PgVectorStore` adapter over it |
-| Embeddings | `nomic-embed-text` (purpose-built, not Gemma) | the embedding provider wiring |
-| Generation model | stock `gemma2:9b` (not fine-tuned) | the provider + tool-call emulation |
-| Eval metrics | — (didn't exist in AptKit) | `scorePrecisionAtK` / `scoreRecallAtK` |
+  option            product-face pain     career-face pain (the real one)
+  ─────────────────────────────────────────────────────────────────────────
+  do nothing        ✗ unsolved            ✗ unsolved
+  buy Hermes as-is  ✓ solved              ✗ HIDDEN (tool hides the engineering)
+  buy + assemble    ✓ mostly solved       ~ partial (glue isn't the hard parts)
+  BUILD             ✓ solved              ✓ solved (exposes provider/RAG/evals)
+                                            ▲
+                              the axis flips HERE — buy satisfies the product
+                              but not the career; build satisfies both
+```
 
-The opportunity cost is named on both sides. Reinvent the loop → lose weeks, prove nothing new. Build nothing → it's just Hermes again. The chosen line — build the glue, buy the substrate — is the one that maximizes portfolio signal per week spent.
+**Seam:** the load-bearing boundary is between **"a working agent"** and **"evidence I can
+build one."** Buying gets you across the first; only building gets you across the second.
+The seam is load-bearing because the axis-answer "which pain is satisfied" flips across it —
+and the career-face pain is the one that actually justified the project.
 
-## When you're cornered
+## The options, walked one at a time
 
-  ╔═════════════════════════════════════════════════════════╗
-  ║ IF THEY SAY                                              ║
-  ║   "Building it yourself just to learn is résumé-driven    ║
-  ║    development. In a real job you'd buy."                ║
-  ║                                                         ║
-  ║ DON'T                                                    ║
-  ║   Argue that buying is always wrong. It isn't, and       ║
-  ║   they'll know it. Don't pretend this was a production   ║
-  ║   build-vs-buy when it was a portfolio one.             ║
-  ║                                                         ║
-  ║ DO                                                       ║
-  ║   "You're right that in production, for a shipping       ║
-  ║    product, I'd lean buy — and I do exactly that inside  ║
-  ║    this project: I bought the agent loop, the vector     ║
-  ║    index, the model. But the *goal* here is different.   ║
-  ║    The deliverable isn't a running tool — it's           ║
-  ║    demonstrated capability. For that goal, building the  ║
-  ║    parts that signal skill is the correct call, and      ║
-  ║    knowing *which* parts to build versus buy is itself   ║
-  ║    the production judgment you're testing for. I didn't  ║
-  ║    rebuild pgvector. I built the eval layer. That split  ║
-  ║    is the answer to your objection."                    ║
-  ╚═════════════════════════════════════════════════════════╝
+### Option 1 — Do nothing
 
-The judo here: the interviewer's "you'd buy in production" objection is *answered by the project itself*, because the project buys the substrate and builds only the judgment layer. You don't fight the objection — you show the project already embodies the right instinct.
+```
+  do nothing — the baseline that makes every other option earn its cost
 
-## The one-page version
+  state: pivot asserted, no artifact
+    │
+    ▼  cost compounds monthly
+  every AI-engineering interview anchors on a claim with no system behind it;
+  the adjacent shipped pieces (AdvntrCue, dryrun, contrl, aipe) age separately
+  instead of composing into one case
+```
 
-**Core claim:** Three options — do nothing (pivot stays unproven, cost compounds), buy/install Hermes (working agent, proves nothing because a turnkey tool hides the skill-signaling parts), build (the chosen option: one agent on AptKit + stock Gemma + pgvector, borrowing Hermes' trajectory discipline). Build wins because the *building is the deliverable* — but the build is disciplined: buy the substrate (loop, vector index, model), build the glue and judgment layer (provider + tool-call emulation, RAG pipeline, schema, evals).
+**Opportunity cost of do-nothing:** the pivot stays a résumé line. This is the option every
+other one is measured against — and it's why "why now" (file 01) has teeth. The cost of *not*
+solving isn't zero; it's a compounding gap between a claimed pivot and a proven one.
 
-**The questions, one-line answers:**
-- "Why not just install Hermes?" → A turnkey tool hides exactly the parts that signal skill — the provider contract, the RAG pipeline, the schema, the eval numbers. The hidden parts *are* the portfolio.
-- "Do you understand Hermes?" → Yes — it's a multi-agent Python platform on Nous's fine-tuned models. I run stock Gemma in TS and steal only the trajectory-capture discipline.
-- "Didn't you reinvent the wheel?" → No — I bought the loop, the vector index, the model. I built only the glue and the judgment layer.
-- "Isn't this résumé-driven?" → In production I'd buy, and I do — inside the project. The goal here is demonstrated capability, and the build/buy split *is* the judgment being tested.
+**Verdict:** rejected. The whole point of the project is that this baseline is unacceptable.
 
-**The pull quote you keep:** *"A turnkey tool hides exactly the parts that signal engineering skill. Building this route exposes them — and the building is the deliverable."*
+### Option 2 — Buy: use Hermes as-is
 
-→ Next: Chapter 4, success metrics. The build is justified — now, how do you know it actually worked? The eval numbers are what make "build" defensible instead of indulgent.
+This is the option that was **evaluated directly**, not dismissed from a distance — which is
+exactly what makes the rejection credible.
+
+```
+  Hermes as-is — what it gives you, and what it HIDES
+
+  ┌─ what Hermes is ─────────────────────────────────────────────────────┐
+  │  a multi-agent Python PLATFORM: sub-agents, skill auto-generation,    │
+  │  multi-platform gateways, running Nous Research's own FINE-TUNED      │
+  │  models (Hermes = fine-tunes of Llama/Mistral/Qwen)                   │
+  │  agent-layer-plan.md:16                                               │
+  └───────────────────────────────┬──────────────────────────────────────┘
+                                  │ using it gives you a working agent…
+  ┌─ what it HIDES (the evidence) ▼──────────────────────────────────────┐
+  │  ✗ the provider contract (you never write the ModelProvider)         │
+  │  ✗ the RAG pipeline (chunking, embeddings, pgvector+HNSW, ranking)   │
+  │  ✗ the multi-tenant systems design (RLS, app-scoping)                │
+  │  ✗ the evals with NUMBERS — precision@5, faithfulness, JSON validity │
+  │     "the biggest separator between 'played with an LLM' and          │
+  │      'does AI engineering'"   agent-layer-plan.md:30                  │
+  └───────────────────────────────────────────────────────────────────────┘
+```
+
+**The decisive line:** *"a turnkey tool hides exactly the parts that signal engineering
+skill"* (`agent-layer-plan.md:25`). Hermes would solve the product-face pain perfectly and
+leave the career-face pain — the actual reason for the project — completely unsolved.
+
+**Opportunity cost of buying Hermes:** you ship an agent and prove nothing about your
+ability to build one. For a product company that'd be the *right* call. For a portfolio
+whose entire purpose is to expose engineering judgment, it's the wrong one.
+
+**Verdict:** rejected — *after direct evaluation, for a documented reason.* Note what's
+borrowed, though: the project *steals Hermes' patterns*, above all the trajectory-capture
+discipline ("capture every conversation as a trajectory now so fine-tuning is answerable
+later") — but none of its platform machinery or fine-tuned models
+(`agent-layer-plan.md:17`). That's the senior move: learn from the tool you rejected.
+
+### Option 3 — Buy: assemble hosted glue (SaaS RAG + hosted agent framework)
+
+```
+  buy + assemble — closer, but still hides the hard parts
+
+  hosted vector DB  +  hosted embedding API  +  agent framework
+        │                    │                       │
+        └────────────────────┴───────────────────────┘
+                             ▼
+                a working agent assembled from glue
+                             │
+         what you'd demonstrate: integration / config
+         what you would NOT demonstrate:
+           ✗ a provider contract you wrote (Gemma has no native tool-calling
+              — emulating it IS the engineering, ...aptkit-packages-design.md:136)
+           ✗ RAG built from scratch (the from-scratch pipeline is the signal,
+              not a hosted retrieve() call)
+```
+
+**Opportunity cost of assembling glue:** you demonstrate that you can wire SaaS together —
+a real skill, but not the one the pivot needs to prove. The hardest, most signal-rich parts
+(writing a `ModelProvider` for a model with *no* tool-calling, building the retrieval
+pipeline over swappable contracts) are exactly the parts a hosted stack does for you.
+
+**Verdict:** rejected. Partial evidence isn't the evidence the pivot needs. The glue path
+proves integration; the build path proves engineering.
+
+### Option 4 — Build (chosen)
+
+```
+  build — the option where the work IS the deliverable
+
+  ┌─ what building forces you to expose ─────────────────────────────────┐
+  │  ✓ a provider contract + real impl — write the Gemma ModelProvider,  │
+  │     tame its messy JSON  (agent-layer-plan.md:28)                    │
+  │  ✓ a RAG pipeline you actually built — chunk, embed, pgvector+HNSW,  │
+  │     retrieval ranking, from scratch (NOT ported from AdvntrCue)      │
+  │  ✓ a measurement-driven decision (ship vs iterate vs fine-tune) made │
+  │     FROM evidence  (agent-layer-plan.md:32)                          │
+  │  ✓ evals with NUMBERS — the separator (agent-layer-plan.md:30)       │
+  └───────────────────────────────────────────────────────────────────────┘
+```
+
+But note the *balance* — build is not "reinvent everything." The plan is explicit: *"build
+the glue and the judgment layer. Don't reinvent the agent loop or vector search — that
+costs scope and hides the interesting parts. Use AptKit, use Gemma off-the-shelf, use
+pgvector"* (`agent-layer-plan.md:35`). That's the nuance that makes the build decision
+credible rather than naive: build the parts that signal skill, buy the commodity
+infrastructure. Off-the-shelf Gemma, off-the-shelf pgvector, off-the-shelf agent loop —
+*hand-built* provider contract, RAG pipeline, and evals.
+
+**Opportunity cost of building:** more time, and the risk concentrated in the hardest piece
+(Gemma's missing tool-calling, `...aptkit-packages-design.md:136`). Both accepted
+deliberately — the time *is* the portfolio, and the hard piece is de-risked first.
+
+**Verdict:** chosen. It's the only option that satisfies the career-face pain.
+
+## The opportunity-cost ledger — all four at once
+
+```
+  options × cost — the whole decision in one frame
+
+  option            ships agent?  produces evidence?  opportunity cost
+  ──────────────────────────────────────────────────────────────────────────
+  do nothing        ✗ no          ✗ none              pivot stays unproven,
+                                                       cost compounds monthly
+  buy Hermes        ✓ yes, fast   ✗ HIDDEN            ship an agent, prove
+                                                       nothing about building one
+  buy + assemble    ✓ yes         ~ partial          prove integration, not
+                                                       the hard engineering
+  ★ BUILD ★         ✓ yes         ✓✓✓ the hard parts  more time + risk in the
+                                                       Gemma piece — both the point
+```
+
+## The principle
+
+Build vs buy is not decided on "which is less work" — it's decided on **which option
+produces the thing you actually need.** Here the thing needed is *evidence of engineering
+judgment*, and a turnkey tool hides exactly that. The credible version of the decision
+evaluates the strongest buy option (Hermes) directly, names precisely what it would hide,
+borrows its best pattern (trajectory capture), and builds only the parts that signal skill
+while buying the commodity infrastructure. "Build everything" is naive; "buy everything"
+produces no evidence; the right call is *build the judgment layer, buy the substrate.*
+
+## Interview defense
+
+**Q: Why not just use Hermes? It already does all of this.**
+Because Hermes is the right tool to *use* and the wrong tool for *this goal*. I evaluated it
+directly — it's a multi-agent platform on fine-tuned models, and it ships a working agent.
+But a turnkey tool hides exactly the parts that signal engineering skill: the provider
+contract, the RAG pipeline, the evals with numbers. My goal is to *expose* those, so I built
+them — while borrowing Hermes' trajectory-capture discipline. Anchor: `agent-layer-plan.md:25,30`.
+
+```
+  buy Hermes → working agent, evidence hidden
+  build      → working agent, evidence exposed (the whole point)
+```
+
+**Q: Isn't building from scratch just NIH syndrome?**
+No — the build is *scoped*. I don't reinvent the agent loop or vector search; I use AptKit,
+stock Gemma, and pgvector for the commodity layers. I built only the glue and the judgment
+layer — the provider contract, the from-scratch retrieval pipeline, the evals. Reinventing
+the commodity parts would cost scope and hide the interesting ones. Anchor:
+`agent-layer-plan.md:35`.
+
+**Q: What's the cost of doing nothing — why couldn't you wait?**
+Doing nothing leaves the pivot a claim with no artifact, and the cost compounds: every
+interview anchors on an unproven assertion while the adjacent pieces I've already shipped
+age separately instead of composing into one case. The baseline isn't free. Anchor: file
+01, "why now."
+
+## See also
+
+- `01-problem-brief.md` — the career-face vs product-face pain this decision turns on.
+- `02-scope-cuts-and-non-goals.md` — "build the judgment layer, buy the substrate," scoped.
+- `agent-layer-plan.md:13-35` — the build-vs-buy thesis, the source of this entire file.

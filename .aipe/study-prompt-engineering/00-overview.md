@@ -1,137 +1,82 @@
-# The assembled prompt — buffr's whole prompt in one frame
+# Overview — the prompt nobody fully owns
 
-**Industry name(s):** Prompt assembly / system-prompt composition · *Project-specific orientation*
+One page to orient. The thing to internalize before anything else: in this repo
+there is no single file you can open and read "the prompt." The string that
+finally reaches Ollama is **assembled across three owners**, each appending to
+what the last one produced.
 
----
-
-## Zoom out, then zoom in
-
-You asked buffr a question in the chat TUI. Before a single token reaches
-Gemma, four separate pieces of text get stitched into one system prompt,
-the tools get rendered into that same text (because Gemma can't take them
-any other way), and your question rides in as the user message. Here's
-the whole thing as bands — where each piece is born, and where it lands.
+I have debugged this exact shape in production more than once — a prompt that
+"looks fine" in your code because the part you wrote *is* fine, and the failure
+lives in a layer you don't own. So before mechanics, here's the whole machine.
 
 ```
-  Zoom out — where the prompt gets assembled
+  Prompt assembly — three owners, one string
 
-  ┌─ buffr CLI (your repo) ──────────────────────────────────────┐
-  │  chat.tsx onSubmit ──► session.ask(question)                 │
-  │  session.ts: loadProfile() ──► profile string                │
-  │              new RagQueryAgent({ model, tools, profile })     │
-  └───────────────────────────────┬──────────────────────────────┘
-                                   │  profile + question
-  ┌─ aptkit agent (library) ──────▼──────────────────────────────┐
-  │  RagQueryAgent ctor:                                          │
-  │   ★ injectProfile(BASE_SYSTEM, profile) ★  ← THIS GUIDE       │
-  │   renderPromptTemplate(...)                                   │
-  │  runAgentLoop: system + (synthesis nudge on final turn)       │
-  └───────────────────────────────┬──────────────────────────────┘
-                                   │  system + messages + toolSchemas
-  ┌─ Gemma provider (library) ────▼──────────────────────────────┐
-  │  buildSystemText: BASE_SYSTEM + profile                       │
-  │                 + "You can call the following tools:" + JSON  │
-  │                 + "respond with ONLY a single JSON object"    │
-  └───────────────────────────────┬──────────────────────────────┘
-                                   │  HTTP POST /api/chat
-  ┌─ Ollama (local) ──────────────▼──────────────────────────────┐
-  │  gemma2:9b  →  text (maybe a JSON tool call, maybe prose)     │
-  └───────────────────────────────────────────────────────────────┘
+  ┌─ Owner 1: buffr (this repo) ──────────────────────────────┐
+  │  loadProfile(pool, appId)         src/profile.ts:4         │
+  │    → reads me.md text from agents.profiles                 │
+  │  new RagQueryAgent({ profile })   src/session.ts:57        │  ← we start here
+  └───────────────────────────┬───────────────────────────────┘
+                              │ profile string handed in
+  ┌─ Owner 2: aptkit RagQueryAgent ──▼────────────────────────┐
+  │  injectProfile(BASE_SYSTEM, profile, {position:'start'})   │
+  │    rag-query-agent.js:29-31                                │
+  │    → "# About the person…\n<me.md>\n\n<BASE_SYSTEM>"       │
+  │  BASE_SYSTEM = "call search first, ground, cite sources"   │
+  └───────────────────────────┬───────────────────────────────┘
+                              │ system string + tool schemas
+  ┌─ Owner 3: Gemma provider ────────▼────────────────────────┐
+  │  buildSystemText(request)         gemma-provider.js:82     │
+  │    → system + "You can call the following tools:" +        │
+  │      JSON.stringify(each tool) + "respond ONLY a JSON      │
+  │      object {tool, arguments}"                             │
+  └───────────────────────────┬───────────────────────────────┘
+                              │ final messages[]
+                              ▼
+                       Ollama /api/chat  (gemma2:9b)
 ```
 
-Zoom in: there is no single "prompt file" in buffr. The prompt is
-**composed at three layers** — your CLI assembles the agent once in
-`createChatSession` (`session.ts:34-57`) and hands in a profile, the
-aptkit agent prepends it to a baked-in grounding instruction, and the
-Gemma provider appends the tool catalog as text. The job of this guide is
-to name each piece, say which layer owns it, and ground it in real code.
+**Why this matters and not just "it's layered":** the load-bearing capability in
+this app — calling the search tool to retrieve knowledge — is decided entirely in
+Owner 3, and it's *emulated*. Gemma 2 9B served by Ollama has no native tool API.
+So aptkit doesn't pass a `tools` array to a tool endpoint; it renders the tool
+catalog into **text** inside the system prompt and asks the model to reply with a
+JSON object it then parses back (`gemma-provider.js:107`). Tool calling here is a
+prompt-engineering trick, not an API feature. If the model returns prose instead
+of JSON, there's exactly one retry, gated on a cheap `{`-tell.
 
----
+The rest of the prompt machinery is comparatively calm:
 
-## The four pieces and who owns them
-
-Every prompt buffr sends is these four pieces, in this order. The first
-column is the prompt-anatomy term; the last is the exact owner.
+- **Grounding + citation** is one instruction in `BASE_SYSTEM`
+  (`rag-query-agent.js:12-19`): *call search first, ground every answer, cite
+  sources.* It works not because the instruction is strong but because the search
+  tool returns **pre-formatted citations** (`[docId] snippet`,
+  `search-knowledge-base-tool.js`) that the model copies. Nothing validates that
+  it actually did.
+- **Profile injection** (`me.md` → system prompt) is the entire personalization
+  story — one prepend, no extra model call.
+- **Bounded synthesis** is a forced final turn ("you have NO more tool calls,
+  now answer and cite") that stops the agent loop from spinning
+  (`run-agent-loop.js:17,30`).
+- **Structured-output reprompt** (generate → validate → retry with a strict
+  JSON-only suffix) exists in aptkit (`structured-generation.js`) but is **not on
+  buffr's chat hot path** — it's the meta-agents' machinery, available to grow into.
 
 ```
-  The assembled system prompt — four pieces, three owners
+  The five prompt patterns, by how load-bearing they are
 
-  ┌──────────────────────┬────────────────────────┬──────────────────────┐
-  │ piece                │ what it is             │ owner (file:line)    │
-  ├──────────────────────┼────────────────────────┼──────────────────────┤
-  │ 1. profile block     │ me.md-style standing   │ session.ts:47 loads  │
-  │    "# About the      │ context about YOU      │ profile-injector.ts  │
-  │    person..."        │ (per-user, ~constant)  │ :15 prepends it      │
-  ├──────────────────────┼────────────────────────┼──────────────────────┤
-  │ 2. BASE_SYSTEM       │ "search first, ground, │ rag-query-agent.js   │
-  │    grounding         │ cite, say so if you    │ :12-19 (the          │
-  │    contract          │ don't know" (constant) │ DEFAULT template)    │
-  ├──────────────────────┼────────────────────────┼──────────────────────┤
-  │ 3. tool catalog      │ tool schemas as JSON   │ gemma-provider.js    │
-  │    (Gemma only)      │ + "respond with ONLY   │ :82-105 buildSystem  │
-  │                      │ a single JSON object"  │ Text                 │
-  ├──────────────────────┼────────────────────────┼──────────────────────┤
-  │ 4. synthesis nudge   │ "NO more tool calls.   │ run-agent-loop.js    │
-  │    (final turn only) │ Now answer, cite."     │ :17-19, applied :30  │
-  └──────────────────────┴────────────────────────┴──────────────────────┘
-
-  the user message (your question) is NOT in the system prompt —
-  it rides as messages[0] (session.ts:62 agent.answer → runAgentLoop:22)
+  ┌────────────────────────────────┬──────────────┬─────────────────────┐
+  │ pattern                        │ load-bearing │ where it lives      │
+  ├────────────────────────────────┼──────────────┼─────────────────────┤
+  │ tool-call emulation            │ ★★★ critical │ gemma-provider.js   │
+  │ grounding + citation instr.    │ ★★           │ rag-query-agent.js  │
+  │ profile injection              │ ★★           │ profile-injector +  │
+  │                                │              │ rag-query-agent.js  │
+  │ bounded synthesis nudge        │ ★★           │ run-agent-loop.js   │
+  │ structured-output reprompt     │ ★ (off-path) │ structured-gen.js   │
+  └────────────────────────────────┴──────────────┴─────────────────────┘
 ```
 
-Not in the system prompt, but worth naming here: a fifth kind of text can
-land in the *user-turn* channel — **recalled conversation memory**. After
-each turn, `session.ts:66` embeds the exchange into the same vector store
-tagged `kind=memory`; on a later turn the `search_knowledge_base` tool
-surfaces relevant past exchanges *alongside* document chunks (same store,
-same tool). So a recalled exchange enters the prompt as a tool result —
-the retrieved-context channel of [`02`](02-grounding-and-citation-instruction.md),
-not the standing-context channel of [`01`](01-profile-injection-as-personalization.md).
-
-The split that matters: **pieces 1 and 2 are constant per session**
-(profile + grounding rules), **piece 3 is constant per turn** (tools
-don't change mid-loop), and **piece 4 appears only on the last turn**.
-That's textbook prompt anatomy — system holds the constant, user holds
-the per-call. Mixing them is how prompts drift. buffr keeps them in
-separate layers, which is why you can reason about each piece alone.
-
----
-
-## Where the deep walks live
-
-This overview is the map. Each piece gets its own pattern file:
-
-- Piece 1 → [`01-profile-injection-as-personalization.md`](01-profile-injection-as-personalization.md)
-- Piece 2 → [`02-grounding-and-citation-instruction.md`](02-grounding-and-citation-instruction.md)
-- Piece 3 → [`03-tool-call-emulation-prompt.md`](03-tool-call-emulation-prompt.md)
-- Piece 4 → [`05-bounded-synthesis-nudge.md`](05-bounded-synthesis-nudge.md)
-- The JSON validate/retry machinery → [`04-structured-output-reprompt.md`](04-structured-output-reprompt.md)
-
-And the lens-by-lens audit (including everything buffr does **not** do)
-lives in [`audit.md`](audit.md).
-
----
-
-## The principle
-
-A production prompt is rarely one string in one file. It's **assembled**
-— composed across the layers that each own a piece of the constant. The
-discipline isn't "write a good prompt," it's "keep each piece in the
-layer that owns it, so a model upgrade or a profile change touches one
-piece, not all four." buffr's three-layer split (CLI profile → library
-grounding → provider tool catalog) is that discipline made concrete.
-
----
-
-## See also
-
-- [`audit.md`](audit.md) — every lens, including the gaps
-- [`study-agent-architecture/00-overview.md`](../study-agent-architecture/00-overview.md)
-  — the runtime that drives this prompt
-
----
-
-Updated: 2026-06-24 — Re-pointed prompt assembly from the deleted
-`ask-cmd.ts` to `createChatSession` (`session.ts:34-57`) driven by
-`chat.tsx`; added recalled conversation memory as a fifth, retrieved-context
-piece that lands in the prompt via the search tool.
+Now read [`audit.md`](audit.md) for the full 13-concept walk, then the pattern
+files for the deep dives. The recommended deep-read order is in the
+[`README`](README.md).

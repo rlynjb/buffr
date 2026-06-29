@@ -1,230 +1,234 @@
-# Design Doc — The pgvector Graduation
+# DOC 01 — The pgvector Graduation
 
-> **Summary:** Graduate buffr's RAG from an in-memory vector store to a
-> persistent Supabase pgvector store by *filling aptkit's `VectorStore`
-> contract* with a `PgVectorStore` adapter — single device, direct `pg`, no
-> rewrite of the agent. The in-memory toy becomes a brain that remembers its
-> corpus and conversations across runs, and nothing above the store changes.
+**Decision (one line):** Graduate the laptop RAG agent from an in-memory vector
+store to **persistent Supabase pgvector** by *filling an existing contract* —
+`PgVectorStore implements VectorStore` — so the agent, the pipeline, and the
+retrieval tool change zero lines, and the agent now remembers its corpus and its
+conversations across runs.
 
-**Status:** Shipped — verified live against `reindb` 2026-06-19.
-**Grounds:** `src/pg-vector-store.ts`, `sql/001_agents_schema.sql`,
-`src/session.ts`, `docs/superpowers/specs/2026-06-19-laptop-supabase-graduation-design.md`.
+*Source: `docs/superpowers/specs/2026-06-19-laptop-supabase-graduation-design.md`.
+Built and verified live against `reindb` on 2026-06-19.*
 
 ---
 
 ## 2. Context / problem
 
-buffr's predecessor (`docs/superpowers/plans/2026-06-19-laptop-build.md`)
-built a working RAG agent on aptkit's runtime with an **in-memory** vector
-store. It worked — and forgot everything on exit. Re-index the corpus every
-run; lose every conversation; no episodic memory across sessions.
+The laptop brain worked, but it forgot everything on exit. The whole RAG
+pipeline — embed → upsert → cosine search → retrieve — ran against an
+`InMemoryVectorStore`. Restart the process and the indexed corpus, every
+conversation, and any memory of the user was gone. A toy, not a brain.
 
-The forcing constraint: aptkit already shipped the *seams*. `RagQueryAgent`,
-`createRetrievalPipeline`, the Gemma provider, the embedder, and the
-`VectorStore` / `CapabilityTraceSink` contracts all exist in the published
-`@rlynjb/aptkit-core` bundle. aptkit is **consumed, never edited here**
-(`.aipe/project/context.md`, Must-not-change constraints). So the persistence
-problem isn't "rewrite the agent" — it's "fill a contract aptkit already
-defined, from inside buffr."
+The forcing function: aptkit had already shipped the *seams* — the `VectorStore`
+and `EmbeddingProvider` contracts, the `RagQueryAgent`, the Gemma provider, the
+evals. The agent doesn't know or care where vectors live; it only speaks the
+`VectorStore` contract. So the persistence problem wasn't "rewrite the agent."
+It was "write one adapter that speaks that contract over a real database."
 
-That reframing is the whole decision. The question stops being *how do I add a
-database to my RAG app* and becomes *what's the smallest persistent thing I
-can drop into an existing seam.*
-
-> **Coach:** Lead with this reframing, not with "we needed persistence."
-> Every candidate has needed persistence. The staff move is recognizing the
-> problem was already shaped into a contract by the layer below — and that the
-> right answer was an *adapter*, not a feature. Say: "aptkit had already
-> drawn the seam; my job was to fill it without the agent noticing."
+The constraint that shaped everything downstream: **buffr consumes aptkit, never
+edits it** (`context.md`, "Must-not-change constraints"). aptkit is the
+deployment-agnostic toolkit; buffr is the body. So the persistent store had to
+slot into `createRetrievalPipeline` with no changes on the aptkit side at all.
 
 ---
 
 ## 3. Goals & non-goals
 
 **Goals**
-- Persist the corpus (chunks + embeddings) and conversations across runs.
-- Drop into `createRetrievalPipeline` with **zero agent changes** — the
-  `search_knowledge_base` tool, its citations, and the agent loop must work
-  unchanged across stores.
-- Single device, one writer (`app_id = 'laptop'`).
-- Forward-compatible schema so adding apps later needs no migration.
 
-**Non-goals** (these are the scope fences — name them or the review drifts)
-- No HTTP API / Edge Functions / PostgREST this phase. One client exists.
-- No RLS policies. One tenant.
-- No phone, no laptop↔phone sync, no multi-platform gateway.
-- No `agents.tool_runs` cache.
-- No new Supabase project — reuse existing `reindb`.
+- Corpus and conversations survive process restart — durable RAG.
+- Drop into `createRetrievalPipeline` with **zero agent changes** — the store is
+  the only thing that knows it's now Postgres.
+- One schema that doesn't need a migration when a second app shows up later.
+- Same loud failures as in-memory — a wrong-dimension vector throws, never
+  silently truncates.
 
-> **Coach:** The non-goals are where you win the review. When a reviewer says
-> "shouldn't this go through an API?", you don't defend — you point at the
-> non-goal: "named and deferred; YAGNI until a second client exists." A doc
-> with explicit non-goals turns scope-creep questions into already-answered
-> ones.
+**Non-goals (explicit — these prevent scope fights)**
+
+- **No HTTP API / Edge Functions this phase.** Single device, one client.
+- **No RLS.** One writer (`app_id = 'laptop'`); isolation is by convention until
+  app #2.
+- **No phone, no sync, no gateway, no fine-tune.** All named and deferred
+  (graduation spec, "Out of scope").
+- **No `agents.tool_runs` cache.** YAGNI for one device.
+
+The non-goals are doing real work here. "No RLS" and "no Edge Functions" are the
+two a reviewer reaches for first — naming them as deliberate deferrals, not
+oversights, is what stops the review from becoming a scope argument.
 
 ---
 
 ## 4. The decision
 
-Fill aptkit's `VectorStore` seam with a buffr-owned `PgVectorStore` over
-node-postgres, talking directly to a new `agents` schema in the existing
-`reindb` Postgres (pgvector + HNSW cosine). The agent, pipeline, and tool are
-untouched aptkit code.
+Two pieces: a forward-compat `agents` schema in the existing `reindb`, and a
+`PgVectorStore` adapter that fills aptkit's `VectorStore` contract over it. The
+agent sits on top, unchanged.
 
 ```
-  The graduation — same agent, store swapped underneath
+  The graduation — adapter fills a contract, agent doesn't move
 
-  ┌─ Service layer (buffr runtime, src/session.ts) ──────────────┐
-  │  GemmaModelProvider (guarded)   ← aptkit, unchanged          │
-  │  RagQueryAgent                  ← aptkit, unchanged           │
-  │  createRetrievalPipeline        ← aptkit, unchanged           │
-  │        │ depends on the VectorStore CONTRACT                  │
-  │        ▼                                                      │
-  │  ┌──────────────────────── seam ────────────────────────┐    │
-  │  │  BEFORE: InMemoryVectorStore   (aptkit, ephemeral)    │    │
-  │  │  AFTER:  ★ PgVectorStore ★     (buffr, persistent)    │    │
-  │  └───────────────────────────────────────────────────────┘   │
-  └───────────────────────────────┬──────────────────────────────┘
-                                  │ node-postgres (pg), direct
-                                  │ ORDER BY embedding <=> $1  (cosine)
-  ┌─ Storage layer (reindb Postgres) ─────────────────────────────┐
-  │  schema agents:  documents · chunks(vector 768, HNSW) ·       │
-  │                  conversations · messages · profiles          │
-  │  [ existing app_* schemas untouched ]                         │
-  └───────────────────────────────────────────────────────────────┘
+  ┌─ aptkit (UNCHANGED — consumed, never edited) ───────────────┐
+  │  RagQueryAgent → createRetrievalPipeline → VectorStore (iface)│
+  └──────────────────────────────────┬───────────────────────────┘
+                                      │  the seam: VectorStore contract
+                                      │  (upsert / search / dimension)
+  ┌─ buffr (NEW) ────────────────────▼───────────────────────────┐
+  │  PgVectorStore implements VectorStore   src/pg-vector-store.ts │
+  │    upsert → INSERT ... ON CONFLICT (id) DO UPDATE             │
+  │    search → ORDER BY embedding <=> $1   (cosine distance)     │
+  └──────────────────────────────────┬───────────────────────────┘
+                                      │  node-postgres (pg), direct
+  ┌─ Storage: reindb (Supabase Postgres) ▼───────────────────────┐
+  │  agents schema  (pgvector + HNSW cosine)                     │
+  │    documents · chunks(vector 768) · conversations · messages │
+  │    · profiles      — every row keyed by app_id               │
+  │  [ existing app_* schemas untouched ]                        │
+  └──────────────────────────────────────────────────────────────┘
 ```
 
-The seam is the load-bearing idea. Everything above it sees a `VectorStore`;
-whether that store lives in a JS `Map` or in Postgres is invisible. The
-adapter's whole job is to *be* a `VectorStore` so convincingly that the agent
-can't tell the difference.
+**The load-bearing move is the seam, not the database.** Because aptkit defines
+`VectorStore` as `{ dimension, upsert, search }` and nothing more, the
+persistence change is fully contained in one file. `createChatSession` swaps one
+constructor — `new PgVectorStore({ pool, ... })` instead of the in-memory one —
+and the agent, the pipeline, the tool, and the memory engine are all none the
+wiser (`src/session.ts:41-42`).
 
-Two details make the swap real:
-- `PgVectorStore.search` rebuilds each hit's `meta` to the in-memory shape
-  (`docId`, `chunkIndex`, `text`) so the tool's citations work unchanged
-  (`src/pg-vector-store.ts:79-84`). The contract isn't just the method
-  signatures — it's the *shape of what comes back*.
-- A vector whose length ≠ `dimension` throws — the same loud failure
-  `InMemoryVectorStore` gives (`src/pg-vector-store.ts:32-36`). Parity
-  includes parity of failure.
+`search` does one extra job worth calling out: it rebuilds each hit's `meta`
+into the in-memory shape (`docId`, `chunkIndex`, `text`) so the
+`search_knowledge_base` tool's citations work *identically* across stores
+(`pg-vector-store.ts:79-84`). The contract isn't just the method signatures —
+it's the *shape of what comes back*. Honor that and the tool can't tell which
+store it's talking to.
 
-> **Coach:** Borderline-doc callout — the trace-sink
-> (`src/supabase-trace-sink.ts`) ships *with* this graduation: it fills the
-> sibling `CapabilityTraceSink` contract, persisting all 6 `CapabilityEvent`
-> types with `created_at` from `event.timestamp` for deterministic replay
-> order. It's the same "fill the contract" move applied to trajectory
-> capture. It doesn't get its own RFC because its alternatives are thin — but
-> mention it here as evidence the seam-filling pattern is repeatable, not a
-> one-off.
+**Why direct `pg`, not Edge Functions:** a single device has exactly one client.
+Vector search is one cosine query — `ORDER BY embedding <=> $1 LIMIT k`. Wrapping
+it in PostgREST or an Edge Function adds an HTTP hop and latency for the only
+caller that exists. The HTTP layer is deferred, named, and arrives with app #2.
 
 ---
 
 ## 5. Alternatives considered
 
-Three real options were on the table. Each lost for a nameable reason.
+**Alternative A — stay in-memory, rebuild the index on boot.**
+Re-embed the whole corpus from markdown at every startup. *Why it lost:* it
+re-embeds on every run (slow, and burns the embedder), and it can't persist
+*conversations* or *memory* at all — those have no markdown source to rebuild
+from. The forgetting problem is unsolved for exactly the data that makes it a
+brain.
 
-**A — Stay in-memory, persist with a snapshot file.**
-Serialize the `Map` to disk on exit, reload on boot. Cheapest. Lost because it
-doesn't give vector *search* over a growing corpus — you'd reload everything
-into RAM every run, and there's no HNSW index, so retrieval is a linear scan
-that degrades with corpus size. It also can't host conversation memory as
-queryable rows. It's persistence without the thing persistence was *for*.
+**Alternative B — a managed/dedicated vector database (Pinecone, Weaviate,
+Qdrant).**
+Purpose-built ANN, less SQL to own. *Why it lost:* `reindb` already exists and
+already runs pgvector-capable Postgres. A separate vector DB means a second
+system to operate, a second set of credentials, and — the killer — your
+relational data (documents, conversations, profiles) and your vectors now live
+in two places that can drift. Colocating vectors and rows in one Postgres
+instance keeps a single source of truth and one connection. The pattern (embed +
+ANN + retrieval) is identical; only the operational cost differs.
 
-**B — A fresh Postgres project, dedicated to buffr.**
-Clean isolation. Lost because `reindb` already hosts per-app schemas and
-pgvector; a new project is operational overhead (another connection, another
-secret, another thing to back up) for zero isolation benefit at one tenant.
-The `agents` schema inside `reindb` is the cheaper boundary
-(`agent-layer-plan.md`: "centralize the *agent layer*, not the *data*").
-
-**C — Go straight to an HTTP API (Supabase Edge Functions / supabase-js).**
-The "real architecture." Lost because it adds PostgREST indirection and
-network latency for the *only client that exists* — the laptop, in-process.
-Direct `pg` is one hop; the HTTP layer is YAGNI until a phone or a second app
-appears (graduation spec, "Connection approach"). It's named and deferred, not
-rejected: when app #2 arrives, the Edge layer wraps the *same* SQL.
-
-> **Coach:** Alternative C is the one a senior reviewer pushes hardest —
-> "real" systems have an API. Don't fold. The framing that holds: "an API is a
-> boundary between clients; I have one client, in-process. Adding the boundary
-> now buys indirection and latency and buys *nothing* until a second client
-> exists. The SQL I'm writing is exactly what that future API would wrap." You
-> didn't skip the API out of laziness — you deferred a one-way *cost*, not a
-> one-way door.
+**Alternative C — a new Supabase project for the agent layer.**
+Clean isolation. *Why it lost:* `reindb` already hosts per-app schemas
+(`app_buffr`, etc.). A new project is a new thing to provision, secure, and pay
+for, to hold one schema. Adding the `agents` schema to the existing database
+reuses what's there and keeps the existing per-app schemas untouched
+(graduation spec, "Decisions locked").
 
 ---
 
 ## 6. Tradeoffs accepted
 
-- **We chose direct `pg`, accepting that buffr now owns a SQL surface** that a
-  future HTTP layer would otherwise hide. Cost: when the API arrives, the
-  query in `search` (`src/pg-vector-store.ts:70-78`) moves behind an endpoint.
-  Owned: it's a copy-paste move, not a redesign — the SQL is the contract.
-- **We chose the shared `agents` schema with `app_id` columns, accepting that
-  tenant isolation is by convention until RLS lands.** Cost: nothing stops a
-  buggy writer from using the wrong `app_id`. Owned: at one tenant there's no
-  second writer to isolate from; the column exists so RLS is an `ALTER`, not a
-  migration (graduation spec, Open questions: "RLS-later checkpoint").
-- **We chose pgvector colocated with relational data in one Postgres,
-  accepting a single store for two access patterns** (ANN search + row
-  lookups). Owned deliberately — colocating the vector and relational data is
-  the point; it's how a chunk's `content` and its `embedding` stay one row.
+- **We chose direct `pg`, accepting that a second client later needs the HTTP
+  layer we deferred.** When the phone or app #2 arrives it can't reach `pg`
+  directly across the network — that phase builds the Edge Function layer
+  wrapping the same SQL. We took the latency win for the one client that exists,
+  and the rework is bounded because the SQL doesn't change.
+- **We chose `app_id` columns with no RLS, accepting isolation-by-convention.**
+  Every `agents.*` table carries `app_id` (`sql/001_agents_schema.sql`), but
+  with one writer there are no RLS policies enforcing it. The columns are cheap
+  now and painful to retrofit; the *enforcement* waits until a second tenant
+  makes it necessary.
+- **We chose to own SQL and an HNSW index**, accepting that we now operate a
+  vector index (build params, recall tuning) instead of outsourcing it to a
+  managed service. For a small single-device corpus, that's a few lines of DDL,
+  not an operational burden.
 
 ---
 
 ## 7. Risks & mitigations
 
-- **Risk: embedding-dimension drift.** Switch the embedder and every stored
-  768-dim vector is wrong. *Mitigation:* `vector(768)` is hard-coded in the
-  schema (`sql/001_agents_schema.sql:22`) and `assertDim` throws on any
-  mismatch (`src/pg-vector-store.ts:32-36`) — a mismatch fails loud, never
-  silently truncates (`.aipe/project/context.md`, constraints). The
-  `embedding_model` column records which model wrote each row, so a re-embed
-  is targetable.
-- **Risk: a JS `number[]` mis-serialized into a Postgres array literal.**
-  *Mitigation:* `toVectorLiteral` produces pgvector's `[a,b,c]` text form and
-  the query casts `$1::vector` explicitly (`src/pg-vector-store.ts:14-17`).
-- **Risk: partial corpus on a failed batch index.** *Mitigation:* `upsert`
-  wraps the whole batch in a `begin`/`commit`/`rollback` transaction
-  (`src/pg-vector-store.ts:40-64`) — all chunks land or none do.
+```
+  Risk → mitigation
+
+  embedding-dim mismatch   → assertDim() throws on any vector whose length
+   (768 everywhere)          ≠ store dimension; same loud failure as in-memory
+                             (pg-vector-store.ts:32-36). Never truncates.
+
+  isolation by convention  → app_id is on every table now; RLS is a named
+   (no RLS)                  prerequisite gated before app #2 writes
+                             (graduation spec, "Open questions").
+
+  HNSW recall on a bigger  → defaults fine for a small corpus; m / ef_construction
+   corpus                    revisited past ~10k chunks (the parent plan's
+                             batch-reindex threshold).
+
+  swapping the embedder    → embedding_model is stored per chunk; reindex is
+   (a one-way door)          first-class so a model change re-embeds the corpus
+                             instead of silently mixing dimensions.
+```
 
 ---
 
 ## 8. Rollout / migration
 
-- The schema migration is **idempotent** — every object is
-  `create ... if not exists` (`sql/001_agents_schema.sql`), so re-running the
-  migration on an already-graduated DB is a no-op.
-- For callers: **nothing changes.** That's the whole point of filling a
-  contract. `src/session.ts:39-42` swaps `InMemoryVectorStore` for
-  `PgVectorStore` in the pipeline construction; the agent built at
-  `src/session.ts:57` is unaware.
-- Data in flight: the old in-memory brain held nothing across runs, so there's
-  no data to migrate — the first `index` run populates the persistent corpus
-  fresh.
+- **Schema:** `sql/001_agents_schema.sql` is idempotent — `create ... if not
+  exists` throughout, run by the transactional migration runner (`src/migrate.ts`).
+  Safe to re-run against an already-migrated `reindb`.
+- **For callers:** nothing changes. The agent, pipeline, and tool see the same
+  `VectorStore` interface. The only edit is the store constructor in
+  `src/session.ts`.
+- **For data in flight:** there was none to migrate — the in-memory store held
+  nothing across runs. The corpus is re-indexed once into pg via the `index`
+  CLI; from then on it persists.
+- **Tests:** integration tests gate behind `DATABASE_URL` and skip when unset,
+  so the default `node:test` run stays green with no cloud dependency. The same
+  round-trip the `InMemoryVectorStore` passed (embed → upsert → search returns
+  the planted chunk on top; dimension mismatch throws) now runs against real pg.
 
 ---
 
 ## 9. Open questions
 
-- **HNSW build params** (`m`, `ef_construction`) are defaults. Fine for a
-  small corpus; revisit past ~10k chunks (graduation spec; `agent-layer-plan.md`
-  batch-reindex threshold).
-- **RLS-at-app-#2 is a hard prerequisite, not a nicety.** The shared schema's
-  isolation is `app_id`-by-convention until a second app writes. Before that
-  happens: RLS on every `agents.*` table + always-derive-`app_id`-from-token.
-  Named now so it's not discovered later.
-- **The reindex one-way door.** Changing `embedding_model` requires re-embedding
-  the whole corpus. The design names a first-class `reindex(embedder)`
-  operation; whether it's online or stop-the-world at scale is open.
+- **RLS-later checkpoint.** With RLS deferred, `app_id` isolation is by
+  convention only. Adding RLS *plus* always-derive-`app_id`-from-token is a hard
+  prerequisite before a second app writes — not an afterthought.
+- **HNSW build params (`m`, `ef_construction`).** Defaults are fine now; the
+  revisit threshold is ~10k chunks. Unsettled until the corpus is that big.
+- **Conversation retention.** Unbounded `messages` growth is a real cost.
+  TTL / keep-N-recent / archive is named in the parent plan and not yet decided.
+
+---
+
+## Coach notes — where a reviewer pushes, and the framing that holds
+
+- **"Why not just use a vector database?"** Don't get defensive. The answer is
+  colocation: "vectors and relational rows in one Postgres instance is one
+  source of truth and one connection; a separate vector DB is a second system
+  that can drift from the rows it indexes." That's an architecture answer, not a
+  preference.
+- **"No RLS is a security hole."** Agree on the principle, reframe the timing:
+  "single writer today, so RLS guards nothing yet — and I've gated it as a hard
+  prerequisite before the second app, with `app_id` already on every table so
+  there's no migration." You've already thought past their objection.
+- **The sentence that gets the yes:** *"The agent didn't change. I filled
+  aptkit's `VectorStore` contract with a Postgres-backed adapter, and persistence
+  fell out."* Lead with that. It signals you found the seam instead of
+  rewriting the system.
 
 ---
 
 ## See also
 
-- `02-aptkit-memory-extraction.md` — the memory engine that rides this same
-  store via the same contract.
-- `03-dropped-chunks-documents-fk.md` — the schema tradeoff that keeps this
-  store drop-in compatible.
-- `.aipe/study-system-design/` — the mechanism walk of the `VectorStore` seam.
-- `.aipe/rehearse-problem-selection/` — why persistence was worth the spend.
+- DOC 02 — the memory engine that rides this same store.
+- DOC 03 — the dropped FK that lets memory rows live in `chunks` with no
+  `documents` row.
+- `.aipe/study-system-design/01-vector-store-adapter.md`,
+  `.aipe/study-data-modeling/01-vector-column-and-ann-index.md`.

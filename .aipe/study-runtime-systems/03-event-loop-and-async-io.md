@@ -1,349 +1,177 @@
-# 03 · Event Loop and Async I/O
+# Event Loop and Async I/O — the engine under every await
 
-**The event loop, microtasks, and the sync/async `emit` seam** · *Industry standard*
-
----
+**Industry name(s):** the event loop, microtask queue, async/await · **Type:** Industry standard (JS/Node runtime)
 
 ## Zoom out, then zoom in
 
-The single thread from `02` doesn't sit idle — the event loop keeps it busy by
-running whatever task is ready next. In buffr the event loop's most interesting
-moment is one specific seam: aptkit hands buffr a *synchronous* `emit(event)`
-callback, but the work that callback wants to do — writing a row to Postgres —
-is *asynchronous*. Bridging sync-in / async-out without blocking is the whole
-trick, and buffr solves it with a queue.
+Every `await` you've written in buffr is a handoff to the same machine: the event loop. It's the scheduler that lets one thread juggle a chat UI, a token stream from Ollama, and a fan of concurrent Postgres inserts without any of them blocking the others.
 
 ```
-  Zoom out — where the event loop sits
+  Zoom out — the event loop sits under all of buffr's async code
 
-  ┌─ Library layer (aptkit) ─────────────────────────────────────┐
-  │  RagQueryAgent loop  →  calls sink.emit(event)  SYNCHRONOUSLY │
+  ┌─ buffr's async surface ───────────────────────────────────────┐
+  │  session.ask()  trace.flush()  pool.query()  Ink re-renders   │
   └───────────────────────────────┬───────────────────────────────┘
-                                  │ sync call, must return now
-  ┌─ buffr glue ──────────────────▼──────────────────────────────┐
-  │  ★ SupabaseTraceSink.emit ★  push promise, return immediately │ ← here
+                                  │  every await registers a callback with:
+  ┌─ The event loop (one thread) ─▼───────────────────────────────┐ ← we are here
+  │  microtask queue (promises)  ·  timer/I-O/poll phases         │
+  │  pulls the next ready callback, runs it to completion         │
   └───────────────────────────────┬───────────────────────────────┘
-                                  │ async I/O, runs on the loop
-  ┌─ Storage layer ───────────────▼──────────────────────────────┐
-  │  Postgres write (pool.query) — resolves later                │
-  └───────────────────────────────────────────────────────────────┘
+                                  │  parks pending I/O on:
+  ┌─ OS async I/O ────────────────▼───────────────────────────────┐
+  │  epoll/kqueue — sockets to Postgres + Ollama                  │
+  └────────────────────────────────────────────────────────────────┘
 ```
 
-Zoom in: the concept is the **event loop** — the scheduler that decides which
-parked task resumes next — and its two queue tiers: microtasks (resolved
-promises, `await` continuations) and macrotasks (timers, I/O callbacks).
-
----
+Zoom in: this file answers *what actually happens at an `await`* — where control goes, what gets queued, and the one rule that keeps it all correct (a callback runs to completion before any other runs).
 
 ## Structure pass
 
-**Layers, by "what the loop is doing":**
+**Layers.** Three: **your async code**, **the event loop** (microtask queue + phases), and **OS async I/O** (the sockets).
+
+**Axis: control — "who runs next?"**
 
 ```
-  Layer              The loop's job there
-  ─────────────────  ─────────────────────────────────────────
-  await chain (CLI)  resume the next .then after a promise settles
-  emit() callback    accept sync work, defer the async part
-  pending[] queue    hold promises that haven't settled yet
-  flush()            drain the queue: Promise.all parks until all settle
+  One axis — "who runs next?" — traced down
+
+  ┌────────────────────────────────────────────────┐
+  │ your code: runs straight-line UNTIL an await    │  → YOU decide, linearly
+  └───────────────────────┬─────────────────────────┘
+       ┌──────────────────────────────────────────┐
+       │ event loop: picks next ready callback     │  → THE LOOP decides order
+       └───────────────────────┬───────────────────┘
+            ┌─────────────────────────────────────┐
+            │ OS: signals "socket ready" via epoll │  → THE KERNEL decides timing
+            └─────────────────────────────────────┘
+
+  control flips from you → loop → kernel and back
 ```
 
-**Axis traced — "is this synchronous or asynchronous?"** Watch it flip across
-the `emit` seam:
-
-```
-  "does this return a value now, or a promise for later?"
-
-  ┌─ aptkit agent ─┐   emit()   ┌─ buffr sink ────┐
-  │ SYNC: needs    │ ═══════════►│ SYNC signature, │  ← the seam: sync in
-  │ emit to return │  (it flips) │ ASYNC work fired│     async out
-  └────────────────┘             └─────────────────┘
-         ▲                              ▲
-         └── must not block ────────────┘
-             so the write is queued, not awaited inline
-```
-
-**Seams:**
-
-- **sync ↔ async (the `emit` seam).** This is *the* load-bearing seam of the
-  file. aptkit's `CapabilityTraceSink` contract makes `emit` synchronous; buffr
-  cannot `await` inside it without changing the contract, so it pushes the
-  promise and returns. The async work runs on the event loop afterward.
-- **fired ↔ awaited (the `flush` seam).** Promises pushed in `emit` are
-  *fired* but not *awaited* until `flush()`. Skip `flush()` and the process can
-  exit with promises still pending — writes lost.
-
----
+**The seam: the `await` keyword itself.** On the left of an `await`, control is yours and synchronous. On the right — after the awaited promise settles — control is the loop's to schedule. That single keyword is where straight-line code becomes scheduled code.
 
 ## How it works
 
 ### Move 1 — the mental model
 
-You know how `setState` in React doesn't update the value on the next line —
-it *schedules* a re-render and moves on? `emit()` here is the same move. It
-doesn't do the write; it schedules the write and returns instantly. The event
-loop runs the actual write later, when the call stack is clear.
+You know how `setState` in React doesn't update the variable on the next line — the change is queued and applied later? `await` is the same shape: it pauses your function, hands the rest of it to a queue as a callback, and lets the thread go do other ready work. When the awaited thing settles, your callback gets pulled off the queue and your function resumes exactly where it stopped.
 
 ```
-  Fire-and-queue — the shape of emit()
+  The pattern — await splits a function at the seam
 
-   sync caller ──► emit(event) ──► push promise to pending[] ──► RETURN
-                                        │
-                                        │ (the write happens later,
-                                        ▼  on the event loop)
-                                   pg write resolves ──► row in DB
-
-   the call returns BEFORE the write finishes — that's the point
+  async function ask(q) {
+    persistUser(q)          ┐  runs synchronously now
+    ─── await agent.answer ─┤◄── PAUSE: rest becomes a queued callback;
+    flush()                 ┘    thread goes idle / runs other tasks;
+                                 resumes here when answer settles
+  }
 ```
 
-### Move 2 — the loop, one part at a time
+### Move 2 — the walkthrough
 
-**The call stack and `await`.** When `session.ask` hits `await agent.answer(...)`,
-the function suspends, the stack unwinds, and the event loop is free. When the
-agent's promise settles, the continuation (everything after the `await`) is
-queued as a *microtask* and runs as soon as the stack is empty. Every `await`
-in `session.ts:60-70` is one of these suspend-resume points. In `chat` this
-matters extra: while that turn is parked, the event loop is free to run Ink's
-render loop — that's why the `thinking…` spinner (`chat.tsx:48-51`) animates
-*during* the await instead of freezing.
+**An `await` registers a continuation and yields the thread.** Take `session.ask` (`src/session.ts:60-71`):
 
-```
-  await as suspend/resume — the loop's core move
-
-  stack:  [session.ask] ──await agent.answer──► (suspend, stack empty)
-                                                  │
-            event loop idle, free to run other tasks (incl. Ink render)
-                                                  │
-          agent promise settles ──► microtask: resume session.ask after the await
-  stack:  [session.ask continues] ──► await trace.flush ...
+```ts
+async ask(question: string): Promise<string> {
+  await persistMessage(pool, conversationId, 'user', question);  // ← yield #1
+  const answer = await agent.answer(question);                   // ← yield #2 (the long one)
+  await trace.flush();                                           // ← yield #3
+  try { await memory.remember({ conversationId, question, answer }); } catch {}
+  return answer;
+}
 ```
 
-**Microtasks vs macrotasks.** Two queues, strict priority. Resolved promises
-and `await` continuations go to the *microtask* queue, drained completely
-before the loop touches the *macrotask* queue (I/O callbacks, timers). buffr
-never uses timers, so in practice the loop here is: run stack → drain
-microtasks → poll I/O → repeat. The ordering matters for one reason — every
-`persistMessage` promise resolution is a microtask, so they all flush before
-the process considers exiting.
+At each `await`, the function suspends and the rest of it is parked as a continuation. During `await agent.answer(question)` — which is Ollama generating tokens over HTTP — the thread is *free*. That's why the Ink spinner keeps animating: its re-render callbacks get to run on the same loop while `ask` is parked. → `02` covered why one thread can do this; here's the loop that schedules it.
 
-**The `emit` seam — sync signature, async body.** `emit(event)` must return
-synchronously (aptkit calls it inline in its agent loop and doesn't `await` it).
-buffr cannot block there, so it constructs the `persistMessage(...)` promise —
-which *starts* the Postgres write — and pushes it into `pending[]`. The promise
-is now "in flight" on the event loop. `emit` returns. The kernel of the pattern:
+**The microtask queue runs before the macrotask phases.** This is the part people trip on. Promise continuations (everything after an `await`) go on the **microtask** queue, which the loop drains *completely* after each macrotask and between phases. Timers, I/O callbacks, and `setImmediate` are **macrotasks** in the loop's phases. Practically: a resolved promise's `.then` runs before a `setTimeout(…, 0)` queued at the same moment.
 
 ```
-  Skeleton: queue-and-drain
+  One tick of the loop — microtasks drain between everything
 
-   1. pending[]              ← the buffer that survives between emit calls
-   2. emit → pending.push(p) ← enqueue without awaiting (keeps emit sync)
-   3. flush → Promise.all    ← drain: park until every queued task settles
-
-   what breaks if removed:
-   • drop pending[]      → nowhere to hold the in-flight writes; lost
-   • drop the push       → emit does nothing; no trace persisted
-   • drop flush          → process may exit with writes unfinished → DATA LOSS
+  ┌─ run one macrotask (e.g. an I/O callback) ─┐
+  │   ... your code runs, hits awaits ...        │
+  └───────────────────┬──────────────────────────┘
+                      ▼
+  ┌─ DRAIN microtask queue COMPLETELY ──────────┐  ← all promise continuations
+  │   await-continuations, .then, queueMicrotask │     run here, before the
+  └───────────────────┬──────────────────────────┘     next macrotask
+                      ▼
+  ┌─ next phase: timers → poll(I/O) → check ────┐
+  └──────────────────────────────────────────────┘
 ```
 
-The load-bearing part people forget is **`flush()`**. Without it the turn
-returns, `session.ask` resolves the answer to the UI, and the next turn (or
-`/exit` → `pool.end()`) can fire while trace writes are still settling — the rows
-silently never land. `session.ts:63` calls `await trace.flush()` *after*
-`agent.answer` and *before* returning the answer for exactly this reason. (In a
-long-lived chat there's no `pool.end()` per turn, so the risk shifts from
-"process exits mid-write" to "pool closed at `/exit` mid-write" — same seam, same
-fix.)
+buffr never reaches for `setTimeout` or `setImmediate`, so its async is *all* microtask-driven: promise after promise, draining as fast as I/O settles. There are no timers to reason about — which also means no timeouts, a gap `07` returns to.
 
-**Optional hardening (absent).** A real system would catch per-write failures
-(`Promise.allSettled` instead of `Promise.all` so one failed write doesn't
-reject the whole flush), and would cap how many writes can be in flight. buffr
-does neither — `flush` uses `Promise.all` (`:92`), so a single failed trace
-write rejects `flush` and throws out of `session.ask` — which `chat.tsx`'s
-`try/catch` (`:30-31`) catches and renders as an error turn, so the *session*
-survives even though that turn's trace is lost. That's a real edge, named in
-`08`.
+**The fan-out in the trace sink is the loop's concurrency on display.** `emit()` is synchronous by contract (aptkit calls it without awaiting), so it *starts* a `persistMessage` promise and stashes it — it does not await:
 
-**Ordering inside the row, not just between calls.** A subtlety the trace sink
-now adds: because all 6 event types are fired into `pending[]` as concurrent
-writes, their *insert* order races. So `emit()` threads `event.timestamp` into
-each row's `created_at` (`coalesce($8::timestamptz, now())`,
-`supabase-trace-sink.ts:30,55`). Replay order then follows emit order, not the
-flush race — the event loop decides *when* each write lands, the timestamp
-decides how the trajectory reads back.
+```ts
+// src/supabase-trace-sink.ts:53-89
+emit(event: CapabilityEvent): void {      // sync — cannot await
+  // ...
+  this.push(persistMessage(pool, conversationId, event.role, event.content, { createdAt: at }));
+  // ...
+}
+private push(p: Promise<void>): void { this.pending.push(p); }
+
+async flush(): Promise<void> {
+  await Promise.all(this.pending);         // join all the in-flight inserts
+}
+```
+
+Each `emit` kicks off an insert that immediately parks on a Postgres socket. By the time `flush()` runs, *N* inserts are all in flight at once, multiplexed by the loop across *N* connections from the pool. `Promise.all` is the single join point where the loop waits for the slowest one. This is the cleanest "async I/O without blocking" example in the repo. → `07` notes the missing bound on *N*.
+
+**The blocking hazard: a sync call that doesn't yield.** The loop's correctness rule is *run-to-completion* — once a callback starts, nothing else runs until it returns or hits an `await`. So a synchronous blocking call (a `fs.readFileSync` of a huge file, a tight CPU loop, a sync DB driver) would freeze the loop: no microtasks drain, the spinner stops, every parked insert waits. buffr avoids this — its file reads are `await readFile(...)` (`src/cli/index-cmd.ts:23`, async), and there's no sync compute. The only `readFileSync`-shaped risk would be if someone swapped an async call for a sync one. → `02` covers the CPU-bound version of this hazard.
 
 ### Move 3 — the principle
 
-**When a contract is synchronous but the work is asynchronous, queue the work
-and drain at a boundary.** The sync callback's job becomes "enqueue," and a
-later explicit drain (`flush`) owns the waiting. This decouples *when work is
-requested* from *when it's guaranteed done* — and the drain point is where you
-must not forget to await, or the runtime exits out from under your I/O.
-
----
+`await` doesn't make code wait — it makes the *thread* not wait. It splits your function at the seam, queues the back half, and frees the loop to serve every other ready callback. The whole model holds together on one rule: each callback runs to completion before the next, so you never have two callbacks half-executed at once. That rule is also why buffr has almost no races (→ `04`).
 
 ## Primary diagram
 
 ```
-  The emit→queue→flush lifecycle, full picture
+  buffr — one turn through the event loop
 
-  ┌─ Library (aptkit) ────────────────────────────────────────────┐
-  │  agent loop step ──► sink.emit(event)  [synchronous call]      │
-  └──────────────────────────────┬────────────────────────────────┘
-                                 │ returns immediately
-  ┌─ buffr glue ─────────────────▼────────────────────────────────┐
-  │  emit: pending.push( persistMessage(...) )                     │
-  │              │                                                 │
-  │   pending[]: [ p1 ][ p2 ][ p3 ]   ← promises in flight         │
-  │              │                                                 │
-  │  flush: await Promise.all(pending)  ← drains at the end        │
-  └──────────────┬─────────────────────────────────────────────────┘
-                 │ each p is a pg write on the event loop
-  ┌─ Storage ────▼────────────────────────────────────────────────┐
-  │  agents.messages rows — guaranteed written only AFTER flush    │
-  └───────────────────────────────────────────────────────────────┘
-
-  per-turn order in session.ask:  agent.answer → trace.flush → memory.remember → return
-  exit (once, at /exit):          session.close() → pool.end()
-  reorder flush after the return and you race the next turn against unwritten rows
+  ┌─ your code ──────────────────────────────────────────────────────────┐
+  │ ask(): persistUser → await answer → await flush → remember            │
+  └───┬─────────────────────┬──────────────────────┬────────────────────┘
+      │ await (yield)        │ await (yield, long)  │ await (yield)
+  ┌───▼─────────────────────▼──────────────────────▼────────────────────┐
+  │  EVENT LOOP (one thread)                                             │
+  │  microtask queue: [ask-cont] [emit-inserts...] [Ink re-render]       │
+  │  drains fully between phases; runs each callback to completion       │
+  └───┬─────────────────────┬──────────────────────┬────────────────────┘
+      │ socket              │ socket               │ stdout
+  ┌───▼──────────┐  ┌───────▼────────────┐  ┌──────▼──────────┐
+  │ Ollama HTTP  │  │ Postgres ×N (pool) │  │ terminal (TTY)  │
+  │ token stream │  │ inserts in flight  │  │ spinner frames  │
+  └──────────────┘  └────────────────────┘  └─────────────────┘
 ```
-
----
-
-## Implementation in codebase
-
-**Use cases.** The queue-and-drain pattern is reached for once per chat turn:
-capturing the agent's trajectory. aptkit emits all 6 `CapabilityEvent` types
-synchronously as the agent reasons — `step`, `tool_call_start`, `tool_call_end`,
-`model_usage`, `warning`, `error` — and buffr persists each as a row without
-blocking the agent loop.
-
-**The seam, line by line** (`src/supabase-trace-sink.ts`, lines 53–93):
-
-```
-  src/supabase-trace-sink.ts  (lines 53–93)
-
-  emit(event: CapabilityEvent): void {                ← SYNC: returns void, not Promise
-    const { pool, conversationId } = this.opts;
-    const at = event.timestamp;                        ← thread the emit time in
-    switch (event.type) {                              ← all 6 variants persisted
-      case 'step':
-        if (event.content)
-          this.push(persistMessage(..., event.role, event.content, { createdAt: at }));
-        return;
-      case 'tool_call_start':                          ← args (the cause) — was dropped before
-        this.push(persistMessage(..., 'tool_call', event.toolName, {...args, createdAt: at }));
-        return;
-      case 'tool_call_end':                            ← result + durationMs + error
-      case 'model_usage':                              ← fills tokens_used column
-      case 'warning': case 'error':                    ← operational signals → rows too
-        this.push(...);
-        return;
-    }
-  }                                                    ← returns NOW; writes still pending
-
-  private push(p) { this.pending.push(p); }            ← enqueue, do NOT await
-
-  async flush(): Promise<void> {
-    await Promise.all(this.pending);                   ← drain: park until all settle
-  }
-       │
-       └─ emit can't be async (aptkit's contract, doc-comment lines 39-48). So
-          each write is fired into pending[] via push() and the awaiting is
-          deferred to flush(). createdAt threads event.timestamp so replay order
-          survives the concurrent-insert race. Promise.all means one rejected
-          write rejects the whole flush — see 08 for that edge.
-```
-
-**The drain ordering that protects the data** (`src/session.ts`, lines 60–70):
-
-```
-  src/session.ts  (lines 60–70)
-
-  await persistMessage(pool, conversationId, 'user', question);  ← user turn first
-  const answer = await agent.answer(question);  ← agent runs, emit() fires trace writes
-  await trace.flush();                          ← ★ DRAIN before returning — load-bearing ★
-  try { await memory.remember({ conversationId, question, answer }); }
-  catch { /* best-effort: memory failure must not lose the answer */ }
-  return answer;                                ← only now hand the answer back to the UI
-       │
-       └─ flush() BEFORE return is the correctness argument. The pool is NOT
-          closed here (it's held warm for the next turn) — close()/pool.end()
-          happens once at /exit. memory.remember is wrapped so a failed memory
-          write can't reject the turn the user already has. (see 07.)
-```
-
----
 
 ## Elaborate
 
-The microtask/macrotask split is the JavaScript event loop's defining feature,
-formalized by the HTML spec and matched by Node via libuv's phases (timers,
-poll, check, close). `await` continuations and `.then` callbacks are
-microtasks; `setTimeout` and I/O completions are macrotasks. The practical rule:
-microtasks always fully drain between macrotasks, which is why a flood of
-resolved promises can starve a timer.
-
-The queue-and-flush pattern buffr uses is the standard answer to "I have a sync
-hook but async work" — the same shape appears in logging libraries (buffer log
-lines, flush on exit), analytics SDKs (`beforeunload` flush), and write-behind
-caches. The danger is always identical: forgetting to drain before the runtime
-tears down. See `07` for the graceful-shutdown angle and `05` for what the
-`pending[]` array costs in memory while it fills.
-
----
+The microtask-vs-macrotask split exists to give promises *priority and predictability*: once a promise resolves, you want its `.then` to run as soon as possible — before the loop wanders off to the next timer or I/O event — so promise chains complete in a tight burst. The cost is a footgun: an infinitely-recursive microtask (a `.then` that schedules another microtask forever) can starve the macrotask phases entirely, so timers never fire. buffr never builds such a chain — its microtasks are finite per turn (one per `await`, *N* per trace flush) — but it's the classic event-loop starvation bug worth naming. The model itself traces back to Node's libuv, which wraps epoll/kqueue/IOCP into the phase machine you see above.
 
 ## Interview defense
 
-**Q: aptkit's `emit` is synchronous but you need to write to Postgres. How?**
+**Q: Walk me through what happens at `await agent.answer(question)`.**
+The `ask` function suspends; everything after the `await` becomes a continuation on the microtask queue. The thread is freed and the loop runs other ready callbacks — the Ink spinner re-renders, any in-flight inserts progress. When Ollama's HTTP response settles, the continuation is pulled off the queue and `ask` resumes with `answer` bound.
 
 ```
-  sync emit, async write — the bridge
-
-  emit(e): void {           ┌─ pending[] ─┐
-    pending.push(write(e))  │ [p1][p2]... │  ← fired, not awaited
-  }                         └──────┬──────┘
-                                   │ later
-  flush(): await Promise.all(pending)  ← one drain point owns all the awaiting
+  await answer ─► suspend, queue continuation ─► thread serves spinner/inserts
+              ◄─ Ollama responds ─► resume ask() with answer
 ```
+Anchor: *await frees the thread, not the function — the back half is a queued callback.*
 
-You can't await inside a sync callback without breaking the contract, so you
-*start* the write (which gives you a promise) and stash it. A later `flush()`
-awaits the whole batch. *Anchor:* the part people forget is calling `flush`
-before exit — without it the process dies with writes pending and the rows
-silently never land.
+**Q: Microtask vs macrotask — why does it matter here?**
+Promise continuations are microtasks and drain completely between phases; timers/`setImmediate` are macrotasks. buffr is all-microtask (no timers anywhere), so its async is a tight drain of promises as I/O settles. The footgun is microtask starvation — an endlessly self-scheduling microtask would block timers forever — but buffr's per-turn microtasks are finite.
 
-**Q: Why `Promise.all` and not `Promise.allSettled` in `flush`?** It's the
-weaker choice — `Promise.all` rejects on the first failed write, throwing out of
-`session.ask`. In chat that throw is caught by `chat.tsx`'s `try/catch`
-(`:30-31`) and rendered as an error turn, so the session survives but that turn's
-whole trace is lost. `allSettled` would drain everything and let you inspect
-failures. buffr uses `all` (`:92`); for a single-user laptop that's acceptable,
-but it's the honest weak spot. *Anchor:* `all` = fail-fast, `allSettled` =
-drain-everything.
-
----
-
-## Validate
-
-1. **Reconstruct:** draw the queue-and-drain skeleton and name what breaks if
-   you remove `pending[]`, the `push`, or `flush`.
-2. **Explain:** why can't `emit` (`supabase-trace-sink.ts:53`) be `async`? What
-   in aptkit's `CapabilityTraceSink` contract forbids it (doc-comment 39-48)?
-   And why does it now thread `event.timestamp` into `created_at`?
-3. **Apply:** you move `await trace.flush()` to *after* `return answer` in
-   `session.ts`. What races the next turn at runtime?
-4. **Defend:** argue for switching `flush` to `Promise.allSettled`. What does
-   the repo gain, what does it give up, and is it worth it for a laptop CLI?
-
----
+```
+  [macrotask] → DRAIN all microtasks → [next phase]
+  buffr: only microtasks → fast settle, no timer reasoning needed
+```
+Anchor: *promises jump the queue ahead of timers; buffr never queues a timer.*
 
 ## See also
 
-- `02-processes-threads-and-tasks.md` — the single thread the loop drives (and the Ink loop)
-- `05-memory-stack-heap-gc-and-lifetimes.md` — what `pending[]` costs while it fills
-- `07-backpressure-bounded-work-and-cancellation.md` — flush as graceful shutdown
-- `08-runtime-systems-red-flags-audit.md` — the `Promise.all` fail-fast edge
-
----
-
-Updated: 2026-06-24 — re-grounded emit() on the 6-type switch + `event.timestamp`→`created_at`; moved drain ordering from `ask-cmd.ts` to `session.ts:60-70` (flush before return, pool held warm); added the Ink render loop running during the parked `await`.
+- `02-processes-threads-and-tasks.md` — the one thread this loop drives
+- `04-shared-state-races-and-synchronization.md` — run-to-completion is why there are no half-updates
+- `07-backpressure-bounded-work-and-cancellation.md` — the unbounded fan-out and the missing timeouts

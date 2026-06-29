@@ -1,136 +1,85 @@
-# System Design — Overview (buffr-laptop)
+# 00 — System Overview
 
-One page. The whole system in one diagram, then a legend naming what each
-box is, what it owns, and what it talks to. Skim only this file and you have
-the map.
+One page, one diagram. Skim this and you have the whole map of buffr-laptop: every
+component, what it owns, and what it talks to. Everything else in this guide zooms into
+a box on this picture.
 
-## The system in one frame
+## The whole system
 
-`buffr-laptop` is the **body** of a self-hosted RAG agent. It owns
-persistence and the CLI; it consumes `@rlynjb/aptkit-core` (the **toolkit**)
-for everything that is reusable — the model provider, the agent loop, the
-retrieval pipeline, the search tool, the evals. One device, one user, one
-Postgres. No HTTP API, no phone, no sync — those are named and deferred, not
-forgotten.
+buffr-laptop is the **body** that wires aptkit's contracts to real persistence. aptkit
+ships the brain parts (model provider, agent loop, retrieval pipeline, memory engine,
+evals) as a library; buffr fills the seams with a Postgres-backed implementation and a
+terminal interface. One device, one user, one process per `chat`.
 
 ```
-  Full system — buffr-laptop, single device
+  buffr-laptop — full system map
 
-  ┌─ CLI layer (buffr — entrypoints) ───────────────────────────────────┐
-  │  index-cmd.ts      chat.tsx → session.ts   eval-cmd.ts               │
-  │  load corpus       interactive chat        score retrieval (P@1/R@k) │
-  │  (one-shot)        (long-lived session)    (one-shot)                │
-  └────────┬───────────────┬───────────────────┬────────────────────────┘
-           │               │                   │
-  ┌─ Toolkit layer (@rlynjb/aptkit-core 0.4.1 — imported, never edited) ──┐
-  │  createRetrievalPipeline   RagQueryAgent      scorePrecisionAtK      │
-  │  OllamaEmbeddingProvider   GemmaModelProvider createSearchKB Tool    │
-  │  ContextWindowGuardedProvider  InMemoryToolRegistry                  │
-  │  createConversationMemory (engine; bundles @aptkit/memory)          │
-  └────────┬───────────────┬───────────────────┬────────────────────────┘
-           │ implements     │ uses             │ implements
-           │ VectorStore    │ ModelProvider    │ CapabilityTraceSink
-  ┌─ Adapter layer (buffr — fills aptkit's seams) ──────────────────────┐
-  │  PgVectorStore         SupabaseTraceSink     loadProfile / runtime  │
-  └────────┬─────────────────────────┬───────────────────┬─────────────┘
-           │ pg (node-postgres)      │ pg                 │ pg
-  ┌─ Storage layer (reindb · Postgres + pgvector · schema `agents`) ─────┐
-  │  documents   chunks(vector 768, HNSW)   conversations   messages     │
-  │  profiles                              [ all rows keyed by app_id ]   │
-  └─────────────────────────────────────────────────────────────────────┘
-           ▲                                                  ▲
-  ┌─ Provider layer (Ollama, localhost:11434) ──────────────────────────┐
-  │  nomic-embed-text:v1.5 (768-dim embeddings)   gemma2:9b (generation) │
-  └─────────────────────────────────────────────────────────────────────┘
+  ┌─ Interface layer (you) ──────────────────────────────────────────────┐
+  │  npm run chat → Ink TUI (src/cli/chat.tsx)                            │
+  │    React-in-terminal: input box, turn list, spinner                  │
+  │    one process, one conversation, held across turns                  │
+  └───────────────────────────────┬──────────────────────────────────────┘
+                                  │ session.ask(question)
+  ┌─ Session layer (buffr) ───────▼──────────────────────────────────────┐
+  │  createChatSession (src/session.ts)                                  │
+  │    warm pg Pool · agent built ONCE · ONE conversationId · per-turn:  │
+  │    persist user → agent.answer() → trace.flush() → memory.remember() │
+  └──────┬──────────────┬───────────────┬───────────────┬────────────────┘
+         │              │               │               │
+  ┌──────▼─────┐ ┌──────▼──────┐ ┌──────▼──────┐ ┌──────▼─────────────────┐
+  │ aptkit     │ │ aptkit      │ │ buffr       │ │ aptkit @aptkit/memory  │
+  │ RagQuery   │ │ retrieval   │ │ Supabase    │ │ createConversation-    │
+  │ Agent      │ │ pipeline    │ │ TraceSink   │ │ Memory                 │
+  │ (loop +    │ │ (embed →    │ │ (Capability │ │ (remember/recall over  │
+  │  Gemma)    │ │  search →   │ │  TraceSink) │ │  injected store)       │
+  │            │ │  rank)      │ │             │ │                        │
+  └──────┬─────┘ └──────┬──────┘ └──────┬──────┘ └──────┬─────────────────┘
+         │ tool calls   │ store.search  │ INSERT msgs   │ store.upsert (kind=memory)
+         │              │               │               │
+  ┌──────▼──────────────▼───────────────▼───────────────▼────────────────┐
+  │  buffr adapter layer                                                  │
+  │    PgVectorStore (src/pg-vector-store.ts) — implements VectorStore   │
+  │    profile.ts · runtime.ts · supabase-trace-sink.ts                  │
+  └───────────────────────────────┬──────────────────────────────────────┘
+                                  │ node-postgres (pg Pool), direct SQL
+  ┌─ Storage layer ───────────────▼──────────────────────────────────────┐
+  │  Postgres reindb · schema `agents` · pgvector ext (HNSW cosine)      │
+  │    documents · chunks (embedding vector(768)) · conversations ·      │
+  │    messages · profiles      [ all keyed by app_id='laptop', no RLS ] │
+  └───────────────────────────────────────────────────────────────────────┘
+
+  ┌─ Provider layer (external, local) ────────────────────────────────────┐
+  │  Ollama @ http://localhost:11434                                      │
+  │    gemma2:9b (generation)   ·   nomic-embed-text:v1.5 (768-dim embed) │
+  └───────────────────────────────────────────────────────────────────────┘
 ```
 
-## Legend — what each box owns and talks to
+## Legend — what each component is, owns, and talks to
 
-**CLI layer** (`src/cli/*` + `src/session.ts`, buffr) — the entrypoints, in
-two shapes. The one-shots (`index`, `eval`, `migrate`) load `.env`, build the
-wiring (pool → embedder → store → pipeline), do one job, and exit. `chat`
-(`chat.tsx` → `createChatSession`) is long-lived: it wires once and holds ONE
-warm pool and ONE conversation across every turn until `/exit`. (The old
-one-shot `ask` CLI is removed.) No long-running server — a process per
-invocation, or one held session.
-→ deep walk: `05-cli-as-entrypoints.md`
+| Component | What it is | Owns | Talks to |
+| --- | --- | --- | --- |
+| **Ink TUI** (`src/cli/chat.tsx`) | React-in-terminal chat UI, the only interface | ephemeral render state (turns, input, busy) | `session.ask` / `session.close` |
+| **ChatSession** (`src/session.ts`) | long-lived orchestrator built once at startup | the warm `pg.Pool`, the single `conversationId`, the wired agent | aptkit agent, pipeline, memory; buffr trace sink |
+| **RagQueryAgent** (aptkit) | the bounded agent loop + guarded Gemma | the reasoning loop, tool dispatch | Gemma (Ollama), `search_knowledge_base` tool, trace sink |
+| **Retrieval pipeline** (aptkit) | embed → search → rank | nothing persistent; pure pipeline over injected store | embedder (Ollama), `PgVectorStore` |
+| **PgVectorStore** (`src/pg-vector-store.ts`) | buffr's `VectorStore` adapter over pgvector | the SQL for chunk upsert + cosine search, the 768-dim guard | `pg.Pool`, `agents.chunks` |
+| **SupabaseTraceSink** (`src/supabase-trace-sink.ts`) | `CapabilityTraceSink` impl, full-signal | the queue of pending message inserts | `agents.messages` via `persistMessage` |
+| **ConversationMemory** (aptkit `@aptkit/memory`) | episodic memory engine, store-injected | embedding + tagging + recall logic; never names a DB | the *same* `PgVectorStore` (rows tagged `kind=memory`) |
+| **Postgres `reindb` / `agents`** | the single source of truth | the corpus, the vectors, the trajectory, the profile | every buffr adapter via `pg` |
+| **Ollama** | local model server | the weights; nothing buffr owns | embedder + Gemma provider over HTTP localhost |
 
-**Toolkit layer** (`@rlynjb/aptkit-core@0.4.1`) — everything reusable across
-apps. The agent loop, the model/embedding provider contracts, the retrieval
-pipeline, the `search_knowledge_base` tool, the eval scorers, and now the
-conversation-memory engine (`createConversationMemory`, bundling
-`@aptkit/memory`). buffr imports these and **never edits them** — the
-dependency direction is the architecture. The memory engine is itself a
-round-trip: extracted UP from buffr, re-consumed DOWN with `PgVectorStore`
-injected. → deep walk: `04-library-as-dependency-boundary.md`
+## The one thing to notice first
 
-**Adapter layer** (buffr) — the code that fills aptkit's seams with a
-Postgres-backed implementation. `PgVectorStore` implements aptkit's
-`VectorStore`; `SupabaseTraceSink` implements `CapabilityTraceSink`;
-`runtime.ts` writes the `documents` source-of-truth row; `profile.ts` reads
-the system-prompt profile. This layer is the load-bearing buffr code.
-→ deep walks: `01-vector-store-adapter.md`, `03-trajectory-capture.md`,
-`06-profile-injection-as-context.md`
+There is **no network in the architecture except localhost Ollama and the pg connection
+to one Postgres instance.** No HTTP API, no Edge Functions, no load balancer, no queue,
+no second service. This is deliberate (`docs/superpowers/specs/2026-06-19-laptop-supabase-graduation-design.md:54`
+— "direct `pg` now, Edge Functions later"). The whole system fits in one process plus
+one database plus one model server. That single-device shape is what makes most of the
+classic system-design lenses read `not yet exercised` — and the audit names that
+honestly rather than inventing scale that isn't there.
 
-**Storage layer** (`reindb`, Postgres + pgvector, schema `agents`) — the
-single source of truth for corpus, embeddings, and conversation history.
-`chunks.embedding` is `vector(768)` with an HNSW cosine index. Every row
-carries `app_id` (default `'laptop'`) for a multi-tenant future that has one
-tenant today. No RLS this phase.
-→ deep walk: `02-retrieval-pipeline.md`; schema shape → cross-link
-`study-data-modeling`; engine internals → cross-link
-`study-database-systems`.
+## See also
 
-**Provider layer** (Ollama, `localhost:11434`) — the two models, served
-locally. `nomic-embed-text:v1.5` turns text into 768-dim vectors;
-`gemma2:9b` generates answers. No network leaves the laptop. The dimension
-(768) is a one-way door wired end to end.
-
-## The one tradeoff that shapes everything
-
-Direct `pg` now, Edge Functions later. There is exactly one client (this
-laptop), so an HTTP API in front of Postgres would add PostgREST indirection
-and latency for nobody. The schema already carries the columns
-(`app_id`, `user_id`, `embedding_model`) that the deferred phone/multi-app
-future needs — cheap to add now, painful to retrofit. The whole "what
-changes at 10x" story is **deliberately deferred**, named in the design
-doc, and re-uses this exact schema and the `VectorStore` contract with no
-rework. → deep walk: `07-deferred-body.md`
-
-## Reading order
-
-1. `00-overview.md` — you are here.
-2. `audit.md` — the 8-lens system-design audit, grounded in `file:line`.
-3. `01-vector-store-adapter.md` — the seam that makes pg drop in.
-4. `02-retrieval-pipeline.md` — index and query, end to end.
-5. `03-trajectory-capture.md` — sync emit, async flush, conversation rows.
-6. `04-library-as-dependency-boundary.md` — aptkit consumed, never edited; the
-   memory-engine round-trip.
-7. `05-cli-as-entrypoints.md` — one-shot processes + the long-lived chat session.
-8. `06-profile-injection-as-context.md` — me.md as a row in the prompt.
-9. `07-deferred-body.md` — single-device now, two-brain/edge later.
-
-## Cross-links to neighboring guides
-
-- **`study-data-modeling`** — the shape of the `agents` schema: the
-  `documents`/`chunks` split, the dropped FK, `app_id` denormalization,
-  `vector(768)` as a typed column.
-- **`study-database-systems`** — how pgvector executes `<=>` cosine
-  distance, what HNSW does at the storage-engine level, transaction
-  semantics of the `upsert` `begin/commit`.
-- **`study-distributed-systems`** — the coordination mechanics that arrive
-  in the deferred phases (RLS-as-isolation, edge function as a boundary,
-  laptop↔phone sync).
-- **`study-runtime-systems`** — how the per-invocation CLI process executes,
-  the connection-pool lifecycle, the sync-emit/async-flush trace queue.
-- **`study-ai-engineering`** / **`study-agent-architecture`** — the RAG
-  pipeline, the ReAct-style agent loop inside `RagQueryAgent`, eval scoring.
-- **`study-software-design`** — the deep-module / info-hiding read of the
-  adapter layer (the seam contracts, the pure `loadConfig`).
-
----
-
-Updated: 2026-06-24 — CLI layer reframed (one-shot `index`/`eval`/`migrate` +
-long-lived `chat` session; `ask` removed); aptkit bumped to 0.4.1 (bundles
-`@aptkit/memory`); added `createConversationMemory` engine + its round-trip to
-the toolkit legend.
+- `audit.md` — the 8-lens walk with each `not yet exercised` named
+- `02-library-as-dependency-boundary.md` — the aptkit seam this whole map hangs on
+- `04-long-lived-chat-session.md` — the deep walk of the session orchestrator

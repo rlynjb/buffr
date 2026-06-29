@@ -1,94 +1,71 @@
-# Study — System Design (buffr-laptop)
+# System Design — buffr-laptop
 
-A per-codebase system-design guide for `buffr-laptop`: the architecture
-actually present in the repo — boundaries, flows, state ownership, storage
-choice, failure handling, and the deliberately-deferred scale story. Built
-audit-style (two passes): one audit walking eight lenses, then one file per
-load-bearing pattern the repo really exercises.
+A per-repo system-design guide for **buffr-laptop**: a single-device personal RAG
+agent that consumes `@rlynjb/aptkit-core@0.4.1` as a library and adds Postgres+pgvector
+persistence plus an interactive chat CLI. The sole interface is `npm run chat`.
 
-## What this repo is, in one line
-
-The **body** of a self-hosted RAG agent: TS ESM, one-shot CLIs (`index` /
-`eval` / `migrate`) plus a long-lived interactive `chat` session over
-Postgres + pgvector, consuming `@rlynjb/aptkit-core` (the toolkit) for the
-agent loop, providers, retrieval pipeline, evals, and the conversation-memory
-engine. Single device, single user, no HTTP API — and precise about what it
-defers.
+This guide teaches the architecture *actually present* in the repo — boundaries, flows,
+state ownership, failure handling, and what breaks at scale — anchored to real
+`file:line` evidence. It does not teach generic system-design theory, and it never
+invents infrastructure the repo doesn't run.
 
 ## Reading order
 
-1. **`00-overview.md`** — one full-system diagram + legend. Skim this and you
-   have the whole map.
-2. **`audit.md`** — Pass 1. The 8-lens system-design audit, every claim
-   grounded in `file:line`, with honest `not yet exercised` where the repo
-   does nothing.
-3. **`01-vector-store-adapter.md`** — `PgVectorStore implements VectorStore`;
-   the seam that drops Postgres into aptkit. The most load-bearing buffr code.
-4. **`02-retrieval-pipeline.md`** — index and query end to end; the RAG
-   retrieve half and the eval that measures it.
-5. **`03-trajectory-capture.md`** — the trace sink; sync `emit()` /
-   async `flush()` bridging aptkit's contract to async pg writes; full-signal
-   (all six events, ordered by `event.timestamp`).
-6. **`04-library-as-dependency-boundary.md`** — aptkit consumed, never edited;
-   the repo-split that defines the architecture, now a bidirectional round-trip
-   (memory engine promoted up, store injected down).
-7. **`05-cli-as-entrypoints.md`** — one-shot run-on-import processes + the
-   long-lived `chat` session; one shared wiring, ordered teardown.
-8. **`06-profile-injection-as-context.md`** — me.md as a DB row, injected into
-   the system prompt.
-9. **`07-deferred-body.md`** — single-device now, two-brain / edge / RLS
-   later; YAGNI behavior, forward-compat seams. The architectural thesis.
+```
+  1.  00-overview.md   the whole system in one diagram — read this first
+  2.  audit.md         Pass 1: the 8-lens architectural audit, honest gaps named
+  3.  01-08            Pass 2: the patterns this repo actually exercises
+```
 
-## The pattern files at a glance
+Skim `00-overview.md` and you have the map. Read `audit.md` and you know which lenses
+the repo exercises and which it leaves `not yet exercised`. The numbered files are the
+deep walks of each load-bearing pattern.
 
-| File | What the system would lose without it |
-| --- | --- |
-| `01-vector-store-adapter` | persistence that drops into the agent unchanged |
-| `02-retrieval-pipeline` | grounding + citations (it'd be a chatbot, not RAG) |
-| `03-trajectory-capture` | full-signal conversation history + the fine-tune dataset seam |
-| `04-library-as-dependency-boundary` | aptkit's reuse across apps (engine up, store down) |
-| `05-cli-as-entrypoints` | any way to drive the system (one-shot + chat session) |
-| `06-profile-injection-as-context` | the agent's persona (generic voice) |
-| `07-deferred-body` | free future phases (no-rework scale path) |
+## The patterns this repo exercises (Pass 2)
 
-## Cross-links to neighboring foundation guides
+```
+  01-vector-store-adapter.md          PgVectorStore implements aptkit's VectorStore
+  02-library-as-dependency-boundary.md  aptkit consumed, never edited; the memory round-trip
+  03-trajectory-capture.md            full-signal CapabilityEvent persistence
+  04-long-lived-chat-session.md       warm pool, ONE conversation, agent built once
+  05-profile-injection-as-context.md  me.md profile → system prompt
+  06-retrieval-as-memory.md           episodic memory riding the chunks table
+  07-deferred-body.md                 what's gated, and what won't have to change
+```
 
-System design owns architectural boundaries and tradeoffs. Mechanism-level
-teaching belongs to the owning foundation generator:
+The file list is itself a teaching artifact: a reader who has never opened the repo
+learns what's architecturally interesting from these names alone.
 
-- **`study-database-systems`** — how pgvector executes `<=>` cosine distance,
-  HNSW index internals (recall vs `ef`), transaction semantics of the upsert
-  `begin/commit`.
-- **`study-data-modeling`** — the `agents` schema shape: `documents`/`chunks`
-  split, the deliberately-dropped FK, `app_id` denormalization,
-  `vector(768)` as a typed column, forward-compat columns.
-- **`study-distributed-systems`** — the coordination mechanics the *deferred*
-  phases introduce: RLS-as-isolation, edge-function boundary, laptop↔phone
-  sync correctness.
-- **`study-runtime-systems`** — the per-invocation process lifecycle, the
-  connection-pool teardown, the floating-promise queue-and-join in the trace
-  sink.
+## Cross-links — neighboring foundation guides
 
-And the AI/design neighbors this guide touches:
+System design owns the architectural boundaries and tradeoffs. The mechanism-level
+teaching belongs to the foundation generators. Where this guide names a mechanism, it
+cross-links rather than re-teaching:
 
-- **`study-ai-engineering`** / **`study-agent-architecture`** — the RAG
-  pattern, the agent loop inside `RagQueryAgent`, eval scoring (P@1 / R@k).
-- **`study-prompt-engineering`** — how the injected profile + retrieved
-  context are assembled into the prompt.
-- **`study-software-design`** — the deep-module / info-hiding read of the
-  adapter seams and the pure `loadConfig`.
+- **`study-database-systems`** — how pgvector's HNSW index executes the cosine query,
+  what `<=>` does at the storage layer, transaction isolation on the `upsert` batch.
+  This guide owns *why* Postgres is the store and what durability boundary it draws;
+  the engine internals live there.
+- **`study-data-modeling`** — the *shape* of the `agents` schema (the soft FK, the
+  `meta jsonb`, the `app_id` tenancy column, chunk-id design). This guide owns where
+  state lives and who owns each transition; the normalization and integrity analysis
+  lives there.
+- **`study-distributed-systems`** — correctness when the laptop and phone brains both
+  go live and share one memory plane (the deferred sync/merge problem). This guide
+  names the deferred boundary; the coordination mechanics live there.
+- **`study-runtime-systems`** — how the warm pool, the sync `emit()` + async `flush()`
+  trace sink, and the single-threaded chat session execute inside one Node process.
+  This guide owns the session as an architectural boundary; the execution model lives
+  there.
+- **`study-ai-engineering`** / **`study-agent-architecture`** — the RAG retrieval
+  pipeline, the agent loop, the eval harness (precision@k / recall@k), and tool-calling.
+  This guide names the seams where buffr injects its adapters; the AI mechanics live
+  there.
+- **`study-dsa-foundations`** — vector similarity, ANN, cosine distance as algorithms.
+  Not re-taught here.
 
-## A note on honesty
+## What this repo is, in one line
 
-This repo is `v1b` of a deferred body. Several system-design lenses correctly
-read `not yet exercised` — no caching, no retries/timeouts, no multi-region,
-no gateway, no horizontal scale. That's not a gap to paper over; it's the
-design. `audit.md` names each one plainly, and `07-deferred-body.md` shows why
-deferring them is the correct call and which seam each deferred phase attaches
-to when it arrives.
-
----
-
-Updated: 2026-06-24 — `ask` CLI removed → long-lived `chat` session; aptkit
-0.4.1 (bundles `@aptkit/memory`); trajectory capture now full-signal (6/6
-events); library boundary strengthened to a bidirectional round-trip.
+> A single off-the-shelf-Gemma RAG agent on aptkit's runtime, persisted to Postgres
+> pgvector on one device, capturing every conversation as a full-signal trajectory —
+> the laptop brain (v1b) of a deliberately-deferred two-brain body.

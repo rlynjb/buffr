@@ -1,49 +1,70 @@
-# Replication and Read Consistency
+# Replication and read consistency
 
-**Industry name(s):** streaming replication / read replicas / replication lag · **Type:** Industry standard
+**Subtitle:** primary/replica streaming replication / replication lag / read-your-writes — *Industry standard*
 
 ---
 
 ## Zoom out, then zoom in
 
-buffr has one Postgres process. No standby, no replica, no failover. There is nothing to lag, no stale-read window, no failover to handle. This file is the shortest in the guide on purpose: it names what's `not yet exercised`, teaches the mechanism so you'd recognize when it becomes relevant, and draws the exact line where a second node would change buffr's consistency story.
+Replication is how a database stays available and scales reads: ship the WAL from
+a primary to one or more replicas, so a replica can serve reads or take over on
+failover. `buffr-laptop` has none of this — it's a single Postgres node, one
+process, no standby. This file is mostly an honest `not yet exercised`: the
+mechanism is real and worth understanding, but nothing in the repo drives it.
+The value here is knowing *exactly* what would change the day a replica appears.
 
 ```
-  Zoom out — what isn't here
+  Zoom out — replication would sit beside the single node
 
-  ┌─ Persistence ───────────────────────────────────────────────┐
-  │  one pg.Pool → one Postgres → one copy of the data           │
-  └──────────────────────────┬──────────────────────────────────┘
-                             │
-  ┌─ Storage engine ─────────▼──────────────────────────────────┐
-  │  single primary · NO replica · NO standby · NO failover      │ ← we are here
-  │  every read and write hits the SAME node → always consistent  │
-  └─────────────────────────────────────────────────────────────┘
+  ┌─ Service ───────────────────────────────────────────────┐
+  │  search() (read)        upsert() / commits (write)        │
+  └──────────────────────────┬───────────────────────────────┘
+                             │  one pg.Pool → one node TODAY
+  ┌─ Storage ───────────────▼────────────────────────────────┐
+  │  ★ Postgres reindb (PRIMARY) ★                            │ ← only node today
+  │  ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄  │
+  │  ┌ replica (NONE) ┐  would stream WAL, serve stale reads  │
+  │  └────────────────┘  ← not yet exercised                  │
+  └──────────────────────────────────────────────────────────┘
 ```
 
-Zoom in: replication is copying one database's writes to other nodes so reads can scale or survive a node loss. buffr does none of it — and for a single-device laptop agent, that's correct, not a gap to apologize for. The verdict: **read-your-writes is trivially guaranteed because there's exactly one node.** The whole interest here is the *boundary* — what changes the day a second device reads `reindb`.
+Zoom in: streaming replication works by shipping the same WAL records from `07`
+to a replica, which replays them to stay (nearly) in sync. The lag between
+"primary committed" and "replica replayed" is the whole game — it's why a read
+from a replica can be *stale*. The question: what consistency does buffr assume
+today (full, single-node), and which of its read paths would break under
+replication lag?
 
 ---
 
 ## The structure pass
 
-There's one node, so the usual replication axes collapse. Trace the axis anyway — *where could a read see stale data?* — to show why the answer is "nowhere, yet."
+**Layers.** Replication, when it exists, decomposes into:
 
 ```
-  Axis = "can a read return data older than my last write?"
-
-  ┌─ buffr today (single node) ──────────────────────────────────┐
-  │  write → primary → read ← same primary                       │  → NO stale read
-  │  read-your-writes guaranteed by topology                     │     (one copy)
-  └──────────────────────────────────────────────────────────────┘
-  ┌─ buffr + a read replica (hypothetical) ─────────────────────┐
-  │  write → primary ──async WAL──► replica ← read              │  → STALE possible
-  │  replica lags the primary by some ms                        │     during lag
-  └──────────────────────────────────────────────────────────────┘
-       the seam that doesn't exist yet: primary↔replica
+  ┌─ Write routing ──────────────────┐  writes → primary only
+  └──────────────┬────────────────────┘
+  ┌─ WAL streaming ▼──────────────────┐  primary ships WAL → replica
+  │   the lag lives here               │
+  └──────────────┬────────────────────┘
+  ┌─ Read routing ▼───────────────────┐  reads → primary or replica?
+  │   stale-read risk decided here     │
+  └────────────────────────────────────┘
 ```
 
-The seam — primary↔replica — is the boundary where read consistency *would* flip from "always fresh" to "possibly stale." buffr has no such seam. **That's the entire finding: the consistency question is answered by topology, and the topology has one node.**
+**Axis — trace `read consistency` (does a read see the latest write?) across the
+topology.** *Will this read reflect what I just wrote?*
+
+- Single node (today): **always yes.** One node, no lag, read-your-writes is
+  free. buffr assumes this everywhere.
+- With a replica, write to primary then read from replica: **maybe not** — if
+  the read beats WAL replay, it's stale.
+
+**Seam — the primary↔replica WAL stream (doesn't exist yet).** The day it does,
+*read consistency* flips across it: a read on the primary side is current, a read
+on the replica side is "current as of replay." buffr has no code that knows which
+side it's reading from — `search()` just calls `pool.query()`. That's fine on one
+node; it's the exact assumption that breaks under replication.
 
 ---
 
@@ -51,159 +72,187 @@ The seam — primary↔replica — is the boundary where read consistency *would
 
 ### Move 1 — the mental model
 
-You know how the WAL (`07`) is an append-only log of every change? Streaming replication is just *shipping that log to another node and replaying it there*. The replica is a second Postgres continuously replaying the primary's WAL, so it converges toward the primary's state — a few milliseconds behind.
+You know read-your-writes from optimistic UI: you update local state immediately
+so the user sees their own change before the server confirms — because reading
+from the server might not reflect the write yet. Replication lag is the
+server-side version of that exact problem: you write to the primary, the replica
+hasn't replayed it yet, so a read from the replica shows the *old* value. The
+fix is the same shape — route the read to where the write is guaranteed visible,
+or wait for the replica to catch up.
 
 ```
-  The pattern — replication is WAL replay on a second node
+  Replication lag — the staleness window (the kernel)
 
-  ┌─ primary ──────┐   stream WAL records   ┌─ replica ──────┐
-  │ writes here    │ ─────────────────────► │ replays WAL    │
-  │ WAL: …A,B,C    │   (async by default)   │ WAL: …A,B  ◄── │ lags by C
-  └────────────────┘                        └────────────────┘
-       reads here always fresh               reads here can be STALE (missing C)
+  t0  primary: COMMIT write  ──► durable on primary
+        │ ship WAL
+        ▼ (network + replay delay = LAG)
+  t1  replica: replays WAL    ──► now visible on replica
+
+  a read on the replica between t0 and t1 → STALE (sees pre-write state)
+  read-your-writes requires reading the primary, or waiting past t1
 ```
 
-One sentence: **a replica replays the primary's WAL stream, so it's a near-copy that trails by the replication lag.**
+### Move 2 — what buffr assumes, and what would change
 
-### Move 2 — what lag costs (the mechanism buffr would inherit)
+**Today: single node, full consistency, every assumption holds.** There's one
+Postgres, reached through one pool (`db.ts:4`). Walk the read-your-writes paths
+that *depend* on single-node consistency:
 
-**Async replication means the primary doesn't wait.** By default (and what a managed Postgres read replica gives you) the primary acks your commit *before* the replica has the change. So a read routed to the replica immediately after a write can miss it. Bridge: it's the same hazard as reading from a cache right after writing the source — the cache hasn't caught up.
+- **Memory write-then-recall.** `session.ts` calls `memory.remember()` after a
+  turn (writes a memory chunk), and the *next* turn's `search()` may recall it.
+  On one node, the just-written memory chunk is immediately visible to the next
+  search. **Under a replica:** if the next `search()` hit a lagging replica, the
+  memory chunk might not be there yet — the agent "forgets" the exchange it just
+  had. This is the read path most exposed to lag.
 
-```
-  The read-your-writes trap on a replica
+- **Index-then-query.** `indexDocumentRow` commits chunks, and a subsequent
+  `search()` retrieves them. On one node, immediate. On a replica, a query right
+  after indexing could miss the new chunks until replay catches up.
 
-  t0: write C to primary  → commit acked
-  t1: read from replica   → replica still at B → returns OLD data  ◄ stale
-  t2: replica replays C    → now consistent
-       │
-       └─ the window t0→t2 is replication lag. Routing reads to a replica
-          without handling this window breaks read-your-writes.
-```
-
-**Failover is the other reason replicas exist.** If the primary dies, a replica gets promoted. With async replication, any commits not yet shipped are lost on promotion — the durability gap from `07` reappears as a *replication* gap. Synchronous replication closes it (primary waits for the replica's ack) at the cost of write latency.
-
-**None of this is in buffr.** No replica means no lag, no stale reads, no failover, no promotion data loss. The mechanism is taught so you recognize the day it arrives.
-
-### Move 2.5 — current vs the line where this matters
+- **Conversation/message replay.** The trajectory writes
+  (`supabase-trace-sink.ts`) and any later read of `agents.messages` assume the
+  writes are visible. Single-node: guaranteed. Replica: lagged.
 
 ```
-  Replication — current vs the trigger that introduces it
+  Layers-and-hops — the memory recall path, single-node vs replica
 
-  CURRENT: single node
-   ├─ read-your-writes: guaranteed by topology
-   ├─ consistency: strong (one copy)
-   └─ failover: N/A
+  SINGLE NODE (today):
+  ┌─ ask() turn N ─┐  remember()  ┌─ Postgres ─┐  search()  ┌─ turn N+1 ─┐
+  │ write memory   │ ───────────► │ committed  │ ─────────► │ recalls it │
+  └────────────────┘              └────────────┘            └────────────┘
+       immediate visibility — read-your-writes is free
 
-  TRIGGER (what introduces a replica):
-   ├─ a SECOND device reads reindb        → now there's a remote reader
-   ├─ buffr graduates off "laptop-only"   → the parent agent-layer vision
-   └─ then: route reads to replica? → inherit lag + stale-read handling
+  WITH REPLICA (hypothetical):
+  ┌─ write ─┐ → PRIMARY ──WAL lag──► REPLICA ◄── ┌─ read (search) ─┐
+                                                  └─────────────────┘
+       read may land before replay → memory chunk missing → "forgot"
 ```
 
-The context doc describes buffr as the "laptop brain" that *graduates* an in-memory pipeline to persistent Postgres, single-device — and `agent-layer-plan.md` is the parent multi-surface vision. **The moment a phone or a second laptop reads the same `reindb`, this file stops being `not yet exercised`.** Until then, every read hits the one primary and is strongly consistent for free.
+**The code has no read/write routing — which is correct for one node.**
+`PgVectorStore` issues both `upsert()` (write) and `search()` (read) through the
+same `pool` (`pg-vector-store.ts`). There's no "send reads here, writes there"
+split because there's nowhere else to send them. **What this means:** adopting
+replication isn't a config flip — it's an application change. You'd either keep
+all reads on the primary (no read scaling, but read-your-writes preserved), or
+route some reads to a replica and accept staleness on the paths above.
+
+**Failover isn't handled either.** With one node, if Postgres goes down, buffr is
+down — the `pool` has no failover target, and with no `connectionTimeoutMillis`
+(`06`) a `connect()` would hang rather than fail over. That's the availability
+side of the same single-node story.
+
+### Move 2.5 — current state vs future state (replication)
+
+```
+  Phase A — now (single node)      Phase B — primary + replica
+  ─────────────────────────────    ──────────────────────────────────────
+  one Postgres, one pool            primary (writes) + replica(s) (reads)
+  read-your-writes free             lag window → stale reads possible
+  no read/write routing in code     app must route + handle staleness
+  no failover                       replica promotion on primary failure
+  memory recall always current      memory recall can miss recent turns
+
+  what doesn't change: the SQL, the schema, the index. what changes:
+  read routing and the read-your-writes assumption baked into session.ts.
+```
 
 ### Move 3 — the principle
 
-Read consistency is a function of topology. One node → strong consistency, no lag, read-your-writes for free. Add a replica and you trade that for read scaling or availability, inheriting lag and stale-read handling. The skill isn't configuring replication — it's recognizing that buffr's single-node topology *gives* it the strongest consistency guarantee at zero cost, and naming the exact trigger (a second reader) that would force the tradeoff.
+Single-node consistency is an assumption you get for free and stop noticing —
+every read sees every prior write, instantly. Replication is what trades that
+assumption for availability and read-scaling, and the price is a staleness
+window measured in replication lag. The skill is knowing *which* of your read
+paths actually depend on read-your-writes — here it's memory recall and
+index-then-query — because those are the ones that break first when a replica
+shows up. buffr's code is consistent by construction today; the day it isn't,
+the change is in the application's read routing, not the schema.
 
 ---
 
 ## Primary diagram
 
-The whole replication story — current reality and the hypothetical seam.
+The single-node reality and the replicated future, side by side.
 
 ```
-  buffr read consistency — one node now, the seam that's absent
+  buffr-laptop — replication: now vs later
 
-  NOW (single primary):
-  ┌─ pg.Pool ─┐  write+read  ┌─ Postgres primary ─┐
-  │           │ ───────────► │ one copy of reindb  │  → strong consistency
-  └───────────┘              └─────────────────────┘     read-your-writes free
+  NOW (single node, full consistency):
+  ┌─ Service ─┐  read+write   ┌─ Postgres reindb (PRIMARY) ─┐
+  │ search()  │ ────────────► │ every read sees every write  │
+  │ upsert()  │              └──────────────────────────────┘
+  └───────────┘   read-your-writes: FREE
 
-  IF a replica were added (NOT in repo):
-  ┌─ pg.Pool ─┐  writes  ┌─ primary ─┐ ─async WAL─► ┌─ replica ─┐
-  │           │ ───────► │           │              │ trails by │
-  │           │  reads?  │           │              │ lag       │ ← stale reads
-  └───────────┘ ────────►└───────────┘              └───────────┘   possible here
-
-  replica · streaming replication · lag · failover · synchronous_commit
-  for replicas: ALL not yet exercised
+  LATER (primary + replica — NOT YET EXERCISED):
+  ┌─ Service ─┐ writes  ┌─ PRIMARY ─┐ ──WAL stream──► ┌─ REPLICA ─┐
+  │ route by  │ ──────► │ authoritative│   (lag)       │ stale reads│
+  │ read/write│ reads ?─┴────────────┘                └───────────┘
+  └───────────┘
+     exposed paths: memory recall, index-then-query (session.ts)
 ```
-
----
-
-## Implementation in codebase
-
-**Use cases.** There is no replication code to walk — that's the point. The evidence is the *single* pool pointing at a *single* `DATABASE_URL`, with no replica URL, no read/write split, no failover client config anywhere.
-
-```
-  src/db.ts  (lines 4–6)  — one connection target, no replica
-
-  export function createPool(databaseUrl: string): pg.Pool {
-    return new pg.Pool({ connectionString: databaseUrl });
-  }
-       │
-       └─ ONE connection string. No primary/replica split, no read-replica
-          host, no failover list. Every read and write resolves to the same
-          node — which is exactly why read-your-writes is free.
-```
-
-```
-  src/config.ts  (lines 11–16)  — one DATABASE_URL, full stop
-
-  return {
-    databaseUrl: env.DATABASE_URL || undefined,   ← single URL, no REPLICA_URL
-    appId: …, schema: …, ollamaHost: …,
-  };
-       │
-       └─ config exposes exactly one database URL. There's no second env var
-          for a replica, confirming single-node by configuration.
-```
-
-Every read path (`search`, `loadProfile`) and every write path (`upsert`, `persistMessage`) uses this one pool against this one URL. Replication, read replicas, failover, replication lag, synchronous replication: all `not yet exercised`.
 
 ---
 
 ## Elaborate
 
-Postgres streaming replication ships WAL — which is why `07` (WAL) is the prerequisite for this file. Everything a replica knows, it learned by replaying the primary's WAL. That's also why the consistency models line up: a synchronous replica (primary waits for its ack) gives you no data loss on failover but adds write latency; an async replica gives you fast writes but a lag window where reads are stale and a promotion can lose the un-shipped tail. The CAP-flavored tradeoff — consistency vs availability vs latency — only becomes a *decision* when there's more than one node to be inconsistent across.
-
-For buffr specifically, the most likely first replica isn't for scale (a laptop doesn't need read scaling) — it's for *sync to a second device*, which is the parent `agent-layer-plan.md` vision. That's a different shape from a classic read replica: it's closer to the canonical-local-with-cloud-mirror pattern you shipped in buffr's React Native sibling and in dryrun. When it arrives, the question won't be "route reads to the replica" — it'll be "which device is canonical and how do conflicting writes merge." Cross-link `study-system-design` for that multi-device topology; cross-link `07` for the WAL the replica would replay.
+Postgres streaming replication ships WAL records (the same log from `07`) over a
+connection to a standby that replays them continuously — async by default (the
+primary doesn't wait for the replica, so there's lag) or synchronous (the primary
+waits for the replica to confirm, no data loss on failover but higher write
+latency). The CAP-theorem framing: under a network partition you choose
+consistency or availability, and async replication picks availability with a
+stale-read window. Read-your-writes, monotonic-reads, and bounded-staleness are
+the consistency levels you'd reach for to tame that window. None of this is in
+buffr because there's one node — but the moment a second appears, the
+consistency model becomes an application concern, which is why this lives at the
+seam between this guide and `study-distributed-systems` / `study-system-design`.
 
 ---
 
 ## Interview defense
 
-**Q: How does this system handle replication lag and stale reads?**
+**Q: buffr is single-node. If you added a read replica tomorrow, what breaks
+first?**
 
-It doesn't need to — single node. One Postgres, one pool, one `DATABASE_URL`. Every read hits the same node that took the write, so read-your-writes is guaranteed by topology and there's no lag window. Adding a read replica is what would introduce stale reads, and buffr has none.
+> Memory recall. After each turn `session.ts` writes a memory chunk via
+> `memory.remember()`, and the next turn's `search()` may recall it. On one node
+> that's immediate. Route that `search()` to a lagging replica and the chunk
+> might not be replayed yet — the agent forgets the exchange it just had.
+> Index-then-query has the same exposure: chunks committed on the primary, read
+> from a replica before replay, missing. The code has no read/write routing
+> because it doesn't need it yet — adding a replica is an application change, not
+> a config flip.
 
 ```
-  one node → write and read hit the same copy → no stale window
+  write memory → PRIMARY ──lag──► REPLICA ◄── next search()
+  read beats replay → memory missing → "forgot the last turn"
 ```
 
-Anchor: *"Single-node topology gives strong consistency for free — there's no replica to lag."*
+> Anchor: the read-your-writes paths — memory recall and index-then-query — are
+> what replication lag breaks first.
 
-**Q: When would you add a replica, and what would it cost you?**
+**Q: How do you keep read-your-writes once you have a replica?**
 
-The trigger is a second device reading `reindb` — the parent multi-surface vision. The cost: an async replica introduces a lag window where reads can miss a just-committed write, and a failover can lose un-shipped commits. For buffr that'd more likely be a device-sync problem (which copy is canonical) than a read-scaling one.
+> Two options. Keep all reads on the primary — simplest, preserves
+> read-your-writes, but you get no read-scaling. Or route reads to the replica
+> for paths that tolerate staleness and pin the consistency-critical ones
+> (memory recall, post-index queries) to the primary. Either way the decision
+> lives in the application's read routing, which buffr doesn't have today because
+> there's nowhere else to route to.
 
-Anchor: *"A second reader introduces the replica; with it comes lag and a failover data-loss tail — trade strong consistency for availability only when you must."*
+```
+  consistency-critical reads → PRIMARY (read-your-writes)
+  staleness-tolerant reads    → REPLICA (scale)
+```
 
----
-
-## Validate
-
-1. **Reconstruct:** Draw the primary→replica WAL stream and mark the lag window where a read goes stale.
-2. **Explain:** Why does buffr's single `DATABASE_URL` (`src/config.ts:12`) guarantee read-your-writes with no extra code?
-3. **Apply:** A second device starts reading `reindb` via an async replica. What's the first consistency bug a user would hit, and when?
-4. **Defend:** Argue why buffr correctly has *zero* replication today, and name the exact trigger that changes the answer.
+> Anchor: read-your-writes is an application routing decision once there's more
+> than one node.
 
 ---
 
 ## See also
 
-- `07-wal-durability-and-recovery.md` — the WAL a replica would replay
-- `01-database-systems-map.md` — the single-node topology this file confirms
-- `study-system-design` — the multi-device topology where replication becomes a decision
-- `study-distributed-systems` — consistency across nodes once there's more than one
+- `07-wal-durability-and-recovery.md` — the WAL that replication ships.
+- `06-locks-mvcc-and-concurrency-control.md` — the pool that has no failover
+  target today.
+- `study-distributed-systems` — consistency models, CAP, lag tolerance in depth.
+- `study-system-design` — the single-device scope decision and when it changes.

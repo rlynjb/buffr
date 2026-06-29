@@ -1,207 +1,171 @@
-# Chapter 02 — The Demo   (1:00–6:00, 5 minutes)
+# Chapter 02 — The demo   (1:00–6:00, 5 minutes)
 
 ## Opening hook
 
-This is the centerpiece, and it gets the most clock because it carries the whole presentation. Five minutes, one running app, one moment the room reacts. Everything before this set it up; everything after explains it. If you nail nothing else, nail this: **by ~3:00 the room sees buffr recall an exchange from a prior session, and someone in the room thinks "wait — it remembers me."** That is the money shot. It is real and verified — a paraphrased query retrieved a stored past exchange as the top hit. You are not promising a feature; you are showing one.
+This is the chapter that wins or loses the demo, and it owns half the slot. Everything else — the architecture, the build story, the close — exists to support the five minutes you spend here. You have one job: make the room *feel* "it remembers me" before the clock hits 3:00, then spend the rest of the time letting that land and showing it's not a parlor trick.
 
-The structure of these five minutes is deliberate. You earn trust first (grounded, cited, knows-you), then you spend that trust on the wow (remembers-you), then you bank a second, quieter wow (it's all local — your data, your machine). Trust, then wow, then the privacy kicker. Don't reorder it: the recall moment is only impressive *because* the room already believes the basic thing works.
+Three beats, in order, and they escalate. First a grounded, cited answer (proves it's a real RAG agent, not a chatbot). Then the money shot — you ask about something from a *prior* session and it recalls the exchange (proves it remembers). Then the privacy beat — you point out the whole thing ran with no network (proves the wow is also yours, locally, nobody else's). Grounded, then memory, then private. The middle one is the moment the room reacts.
 
 ## The time-budget bar
 
-You own five minutes — the largest slice in the slot. The money shot lands inside the first third of the *whole presentation*, by roughly 3:00.
+You own 1:00 to 6:00 — the largest block in the slot — and the money shot lands by 3:00, inside the first third.
 
 ```
-  ┌──────────────────────────────────────────────────────────┐
-  │ ░░░░░▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░░ │
-  │ 0:00   1:00 ─────── ★3:00★ ─────── 6:00 ─────────── 10:00 │
-  │        THE DEMO — you own 1:00 to 6:00 (5 min)             │
-  │        ★ MONEY SHOT lands by ~3:00 ★                       │
-  └──────────────────────────────────────────────────────────┘
+  ┌──────────────────────────────────────────────────────┐
+  │ ░░░░░▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░░ │
+  │ 1:00 ──────────── 6:00 ────────────────────────── 10:00 │
+  │       THE DEMO — you own 1:00 to 6:00 (5 min)          │
+  │       ★ money shot at ~2:30–3:00 ★                     │
+  └──────────────────────────────────────────────────────┘
 ```
 
 ## The chapter-opening diagram — the click-path
 
-Here is the exact path through the running app, beat by beat, with the money shot marked. You walk this top to bottom and do not deviate.
+This is the exact sequence of beats, with the money shot marked. Walk it left to right; never skip ahead. The whole demo is one pass through this path.
 
 ```
-  THE DEMO CLICK-PATH — three beats, money shot in the middle
+  THE DEMO CLICK-PATH — three escalating beats
 
-  ┌─ BEAT A (1:00–2:15) · grounded + cited + knows-you ──────────┐
-  │  chat REPL → ask a question your indexed docs answer          │
-  │  → grounded answer comes back, cites the source               │
-  │  → it's shaped by your stored profile (it answers like it     │
-  │    knows who you are)                                          │
-  └───────────────────────────┬──────────────────────────────────┘
-                              │  "now watch this"
-  ┌─ BEAT B (2:15–3:30) · ★ THE MONEY SHOT ★ · remembers-you ────┐
-  │  ask about something discussed in a PRIOR session,            │
-  │  PARAPHRASED (not the exact words)                            │
-  │  → buffr pulls the past exchange back as the top hit          │
-  │  → "it remembers me." ← the room reacts HERE (~3:00)          │
-  └───────────────────────────┬──────────────────────────────────┘
-                              │  "and all of this…"
-  ┌─ BEAT C (3:30–5:30) · the privacy kicker · all-local ────────┐
-  │  show: Ollama on localhost, Postgres on your machine          │
-  │  → no cloud in the hot path, your data never leaves           │
-  │  (≤2 min — a claim with one piece of evidence, then stop)     │
-  └───────────────────────────────────────────────────────────────┘
+  1:00          2:00            2:30 ─ 3:00          3:00         6:00
+   │             │                  │                  │            │
+   ▼             ▼                  ▼                  ▼            ▼
+  ┌───────────┐ ┌───────────────┐ ┌────────────────┐ ┌──────────────┐
+  │ BEAT 1    │ │ set up the    │ │ ★ BEAT 2       │ │ BEAT 3       │
+  │ grounded  │→│ recall: name  │→│ MONEY SHOT      │→│ privacy /    │
+  │ + cited   │ │ the prior     │ │ ask about a    │ │ self-hosted  │
+  │ answer    │ │ session       │ │ PRIOR session  │ │ beat         │
+  │           │ │ out loud      │ │ → it RECALLS   │ │ "no network" │
+  └───────────┘ └───────────────┘ └────────────────┘ └──────────────┘
+   proves it     primes the room   "it remembers me"  proves it's
+   retrieves     to recognize it   ◄ THE REACTION     yours, local
+                                      lands by 3:00
+
+  the corpus + a prior exchange were SEEDED in pre-flight, or beat 2
+  has nothing to recall. (See overview pre-flight checklist.)
 ```
 
-Hold that shape: trust (A) → wow (B) → kicker (C). The money shot is Beat B, and it is scheduled to land by ~3:00. Now walk each beat.
+The single most important scheduling fact in this whole book: **the money shot is beat 2, and it lands by 3:00.** If you find yourself at 3:30 still on beat 1, cut into beat 2 immediately. The room will forgive a rushed grounded-answer beat; it will not forgive a buried money shot.
 
-## The body — the beats in order
+## The body — the three beats
 
-### Beat A — grounded, cited, knows you (1:00–2:15)
+### Beat 1 — the grounded, cited answer (1:00–2:00)
 
-You carried a grounded answer over from the cold open, so the room already half-believes it. Beat A makes the belief solid and adds the "knows me" layer. Ask a question where the *profile* shapes the answer — something where buffr responding generically vs responding *as if it knows you* is visibly different.
-
-```
-  SHOW (on screen)                 SAY (out loud)
-  ───────────────────────────      ─────────────────────────────────
-  ask a profile-shaped question    "It's not a blank assistant — it
-  (e.g. "what should I focus on     answers shaped by a stored profile
-   given what I work on?")           of who I am and what I do…"
-
-  grounded answer streams,         "…and everything it says is pulled
-  citing your indexed docs          from my own indexed notes — see
-                                    the source it's grounding on."
-
-  point at the cited source        "That's RAG: retrieve, then answer
-                                    only from what it retrieved."  ← trust banked
-```
-
-The SAY track sells *grounded* and *knows-me* — never "I'm typing now." By the end of Beat A the room believes buffr is real and personal. That belief is the fuel for Beat B.
-
-### Beat B — THE MONEY SHOT: it remembers you (2:15–3:30)
-
-This is the moment. Everything is staged for it: you indexed a corpus, you ran a prior session and stored a memorable exchange, you have a paraphrased question ready. Now you set it up with one sentence, fire the question, and let the room watch a *past conversation* come back.
+You may have already shown a version of this in the cold open. Here you do it deliberately and point at the grounding. The value you're speaking is *it doesn't make things up — it retrieves from your real corpus and tells you the source.*
 
 ```
-  SHOW (on screen)                 SAY (out loud)
-  ───────────────────────────      ─────────────────────────────────
-  (set up first, hands still)      "Here's the part that got me. Earlier
-                                    — in a totally separate session — I
-                                    talked to it about something."
-
-  type a PARAPHRASED question       "I'm not going to repeat what I said.
-  about that prior exchange         I'll ask it sideways, different words…"
-  → enter
-
-  buffr surfaces the PAST          "…and it pulls back what we talked
-  exchange as the top hit,          about before. It remembers me —
-  weaves it into the answer         across sessions."        ← ★ MONEY SHOT ★
+  SHOW (on screen)                    SAY (out loud)
+  ────────────────────────────────    ─────────────────────────────────
+  type a question about your          "I'll ask it something only my
+  indexed notes, hit enter             notes would know."
+  spinner: "thinking…"                (silence — let it work)
+  answer prints, grounded, with a     "Notice it didn't guess — it
+  citation to the source doc           retrieved that from a document I
+                                       indexed, and it shows me which
+                                       one."
 ```
 
-Then stop talking. Let it land. The single strongest move you can make here is silence for one beat while the room reads the screen. The line to say, once, right after:
+Speak value, not clicks. Banned: "now I'm typing a question and pressing enter." The hands do that; your mouth says why it matters.
+
+### Beat 2 — THE MONEY SHOT (2:30–3:00): it remembers a prior session
+
+This is the moment. Two micro-steps: first you *prime* the room by naming, out loud, that you talked about something earlier in a different session. Then you ask about it — phrased differently than you asked the first time — and it comes back having recalled the earlier exchange. The paraphrase matters: it proves this is *semantic* recall, not string-matching. (Verified: a paraphrased query retrieved the stored exchange as the top hit.)
 
 ```
-┃ "That's not a saved chat log — it retrieved a past exchange
-┃  by meaning, the same way it retrieves my documents."
+  SHOW (on screen)                    SAY (out loud)
+  ────────────────────────────────    ─────────────────────────────────
+  [fresh chat session — you can       "Here's the part I think is
+   even point out it's a NEW           different. Earlier, in a totally
+   session]                            separate conversation, I told
+                                       buffr something about myself."
+  type a PARAPHRASED question about    "I'm not going to repeat it the
+  that earlier exchange, hit enter     same way — I'll ask it sideways."
+  spinner: "thinking…"                (silence — this is the beat; let
+                                       the room lean in)
+  the answer comes back having         "…and it remembered. That's a
+  RECALLED the prior exchange —        conversation from before, in a
+  surfaces what you told it earlier    different session, that it pulled
+                                       back on its own."          ◄ ★ MONEY SHOT
 ```
 
-That sentence is load-bearing: it tells the room the recall is *retrieval*, not a transcript scroll — which is what makes it impressive to anyone who knows what a chat log is. Say it and let it breathe. Do not rush into Beat C.
-
-### Beat C — the privacy kicker: it's all yours (3:30–5:30)
-
-The room is warm. Bank the second wow without over-explaining. One claim, one piece of evidence, then stop — this beat has a hard ceiling and you protect the buffer.
+Then the line. Say it, then stop talking. Let the silence do the work — the reaction happens in the pause, not over your voice.
 
 ```
-  SHOW (on screen)                 SAY (out loud)
-  ───────────────────────────      ─────────────────────────────────
-  a second pane: Ollama on         "And all of this is mine. The model
-  localhost:11434, Postgres         is gemma2:9b running on my laptop
-  running locally                   via Ollama — nothing's calling out."
-
-  point at the local DB            "The corpus, the memory, the profile —
-                                    all in my own Postgres, on this
-                                    machine. No cloud in the hot path."
-
-  (resist the urge to go deeper)   "Your data, your model, your machine.
-                                    That's the whole pitch."  ← kicker banked
+┃ "It remembers me. Different session, no history pasted in — it
+┃  retrieved the past conversation because it was relevant."
 ```
 
-Then you are done with the demo with time to spare. Hand to Chapter 03 with: "let me show you the one trick that makes the memory work."
+That pause is the highest-value silence in your ten minutes. Do not fill it.
 
-## Strong vs weak — the demo
+### Beat 3 — the privacy beat (3:00–6:00): it's yours, locally
 
-The failure mode that wastes the money shot is burying it or over-narrating it. Here is the contrast.
+The room is sold on memory. Now you collapse the second wow into it: all of that — the grounding, the recall — happened with no network in the path. The model is on your laptop (Gemma via Ollama), the data is on your Postgres. You can dramatize it.
 
 ```
-  WEAK DEMO                          STRONG DEMO
-  ─────────────────────────────      ─────────────────────────────────
-  spends 3 min on grounded RAG       grounded RAG in ~75 sec (trust),
-  (which judges have seen 50x),       then the money shot by ~3:00 —
-  recall shows up at minute 5         the thing they HAVEN'T seen, early
-  if there's time left
-
-  narrates the recall: "so now       sets it up, fires it, then SILENCE —
-  the system embeds the query and     lets the room read the screen and
-  searches the vector store and…"     react before explaining anything
-
-  → the wow is buried + explained    → the wow lands early + lands clean
-     to death                           (explain the mechanism in 03)
+  SHOW (on screen)                    SAY (out loud)
+  ────────────────────────────────    ─────────────────────────────────
+  (optional, high-impact) turn wifi   "Everything you just saw — the
+  OFF, or show it's already off,       answer, the memory — ran with no
+  then ask one more grounded           internet. The model's on this
+  question                             laptop, the data's in my own
+                                       Postgres."
+  answer still comes back, grounded   "Nothing I tell it ever leaves the
+                                       machine. It's my second brain,
+                                       and it's actually mine."
 ```
+
+If you turn wifi off live, do it as a small piece of theater — "watch, I'll kill the network" — and ask one more question so the room sees it still answer. That's the privacy story made physical. If you'd rather not risk it, just say it; the claim is true either way (no cloud in the hot path — `src/session.ts` wires Ollama + PgVectorStore, no remote model call).
 
 ## The IF-IT-BREAKS box
 
-Two real risks live in this chapter, and the money shot is one of them. Emulated tool-calling means Gemma can skip the search tool; if it does, recall doesn't surface. You have a recovery for each.
+Two failure modes, two backups. The money shot has the worst-case fallback because it's the beat that matters most.
 
 ```
 ╔══════════════════════════════════════════════════════════════════╗
-║ IF IT BREAKS — the money shot doesn't recall                     ║
-║                                                                   ║
-║ Gemma answered Beat B without pulling the past exchange (it       ║
-║ skipped the search tool — emulated tools, it happens):           ║
-║   1. Don't re-type frantically. Say: "let me ask that more        ║
-║      directly" and fire your BACKUP recall question — the one     ║
-║      you verified pre-flight pulls the prior exchange as top hit. ║
-║   2. Still whiffs → cut to the 20-SECOND RECORDED CLIP of the     ║
-║      money shot working. Say: "here it is from earlier — it       ║
-║      pulled back a past exchange across sessions." Keep energy up.║
-║                                                                   ║
-║ The recorded clip is your insurance. It exists because emulated   ║
-║ tool-calling is the one thing in this demo you can't fully trust  ║
-║ live. Never apologize twice. Never freeze. Keep moving.           ║
+║ IF IT BREAKS                                                       ║
+║                                                                    ║
+║ BEAT 1 (grounded answer) ungrounded / no citation → re-ask the    ║
+║ known-good question once ("let me ask that more directly"). Almost ║
+║ always grounds on retry. Emulated tool-calling occasionally skips  ║
+║ the search tool — this is the recovery for it.                    ║
+║                                                                    ║
+║ BEAT 2 (MONEY SHOT) doesn't recall → DO NOT freeze. Re-ask once,   ║
+║ phrased closer to the original wording (less paraphrase = easier   ║
+║ recall). If it still misses → cut to the 25-second recorded clip   ║
+║ of the recall working. Say: "here it is from earlier — watch it    ║
+║ pull back the past conversation." The clip IS the money shot if    ║
+║ live won't cooperate. You rehearsed this; you do not apologize.    ║
 ╚══════════════════════════════════════════════════════════════════╝
 ```
 
-## The "tighten it" treatment
+The recovery ladder for the money shot, in order, so you never have to think on stage: **paraphrased ask → closer-worded re-ask → recorded clip.** Three rungs. You only fall to the clip if both live attempts miss, and the clip still delivers the wow.
 
-If you are running long when you hit the demo, cut Beat C first — never the money shot.
+## The "tighten it" cut
 
-```
-  TIGHTEN IT
-    cut first:  Beat C (the privacy kicker) down to one sentence —
-                "and it's all running locally, your data never leaves."
-                No second pane, no Ollama/Postgres show-and-tell.
-    cut next:   Beat A's profile question — go straight from the
-                cold-open grounded answer into "now watch this."
-    floor:      Beat B, the money shot, is sacred. The room MUST see
-                recall across sessions work. Cut anything else first.
-```
+Under a tight slot, you cut beat 3, not beat 2. Drop the privacy demo to a single spoken sentence — "and all of this ran locally, no cloud" — and hold the full money shot intact. The demo's floor is **the room sees it recall a prior session.** That is the one thing you never cut. If you have to choose between a polished grounded-answer beat and the money shot, the money shot wins every time.
 
-## The one-page run sheet — THE DEMO
+## The one-page run sheet — CHAPTER 02
 
 ```
-  ┌─ RUN SHEET · 02 THE DEMO · 1:00–6:00 · ★MONEY SHOT ~3:00★ ──────┐
-  │                                                                 │
-  │  BEAT A (→2:15) grounded + knows-you                            │
-  │   • "answers shaped by a stored profile of who I am"            │
-  │   • "everything pulled from my own indexed notes — the source"  │
-  │                                                                 │
-  │  BEAT B (→3:30) ★ MONEY SHOT — it remembers you ★               │
-  │   • "earlier, in a SEPARATE session, I talked to it about X"    │
-  │   • "I'll ask it sideways, different words…" (PARAPHRASE)        │
-  │   • [it pulls the past exchange back] → SILENCE, let it land    │
-  │   • LINE: "not a saved chat log — it retrieved a past exchange  │
-  │            by meaning, like it retrieves my documents."         │
-  │                                                                 │
-  │  BEAT C (→5:30) the privacy kicker (≤2 min, then STOP)          │
-  │   • "model on my laptop via Ollama, nothing calls out"          │
-  │   • "corpus + memory + profile in my own Postgres"              │
-  │   • "your data, your model, your machine."                      │
-  │                                                                 │
-  │  IF MONEY SHOT WHIFFS: backup recall Q → still no? 20-sec clip. │
-  │  TIGHTEN: cut Beat C to one line, then Beat A. Beat B is sacred.│
-  └─────────────────────────────────────────────────────────────────┘
+  ┌─ THE DEMO ─ 1:00–6:00 ─ 5 min ─ ★ money shot by 3:00 ★ ──────┐
+  │                                                              │
+  │  BEAT 1 (1:00–2:00) grounded + cited                         │
+  │    SAY: "something only my notes would know" → on answer:    │
+  │         "didn't guess — retrieved it, shows the source"      │
+  │                                                              │
+  │  BEAT 2 (2:30–3:00) ★ MONEY SHOT — prior-session recall      │
+  │    prime: "earlier, a separate conversation, I told it…"     │
+  │    ask it SIDEWAYS (paraphrased) → it recalls                │
+  │    ┃ "It remembers me. Different session, no history pasted  │
+  │    ┃  in — it retrieved the past conversation."  THEN STOP.  │
+  │                                                              │
+  │  BEAT 3 (3:00–6:00) privacy / local                          │
+  │    (optional: kill wifi) "everything ran with no internet —  │
+  │     my model, my data, nothing leaves the machine."          │
+  │                                                              │
+  │  NAIL THIS LINE: "It remembers me." + the pause after.       │
+  │  IF IT BREAKS: re-ask → closer re-ask → 25-sec clip.         │
+  │  TIGHTEN: cut beat 3 to one sentence. Floor: room SEES recall.│
+  └──────────────────────────────────────────────────────────────┘
 ```
+
+On to chapter 03 — one level under the hood, then stop.

@@ -1,316 +1,258 @@
-# Parameterized SQL Boundary
+# Parameterized SQL boundary
 
-*Prepared statements / bound parameters — Industry standard.*
+**Industry name(s):** parameterized queries / prepared statements /
+bound parameters. **Type:** Industry standard.
 
 ## Zoom out, then zoom in
 
-Here's the whole data path, with the one boundary this file is about marked.
+Every byte that travels from your laptop to `reindb` crosses one
+boundary, and at that boundary there's exactly one rule that keeps an
+attacker's text from becoming an attacker's *query*: the value never
+touches the SQL string. It rides in a separate slot.
 
 ```
-  Zoom out — where the SQL boundary sits
+  Zoom out — where the SQL boundary lives
 
-  ┌─ CLI layer ─────────────────────────────────────────────┐
-  │  argv "question"   ·   *.md file text   ·   embeddings   │  untrusted-ish
-  └─────────────────────────┬───────────────────────────────┘
-                            │  JS values (strings, number[])
-  ┌─ Storage adapter ──────▼────────────────────────────────┐
-  │  PgVectorStore · runtime · profile · trace-sink          │
-  │  ★ every query: SQL text + bound params, kept apart ★    │ ← we are here
-  └─────────────────────────┬───────────────────────────────┘
-                            │  wire protocol: query + param array
-  ┌─ Postgres (reindb) ────▼────────────────────────────────┐
-  │  parser sees fixed SQL; params arrive as typed values    │
-  └──────────────────────────────────────────────────────────┘
+  ┌─ UI (Ink TUI) ───────────────────────────────────┐
+  │  src/cli/chat.tsx  — you type a question          │
+  └───────────────────────────┬──────────────────────┘
+                              │ in-process
+  ┌─ Service (session/agent) ─▼──────────────────────┐
+  │  ★ PgVectorStore / runtime / profile / sink ★    │ ← we are here
+  │     build SQL with $1,$2,...  +  values array     │
+  └───────────────────────────┬──────────────────────┘
+                              │ DATABASE_URL → TLS
+  ┌─ Storage (Postgres) ──────▼──────────────────────┐
+  │  pg parses SQL ONCE, binds values into slots      │
+  │  agents.chunks / documents / messages / profiles  │
+  └───────────────────────────────────────────────────┘
 ```
 
-Zoom in: the question is the oldest one in the book — *does any value the
-program didn't write itself ever become part of the SQL text the database
-parses?* If yes, that value can change the *structure* of the query (add a
-`; DROP`, a `UNION`, an `OR 1=1`) and you have injection. If the value only
-ever arrives as a **bound parameter**, the database has already finished
-parsing the structure before it sees the value, and the worst a hostile
-string can do is be a weird value in a `WHERE`. buffr does the second thing,
-everywhere. That's the pattern.
+Zoom in: the pattern is *separate the code from the data*. The query
+text — with `$1`, `$2`, `$1::vector` placeholders — is parsed by
+Postgres on its own. The values arrive as a second argument, an array,
+and get *bound* into the parsed plan's slots. A value can never be
+re-interpreted as SQL syntax because by the time the value shows up,
+the parser has already finished. This is the control that makes
+buffr's database boundary injection-resistant. The interesting part in
+this repo isn't that it's used — it's the one place that *looks* like
+string-building and isn't.
 
-## Structure pass
+## The structure pass
 
-**Layers.** Two: the SQL *text* (the structure — `select`, `from`, `where`,
-the `$N` placeholders) and the *parameter array* (the values). They travel
-to Postgres separately.
+**Layers:** the SQL boundary appears at four sites, all at the same
+altitude (the storage-adjacent service layer): `PgVectorStore`
+(`src/pg-vector-store.ts`), `runtime` (`src/runtime.ts`), `profile`
+(`src/profile.ts`), `trace-sink` (`src/supabase-trace-sink.ts`).
 
-**Axis — trust.** Trace "is this attacker-controllable?" down the two
-layers:
+**Axis — trust.** Trace "is this string trusted as code?" across the
+boundary:
 
 ```
-  One axis (trust) across the two layers of a query
+  axis traced = "can this text become SQL syntax?"
 
-  ┌─ SQL text layer ──────────────────────────────┐
-  │  "select ... where app_id = $2 limit $3"       │  → repo-authored,
-  │                                                │     NEVER from input
-  └────────────────────────────────────────────────┘
-  ┌─ parameter layer ─────────────────────────────┐
-  │  [vectorLiteral, appId, k]                     │  → may contain input,
-  │                                                │     but only as VALUES
-  └────────────────────────────────────────────────┘
-
-  the trust answer flips across the layers — and the boundary
-  between them is exactly what makes injection impossible
+  ┌─ app side ──────┐   seam: pg.query(text, values)   ┌─ Postgres ──┐
+  │ values UNtrusted│ ═════════════╪═══════════════════►│ values are  │
+  │ (could be evil) │   (it flips)                      │ DATA only   │
+  └─────────────────┘                                   └─────────────┘
+           ▲                                                   ▲
+           └──────── same text, two roles ─────────────────────┘
+             app: "might be hostile"   pg: "bound, inert"
 ```
 
-**Seam.** The load-bearing seam is the `pool.query(text, params)` call
-itself. On one side, fixed structure the parser trusts; on the other, values
-the parser never lets touch structure. The seam holds because node-postgres
-sends them as two distinct fields of the wire protocol — the value is never
-spliced into the text on the client.
+**Seam:** the `pool.query(text, valuesArray)` call. That's where the
+trust answer flips — left of it a value is suspect, right of it it's
+inert data bound into a pre-parsed plan. The whole defense is that
+this seam is *always* used and the value array is *always* the second
+argument. Now the mechanics.
 
 ## How it works
 
-### Move 1 — the mental model
-
-You already know this shape from React: when you render user text you do
-`<span>{userText}</span>`, not `dangerouslySetInnerHTML`. The `{}` puts the
-string in as a **text node** — data — so a value of `<script>` renders as
-literal characters, not a tag. A bound SQL parameter is the same move at the
-database layer: the value goes in as *data*, never as *markup the parser
-acts on*.
+You already know this shape from frontend work: a React `key` is a
+slot the framework fills, not a string you concatenate into markup.
+Same idea — `$1` is a slot Postgres fills, not a string you splice into
+SQL.
 
 ```
-  The shape — structure and value travel apart
+  The pattern — two channels, never mixed
 
-       query text  ─────────────►  ┌──────────┐
-       "...where app_id = $2"       │ Postgres │  1. parse structure
-                                    │  parser  │     (placeholders, no values)
-       params      ─────────────►  └────┬─────┘
-       [ "'; drop table--" ]            │ 2. bind values into the
-                                        ▼    already-parsed plan
-                                   value is compared as a string;
-                                   it can NEVER become a new clause
+   SQL text (parsed first)        values (bound second)
+   ┌──────────────────────────┐   ┌────────────────────┐
+   │ insert ... values        │   │ [ c.id,            │
+   │   ($1,$2,$3,$4,$5,        │ + │   docId, appId,    │
+   │    $6::vector,$7,$8)      │   │   ... vectorText ] │
+   └──────────────────────────┘   └────────────────────┘
+        │  parser runs on THIS            │
+        ▼  (no values present yet)        ▼
+   plan with 8 empty slots  ──────►  slots filled, inert
 ```
 
-The one-sentence strategy: **parse the query shape first with holes in it,
-then drop values into the holes** — the holes can't grow into new SQL.
+### The kernel — what breaks if it's missing
 
-### Move 2 — the walkthrough
+Strip the value array and inline the values into the string, and the
+whole control collapses: a chunk whose text is
+`'); drop table agents.chunks; --` would become executable SQL. The
+load-bearing part is the *separation* — `text` with placeholders, plus
+a `values` array, passed as two arguments to one `query` call. Lose
+the second argument and you've lost the boundary.
 
-**Part 1 — the placeholder.** Every query writes `$1`, `$2`, … where a value
-goes, never the value itself. Drop this and you're back to string
-concatenation: `where app_id = '${appId}'`, and an `appId` of
-`' or '1'='1` reads every tenant's rows. The placeholder is the part that
-makes the structure fixed before any value is seen.
+### The upsert sink — read it line by line
 
-```
-  Placeholder vs concatenation — the one that breaks
-
-  SAFE:    "select ... where app_id = $2"      + params [vec, appId, k]
-  BROKEN:  "select ... where app_id = '" + appId + "'"
-
-  in BROKEN, appId = "' or '1'='1"  →  where app_id = '' or '1'='1'
-                                       → returns every row, all tenants
-```
-
-**Part 2 — the typed cast at the param site.** pgvector needs the embedding
-as its `vector` type. The query casts the *placeholder*: `$1::vector`, not
-`'[0.1,0.2]'::vector`. The cast applies to the bound value after binding, so
-the vector literal string is still data, never SQL text. Drop the cast and
-the value arrives as `text` and the distance operator `<=>` has no
-overload — you get a type error, not injection, but the cast is what keeps
-the value on the data side of the seam.
+The chunk upsert is the highest-traffic sink and the one that carries
+model-adjacent data. Here's the real code (`src/pg-vector-store.ts:47`):
 
 ```
-  The vector literal is a VALUE, cast after binding
-
-  toVectorLiteral([0.1, 0.2])  →  "[0.1,0.2]"   (a JS string)
-        │
-        ▼ passed as param $1, NOT spliced into text
-  "... 1 - (embedding <=> $1::vector) ..."
-        │
-        ▼ Postgres binds "[0.1,0.2]" then casts it to vector
-  even if the string were hostile, it's compared as a vector,
-  never parsed as SQL
+  await client.query(
+    `insert into agents.chunks (id, document_id, app_id, chunk_index,
+        content, embedding, embedding_model, meta)
+     values ($1, $2, $3, $4, $5, $6::vector, $7, $8)   ◄ 8 slots, no values inline
+     on conflict (id) do update set ...`,
+    [c.id, docId, this.appId, chunkIndex,             ◄ values array — the 2nd arg
+     content, toVectorLiteral(c.vector),              ◄ vector as text, but BOUND
+     this.embeddingModel, c.meta],
+  );
 ```
 
-**Part 3 — the one exception, and why it's not a sink.** The migration
-runner (`migrate.ts`) does run a whole SQL *file* as one statement with no
-parameters. That looks like the anti-pattern — raw SQL execution — but the
-SQL comes from a repo-controlled file (`sql/001_agents_schema.sql`), never
-from user input. The rule isn't "never run raw SQL"; it's "never let
-*untrusted input* reach the SQL text." Repo-authored DDL is trusted by
-definition.
+- `$1..$8` are slots; the SQL string contains no data, only structure.
+- `$6::vector` — the placeholder gets a cast. pg binds the *value* of
+  `$6` then casts the bound value to `vector`. The cast is part of the
+  parsed query, not the data.
+- The values array is the second argument. `c.id`, `content`, `c.meta`
+  — all of which may contain model- or document-derived text — go in
+  here, inert.
 
-### Move 3 — the principle
+### The trap that looks like a hole (and isn't)
 
-The principle generalizes past SQL: **separate the code from the data at
-every interpreter boundary.** SQL parser, shell, HTML renderer, the LLM
-prompt — each one is an interpreter, and injection is always the same bug:
-a value crossed over into the structure the interpreter acts on. Bound
-parameters are how you keep the value on the data side at the SQL boundary.
-(Note the symmetry with `03-indirect-prompt-injection-surface.md`: the LLM
-is *also* an interpreter, and there the data/code separation is *not* clean
-— which is exactly why that one's a live surface and this one isn't.)
+This is the one place worth slowing down on. `toVectorLiteral`
+builds a string by concatenation (`src/pg-vector-store.ts:15`):
+
+```
+  function toVectorLiteral(v: number[]): string {
+    return `[${v.join(',')}]`;     ◄ string-building! red flag at first glance
+  }
+```
+
+Then `search` uses it (`src/pg-vector-store.ts:70`):
+
+```
+  `... 1 - (embedding <=> $1::vector) as score
+   from agents.chunks
+   where app_id = $2
+   order by embedding <=> $1::vector
+   limit $3`,
+  [toVectorLiteral(vector), this.appId, k],   ◄ the literal is $1 — BOUND, not spliced
+```
+
+Walk the boundary condition: is this injectable? No — and naming *why*
+is the lesson. The string `[0.1,0.2,...]` is **passed as `$1`**, a
+bound parameter, not concatenated into the query body. So even though
+buffr built a string, that string crosses the seam as data. Two
+reasons it's safe, in order of strength: (1) it's bound, so it can't be
+syntax regardless of content; (2) belt-and-suspenders, its content is
+`number.join(',')` from the embedder — there's no path for free text to
+reach it. The first reason is the one that matters; the second is why
+you'd sleep fine even if the first were ever weakened.
+
+### Memory adds no new sink
+
+Worth confirming because it's a recent change. Conversation memory
+writes through `@aptkit/memory`, which calls `store.upsert(...)`
+(`src/session.ts:53`) — the *same* `PgVectorStore.upsert` above. There
+is no second SQL path for memory. It inherits this boundary wholesale.
+The session and trace layers add inserts (`src/supabase-trace-sink.ts:27`,
+`:5`) but all of them are parameterized the same way. Grep the repo for
+SQL and you'll find no string-built query anywhere.
+
+### The principle
+
+The control isn't "validate the input" — it's "make the input
+*structurally incapable* of being code." Parameterization wins over
+sanitization because sanitization is a blocklist you can be wrong about
+and binding is an architecture that can't be wrong. The generalizable
+move: when untrusted data meets an interpreter (SQL, shell, a template
+engine, `dangerouslySetInnerHTML`), the durable fix is a separate
+channel for data, not a cleverer escape function.
 
 ## Primary diagram
 
-The full picture: untrusted values stay on the parameter rail the whole way
-to Postgres.
+The full boundary, all four sinks, one rule.
 
 ```
-  buffr-laptop — the SQL boundary, end to end
+  Parameterized SQL boundary — buffr-laptop
 
-  ┌─ CLI / adapter (Node) ──────────────────────────────────────┐
-  │                                                              │
-  │   appId, k, vector[]  ──────────────┐  (values)              │
-  │                                     │                        │
-  │   "select id, content, ...          │                        │
-  │    where app_id = $2                │                        │
-  │    order by embedding <=> $1::vector│                        │
-  │    limit $3"          ──────────┐   │  (fixed structure)     │
-  │                                 │   │                        │
-  └─────────────────────────────────┼───┼────────────────────────┘
-              wire protocol:        │   │
-              two separate fields ──▼───▼──────────────────────────
-  ┌─ Postgres ─────────────────────────────────────────────────┐
-  │  1. parse text  (holes, no values)                          │
-  │  2. bind [vector, appId, k] into holes as typed values      │
-  │  3. execute — values compared, never parsed as SQL          │
-  └──────────────────────────────────────────────────────────────┘
-```
-
-## Implementation in codebase
-
-**Use cases.** Reached for on every database touch in the repo: indexing a
-document's chunks (upsert), answering a question (search), reading the
-profile, writing the trajectory, and — new — persisting conversation memory.
-The memory write (`session.ts:66`, `memory.remember`) embeds the exchange
-and calls the **same** `PgVectorStore.upsert`, so it inherits this exact
-parameterized sink rather than adding a new one. There is no code path that
-builds SQL by string concatenation — the pattern is uniform.
-
-**Code side by side.**
-
-```
-  src/pg-vector-store.ts  (search, lines 70–78)
-
-  const { rows } = await this.pool.query(
-    `select id, content, chunk_index, document_id, meta,
-            1 - (embedding <=> $1::vector) as score   ← $1 cast to vector
-     from agents.chunks
-     where app_id = $2                                ← $2 is the tenant value
-     order by embedding <=> $1::vector
-     limit $3`,                                       ← $3 is k
-    [toVectorLiteral(vector), this.appId, k],         ← the param array
-  );
-        │
-        └─ structure (the template string) and values (the array) are two
-           separate arguments. node-postgres sends them as separate wire
-           fields. No value is ever interpolated into the SQL text — strip
-           the array and the query is still a complete, valid template.
-```
-
-```
-  src/pg-vector-store.ts  (upsert, lines 47–56)
-
-  await client.query(
-    `insert into agents.chunks (id, document_id, app_id, ...)
-     values ($1, $2, $3, $4, $5, $6::vector, $7, $8)  ← every column a placeholder
-     on conflict (id) do update set ...`,
-    [c.id, docId, this.appId, chunkIndex, content,
-     toVectorLiteral(c.vector), this.embeddingModel, c.meta],  ← 8 bound values
-  );
-        │
-        └─ content (the chunk text, indexed from a file) is $5 — a bound
-           value. A document whose text is "'); drop table chunks;--" is
-           stored as that literal string, never executed.
-```
-
-```
-  src/runtime.ts  (document insert, lines 11–16)
-  src/profile.ts  (profile read, lines 5–6)
-  src/supabase-trace-sink.ts  (message insert, lines 27–36)
-
-  ...where app_id = $1            ← profile.ts
-  values ($1, $2, 'markdown', $3, $4)  ← runtime.ts, note the literal
-                                          'markdown' is repo-authored, not input
-  values ($1..$7, coalesce($8::timestamptz, now()))  ← trace-sink.ts, the
-                                          event timestamp is bound as $8
-        │
-        └─ same discipline in all three. The only string literals inside
-           the SQL text ('markdown', table names) are authored by the repo.
-           Everything caller-supplied is a $N.
+  ┌─ Service layer (app process) ───────────────────────────────────┐
+  │  pg-vector-store.upsert   insert chunks   ($1..$8, $6::vector)   │
+  │  pg-vector-store.search   knn select      ($1::vector,$2,$3)     │
+  │  runtime.indexDocumentRow insert documents($1..$4)              │
+  │  profile.loadProfile      select content  ($1)                  │
+  │  trace-sink.persistMessage insert messages($1..$8)             │
+  │  memory.remember ─────────► reuses upsert (no new SQL)          │
+  └───────────────────────────┬─────────────────────────────────────┘
+            text + values[]    │   pool.query(text, values)
+                              ▼   ── the seam: data never in `text`
+  ┌─ Storage layer (Postgres) ──────────────────────────────────────┐
+  │  parse SQL once  →  bind values into slots  →  execute           │
+  │  bound values are DATA — never re-parsed as syntax               │
+  └──────────────────────────────────────────────────────────────────┘
 ```
 
 ## Elaborate
 
-Parameterized queries are the original SQL-injection fix, older than the
-ORMs that now do it for you under the hood. The reason they work is a
-property of the database wire protocol, not the client library: the extended
-query protocol (Parse / Bind / Execute) parses the statement *before* values
-are bound, so a value can't retroactively change the parse tree. node-postgres
-exposes this as the two-argument `query(text, values)` call. Drizzle (which
-AdvntrCue uses) and every other serious driver wrap the same mechanism.
+Prepared statements date to the era when SQL injection topped the OWASP
+list — the fix that finally worked wasn't better escaping, it was
+moving the value out of the parsed string entirely. node-postgres
+(`pg`) implements this with the extended query protocol: `Parse` (the
+text, once) then `Bind` (the values) are distinct protocol messages.
+buffr never sees that wire detail — it just always passes a values
+array. The discipline that keeps this safe is boring on purpose:
+*never* build a query by template string with a value in it. The
+moment one sink breaks that rule, the boundary has a hole the size of
+that one query.
 
-The thing worth internalizing: parameterization defends *structure*, not
-*content*. It stops `' OR 1=1`, but it does nothing about a value that's
-legal SQL-wise but wrong authorization-wise — like an `app_id` that lets you
-read another tenant. That's a different boundary, and it's where
-`02-shape-only-tenant-isolation.md` picks up. Parameterized SQL and tenant
-isolation are orthogonal controls; this repo nails the first and defers the
-second.
+This connects to the data layer: the *shape* of these tables (what
+columns, what types, the soft-link FK) is a data-modeling concern; the
+fact that writes to them can't be hijacked is this security concern.
+The same `pool.query` calls show up in both guides under different
+lenses.
 
 ## Interview defense
 
-**Q: This vector store builds a string literal `[0.1,0.2,...]` for the
-embedding and puts it in the query. Isn't that string concatenation?**
+**Q: Your `search` builds a vector string by hand with `.join(',')`.
+Isn't that SQL injection?**
 
-No — and the distinction is the whole point. `toVectorLiteral` builds a JS
-string, but that string is passed as a *bound parameter* (`$1::vector`),
-never spliced into the SQL text. Watch where it goes:
+No — and the reason is the load-bearing one. The string is passed as
+a *bound parameter* (`$1::vector`), not concatenated into the query
+body. Binding means the parser already ran before the value arrived,
+so the value can't become syntax no matter what it contains. The
+content also happens to be machine-generated floats from the embedder,
+but I don't rely on that — the binding is the defense, the source is
+the backup.
 
 ```
-  "[0.1,0.2]"  is a VALUE on the param rail, not text on the SQL rail
-
-  query text:   "... embedding <=> $1::vector ..."   ← no value here
-  params:       [ "[0.1,0.2]", appId, k ]            ← value lives here
-                     │
-                     └─ Postgres binds then casts to vector;
-                        a hostile string is a bad vector, not new SQL
+  build string  ─►  pass as $1  ─►  pg binds it  ─►  inert
+   (looks scary)     (the seam)     (parsed already)  (safe)
 ```
 
-The anchor: **the literal is a value, the `$1` is the structure, and they
-never meet on the client.** If I'd written `<=> '${literal}'::vector` —
-interpolating into the text — *that* would be the bug. The cast on the
-placeholder is what tells me it's safe.
+Anchor: *the string is data because it's bound, not because it's clean.*
 
-**Q: What's the one thing parameterized queries do NOT protect you from?**
+**Q: Where would this break?**
 
-Authorization. They stop a value from changing query *structure*; they do
-nothing about a value being *the wrong value you're not allowed to use*. A
-parameterized `where app_id = $2` is injection-proof and still leaks every
-tenant if `$2` isn't tied to a verified identity — which, in this repo, it
-isn't yet (it's an env default). Naming that gap is the signal I understand
-the control's edge.
+The day someone adds a query with a value template-spliced into the
+text instead of bound — e.g. `where app_id = '${appId}'`. The fix
+isn't to escape `appId`, it's to make it `$1` and pass it in the values
+array. The control is architectural, so the failure mode is
+architectural: one sink that doesn't use it.
 
-## Validate
-
-1. **Reconstruct.** From memory, write the two rails (SQL text, param array)
-   and explain why a hostile `content` value in `pg-vector-store.ts:47` can't
-   become executable SQL.
-2. **Explain.** Why is `migrate.ts:13` running a raw SQL file *not* an
-   injection sink, even though it executes unparameterized SQL?
-3. **Apply.** A new feature lets the operator pass a `--source-type` flag
-   that becomes a `WHERE source_type = ?` clause. Where does the value go —
-   the SQL text or the param array — and what does the call look like
-   (model it on `profile.ts:5-6`)?
-4. **Defend.** Someone proposes "we should sanitize the question string to
-   strip quotes before querying." Argue why that's the wrong fix and what's
-   right instead.
+Anchor: *one inline value reopens the whole boundary.*
 
 ## See also
 
-- `02-shape-only-tenant-isolation.md` — the orthogonal control: structure
-  is safe, but the `app_id` *value* isn't yet identity-bound.
-- `03-indirect-prompt-injection-surface.md` — the same data/code-separation
-  principle at the LLM boundary, where it does *not* hold cleanly.
-- `study-data-modeling` — the schema these queries hit (`agents.chunks`,
-  the JSONB `meta` column, the missing FK).
-
-Updated: 2026-06-24 — re-verified all sinks; conversation-memory writes (`session.ts:66`) reuse the same parameterized `PgVectorStore.upsert`, no new SQL; corrected trace-sink insert line range (27–36) and noted bound `$8` timestamp.
+- `audit.md` — lens 3 (input-validation-and-injection), the full sink
+  list.
+- `02-shape-only-tenant-isolation.md` — the `app_id = $2` filter these
+  queries carry, and why that filter is *isolation by convention*, not
+  enforcement.
+- `../study-data-modeling/` — the *shape* of `agents.chunks` /
+  `documents` / `messages` these queries write to.
+- `../study-database-systems/` — how Postgres parses-then-binds at the
+  storage engine level.

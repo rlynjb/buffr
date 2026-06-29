@@ -1,213 +1,340 @@
 # Chapter 4 — The Scale Story
 
-"What breaks first at 10x?" tests whether you can reason about a system you haven't actually stressed. You built `buffr-laptop` for one user on one machine — it was never under load, and you should say so plainly. But the senior skill isn't having run a load test; it's being able to walk the bottlenecks in order, name what you'd add and when, and say how you'd measure to know. An interviewer doesn't expect you to have scaled a single-device app. They expect you to know *where it would crack* and to not pretend you've already solved problems you haven't met.
+"What breaks first at 10x?" is the question where frontend-pivot
+candidates either show systems thinking or fold. You haven't operated
+distributed systems at horizontal scale — that's the honest gap from
+`me.md`, and this chapter is built around defending it without faking
+it. The move is not to invent a scaling architecture you've never run.
+The move is to reason crisply about *what breaks first, in what order*,
+for the system you actually built — and to be honest about where your
+ability to reason runs out.
 
-Here's the honesty calibration for this chapter, straight from your portfolio: you've shipped local-first apps and on-device AI, but you have not built distributed systems at horizontal scale, queue infrastructure, or multi-region anything. So this chapter teaches you to reason forward about scale *without* claiming you've operated it. When the interviewer pushes into Kafka-shaped territory, Chapter 4's job is to get you to the honest boundary gracefully, not to fake your way across it.
+The good news: buffr's bottlenecks are knowable from the code. You don't
+need scale experience to say "the single stateful process is the first
+thing that won't scale horizontally" — that's a reading of the
+architecture, and you can do that with confidence.
 
-```
-  WHAT BREAKS FIRST — bottlenecks in firing order
+## The scale-bottleneck chart
 
-  load grows ───────────────────────────────────────────►
-
-  10x CORPUS         100x CORPUS          10x CONCURRENT ASKS
-  (more docs)        (huge index)         (many callers)
-       │                  │                      │
-       ▼                  ▼                      ▼
-  ┌──────────────┐  ┌──────────────┐     ┌──────────────────┐
-  │ #1 SERIAL    │  │ #1 HNSW recall│     │ #1 NO POOL ACQUIRE│
-  │ INDEXING     │  │ untuned       │     │ TIMEOUT — waits   │
-  │ files run    │  │ ef_search at  │     │ forever, doesn't  │
-  │ one at a time│  │ default; no   │     │ fail fast         │
-  └──────┬───────┘  │ recall floor  │     └────────┬─────────┘
-         │          └──────┬───────┘              │
-         ▼                 ▼                       ▼
-  ┌──────────────┐  ┌──────────────┐     ┌──────────────────┐
-  │ #2 N+1 chunk │  │ #2 app_id    │     │ #2 Gemma is the   │
-  │ INSERT loop  │  │ post-filter  │     │ real ceiling —    │
-  │ per-row,     │  │ on HNSW under-│     │ one model, serial │
-  │ not batched  │  │ fills k       │     │ generation        │
-  └──────────────┘  └──────────────┘     └──────────────────┘
-
-  HOW YOU'D KNOW: EXPLAIN ANALYZE the search · exact-scan
-  recall baseline · time the embed vs generate vs query split
-```
-
-The chart is the chapter. Three scale scenarios across the top, the first two bottlenecks for each below, and the measurement discipline along the bottom. Walk it left to right and you've answered the scale question.
-
-## Scenario 1 — 10x the corpus
-
-  ┌─────────────────────────────────────────────────────────┐
-  │ THEY ASK                                                 │
-  │   "You go from indexing a few notes to indexing your     │
-  │    whole document history. What breaks first?"          │
-  │                                                         │
-  │ WHAT THEY'RE TESTING                                     │
-  │   Do you know where YOUR code is the bottleneck versus   │
-  │   where Postgres is? Can you name the first thing to     │
-  │   crack, not just "it gets slow"?                       │
-  └─────────────────────────────────────────────────────────┘
-
-> "The first thing to crack is indexing throughput, and it's in my code, not Postgres. I index files serially — the loop awaits each file's full embed-and-upsert before starting the next, so the GPU sits idle during every commit. Within a single document the embedding is already batched into one call, so that's fine; the waste is across files. The fix is a bounded concurrency limit — process three or four files in parallel instead of one — and only the loop changes. The second bottleneck behind that is the chunk insert: I upsert chunks one row at a time inside the transaction, which is the classic N+1, just atomic. A multi-row INSERT or COPY collapses it to one statement. Both are negligible on localhost today, which is why I haven't done them — they only matter once the corpus is big enough that index time is felt."
-
-Decision mode honesty: the serial indexing is something you **defaulted to** — the straightforward loop — and never optimized because at your scale it didn't matter. Owning that it's a default, not a considered choice, is the move.
-
-  ┃ "The first bottleneck is almost always in your own
-  ┃  code, not the database. Know which of your loops is
-  ┃  the N+1."
+This is the chapter's anchor: as you grow each axis, what breaks, in
+what order. Memorize the *sequence*, not the numbers.
 
 ```
-  "What breaks first at 10x corpus?"
-        │
-        ▼  serial indexing
-        │
-        ├─► IF THEY ASK "WHY NOT FIX IT NOW?"
-        │     It's invisible on localhost — the embed call
-        │     dominates, not the loop overhead. Optimizing it
-        │     now is solving a problem I don't have.
-        │
-        ├─► IF THEY ASK "HOW WOULD YOU FIX IT?"
-        │     Bounded parallelism across files (a pLimit of
-        │     3-4), and a multi-row INSERT for chunks. Loop
-        │     changes only; the contract stays the same.
-        │
-        └─► IF THEY ASK "WHAT WOULD YOU MEASURE?"
-              Time the three phases separately — embed,
-              insert, commit — to confirm the embed is the
-              real cost before parallelizing anything.
+  what breaks first — three scale axes
+
+  AXIS                 1st bottleneck          2nd bottleneck
+  ───────────────────  ──────────────────────  ───────────────────────
+  10x CORPUS           HNSW recall + build     synchronous per-doc
+  (~10k+ chunks)       degrades on default     indexing (runtime.ts:17)
+                       m / ef_construction      → batch reindex
+                            │
+                            ▼ tune index, then batch indexing
+
+  2nd WRITER           app_id isolation        full-priv DATABASE_URL
+  (app #2 / phone)     is by CONVENTION,       held in the client
+                       no RLS → wrong-tenant   process → scope the
+                       reads possible           credential
+                            │
+                            ▼ RLS + token-derived app_id (HARD gate)
+
+  10x LATENCY-         single stateful         no timeouts / retries /
+  SENSITIVE REQS       process: one chat       fallback on Gemma + DB
+                       session = one process,  → a hung Ollama stalls
+                       not behind an LB         the turn, no recovery
+                            │
+                            ▼ stateless service behind an LB (rearchitect)
 ```
 
-## Scenario 2 — 100x the corpus
-
-  ┌─────────────────────────────────────────────────────────┐
-  │ THEY ASK                                                 │
-  │   "Now the index has a hundred times more vectors.       │
-  │    What happens to retrieval?"                          │
-  │                                                         │
-  │ WHAT THEY'RE TESTING                                     │
-  │   Do you understand that your ANN index is approximate   │
-  │   and that recall degrades silently? Do you have a way   │
-  │   to even detect the degradation?                       │
-  └─────────────────────────────────────────────────────────┘
-
-> "The risk at a large index is silent recall loss. HNSW is approximate, and the recall knob — `ef_search` — is at the default, which I never tuned because I don't have a recall baseline. A bigger graph with too-low `ef_search` would start missing true nearest neighbors, and nothing in my system would tell me, because my eval scores precision and recall against the *approximate* results, with no exact baseline to compare to. So before I trusted retrieval at that scale, the first thing I'd build is an exact-scan baseline — force Postgres to skip the index and compute true nearest neighbors — then compare and tune `ef_search` to a recall target. The second thing that bites at scale is the tenant filter: the `app_id` WHERE clause and the HNSW order-by don't compose inside one index, so Postgres walks the graph and then post-filters `app_id`, which can under-fill k once there are many tenants. The fix there is a partial or partitioned index per tenant — but that's only when there's a second tenant, which there isn't yet."
-
-The killer move here is admitting the measurement gap: your eval can't currently detect a recall regression because it has no ground truth. Naming the gap *and* the experiment that closes it is the senior signal. Anyone can say "I'd tune the index." Knowing you can't even *measure* whether it needs tuning yet is rarer.
-
-## Scenario 3 — 10x concurrent requests
-
-  ┌─────────────────────────────────────────────────────────┐
-  │ THEY ASK                                                 │
-  │   "What if ten people hit this at once instead of one?"  │
-  │                                                         │
-  │ WHAT THEY'RE TESTING                                     │
-  │   Do you know what your single-user assumptions cost     │
-  │   you the moment there's concurrency? Can you find the   │
-  │   real ceiling versus the fixable bottleneck?           │
-  └─────────────────────────────────────────────────────────┘
-
-> "Two things, and they're different in kind. The fixable one: my connection pool has no acquire timeout. Today there's one caller so the pool never runs dry, but under concurrency an exhausted pool would wait forever for a connection instead of failing fast — that's the first thing I'd fix, and it's one option on the pool. The real ceiling, though, isn't the database — it's Gemma. I run one local model and generation is the dominant cost by an order of magnitude. Ten concurrent asks means ten serial generations through one model, so the database connection problem is almost a distraction next to the model being the throughput wall. If this were ever a real service, scaling generation — multiple model workers, or moving generation to a hosted endpoint — is the actual lever, not anything in my storage layer."
-
-Decision mode: the missing pool timeout is a **defaulted-to** gap — node-postgres's defaults, which you never overrode because single-user never exposed it. Own it as a default.
-
-  ┃ "Find the real ceiling before you optimize the
-  ┃  fixable bottleneck. Mine is the model, not the
-  ┃  database — and I'd be wrong to spend effort on the
-  ┃  pool first."
-
-## Strong vs. weak — the scale answer
-
-  ┌──────────────────────────────┬──────────────────────────────┐
-  │ WEAK ANSWER                  │ STRONG ANSWER                │
-  ├──────────────────────────────┼──────────────────────────────┤
-  │ "I'd add caching and maybe   │ "First bottleneck is serial  │
-  │ Redis, and scale the         │ indexing in my own loop —    │
-  │ database horizontally, and    │ fixable with bounded         │
-  │ add a load balancer, and use │ parallelism. The real        │
-  │ a CDN…"                      │ ceiling is Gemma generation, │
-  │                              │ which dominates wall-clock.   │
-  │                              │ I'd measure the embed-vs-     │
-  │                              │ generate split before         │
-  │                              │ touching anything else."      │
-  ├──────────────────────────────┼──────────────────────────────┤
-  │ Why it's weak:               │ Why it works:                │
-  │ A grab-bag of scaling words  │ Names the FIRST bottleneck    │
-  │ with no order and no         │ specifically, distinguishes  │
-  │ measurement. "Add Redis" to  │ fixable from the real         │
-  │ solve what? Caching would    │ ceiling, and leads with       │
-  │ not even help the real       │ measurement. Shows you'd      │
-  │ bottleneck (generation).     │ verify before optimizing.     │
-  │ Signals pattern-matching,    │                              │
-  │ not reasoning.               │                              │
-  └──────────────────────────────┴──────────────────────────────┘
-
-The weak answer is a list of scaling vocabulary. The strong answer is an *ordering* with a measurement plan. Notice the weak answer even reaches for caching — which wouldn't touch the actual ceiling, because the bottleneck is generation, not retrieval. Reaching for a fix that doesn't address the bottleneck is the clearest tell that someone is pattern-matching instead of thinking.
-
-## When you don't know
-
-This is the chapter where you're most likely to get pushed past your portfolio. The interviewer asks the distributed-systems-at-scale question, and you have not built that. Your portfolio is local-first apps and on-device AI — not Kafka, not multi-region, not load balancing under sustained traffic. This is the single question you're most likely to get pushed past your depth on, and the recovery has to be clean.
-
-  ╔═══════════════════════════════════════════════════════════╗
-  ║ WHEN YOU DON'T KNOW                                       ║
-  ║                                                          ║
-  ║   They push: "Okay, now make it multi-region with        ║
-  ║   millions of users. How do you partition the data,      ║
-  ║   handle replica lag, and keep writes consistent across  ║
-  ║   regions?"                                              ║
-  ║                                                          ║
-  ║   Say:                                                   ║
-  ║   "That's outside what I've actually built. My           ║
-  ║    portfolio is local-first and on-device systems —      ║
-  ║    single-node, single-region. I haven't operated        ║
-  ║    multi-region replication or partitioning under load,  ║
-  ║    so I won't pretend to a design I've never tested. I    ║
-  ║    can reason about the shape — you'd partition on a      ║
-  ║    tenant key, accept that cross-region reads lag, and    ║
-  ║    pick where you want consistency versus availability —  ║
-  ║    but I'd be reasoning from reading, not from having     ║
-  ║    shipped it. Where I'm strong is the single-node story  ║
-  ║    and the local-first tradeoffs. Want to go there       ║
-  ║    instead?"                                              ║
-  ║                                                          ║
-  ║   What this signals: you know the exact edge of your     ║
-  ║   experience, you don't bluff across it, you can still   ║
-  ║   reason about the shape honestly, and you redirect to   ║
-  ║   your strength. A senior interviewer respects this far  ║
-  ║   more than a confident wrong answer.                    ║
-  ║                                                          ║
-  ║   Do NOT say:                                            ║
-  ║   "I'd use Kafka and shard the database and set up        ║
-  ║    eventual consistency with a consensus protocol."      ║
-  ║   Every one of those words invites a follow-up you       ║
-  ║   can't answer, and the bluff unravels fast. Naming      ║
-  ║   technologies you haven't used is the trap.             ║
-  ╚═══════════════════════════════════════════════════════════╝
-
-That box is the most important one in the book for you specifically. The scale question is where the interview most reliably pushes a local-first engineer into distributed-systems territory. The win condition is not crossing into it — it's stopping at the edge cleanly and redirecting to where you're actually strong.
-
-  ┃ "I know the exact edge of my experience, and I'd
-  ┃  rather name it than bluff across it."
-
-## What you'd change
-
-If you were building for scale from the start, the change you'd make first is instrumentation, not architecture. The trace sink now *captures* the right signals — `durationMs` on every tool call, token usage per model call, all six event types persisted with the event timestamp — so the raw material for a latency breakdown is finally landing in `agents.messages` instead of getting dropped on the floor. What's still missing is the *aggregation*: nothing reads those rows back to produce an embed-vs-generate-vs-query split, and the eval still scores retrieval against approximate results with no exact baseline. So the change shifted from "capture the signal" to "build the readout and the recall baseline on top of the signal I now keep." You can't optimize what you can't measure, and the honest version of "what breaks first at 10x" is "I'd find out by measuring — and I now keep the per-call timings to measure *from*, I just haven't built the report." That sentence, said calmly, beats any list of scaling technologies.
-
-## One-page summary
-
-**Core claim:** Walk the bottlenecks in firing order, distinguish the fixable bottleneck from the real ceiling, and lead with how you'd measure. You haven't run it under load — say so.
-
-**The scenarios, one line each:**
-- *10x corpus* → serial file indexing breaks first (fixable with bounded parallelism), then the N+1 chunk insert. Both in my code, not Postgres.
-- *100x corpus* → silent HNSW recall loss; I can't even detect it without an exact-scan baseline, which is the first thing I'd build.
-- *10x concurrent* → no pool acquire timeout is the fixable bug; the real ceiling is one Gemma model generating serially.
-- *multi-region at millions* → outside my experience; I reason about the shape but won't claim a design I've never shipped.
-
-**Pull quotes:**
-- "The first bottleneck is almost always in your own code, not the database."
-- "Find the real ceiling before you optimize the fixable bottleneck."
-- "I know the exact edge of my experience, and I'd rather name it than bluff across it."
-
-**What you'd change:** Build the readout, not the capture — the trace sink now persists per-call `durationMs` and token counts, so the next step is aggregating them into an embed-vs-generate-vs-query latency breakdown, plus the exact-scan recall baseline. You can't optimize what you can't measure, but now you're at least keeping the measurements.
+Three axes, three first-bottlenecks. Walk them one at a time.
 
 ---
 
-Updated: 2026-06-24 — reconciled the instrumentation story: the trace sink now persists `durationMs`, token usage, and all six event types (it previously dropped them), so the "what you'd change" shifted from "capture the latency signal" to "build the readout on top of the signal I now keep."
+### Scenario 1 — 10x the corpus
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ THEY ASK                                                        │
+│   "What happens when you have 10x the documents? A hundred     │
+│    thousand chunks instead of a few thousand?"                  │
+│                                                                 │
+│ WHAT THEY'RE TESTING                                           │
+│   Do you know where YOUR system's data-size ceiling is, and    │
+│   can you name the bottleneck precisely — or do you just say   │
+│   "I'd add caching"? They want a specific first failure, not   │
+│   a generic answer.                                             │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+The strong answer:
+
+> "Two things degrade, in order. First, the HNSW index. I built it on
+> pgvector's default `m` and `ef_construction`, which are fine for a few
+> thousand chunks, but past roughly 10k both recall and index build time
+> degrade — the graph gets denser to search and slower to build. The fix
+> isn't a new database; it's tuning those parameters or rebuilding the
+> index with higher `ef_construction` for better recall at the cost of
+> build time. Second, my indexing is synchronous and per-document —
+> `indexDocumentRow` writes the doc row then indexes its chunks inline,
+> one document at a time. That's fine for a hand-loaded corpus, but at
+> 10x it's a real bottleneck, and the plan is to batch the reindex past
+> that point. How I'd know I hit it: my retrieval eval — precision@1 and
+> recall@3 — would drop, and index build time would climb. The eval set
+> is the instrument."
+
+This is a strong scale answer because it names a *specific first
+bottleneck* (HNSW default params), the *second* (synchronous indexing,
+`src/runtime.ts:17`), the fix for each, and — critically — *how you'd
+measure to know you hit it* (the eval scores). That last part is the
+senior move: you don't just predict the bottleneck, you name the
+instrument that would catch it.
+
+```
+  ┃ Don't just name the bottleneck — name the instrument that
+  ┃ tells you you've hit it. For the corpus, that's the
+  ┃ retrieval eval dropping.
+```
+
+#### The follow-up tree off the corpus scenario
+
+```
+  You give the HNSW-then-indexing answer.
+        │
+        ├─► IF THEY ASK "tune HNSW how, specifically?"
+        │     → Raise ef_construction for better recall at the cost of
+        │       build time, and m for graph connectivity. I'd sweep
+        │       against the eval set, not guess. (Own that I took the
+        │       default first — see chapter 8.)
+        │
+        ├─► IF THEY ASK "why is indexing synchronous?"
+        │     → It was fine for a hand-loaded corpus — indexDocumentRow
+        │       writes the doc row then indexes chunks inline. Past ~10k
+        │       chunks I'd batch the reindex; the plan already flags
+        │       that threshold.
+        │
+        └─► IF THEY ASK "would you ever leave pgvector for this?"
+              → Not for corpus size alone — I'd tune the index first.
+                I'd only switch if tuning ran out, and I'm nowhere near
+                that. It's a watch item, not a regret.
+```
+
+---
+
+### Scenario 2 — a second writer (the real one)
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ THEY ASK                                                        │
+│   "How would this work for multiple users? Or even just a      │
+│    second app writing to the same database?"                    │
+│                                                                 │
+│ WHAT THEY'RE TESTING                                           │
+│   Do you know the difference between data that LOOKS isolated  │
+│   and data that IS isolated? The app_id column is a trap —     │
+│   it looks like multi-tenancy. Do you know it isn't enforced?  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+This is the scenario you should *want*, because the honest answer here
+is a strong signal: you know your isolation is shape-only.
+
+The strong answer:
+
+> "Here's the trap in my own schema: every table has an `app_id` column,
+> default `'laptop'`, and it *looks* like multi-tenancy. It isn't. There's
+> no RLS, and `app_id` is set by the application code — it's not derived
+> from a verified token. So with one user that's correct and clean, but
+> the moment a second app or a phone writes to that database, isolation
+> is enforced only by the app remembering to filter on `app_id`. A bug or
+> a hijacked process could read another tenant's rows. That's why the
+> design treats RLS as a *hard prerequisite* before a second writer — not
+> a nice-to-have. The jump is two parts: `app_id` has to become
+> token-derived, extracted from a verified session instead of an env
+> default, and the database has to enforce it with row-level security
+> instead of trusting the app to pass the right value. The schema already
+> carries the column, so the shape is pre-built; what's missing is the
+> enforcement. And the related risk: the client holds a full-privilege
+> `DATABASE_URL` — fine on my own laptop, but off the laptop that one
+> string is the whole castle, so it'd need to become a scoped, short-lived
+> credential."
+
+That answer demonstrates you understand the *difference between a column
+existing and a constraint being enforced* — which is exactly what the
+question probes. You're not apologizing for the missing RLS; you're
+naming it as a deliberate deferral with a hard, named trigger
+(`sql/001_agents_schema.sql` has no policies; the gate is in the
+graduation spec).
+
+#### Weak vs strong — the second-writer scenario
+
+```
+┌─────────────────────────────┬─────────────────────────────┐
+│ WEAK ANSWER                 │ STRONG ANSWER               │
+├─────────────────────────────┼─────────────────────────────┤
+│ "It supports multiple       │ "It LOOKS multi-tenant —    │
+│ tenants — every table has   │ every table has app_id —    │
+│ an app_id column so the     │ but it isn't enforced.      │
+│ data's separated by         │ There's no RLS and app_id   │
+│ tenant."                    │ is set by the app, not      │
+│                             │ token-derived. With one     │
+│                             │ user that's fine; at a      │
+│                             │ second writer it's the      │
+│                             │ first thing to fix — RLS +  │
+│                             │ token-derived app_id. The   │
+│                             │ column is shape; the         │
+│                             │ enforcement is missing."    │
+├─────────────────────────────┼─────────────────────────────┤
+│ Why it's weak:              │ Why it works:               │
+│ This is the trap, and the   │ Catches its own trap. Knows │
+│ candidate walked into it.   │ a column is not a           │
+│ Claiming isolation that     │ constraint. Names the       │
+│ isn't enforced is worse     │ deferral as deliberate with │
+│ than admitting it's not     │ a hard trigger. This is the │
+│ there — it reads as not     │ exact answer that turns a   │
+│ understanding RLS at all.   │ "gap" into a signal.        │
+└─────────────────────────────┴─────────────────────────────┘
+```
+
+```
+  ┃ A column is not a constraint. app_id LOOKS like tenancy;
+  ┃ without RLS and a token-derived value, it's only shape.
+  ┃ Knowing that difference is the whole answer.
+```
+
+---
+
+### Scenario 3 — 10x latency-sensitive requests
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ THEY ASK                                                        │
+│   "What if you had ten times the request volume, and latency   │
+│    mattered? How does this hold up?"                            │
+│                                                                 │
+│ WHAT THEY'RE TESTING                                           │
+│   Do you understand why your system can't scale horizontally   │
+│   as-is? Can you name the stateful bottleneck — or do you      │
+│   reach for "add more servers" without seeing that nothing     │
+│   here is stateless?                                            │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+The strong answer — and this is where you defend the gap directly:
+
+> "Honestly, this is the axis furthest from what I've built, so let me be
+> precise about what I can and can't reason about. The first thing that
+> breaks: nothing here is stateless-behind-a-load-balancer. A chat
+> session is a single stateful Node process — it holds one warm pool and
+> one conversation in-process across turns. You can't just put ten of
+> those behind a load balancer and round-robin, because the state lives
+> in the process. To scale horizontally I'd have to externalize that
+> session state and make the request path stateless, which is a
+> rearchitecture, not a config change. The second bottleneck: there are
+> no timeouts, retries, or fallback on the Gemma and database calls, so
+> under load a single hung Ollama call stalls a turn with no recovery.
+> Beyond naming those two, I'd be speculating — I haven't operated a
+> service under sustained traffic, so I'm not going to invent a sharding
+> story. What I CAN tell you is exactly why the current shape is
+> single-stateful and what the first rearchitecture would target."
+
+That is the model answer for a gap you can't fake: name the first
+bottleneck precisely (single stateful process), name the second
+(no timeouts/retries), and then *explicitly mark the edge of your
+knowledge* and stop. Stopping is the senior move. Inventing a Kafka
+topology is the junior one.
+
+---
+
+### Where you'll get pushed past your depth
+
+```
+╔═══════════════════════════════════════════════════════════════╗
+║ WHEN YOU DON'T KNOW                                           ║
+║                                                               ║
+║   This whole chapter is the territory. The deepest push:     ║
+║   "OK, so how WOULD you make it stateless and scale it out?   ║
+║   Walk me through the distributed design." This is           ║
+║   distributed-systems-at-scale — genuinely not in your        ║
+║   portfolio.                                                  ║
+║                                                               ║
+║   Say:                                                        ║
+║   "That's past where I've actually built. I can give you the ║
+║    shape — externalize the session state so the request path ║
+║    is stateless, put the stateless workers behind a load     ║
+║    balancer, and the database becomes the shared state with  ║
+║    RLS enforcing tenant isolation. But the parts that need   ║
+║    real production scars — connection pooling under          ║
+║    sustained load, replication and read consistency, where   ║
+║    the hot path actually melts — I haven't operated, so I'd  ║
+║    be guessing at the details. I'd rather tell you that than ║
+║    sketch a diagram I can't defend."                          ║
+║                                                               ║
+║   What this signals: you can reason to the SHAPE of the       ║
+║   distributed design, you know exactly which parts require    ║
+║   experience you don't have, and you stop cleanly at that     ║
+║   line. An interviewer trusts the candidate who marks the     ║
+║   boundary over the one who bluffs across it.                 ║
+║                                                               ║
+║   Do NOT say:                                                 ║
+║   "I'd shard the database, add Redis for caching, use Kafka   ║
+║    for the write path, set up multi-region replication..." —  ║
+║   a shopping list of infra you've never run. One follow-up    ║
+║   ("why Kafka and not a simpler queue?") and it collapses.    ║
+╚═══════════════════════════════════════════════════════════════╝
+```
+
+This box covers the single most likely question to push you past your
+depth in the whole book — see the note in the overview. The defense is
+the same every time: reason to the shape, mark the edge, stop.
+
+---
+
+### What you'd change for scale
+
+The one thing in the current code that I'd change *now*, before any real
+scale, is the missing timeouts and retries on the model and database
+calls. It's the cheapest reliability win and it's the first gap that
+would bite even at modest remote use — a hung Ollama call currently
+stalls a turn with no recovery. Everything else on the scale path (RLS,
+statelessness, batch indexing) is correctly deferred behind a real
+trigger; the timeouts are the one I'd pull forward, because they're low
+cost and the absence is a genuine reliability hole, not just a
+scale-phase concern.
+
+---
+
+## One-page summary — Chapter 4
+
+**Core claim:** Reason crisply about what breaks first in *your* system,
+name the instrument that catches it, and mark the edge of your knowledge
+cleanly instead of inventing a distributed design.
+
+**The three scenarios:**
+
+- **10x corpus** — 1st: HNSW default params degrade recall + build past
+  ~10k chunks (tune, don't switch). 2nd: synchronous per-doc indexing
+  (`runtime.ts:17`) → batch reindex. Instrument: the retrieval eval.
+- **2nd writer** — 1st: `app_id` is shape-only, no RLS, not
+  token-derived → wrong-tenant reads. 2nd: full-priv `DATABASE_URL` in
+  the client. The hard gate before any second writer.
+- **10x latency reqs** — 1st: single stateful process, not behind an LB
+  (rearchitecture to externalize session state). 2nd: no
+  timeouts/retries/fallback on Gemma + DB.
+
+**Pull quotes:**
+
+```
+  ┃ Name the instrument that tells you you've hit the
+  ┃ bottleneck — for the corpus, the retrieval eval dropping.
+
+  ┃ A column is not a constraint. app_id is shape, not tenancy,
+  ┃ until RLS enforces it.
+```
+
+**The "I don't know":** The full distributed design — reason to the
+shape (externalize state, stateless workers, LB, RLS), name the parts
+that need production scars you don't have, stop. Never recite an infra
+shopping list.
+
+**What you'd change:** Pull timeouts/retries on Gemma + DB calls forward
+— cheapest reliability win, the one gap that bites even at modest remote
+use.

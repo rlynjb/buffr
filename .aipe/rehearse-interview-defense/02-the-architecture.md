@@ -1,235 +1,342 @@
 # Chapter 2 — The Architecture
 
-After the pitch, someone stands up and says "walk me through the architecture." This is the whiteboard moment, and it's where a lot of candidates fall apart — not because they don't understand their system, but because they try to *talk* it instead of *draw* it. The rule for this chapter: draw first, talk while you draw, and have the diagram fully in your head so you can reproduce it from scratch in ninety seconds without hesitating.
+After the pitch, the interviewer says "walk me through the
+architecture" or hands you a marker and points at the whiteboard. This
+chapter is about drawing buffr from scratch, in 90 seconds, without
+stalling — and knowing exactly where they'll interrupt and what to say
+when they do. The skill is not memorizing a diagram. It's being able to
+*re-derive* it: start with the request, follow it through the layers,
+and let each box appear because the request needed it.
 
-`buffr-laptop` has two flows worth drawing: the index path (how a document becomes searchable) and the query path (how a question becomes an answer). They share the storage and the models. The query path now lives inside a long-lived chat session — one warm pool, one conversation held in-process across every turn, driven by an Ink (React-in-terminal) REPL — and each turn ends by writing the exchange back as memory. If you can draw those two flows and name what crosses each boundary, you've defended the architecture. This chapter teaches you to draw them and tells you exactly where the interviewer will interrupt.
+You think visually first — this chapter plays to that. You're not
+reciting an architecture; you're drawing one and narrating the data as
+it moves.
 
-```
-  buffr — the architecture, both flows on one board
+## The architecture — the full diagram
 
-  ┌─ CLI ──────────────────────────────────────────────────────┐
-  │  index-cmd            chat.tsx  (Ink REPL → createChatSession)│
-  │  (a .md file)         one live conversation, turn after turn │
-  └──────┬──────────────────────┬──────────────────────────────┘
-         │ INDEX PATH            │ QUERY PATH (per turn)
-         ▼                       ▼
-  ┌─ aptkit-core (library) ─────────────────────────────────────┐
-  │                                                            │
-  │  RetrievalPipeline         RagQueryAgent (bounded loop)    │
-  │   .index(doc)               ├─ inject profile into prompt  │
-  │     ├ chunk text            ├─ model.complete()            │
-  │     ├ embed all chunks ─┐   ├─ wants tool? → search ──┐    │
-  │     └ store.upsert()    │   ├─ ≤4 tool calls, ≤6 turns │    │
-  │                         │   └─ forced final synthesis  │    │
-  │  createConversationMemory  └─ after answer: remember() ┐   │
-  │   (embed exchange → upsert kind=memory)               │   │
-  └─────────────────────────┼───────────────────────────────┼───┘
-         │ embed             │ embed query        │ generate │
-         ▼                   ▼                   ▼          │
-  ┌─ Ollama (localhost:11434) ─────────────────────────────────┐
-  │  nomic-embed-text:v1.5 → vector(768)   gemma2:9b → text     │
-  └─────────────────────────┬───────────────────────────────────┘
-         │ INSERT chunks      │ SELECT … ORDER BY embedding <=> q
-         ▼                   ▼
-  ┌─ Postgres + pgvector (reindb / schema agents) ─────────────┐
-  │  documents ──soft link── chunks(vector(768), HNSW cosine)  │
-  │    └ memory rows ride chunks (meta.kind='memory')          │
-  │  conversations ─FK→ messages(6-event trajectory)  profiles │
-  └─────────────────────────────────────────────────────────────┘
-```
-
-That's the whole system. The index path goes top-left down; the query path goes top-right down and the answer comes back up — then loops back to write the exchange as memory. Everything below the CLI is either the library you consume or infrastructure you run.
-
-## The big question: walk me through the system
-
-  ┌─────────────────────────────────────────────────────────┐
-  │ THEY ASK                                                 │
-  │   "Walk me through what happens when you ask a           │
-  │    question."                                            │
-  │                                                         │
-  │ WHAT THEY'RE TESTING                                     │
-  │   Do you actually understand the data flow, or do you    │
-  │   only know the parts you typed? Can you name what       │
-  │   crosses each boundary — what's a vector, what's a      │
-  │   SQL row, what's a model call? Do you know where the    │
-  │   control flips from your code to the model?            │
-  └─────────────────────────────────────────────────────────┘
-
-Draw the query path as you say this, in your voice:
-
-> "The interface is a chat REPL — an Ink terminal app. When it starts, `createChatSession` wires the pieces *once*: a warm Postgres pool, the local embedder, my pgvector store, the retrieval pipeline, the conversation-memory engine, and one conversation row that lives for the whole session. The agent is built once and reused across every turn. Before anything else it loads my profile from the database — a `me.md`-style document — and injects it at the front of the system prompt so the model knows who 'the author' is.
->
-> Each turn, `ask` persists my question, then hands it to the agent loop. The agent decides whether to search. When it wants to, it calls the one tool it has — `search_knowledge_base` — which embeds the question into the same 768-dimension space as the corpus and runs a cosine nearest-neighbor query against pgvector's HNSW index. That comes back as the top chunks with their source ids, and the agent reads them.
->
-> The loop is bounded: at most four tool calls and six turns. On the final turn the loop physically removes the tools and tells the model it has none left, so it must stop searching and synthesize an answer from what it retrieved. The answer comes back, I flush the whole trajectory — every turn — into Postgres, then embed the question-and-answer pair back into the store as a memory row so a later session can recall it. The answer prints. Nothing in that path leaves the laptop."
-
-Then, if they want the index path, draw the left side:
-
-> "Indexing is simpler. `index` reads a markdown file, writes it whole into a `documents` table as the source of truth, then the pipeline chunks it, embeds all the chunks in one call to the local model, and upserts each chunk as a row keyed `docId#index`. The deterministic id is what makes re-indexing idempotent — index the same file twice and you overwrite the same rows instead of duplicating them."
-
-  ┃ "The control flips at the loop boundary: my code
-  ┃  decides the budget, the model decides the steps
-  ┃  inside it. That's what makes it an agent, not a
-  ┃  pipeline."
-
-That last line is the one that signals depth. Anyone can describe a retrieve-then-generate flow. Knowing exactly *where* your code stops deciding and the model starts — and that you re-take control with a hard budget — is the thing an interviewer remembers.
-
-## The load-bearing part people forget
-
-When you walk the loop, name the termination guarantee. It's the part everyone leaves out, and naming it is the strongest signal you built the thing rather than read about it.
-
-The naive version of an agent loop is "let the model call tools until it's done." The problem: a weak model can keep wanting to search forever, hit the budget, and produce *no answer at all*. The fix in this system is the forced synthesis turn — on the last allowed turn the loop sets the tools to undefined and appends an instruction telling the model it has no tools left and must answer now. Taking the tools away is the teeth; just asking nicely isn't enough, because a model with tools available will reach for one.
-
-  ┌─────────────────────────────────────────────────────────┐
-  │ THEY ASK                                                 │
-  │   "What stops the agent from looping forever?"           │
-  │                                                         │
-  │ WHAT THEY'RE TESTING                                     │
-  │   Do you know your control loop has a termination        │
-  │   guarantee, or did you assume the model would just      │
-  │   stop on its own? This is the question that separates   │
-  │   "I wired up an agent" from "I understand agent         │
-  │   control flow."                                         │
-  └─────────────────────────────────────────────────────────┘
-
-Your answer:
-
-> "Two independent caps plus a forced exit. The loop is bounded to six turns and four tool calls — asymmetric on purpose, so there's always at least one turn left to synthesize after the search budget is spent. And on the final turn the loop removes the tool schemas entirely and tells the model it has none left. The caps alone aren't enough; you have to take the tools away, or the model emits one last tool call you can't service. That termination logic is in the library, but it's the mechanic I'd point to as the most important one in the whole flow."
-
-## Where they'll interrupt — and what to say
-
-Whiteboard walks get interrupted. Here's the map.
+This is the whiteboard you draw. Practice it until you can produce it
+left-to-right without thinking, because the act of drawing it *is* the
+walkthrough.
 
 ```
-  You're drawing the query path.
-        │
-        ├─► THEY INTERRUPT: "How does it find chunks
-        │   with no keyword match?"
-        │     → Semantic search. The question is embedded
-        │       into the same 768-dim space as the corpus;
-        │       I rank by cosine distance with pgvector's
-        │       <=> operator over an HNSW index. Paraphrases
-        │       match without shared words. (Ch 6 goes deep.)
-        │
-        ├─► THEY INTERRUPT: "Why is the vector store its
-        │   own class? Why not query Postgres directly?"
-        │     → It implements aptkit's VectorStore contract,
-        │       so the agent has no idea it's Postgres. Same
-        │       contract passes against the in-memory store
-        │       and mine. Swap the body, agent untouched.
-        │
-        ├─► THEY INTERRUPT: "Where's the second user?"
-        │     → There isn't one. Single-device, single
-        │       operator. Every table has app_id and every
-        │       query filters on it, so the multi-tenant
-        │       SHAPE is there, but there's no RLS yet —
-        │       deliberately deferred. (Ch 3 + Ch 7.)
-        │
-        ├─► THEY INTERRUPT: "What's the soft link between
-        │   documents and chunks?"
-        │     → The FK was deliberately dropped. The
-        │       VectorStore contract upserts chunks with no
-        │       notion of a documents row, so a hard FK
-        │       would break drop-in parity. Looks like a
-        │       bug; it's a contract decision — and it's
-        │       what lets memory rows (no parent document)
-        │       live in the same table. (Ch 3, Ch 6.)
-        │
-        └─► THEY INTERRUPT: "How does it remember across
-            sessions?"
-              → After each turn I embed the question+answer
-                into the same store, tagged meta.kind=
-                'memory'. A later turn's search surfaces a
-                relevant past exchange through the exact same
-                search_knowledge_base tool. It's retrieval-
-                based episodic memory — RAG over chat history.
-                The engine is aptkit's; I inject the store.
+  buffr-laptop — the architecture you draw at the whiteboard
+
+  UI LAYER                  SESSION LAYER           AGENT LAYER (aptkit)
+  ┌────────────────┐        ┌──────────────────┐    ┌─────────────────────┐
+  │ Ink/React TUI  │        │ createChatSession│    │ RagQueryAgent       │
+  │ src/cli/       │ ask(q) │ src/session.ts   │    │  .answer(q)         │
+  │   chat.tsx     │───────►│  warm pg Pool    │───►│  maxTurns 6         │
+  │ onSubmit()     │◄───────│  1 conversation  │◄───│  maxToolCalls 4     │
+  │ render turn    │ answer │  agent built once│    │  Gemma: tool? →     │
+  └────────────────┘        └────────┬─────────┘    │    synthesize       │
+                                     │              └──────────┬──────────┘
+                          persist /  │  inject adapters down   │ store.search
+                          flush /    │                         │ trace.emit
+                          remember   ▼                         ▼
+  ADAPTER LAYER (buffr)   ┌───────────────────────────────────────────────┐
+                          │ PgVectorStore   SupabaseTraceSink   loadProfile│
+                          │ src/pg-vector-  src/supabase-       src/       │
+                          │   store.ts:19     trace-sink.ts:49    profile.ts│
+                          └──────────────────────┬────────────────────────┘
+                                                 │ pg.Pool · parameterized SQL
+  STORAGE / PROVIDER       ┌──────────────────────▼───────────┐  ┌──────────┐
+                          │ Postgres reindb / schema agents   │  │ Ollama   │
+                          │  documents · chunks(+memory)      │  │ gemma2:9b│
+                          │  conversations · messages         │  │ nomic-   │
+                          │  profiles                         │  │  embed   │
+                          │  HNSW vector_cosine_ops, 768-dim  │  │  768-dim │
+                          └────────────────────────────────────┘  └──────────┘
 ```
 
-Every one of those is a question you welcome, because each one lets you show a decision rather than recite a feature.
-
-## Strong vs. weak — the architecture walk
-
-  ┌──────────────────────────────┬──────────────────────────────┐
-  │ WEAK WALK                    │ STRONG WALK                  │
-  ├──────────────────────────────┼──────────────────────────────┤
-  │ "So the user asks a          │ [draws the boundaries first] │
-  │ question and the agent       │ "Question comes in here at    │
-  │ figures out the answer       │ the CLI. It embeds into the  │
-  │ using the LLM and the        │ same 768-dim space as the    │
-  │ vector database and returns  │ corpus, searches pgvector by │
-  │ it."                         │ cosine distance, the model   │
-  │                              │ reads the chunks, and the    │
-  │                              │ loop forces a final answer    │
-  │ [no diagram, all prose]      │ within a four-call budget."   │
-  ├──────────────────────────────┼──────────────────────────────┤
-  │ Why it's weak:               │ Why it works:                │
-  │ "Figures out the answer" is  │ Names what crosses each      │
-  │ a black box. No boundaries,  │ boundary (a vector, a SQL    │
-  │ no diagram, no idea what     │ query, a model call). Draws  │
-  │ data is in what form. The    │ before talking. Names the    │
-  │ interviewer learns nothing   │ budget and the forced exit   │
-  │ about whether you            │ — proof you understand the   │
-  │ understand the flow.         │ control flow.                │
-  └──────────────────────────────┴──────────────────────────────┘
-
-The weak walk treats the system as one box labeled "magic." The strong walk treats it as labeled boundaries with named data crossing each one. Interviewers grade the second; the first reads as someone who used a tutorial.
-
-## When you don't know
-
-The whiteboard is where you're most likely to get pushed into HNSW internals — the actual graph-walk mechanics of the index you rely on. You picked it on defaults; you don't know the algorithm cold. That's fine, if you say it right.
-
-  ╔═══════════════════════════════════════════════════════════╗
-  ║ WHEN YOU DON'T KNOW                                       ║
-  ║                                                          ║
-  ║   They point at the HNSW index and ask: "How does HNSW   ║
-  ║   actually traverse the graph to find neighbors?"        ║
-  ║                                                          ║
-  ║   Say:                                                   ║
-  ║   "I haven't gone deep into the graph-walk internals.    ║
-  ║    What I know: it's a navigable small-world graph, so   ║
-  ║    it's approximate — a greedy walk that can miss the    ║
-  ║    true top-k, and the recall-vs-latency knob is         ║
-  ║    ef_search, which I left at the default. I chose HNSW  ║
-  ║    over IVFFlat because it needs no training step and    ║
-  ║    supports incremental inserts, which fits indexing one ║
-  ║    doc at a time. If you want to walk the layer descent, ║
-  ║    can you start me off?"                                ║
-  ║                                                          ║
-  ║   What this signals: you know the SHAPE (approximate,    ║
-  ║   tunable via ef_search), you know WHY you picked it     ║
-  ║   (no training, incremental insert), and you don't fake  ║
-  ║   the internals. You also invite them to teach, which    ║
-  ║   reads as a learner, not a bluffer.                     ║
-  ║                                                          ║
-  ║   Do NOT say:                                            ║
-  ║   "It's a graph thing where it finds nodes that are      ║
-  ║    kind of close to each other somehow."                 ║
-  ║   Vague hand-waving in territory you don't own is the    ║
-  ║   surest way to fail a senior screen.                    ║
-  ╚═══════════════════════════════════════════════════════════╝
-
-## What you'd change
-
-If you were drawing this architecture fresh today, the one structural thing you'd change is the index path's atomicity. Right now `indexDocumentRow` writes the `documents` row in one implicit transaction, then the chunk upsert runs in a separate one — so a crash between them leaves a document with no chunks. It's tolerable because the corpus is re-derivable (just re-run `index`) and the write path is single-writer, but if you were drawing the ideal version you'd thread one pinned connection through both writes so a document and its chunks commit together. It's a one-parameter fix you'd make before this ever became a service. Naming it unprompted is the move.
-
-## One-page summary
-
-**Core claim:** Draw before you talk. Name what crosses every boundary. Know exactly where control flips from your code to the model.
-
-**The questions, with one-line answers:**
-- *"Walk me through a question."* → Chat session built once (warm pool, one conversation) → per turn: persist question → agent decides to search → embed query → cosine NN over HNSW → read chunks → forced synthesis within a 4-call budget → answer → flush trajectory → remember the exchange as a memory row.
-- *"How does it remember across sessions?"* → After each turn the question+answer is embedded into the same store, tagged `kind=memory`; a later search surfaces it via `search_knowledge_base`. Engine is aptkit's; I inject the store.
-- *"What stops it looping forever?"* → 6 turns, 4 tool calls, and a forced final turn that removes the tools entirely.
-- *"How does it match with no keywords?"* → Semantic: query embedded into the same 768-dim space, ranked by cosine `<=>` over HNSW.
-- *"Why is the store its own class?"* → It implements aptkit's VectorStore contract; the agent never knows it's Postgres.
-
-**Pull quotes:**
-- "The control flips at the loop boundary: my code decides the budget, the model decides the steps inside it."
-- "Taking the tools away is the teeth; just asking nicely isn't enough."
-
-**What you'd change:** Make the index path atomic — thread one transaction through the document write and the chunk upsert so they commit together.
+The trick when you draw it: go top to bottom, one layer at a time, and
+say what each layer *owns*. UI owns the ephemeral turn list. Session
+owns the warm pool and the one conversation. Agent (aptkit's) owns the
+loop. Adapters (buffr's) own the translation to Postgres. Storage owns
+everything durable. Five layers, five ownership statements.
 
 ---
 
-Updated: 2026-06-24 — redrew the query path as a long-lived Ink chat session (`chat.tsx` → `createChatSession`, one warm pool + one conversation across turns), replacing the removed one-shot `ask`; added the per-turn `remember()` memory write (`@aptkit/memory`, rides the `chunks` table as `kind=memory`) to the diagram, the walk, and the interrupt tree; messages now hold the full 6-event trajectory.
+### Question 1 — "Walk me through what happens when you ask a question."
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ THEY ASK                                                        │
+│   "Walk me through a request end-to-end. I type a question —   │
+│    then what?"                                                  │
+│                                                                 │
+│ WHAT THEY'RE TESTING                                           │
+│   Do you understand your own request flow, or do you only      │
+│   know the boxes? Can you name the ORDER of operations and     │
+│   which ones are synchronous? A candidate who built the system │
+│   can trace one request without hand-waving the middle.        │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+The request flow is a waterfall with one internal loop. It is *not* a
+fan-out — nothing happens in parallel here, and that's worth saying
+because it's a deliberate simplicity, not a missing optimization.
+
+The strong answer, in my voice, traced against the real code:
+
+> "I type a question in the Ink TUI and hit enter — that's `onSubmit` in
+> `src/cli/chat.tsx`. It calls `session.ask(q)`. The session does four
+> things in a fixed order. First, it persists my turn to the `messages`
+> table. Second, it runs the agent — `agent.answer(q)`, which is
+> aptkit's. Inside that, Gemma decides whether to call the search tool;
+> if it does, the tool runs a cosine search over `agents.chunks` and
+> hands the chunks back, and Gemma synthesizes an answer. Third, once I
+> have the answer in hand, the session flushes the trace — every event
+> the agent emitted, the tool call args, the tool results, token usage,
+> all into `messages`. Fourth, best-effort, it remembers the exchange —
+> embeds the question-and-answer pair and upserts it back into the same
+> `chunks` table, tagged as memory. Then the answer renders in the TUI."
+
+The order matters and you should say *why* it's that order
+(`src/session.ts:60-71`): persist the user turn first so it's durable
+before anything can fail; run the agent to completion; flush the trace
+*after* the answer is in hand, not during; remember last and wrapped in
+try/catch, because memory is a bonus and must never lose the answer.
+
+```
+  the four steps of a turn — fixed, synchronous order
+
+  1. persistMessage(user)   ──► messages   (durable before risk)
+  2. agent.answer(q)        ──► [Gemma loop: tool? → synthesize]
+  3. trace.flush()          ──► messages×N  (after answer in hand)
+  4. memory.remember(q,a)   ──► chunks(kind=memory)  [try/catch]
+                                 ▲ best-effort: never lose the answer
+```
+
+```
+  ┃ The order is the design. Persist first, answer, then
+  ┃ flush, then remember — each step placed so a failure
+  ┃ in a later one can't undo an earlier one.
+```
+
+#### The follow-up tree off the request walk
+
+```
+  You finish the four-step request walk.
+        │
+        ├─► IF THEY ASK "why flush the trace AFTER the answer,
+        │   not during?"
+        │     → So the answer is in hand before any trace write can
+        │       fail. emit() is sync (aptkit's contract); I queue
+        │       events and await them in flush() once the turn's done.
+        │
+        ├─► IF THEY ASK "is any of this parallel?"
+        │     → No — it's a deliberate synchronous waterfall. One user,
+        │       one turn at a time; there's nothing to fan out. The
+        │       only loop is internal: Gemma deciding tool-call vs
+        │       synthesize.
+        │
+        └─► IF THEY ASK "what's the conversation id for?"
+              → It threads every message and trace event of a session
+                to one conversation row, so the whole trajectory is
+                replayable in emit order — created_at comes from the
+                event timestamp, not the insert race.
+```
+
+---
+
+### Question 2 — "Where does X live? Show me where the boundary is."
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ THEY ASK                                                        │
+│   "Where's the line between your code and the library? What    │
+│    did you write versus what did you import?"                   │
+│                                                                 │
+│ WHAT THEY'RE TESTING                                           │
+│   Can you locate the seam? Do you actually understand what you │
+│   built versus what you wired together — or did the boundary   │
+│   just happen and you can't point at it? This question         │
+│   separates "I assembled parts" from "I designed the           │
+│   boundary."                                                    │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+The strong answer:
+
+> "The line is the npm package. aptkit owns the contracts and the logic
+> — the `VectorStore` interface, the `CapabilityTraceSink` interface, the
+> agent loop, the retrieval pipeline, the memory engine. buffr imports
+> all of that and never edits it. What buffr owns is the *implementations*
+> — `PgVectorStore` implements the vector store contract against
+> Postgres, `SupabaseTraceSink` implements the trace contract — plus
+> everything deployment-specific: the schema, the pool, the secrets, the
+> CLI. You can read the whole boundary in the import list at the top of
+> `src/session.ts`: everything from `@rlynjb/aptkit-core` is the library,
+> everything from `./` is mine."
+
+That's a genuinely strong answer because you can point at one file
+(`src/session.ts:1-11`) and the boundary is *visible* in the imports.
+When you can locate a seam in a single screen of code, the interviewer
+believes you designed it.
+
+#### Weak vs strong — "where's the boundary"
+
+```
+┌─────────────────────────────┬─────────────────────────────┐
+│ WEAK ANSWER                 │ STRONG ANSWER               │
+├─────────────────────────────┼─────────────────────────────┤
+│ "I used my own library for  │ "The boundary is the npm    │
+│ the agent stuff and then    │ package. aptkit owns the    │
+│ built the database part on  │ contracts and logic; buffr  │
+│ top. It's pretty modular."  │ implements them against     │
+│                             │ Postgres and never edits    │
+│                             │ aptkit. You can read it in  │
+│                             │ the imports of session.ts:  │
+│                             │ aptkit-core is the library, │
+│                             │ ./ is mine. The agent never │
+│                             │ learns it's talking to      │
+│                             │ pgvector."                  │
+├─────────────────────────────┼─────────────────────────────┤
+│ Why it's weak:              │ Why it works:               │
+│ "Pretty modular" is the     │ Names the seam (the package │
+│ tell. It's a vibe, not a    │ line), names what's on each │
+│ boundary. The interviewer   │ side, points at one file    │
+│ can't tell if the           │ where it's visible, and     │
+│ separation is real or       │ states the consequence (the │
+│ aspirational. No file, no   │ agent is storage-agnostic). │
+│ contract, no consequence    │ Concrete the whole way      │
+│ named.                      │ down.                       │
+└─────────────────────────────┴─────────────────────────────┘
+```
+
+---
+
+### Where they'll interrupt — and what to say
+
+A whiteboard walkthrough always gets interrupted. Here are the three
+most likely interruptions and the one-liner for each.
+
+```
+  You're drawing the architecture.
+        │
+        ├─► THEY INTERRUPT: "Wait, why is the agent loop in a
+        │   separate library?"
+        │     → "Reuse. aptkit is consumed by other apps too. If I
+        │       welded Postgres config into it, that kills the reuse.
+        │       The dependency arrow points at the stable thing."
+        │       (defer the deep version to chapter 3.)
+        │
+        ├─► THEY INTERRUPT: "Memory and documents are in the SAME
+        │   table? Why?"
+        │     → "So recall surfaces through the search tool I already
+        │       built. A memory row is just a chunk tagged
+        │       kind=memory. Cost: recall has to over-fetch and
+        │       filter by kind in-process, because the VectorStore
+        │       contract has no metadata filter."
+        │
+        └─► THEY INTERRUPT: "There's no API layer? It's just
+            direct database calls?"
+              → "Right — single process, direct pg, no HTTP
+                indirection. The graduation spec called the HTTP API
+                YAGNI for one device. The VectorStore contract is
+                what makes adding an Edge-Function-backed store later
+                a zero-agent-change move."
+```
+
+The point of pre-walking these: when the interrupt comes, you answer in
+one sentence and keep drawing. You don't lose your place. That composure
+is itself a signal.
+
+---
+
+### Where you'll get pushed past your depth
+
+```
+╔═══════════════════════════════════════════════════════════════╗
+║ WHEN YOU DON'T KNOW                                           ║
+║                                                               ║
+║   On the architecture, the push usually goes: "What's the    ║
+║   internal mechanics of the agent loop — how does it decide   ║
+║   to call the tool?" That logic lives in aptkit's            ║
+║   run-agent-loop, which YOU wrote — but the model's          ║
+║   tool-call DECISION is Gemma's emulated reasoning, and the  ║
+║   internals of how Gemma forms that are not yours to claim.  ║
+║                                                               ║
+║   Say:                                                        ║
+║   "The loop itself I wrote — it's a bounded for-loop,        ║
+║    maxTurns 6, and it forces a final synthesis once tool     ║
+║    calls hit 4. What I DON'T control is how Gemma decides to  ║
+║    emit a tool call, because Gemma has no native tool API —   ║
+║    I render the tool schema into the system prompt and parse  ║
+║    the JSON back out. So the decision is the model            ║
+║    reasoning over a prompt, and the reliability of that is    ║
+║    exactly the ceiling I measure. I can show you the parse    ║
+║    path and the failure mode, but I won't pretend I know the  ║
+║    model's internals."                                        ║
+║                                                               ║
+║   What this signals: you know precisely which parts are       ║
+║   your engineering (the bounded loop, the parse) and which    ║
+║   are the model's behavior you're working around. That        ║
+║   distinction IS the senior AI-engineering signal.            ║
+║                                                               ║
+║   Do NOT say:                                                 ║
+║   "It uses the model's tool-calling to decide..." — Gemma     ║
+║   doesn't HAVE native tool-calling here. Claiming it does is  ║
+║   a factual error an AI interviewer catches instantly.        ║
+╚═══════════════════════════════════════════════════════════════╝
+```
+
+```
+  ┃ Name which parts are your engineering and which are the
+  ┃ model's behavior you engineered around. The line between
+  ┃ them is the whole AI-engineering craft.
+```
+
+---
+
+### What you'd change about the architecture
+
+If I were redrawing this today, the one structural thing I'd reconsider
+is the trace flush model. Right now the trace sink queues writes and
+awaits them all in one `Promise.all` at flush time
+(`src/supabase-trace-sink.ts:91`) — which means if one insert fails, that
+turn's trajectory is partially captured and there's no retry. Since the
+trajectory is the *whole portfolio artifact* — the "capture everything now
+so fine-tuning is answerable later" thesis — partial capture costs more
+here than it looks. I'd make the flush more durable: either write events
+inside the same transaction as the answer, or add a retry on the queued
+inserts. It's not wrong for one local user, but it's the part of the
+architecture where the failure mode undercuts the project's own goal.
+
+---
+
+## One-page summary — Chapter 2
+
+**Core claim:** Re-derive the architecture from the request, not from
+memory. Five layers, each with one ownership statement; the request is a
+synchronous waterfall with one internal agent loop.
+
+**The questions covered:**
+
+- **"Walk me through a request"** — Four fixed steps:
+  persist-user → agent.answer (Gemma loop) → flush trace → remember
+  (best-effort). Order is the design (`src/session.ts:60-71`).
+- **"Where's the boundary?"** — The npm package line. aptkit owns
+  contracts + logic; buffr implements them; visible in `session.ts`
+  imports. The agent never learns it's pgvector.
+- **The interrupts** — separate library (reuse), shared memory table
+  (recall through the existing tool), no API layer (YAGNI for one
+  device).
+
+**Pull quotes:**
+
+```
+  ┃ The order is the design. Persist first, answer, then flush,
+  ┃ then remember.
+
+  ┃ Name which parts are your engineering and which are the
+  ┃ model's behavior you engineered around.
+```
+
+**The "I don't know":** On agent-loop internals — claim the bounded
+loop (yours), disclaim Gemma's decision internals (the model's). Never
+say Gemma has native tool-calling; it doesn't, you emulate it.
+
+**What you'd change:** The trace flush — `Promise.all` over queued
+inserts means partial trajectory capture on one failed insert, and the
+trajectory is the portfolio artifact. Make it more durable.

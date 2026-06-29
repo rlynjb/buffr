@@ -1,207 +1,248 @@
-# Design Doc — Extracting Conversation Memory Up Into aptkit
+# DOC 02 — The @aptkit/memory Extraction
 
-> **Summary:** Conversation memory was built inline in buffr, then extracted
-> **up** into the published `@rlynjb/aptkit-core` bundle as
-> `createConversationMemory` — a store-agnostic engine over the
-> `EmbeddingProvider` / `VectorStore` contracts. The *engine* (embed, tag,
-> recall) lives in aptkit; the *store* is injected by buffr. buffr keeps zero
-> memory logic; it keeps only the Postgres-backed store it already owns.
+**Decision (one line):** Conversation memory was built **inline in buffr**, then
+**extracted up** into the published aptkit library — `createConversationMemory`
+over the `EmbeddingProvider` / `VectorStore` contracts — so the *engine* (embed,
+tag, recall) lives in aptkit and is store-agnostic, while buffr only *injects*
+its `PgVectorStore`. A decision about which side of the library boundary a piece
+of logic belongs on.
 
-**Status:** Shipped — `createConversationMemory` consumed from the published
-bundle (`.aipe/project/context.md`, Stack).
-**Grounds:** `src/session.ts:53,64-68`, `.aipe/project/context.md`.
+*Source: `agent-layer-plan.md` (the repo-split thesis); `context.md` ("The
+conversation-memory engine was extracted *up* from buffr into aptkit");
+engine at `aptkit/packages/memory/src/conversation-memory.ts`; consumed in
+`src/session.ts:53`.*
 
 ---
 
 ## 2. Context / problem
 
-buffr needed episodic memory: after each turn, the question+answer exchange
-should be recallable in future turns — across sessions — so the agent surfaces
-relevant past exchanges, not just indexed documents.
+buffr needed the agent to remember past conversations across sessions — not just
+the indexed corpus, but "what did the user and I talk about last time." The first
+working version was built *inline in buffr*: embed each exchange, store it, recall
+the relevant ones next turn.
 
-The first cut built this **inline in buffr**: embed the exchange, write it to
-the store tagged as memory, and let the existing `search_knowledge_base` tool
-surface it. It worked. The problem wasn't correctness — it was *location*. The
-memory engine had no buffr-specific logic in it. Embed an exchange, tag it,
-recall by similarity: that's a pattern any aptkit consumer needs, expressed
-entirely over contracts aptkit already defines (`EmbeddingProvider`,
-`VectorStore`). It was sitting in the wrong repo.
+Then the question that makes this an RFC: **does this logic belong in buffr, or in
+aptkit?** buffr is the body — one specific deployment (laptop, Supabase, Gemma).
+aptkit is the deployment-agnostic toolkit that other apps (`blooming`, `contrl`)
+also consume. If conversation memory is a *buffr feature*, it stays inline and
+every other app reinvents it. If it's a *toolkit capability*, it moves up — and
+the only thing buffr-specific about it has to be cleanly separable.
 
-The forcing question: **does this code belong to the body or the toolkit?**
-
-> **Coach:** This is the doc most engineers never write because they never see
-> the decision. Inline code that works is invisible — nobody asks you to
-> justify where a working function lives. Naming the boundary *before* anyone
-> forces you to is the staff signal. Lead with: "the code worked; the question
-> was whether it was buffr's code or aptkit's."
+Look at the inline implementation and the answer is clear: the memory logic names
+no database. It embeds text, upserts a tagged row, and recalls by similarity. The
+*only* buffr-specific part is *which* `VectorStore` the rows land in. That
+separability is the whole case for extraction.
 
 ---
 
 ## 3. Goals & non-goals
 
 **Goals**
-- A reusable conversation-memory engine any aptkit consumer can use.
-- Engine depends only on aptkit's existing contracts — no Postgres, no
-  buffr-specific anything in the library.
-- buffr keeps owning its store and injects it; buffr holds **no** memory logic.
-- Memory rides the *same* store as documents, so it surfaces through the
-  existing `search_knowledge_base` tool with no new retrieval path.
+
+- The memory **engine** lives in aptkit and is reusable by any app that has an
+  `EmbeddingProvider` + a `VectorStore`.
+- The engine **never names a database.** It speaks only the two contracts.
+- buffr's contribution shrinks to **injection** — pass `PgVectorStore` for
+  durable memory; pass `InMemoryVectorStore` in tests; the logic is identical.
+- Extraction is **non-breaking** for buffr — the consuming call site stays a
+  one-liner.
 
 **Non-goals**
-- The store does not move up. aptkit ships the engine; it does **not** ship a
-  Postgres store (that would make the toolkit "the Supabase app" —
-  `agent-layer-plan.md`, "Why not all-in-AptKit").
-- No sequential in-prompt turn history. `RagQueryAgent.answer()` still treats
-  each question independently; this is relevance-based recall, not a chat
-  transcript (`src/session.ts:25-27`). That gap is named, not hidden.
+
+- **Not in-prompt sequential turn history.** `RagQueryAgent.answer()` still
+  treats each question independently. This is *retrieval-based* memory
+  (relevance, not recency) — and that gap is an aptkit-side change, named in
+  `src/session.ts:25-27`, not papered over here.
+- **Not buffr owning the engine.** The whole point is that buffr stops owning it.
+- **Not a metadata-filtered store.** The `VectorStore` contract has no metadata
+  filter, so the engine over-fetches and filters in app code — a deliberate
+  consequence of keeping the contract minimal (see Tradeoffs).
 
 ---
 
 ## 4. The decision
 
-Split along the contract. The engine — embed, tag `kind=memory`, recall by
-similarity — moves into aptkit as `createConversationMemory`, parameterized
-over `EmbeddingProvider` and `VectorStore`. buffr injects its `PgVectorStore`
-and the Ollama embedder it already constructed.
+Draw the boundary so the **engine is in aptkit** and the **store is injected by
+buffr**. The two contracts are the seam; everything reusable sits above it,
+everything deployment-specific sits below.
 
 ```
-  Engine in aptkit, store injected by buffr — split on the contract
+  The extraction — engine up, store down, contracts as the seam
 
-  ┌─ Provider / library layer (@rlynjb/aptkit-core, published) ───┐
-  │  createConversationMemory({ embedder, store })                │
-  │     remember()  →  embed exchange → tag kind=memory → upsert   │
-  │     recall      →  same store, similarity search              │
-  │        △ depends ONLY on the contracts below                  │
-  │        │  EmbeddingProvider        VectorStore                │
-  └────────┼──────────────────────────────△─────────────────────┘
-           │ injected at construction      │ injected at construction
-  ┌─ Body layer (buffr, src/session.ts) ───┼──────────────────────┐
-  │  OllamaEmbeddingProvider ──────────────┘                      │
-  │  PgVectorStore (buffr-owned) ──────────────────────────────────┤
-  │     same store as documents → memory surfaces via the         │
-  │     existing search_knowledge_base tool                       │
-  └───────────────────────────────────────────────────────────────┘
+  ┌─ aptkit (published library — @aptkit/memory) ──────────────────┐
+  │  createConversationMemory({ embedder, store })                 │
+  │    remember(turn)  → embed → upsert tagged kind='memory'       │
+  │    recall(query,k) → embed → search → filter kind → top-k      │
+  │  packages/memory/src/conversation-memory.ts                    │
+  │  KNOWS: the two contracts.   NAMES: no database, ever.         │
+  └───────────────┬───────────────────────────┬────────────────────┘
+                  │ EmbeddingProvider          │ VectorStore
+                  │ (embed: text → vector)     │ (upsert / search / dimension)
+  ┌─ buffr (the body — injects the store) ─────▼────────────────────┐
+  │  const memory = createConversationMemory({ embedder, store });  │
+  │  src/session.ts:53   — buffr passes its OllamaEmbeddingProvider │
+  │                        and its PgVectorStore. That's all it adds.│
+  └─────────────────────────────────────────────────────────────────┘
 ```
 
-The dependency arrow points **down**: the library engine depends on contracts,
-not on buffr. buffr depends on the library. That direction is the entire
-decision — it's what makes the engine reusable and buffr's store swappable.
+**The load-bearing property: the engine is injected, not coupled.** Read the
+extracted code and it proves itself — `createConversationMemory` takes
+`{ embedder, store }` and the doc comment is explicit: *"The store is injected:
+the engine never names a database. Pass a `PgVectorStore` for durable memory, an
+`InMemoryVectorStore` for tests — the logic is identical"*
+(`conversation-memory.ts:48-59`). That sentence is the dependency-boundary
+decision, written into the engine itself.
 
-In code, the whole seam is one line of construction: `createConversationMemory({
-embedder, store })` (`src/session.ts:53`), reusing the *same* `store` and
-`embedder` already built for retrieval (`src/session.ts:40-41`). Because
-memory shares the document store, recall needs no new tool — it comes back
-through `search_knowledge_base` like any other chunk.
+**What buffr keeps:** exactly one line of wiring. `src/session.ts:53` constructs
+the memory with buffr's embedder and store, and `ask()` calls
+`memory.remember({ conversationId, question, answer })` after each turn
+(`src/session.ts:65`). buffr owns the *deployment* (which store, which embedder,
+when to remember). aptkit owns the *engine* (how to remember).
 
-> **Coach:** The phrase that lands the boundary in one breath:
-> **"engine in aptkit, store injected by buffr."** Say it exactly that way.
-> It compresses the whole RFC: what moved up (engine), what stayed down
-> (store), and the mechanism (injection over a contract). A reviewer who hears
-> that knows you understood the difference between a *toolkit* and an *app*.
+**The self-similarity worth naming:** this is the *same* boundary move as DOC 01.
+There, `VectorStore` let the persistent store drop into the agent. Here, the same
+two contracts let the memory engine move up into the library. The contract that
+made persistence swappable is the contract that made memory extractable. One
+seam, two payoffs.
 
 ---
 
 ## 5. Alternatives considered
 
-**A — Keep memory inline in buffr.**
-Zero extraction work. Lost because the code has no buffr-specific content — it
-embeds over `EmbeddingProvider` and writes over `VectorStore`, both aptkit
-contracts. Leaving it inline means every future aptkit consumer reinvents it,
-and buffr carries library code masquerading as app code. The cost of *not*
-extracting is duplication you'll pay later, silently.
+**Alternative A — keep memory inline in buffr.**
+Less moving — no library release, no published surface. *Why it lost:* every
+other app that consumes aptkit (`blooming`, `contrl`) would reinvent
+conversation memory, and each reinvention drifts. The logic is genuinely
+deployment-agnostic — it names no database — so keeping it in the body is
+mislocating it. You'd be hiding a reusable capability inside one consumer.
 
-**B — Push the whole thing up, store included.**
-Move memory *and* a Postgres store into aptkit. Lost because it inverts the
-repo split. aptkit is provider- and deployment-agnostic on purpose
-(`providers/` has anthropic/openai/local side by side —
-`agent-layer-plan.md`). Bolting a Supabase store into it turns the toolkit
-into "the Gemma+Supabase app" and kills reuse across the other apps
-(`blooming_insights`, `contrl`). The store is exactly the part that *should*
-stay in the body.
+**Alternative B — put memory in buffr, expose it back to aptkit via a plugin
+hook.**
+A middle path — buffr owns it but other apps can borrow it. *Why it lost:* it
+inverts the dependency. aptkit is the *dependency*; buffr is the *dependent*.
+Having the library reach back into a consumer for core logic is a circular
+boundary — the toolkit would now depend on the body. The clean direction is
+engine-up.
 
-**C — A separate `@buffr/memory` package.**
-A third home, between the two repos. Lost because it's a package with one
-consumer and no aptkit dependency it doesn't already have — overhead with no
-boundary benefit. If the engine is store-agnostic (it is), it belongs next to
-the contracts it's written against, which is aptkit.
-
-> **Coach:** Alternative B is the trap a reviewer sets: "if you're extracting
-> memory, extract the store too — keep it together." Don't take the bait. The
-> answer: "the store is the one part with a deployment opinion — Postgres,
-> pgvector, `reindb`. Everything *deployment-agnostic* goes up; everything
-> *deployment-specific* stays down. Memory is agnostic; the store isn't.
-> That's the cut line." Naming the cut line as "agnostic up, specific down" is
-> the reusable principle, not just this one call.
+**Alternative C — extract the engine but let it take a database connection
+directly.**
+Simpler call site, maybe. *Why it lost:* it would re-couple the engine to
+Postgres, defeating the extraction. The engine would name a database, tests
+couldn't use an in-memory store, and `blooming` (if it used a different store)
+couldn't consume it. Injecting the `VectorStore` contract is what keeps the
+engine deployment-agnostic — that's the non-negotiable that makes extraction
+worth doing.
 
 ---
 
 ## 6. Tradeoffs accepted
 
-- **We chose to extract, accepting a published-API surface in aptkit.** Cost:
-  `createConversationMemory`'s signature is now a contract aptkit owns;
-  changing it is a versioned, breaking change, not a local edit. Owned: that's
-  the price of reuse, and the signature is small (`{ embedder, store }` in,
-  `remember`/`recall` out).
-- **We chose relevance-based recall, accepting no sequential turn history.**
-  Cost: the agent doesn't see "what we just said" in order — it sees what's
-  *similar* (`src/session.ts:25-27`). Owned: in-prompt turn history is an
-  aptkit-side change to `RagQueryAgent.answer()`; relevance recall gives
-  cross-session memory *without* waiting for it. Named gap, deliberate phase
-  boundary.
+- **We chose engine-in-aptkit, accepting a published surface to maintain.**
+  `createConversationMemory` is now a library API with a contract other apps
+  depend on. Changing its signature is a breaking change for consumers. We took
+  that cost because the logic is reusable and the alternative is N drifting
+  copies.
+- **We chose the minimal `VectorStore` contract (no metadata filter), accepting
+  over-fetch-then-filter in the engine.** Because the store can't filter by
+  `kind`, `recall` fetches `max(k*4, 20)` hits and filters to memory rows in app
+  code (`conversation-memory.ts:89-95`). That's wasted fetch on a shared store —
+  the deliberate price of *not* widening the contract every store must implement.
+- **We chose retrieval-based memory, accepting no sequential turn history.**
+  Memory surfaces by *relevance*, not *recency*. The agent can recall a relevant
+  exchange from three sessions ago but doesn't carry the last three turns
+  in-prompt. That's an aptkit-side gap, named honestly in `session.ts:25-27`,
+  not hidden.
 
 ---
 
 ## 7. Risks & mitigations
 
-- **Risk: a memory-write failure loses the answer the user already has.**
-  *Mitigation:* `remember()` is wrapped best-effort — the turn returns the
-  answer first, then memory is attempted in a `try/catch` that swallows
-  failures (`src/session.ts:64-68`). Memory is enrichment, never on the
-  critical path of answering.
-- **Risk: memory chunks and document chunks collide in the same store.**
-  *Mitigation:* memory rows are tagged `meta.kind='memory'` with namespaced ids
-  (`"memory:<conv>:<n>"`) (`.aipe/project/context.md`, Data model), so they're
-  distinguishable from corpus chunks even though they share the table.
-- **Risk: the shared store assumes memory rows need no documents row.** Covered
-  by the dropped FK — see `03-dropped-chunks-documents-fk.md`. This decision
-  *depends* on that one: without the dropped FK, a memory chunk with no
-  documents row would violate the constraint.
+```
+  Risk → mitigation
+
+  embedder/store dimension   → the engine throws at construction if
+   drift after extraction       embedder.dimension != store.dimension
+                                (conversation-memory.ts:62-65). Mismatch
+                                fails loud at wire-up, not at recall.
+
+  a memory-write failure      → remember() is wrapped best-effort in buffr's
+   loses the user's answer       ask(): the turn already succeeded, so a
+                                 memory failure is swallowed, not propagated
+                                 (session.ts:66-69). The answer the user has
+                                 is never lost to a memory bug.
+
+  memory rows pollute corpus  → rows are tagged meta.kind='memory' with id
+   search                        namespace 'memory:<conv>:<n>'; recall filters
+                                 to that kind. They coexist with documents in
+                                 the same store without contaminating doc
+                                 retrieval.
+
+  breaking the published API  → the engine's surface is two methods over two
+                                 contracts. Keeping it that narrow is the
+                                 mitigation — small surface, small blast radius.
+```
 
 ---
 
 ## 8. Rollout / migration
 
-- aptkit ships `createConversationMemory` in the published bundle
-  (`@rlynjb/aptkit-core` ^0.4.1); buffr consumes it. Because aptkit is
-  consumed-never-edited, the extraction is a version bump on buffr's side, not
-  a code move buffr performs at runtime.
-- For callers inside buffr: the inline memory code is deleted and replaced by
-  the one-line injection at `src/session.ts:53`. No data migration — memory
-  rows already lived in `agents.chunks`; the engine writing them just moved
-  repos.
+- **The extraction itself** moved the engine from buffr into aptkit's
+  `packages/memory`; buffr re-consumes it via the `@rlynjb/aptkit-core` bundle
+  (`context.md`, Stack). buffr's call site stayed a one-liner — the migration
+  for buffr was deleting the inline copy and importing the published one.
+- **For buffr:** memory rows ride the *same* `chunks` table tagged
+  `kind='memory'` — so no new table, no new migration. They surface through the
+  existing `search_knowledge_base` tool.
+- **For other apps:** `blooming`/`contrl` now *can* consume conversation memory
+  by injecting their own `VectorStore` — but nothing forces them to. The
+  extraction is additive to the library, breaking to nobody.
+- **The dependency rule that gates this:** buffr imports `@rlynjb/aptkit-core`;
+  it never edits aptkit (`context.md`, "Must-not-change constraints"). The
+  extraction respects the arrow — logic flowed *up* into the dependency, and
+  buffr consumes it back down.
 
 ---
 
 ## 9. Open questions
 
-- **Memory retention.** Unbounded growth of `kind=memory` chunks is a real
-  cost (`agent-layer-plan.md`, Open questions: "Conversation retention" —
-  TTL / keep-N-recent / archive). Undecided.
-- **Memory vs. document ranking.** Memory and corpus chunks compete in the
-  same similarity search. Whether a recalled exchange should ever outrank a
-  source document — and how to weight that — is open.
-- **In-prompt turn history.** The named gap: when `RagQueryAgent.answer()`
-  gains sequential history, does retrieval-based memory stay, layer on top, or
-  fold in? An aptkit-side decision.
+- **Sequential turn history.** Retrieval-based recall gives relevance, not
+  recency. In-prompt turn history is an aptkit-side change to
+  `RagQueryAgent.answer()` — still open whether it lives in the agent or as a
+  second memory mode.
+- **Memory eviction / TTL.** Memory rows accumulate in `chunks` unbounded, same
+  retention question as the trajectory tables. Undecided.
+- **Per-conversation id counters live in process memory** (`counters` Map,
+  `conversation-memory.ts:71`). Across a process restart the counter resets to
+  0 — fine because `conversationId` is unique per conversation, so ids never
+  collide. Worth a second look if conversation ids ever get reused.
+
+---
+
+## Coach notes — where a reviewer pushes, and the framing that holds
+
+- **"Why extract it at all — premature abstraction?"** The test for premature is
+  "is there a second consumer, and is the logic actually generic?" Both yes:
+  other apps consume aptkit, and the engine names no database. "I extracted it
+  *because* it named no database — that's the signal it belonged in the library,
+  not the body." Extraction driven by an observed property, not a guess, is the
+  opposite of premature.
+- **"Over-fetch-then-filter is wasteful."** Own it: "it is — it's the price of
+  keeping the `VectorStore` contract minimal so every store stays cheap to
+  implement. Widening the contract to push the filter down is the alternative,
+  and I didn't think one feature justified taxing every store." Tradeoff named,
+  decision held.
+- **The sentence that gets the yes:** *"The engine names no database; buffr only
+  injects the store. That's how I knew it belonged up in aptkit, not down in the
+  body."* Lead with the property that drove the boundary.
 
 ---
 
 ## See also
 
-- `01-pgvector-graduation.md` — the store this engine is injected with.
-- `03-dropped-chunks-documents-fk.md` — the schema decision this one depends
-  on (memory rows with no documents row).
-- `.aipe/study-software-design/` — the deep-module / dependency-direction lens
-  on this boundary.
-- `.aipe/rehearse-interview-defense/` — defending "engine up, store down" out
-  loud.
+- DOC 01 — the `PgVectorStore` and `VectorStore` contract this engine is
+  injected with.
+- DOC 03 — the dropped FK that lets `kind='memory'` rows live in `chunks` with
+  no `documents` row.
+- `.aipe/study-system-design/02-library-as-dependency-boundary.md`,
+  `06-retrieval-as-memory.md`;
+  `.aipe/study-software-design/03-dependency-as-a-boundary.md`.

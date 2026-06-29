@@ -1,240 +1,262 @@
-# Text Stored Twice (content + meta.text)
+# 02 · Text stored twice
 
-**Industry names:** denormalization / jsonb sidecar / data duplication.
-**Type:** Project-specific (a deliberate normalization compromise).
+**Subtitle:** denormalized duplicate of a single fact across a column and a jsonb
+field — the DB analog of information leakage — *Project-specific*.
+
+---
 
 ## Zoom out, then zoom in
 
-Here's a single `chunks` row, and the fact that lives in it twice.
+Same chunk text, two homes. Here's where the duplication sits in the write/read
+path — it's entirely inside the storage layer's `chunks` row, but it's *created*
+on the way in and *re-created* on the way out, so it spans both the write and the
+read.
 
 ```
-  Zoom out — where the duplication lives
+  Zoom out — where the duplicated fact lives
 
-  ┌─ Storage layer — one agents.chunks row ─────────────┐
-  │                                                      │
-  │   content  text   ──►  "the chunk's text..."         │ ★ copy A
-  │   meta     jsonb  ──►  { text: "the chunk's text...",│ ★ copy B
-  │                          docId: "...",               │
-  │                          chunkIndex: 3 }             │
-  │   embedding vector(768)                              │
-  │                                                      │
-  │   nothing in the schema keeps copy A == copy B       │
-  └──────────────────────────────────────────────────────┘
+  ┌─ Retrieval layer ──────────────────────────────────────┐
+  │  pipeline.index(doc)  ──write──►   ◄──read── search()   │
+  └─────────────┬───────────────────────────────▲──────────┘
+                │                                │
+  ┌─ Storage: agents.chunks (one row) ──────────┴──────────┐
+  │   content text          ★ copy A (column) ★            │ ← here
+  │   meta    jsonb {... text: "...", ...}  ★ copy B ★      │ ← and here
+  └────────────────────────────────────────────────────────┘
 ```
 
-**Zoom in.** The same chunk string is in the `content` column **and** inside
-the `meta` jsonb of the same row. This is the DB analog of information
-leakage — one fact, two homes, no single source of truth. The question:
-*why is it there twice, and what breaks because of it?*
+Zoom in: the question is "is the same fact stored in two places that can drift
+apart?" Normalization's whole job is single source of truth — one fact, one home,
+edit it once. This row breaks that: the chunk's text is in `content` *and* in
+`meta.text`, with nothing keeping them equal. It's the data version of the
+information-leakage smell `study-software-design` names in code — the same secret
+known in two modules.
 
 ## The structure pass
 
-**Layers:** (1) the relational column `content` — what SQL reads directly.
-(2) the schemaless `meta` jsonb — the opaque aptkit payload, which *contains*
-`text`. Two representations of one string at two altitudes of the same row.
+One axis: **state ownership** — who is the source of truth for this fact? Trace
+it across the write boundary and the read boundary and watch the answer
+contradict itself.
 
-**Axis — source of truth:** trace "which copy is authoritative?" across the
-two. On write, `content` is *derived from* `meta.text`
-(`src/pg-vector-store.ts:46`) — so `meta` is upstream. On read, `meta.text`
-is *reconstructed from* `content` (`:83`) — so `content` is upstream. The
-authority flips depending on direction. That's the smell: neither is
-canonical.
+```
+  axis = "who owns the chunk's text?"
 
-**Seam:** the load-bearing boundary is **the `VectorStore` contract**. Above
-it, aptkit hands you an opaque `meta` object it owns and will read back
-verbatim. Below it, your SQL wants a plain text column it can `select`
-without parsing jsonb. The duplication lives exactly at that seam — it's the
-price of satisfying both sides.
+  ┌─ write side (upsert) ──────────┐  both written from c.meta.text
+  │  content ← c.meta.text          │  → meta.text is the source
+  │  meta    ← c.meta (incl. text)  │
+  └──────────────┬──────────────────┘
+                 │ seam: the row at rest — TWO copies, no owner
+  ┌─ read side (search) ───────────┐  content read back, meta.text
+  │  meta.text ← r.content          │  → content is the source
+  └─────────────────────────────────┘
+
+  the source of truth FLIPS across the round trip → no single owner
+```
+
+That flip is the seam. On write, `meta.text` is the source. On read, `content`
+is the source and `meta.text` is rebuilt from it. Neither is the durable owner —
+the row at rest holds two copies and the code disagrees with itself about which
+is canonical.
 
 ## How it works
 
 ### Move 1 — the mental model
 
-You know how you sometimes denormalize a `user_name` onto an `orders` row so
-a list query doesn't join `users`? Same move here — `content` is a
-denormalized copy of `meta.text` so SQL reads text without cracking open
-jsonb. The difference: denormalizing across *tables* is a known read
-optimization; duplicating *within one row* buys almost nothing and still
-carries the full consistency risk.
+The shape is a **redundant copy with no binding constraint** — you've seen this
+exact bug in app state: a value cached in two `useState` hooks, updated in one
+handler, stale in the other. Same thing, in a table.
 
 ```
-  one fact, two homes — the write/read round-trip
+  duplicate-with-no-binding (pattern)
 
-  WRITE:   c.meta.text  ──derive──►  content column
-              (upstream)             (copy)
-                  │                     │
-                  └── both written to the same row ──┐
-                                                     ▼
-  READ:    content column ──reconstruct──►  meta.text
-              (now upstream)                (rebuilt copy)
-
-  the authority flips by direction → no single source of truth
+       one fact: "this chunk says X"
+              │
+      ┌───────┴───────┐
+      ▼               ▼
+   content        meta.text
+   (column)        (jsonb)
+      │               │
+      └─── no FK, no check, no trigger ───┘
+            keeps them equal → they CAN drift
 ```
 
-### Move 2 — the step-by-step walkthrough
+### Move 2 — the walkthrough
 
-**On write — `content` is carved out of `meta`.** The upsert reads
-`c.meta.text` and assigns it to a local `content`, then writes *both* the
-`content` column and the whole `c.meta` jsonb into the row. So `meta.text`
-and `content` enter the row as the same string, by construction. They agree
-at write time — the risk is purely future drift.
-
-**On read — `meta.text` is rebuilt from `content`.** The search SELECTs the
-`content` column, then reconstructs the in-memory `meta` shape by spreading
-the stored `meta` jsonb and *overwriting* `text` with the freshly-read
-`content`. So a reader always sees `meta.text === content` even if the stored
-jsonb's `text` had drifted — the read silently papers over any divergence.
-
-**Where it breaks.** Picture a future migration that lowercases
-`chunks.content` for case-insensitive display but doesn't touch `meta`. Now
-the row holds two different truths: `content` (lowercased) and `meta.text`
-(original). The read path masks it (it overwrites `meta.text` with `content`),
-but any SQL that reads `meta->>'text'` directly — an analytics query, a
-backfill, a different consumer — gets the stale copy. Nothing in the schema
-(no generated column, no trigger, no check) keeps them equal.
-
-### Move 2.5 — current state vs the fix
+**The write: both copies land from one source.**
+`upsert` pulls the text out of the incoming chunk's `meta.text`, writes it to the
+`content` column, *and* writes the whole `meta` object (which still contains
+`text`) to the jsonb column. One read, two writes.
 
 ```
-  Phase A (now)              Phase B (the fix, if it bites)
-  ─────────────              ──────────────────────────────
-  content: text col         content: text col  (the one truth)
-  meta:    jsonb WITH text   meta:    jsonb WITHOUT text
-                             read path injects text from content
-                             on the way out (already does this!)
+  File: src/pg-vector-store.ts
+  Function: PgVectorStore.upsert
+  Lines: 44-56
 
-  cost of the fix: drop `text` from the meta written at
-  pg-vector-store.ts:55 BEFORE storing; the read at :83 already
-  rebuilds meta.text from content, so consumers see no change.
+    const content =
+      typeof c.meta.text === 'string' ? c.meta.text : '';   ← copy A source
+    ...
+    insert into agents.chunks
+      (id, document_id, app_id, chunk_index, content, ...)
+       values ($1, ..., $5, ...)        ← $5 = content (copy A)
+    ... meta = excluded.meta            ← copy B: meta STILL holds .text
+                              [c.id, ..., content, ..., c.meta]
+                                              copy A ──┘    └── copy B
 ```
 
-The striking part: the read path *already* reconstructs `meta.text` from
-`content` (`:83`). So `meta.text` doesn't *need* to be stored at all — the
-column is enough. The duplication is removable today with no consumer change.
+Line 46 reads `c.meta.text` into `content`. Line 55 passes `c.meta` — which
+still has `text` inside it — as the jsonb param. So the same string is now in two
+columns of the same row. Nothing in the schema (no generated column, no check
+constraint, no trigger) forces them to stay equal.
+
+**The read: the copy is rebuilt, not just read.**
+On the way out, `search` reads the `content` column, then *reconstructs*
+`meta.text` from it before handing the hit back — because the calling tool expects
+the in-memory chunk shape where text lives at `meta.text`.
+
+```
+  File: src/pg-vector-store.ts
+  Function: PgVectorStore.search
+  Lines: 80-84
+
+    return rows.map((r) => ({
+      id: r.id,
+      score: Number(r.score),
+      meta: { ...(r.meta ?? {}), docId: r.document_id,
+              chunkIndex: r.chunk_index,
+              text: r.content },   ← meta.text REBUILT from the column,
+    }));                              the stored meta.text is overwritten
+```
+
+Look at line 83: it spreads the stored `r.meta` (which has its own `text`), then
+sets `text: r.content` *after* — so the column wins on read. The stored
+`meta.text` is silently shadowed. Which means: **the duplicate in jsonb is dead
+weight on read** — it's written, stored, and then ignored every time it's read
+back.
+
+```
+  Layers-and-hops — the fact's round trip
+
+  ┌─ caller ──────┐ hop1: chunk{meta.text}  ┌─ upsert ────────┐
+  │ pipeline.index│ ──────────────────────► │ content←meta.text│
+  └───────────────┘                         │ meta←meta (dup)  │
+                                            └────────┬─────────┘
+                                              hop2 insert│ BOTH
+                                                         ▼
+                                            ┌─ chunks row ─────┐
+                                            │ content = "X"     │
+                                            │ meta.text = "X"   │ ← redundant
+                                            └────────┬─────────┘
+                  hop4: meta.text=content   hop3 read│
+  ┌─ caller ──────┐ ◄────────────────────── ┌─ search ─┴──────┐
+  │ tool citations│   (column wins)         │ rebuild meta     │
+  └───────────────┘                         └──────────────────┘
+```
+
+**The boundary condition — where it bites.** Today nothing edits a chunk's text
+in place; chunks are upserted wholesale, so both copies are always written
+together and never independently. The duplication is latent, not active. It bites
+the day *anything* updates `content` without going through `upsert` — a
+data-fix SQL, a backfill, a `migrate` script touching text. Then `content` says
+one thing, `meta.text` says another, and which one your code trusts depends on
+whether it reads the column or the jsonb. Search reads the column, so search would
+be right; any consumer reading `meta.text` straight from a raw row query would be
+wrong.
+
+### Move 2 variant — the load-bearing skeleton
+
+The kernel of *the bug* (not the feature):
+
+```
+  what makes it a duplication
+    1. the same fact written to two stores in one operation
+    2. no constraint binding the two equal
+    3. divergent read paths that pick different copies
+```
+
+- Remove **(2)** by adding a generated column or a check → they can't drift; the
+  duplication becomes safe denormalization.
+- Remove **(1)** by storing the fact once → the canonical fix (below).
+- **(3)** is the latent danger: as long as every read uses the same copy you
+  never *see* the drift, which is exactly why it's dangerous.
 
 ### Move 3 — the principle
 
-Normalization is information-hiding for data: one fact, one place, one writer.
-The moment a fact has two homes with no mechanism keeping them equal, you've
-re-introduced exactly the bug that normalization exists to prevent — an
-update that touches one copy and forgets the other. Denormalize on purpose,
-across tables, for a measured read win — not by accident, within a row, for
-nothing.
+Denormalization is fine — `documents.content` and `chunks.content` hold
+overlapping text on purpose, because slicing the doc into chunks is the read
+optimization that makes ANN search possible. The line between *good*
+denormalization and *bad* duplication is: did you choose a single source of
+truth and derive the rest, or do you have two editable originals? Here, `content`
+should be the SSOT and `meta.text` should not exist at rest — it should be
+*projected* on read, which is exactly what `search` already does. The bug is that
+it's also *stored*.
 
 ## Primary diagram
 
-```
-  the duplication, write and read, one row
-
-  ┌─ aptkit (owns meta) ─────────────────────────────────┐
-  │  c.meta = { text, docId, chunkIndex }                 │
-  └───────────────────┬───────────────────────────────────┘
-            write       │  content := c.meta.text  (derive)
-  ┌─ Postgres row ─────▼───────────────────────────────────┐
-  │  content  = "text..."   ◄── copy A                      │
-  │  meta     = {text:"text...", ...}  ◄── copy B (verbatim)│
-  └───────────────────┬───────────────────────────────────┘
-            read        │  meta.text := content  (reconstruct, overwrite)
-  ┌─ back to aptkit ───▼───────────────────────────────────┐
-  │  { ...meta, text: content }  → citations               │
-  └─────────────────────────────────────────────────────────┘
-```
-
-## Implementation in codebase
-
-**Use case.** Triggered on every index (`npm run index`) and every search
-(`npm run chat`). Indexing writes the duplication; searching reads `content`
-and rebuilds `meta.text` so aptkit's `search_knowledge_base` citations have
-the text to quote. It also fires on every **memory write**: `createConversationMemory`
-upserts each exchange through the *same* `PgVectorStore`
-(`src/session.ts:53,67`), and `@aptkit/memory` itself sets `meta.text` to the
-formatted exchange (`conversation-memory.ts:84`) — which the upsert then
-derives `content` from (`pg-vector-store.ts:46`). So the redundancy holds
-identically for `memory:<conv>:<n>` rows: the exchange text lives in `content`
-and in `meta.text` of the same row, library-set on one side, column-derived on
-the other.
-
-**Write side — `src/pg-vector-store.ts:46,55`:**
+The whole duplication, write to read, with the fix overlaid.
 
 ```
-  const content = typeof c.meta.text === 'string' ? c.meta.text : '';
-        │                    │
-        │                    └─ meta.text is the upstream source here
-        └─ content column is a DERIVED copy
+  Text stored twice — and where to cut it
 
-  ...values ($1, $2, $3, $4, $5, $6::vector, $7, $8)
-                            │                    │
-                            │ ($5 = content)     └─ $8 = c.meta — the WHOLE
-                            └─ copy A written        jsonb, incl. text = copy B
+  WRITE (upsert:44-56)              READ (search:80-84)
+  ─────────────────────            ──────────────────────
+  c.meta.text                       r.content ──┐
+      │                                          │ rebuild
+      ├──► content   ●  SSOT  ●  ◄───────────────┘ meta.text
+      │     (keep)                      (project on read — already done)
+      │
+      └──► meta.text ✗  drop  ✗     ← the redundant copy: written,
+            (jsonb)                    stored, then SHADOWED on read
+
+  fix: strip `text` from meta before the insert (line 55);
+       search already reconstructs it from content (line 83),
+       so no read path breaks.
 ```
-
-**Read side — `src/pg-vector-store.ts:71,83`:**
-
-```
-  select id, content, chunk_index, document_id, meta, ...   ← reads BOTH
-
-  meta: { ...(r.meta ?? {}), docId: r.document_id,
-          chunkIndex: r.chunk_index, text: r.content }
-                                            │
-                                            └─ meta.text OVERWRITTEN with the
-                                               content column — proves the
-                                               stored meta.text is redundant
-```
-
-**Secondary instances — same row, smaller payloads:** `chunk_index` is a
-column (`sql/001_agents_schema.sql:21`) *and* `meta.chunkIndex`
-(`pg-vector-store.ts:45`); `document_id` is a column (`:16`) *and*
-`meta.docId` (`pg-vector-store.ts:44`). Same sidecar-redundancy shape.
 
 ## Elaborate
 
-This is the classic jsonb-sidecar tension: you keep a schemaless blob for
-flexibility (aptkit's `meta` can carry fields you didn't model), but you
-promote a few hot fields to real columns for SQL access and indexing. The
-mistake here isn't promoting `text` to a column — that's correct, SQL needs
-it. The mistake is leaving the original copy *inside* `meta` after promoting
-it. The clean pattern: promote to column, strip from blob, re-inject on read
-if the consumer's contract expects it there. Cross-link
-`study-software-design` → information-hiding: same single-source-of-truth
-principle, applied to data instead of code.
+This is a textbook *update anomaly* setup from relational normalization theory:
+a fact duplicated across two locations with no functional dependency enforcing
+equality, so an update to one leaves the other stale. The classic cure is to
+normalize to a single source of truth. Here the cure is unusually cheap because
+the read side *already* projects `meta.text` from `content` — the system is one
+`delete c.meta.text` away from being correct, and zero read paths would notice.
+The reason it exists at all: the in-memory `VectorStore` contract speaks in
+`meta.text`, so the simplest "just store the meta object" write carried the
+duplicate along. Parity made it easy to do the redundant thing.
 
 ## Interview defense
 
-**Q: Your `chunks` table stores the chunk text in both `content` and
-`meta.text`. Defend it.**
+**Q: Your `chunks` table stores the text in both a column and a jsonb field. Why
+is that a problem, and why hasn't it bitten yet?**
+
+It's an update-anomaly setup: two editable copies of one fact with no constraint
+binding them. It hasn't bitten because every write goes through one `upsert` that
+sets both together, and every read goes through `search`, which rebuilds
+`meta.text` from `content` — so the column is effectively the source of truth and
+the jsonb copy is never actually read.
 
 ```
-  content (column)  ◄── SQL reads this directly, indexes, citations
-  meta.text (jsonb) ◄── aptkit's opaque payload, written verbatim
-                        BUT read path overwrites it from content anyway
+  write: both set from c.meta.text   read: meta.text ← content
+         (always together)                  (column wins, jsonb shadowed)
+  → drift only possible if something writes content OUT of band
 ```
-Answer, honest: it's a real redundancy, not a feature. `content` exists
-because SQL shouldn't parse jsonb to read text — that's the right call. But
-leaving `text` *inside* `meta` after promoting it to a column is the bug:
-two copies, nothing keeps them equal. The tell is that my read path already
-rebuilds `meta.text` from `content` (`pg-vector-store.ts:83`), so the stored
-copy is dead weight. The fix is one line — strip `text` from `meta` before
-the insert at `:55`. **Anchor:** the read already reconstructs it, so the
-column is the only source I actually need.
 
-## Validate
+Anchor: "two copies, one constraint short of safe — the read path already
+treats the column as canonical, so the fix is to stop storing the other copy."
 
-1. **Reconstruct:** draw the write-derive / read-reconstruct round-trip.
-2. **Explain:** why does the search result look consistent even if the stored
-   `meta.text` drifted from `content`? (`pg-vector-store.ts:83`)
-3. **Apply:** you add a SQL job that reads `meta->>'text'` for analytics.
-   What breaks after a `content`-only migration, and why?
-4. **Defend:** is denormalization ever right here? Where (across tables) vs
-   where it's wrong (within this row)?
+**Q: When would you keep a denormalized copy on purpose?**
+
+When it's a *derived* read optimization with a clear source of truth — like
+`chunks.content` being slices of `documents.content`. That's deliberate: you
+can't run cosine over a whole document, so you store the slices. The test is
+whether you can name which copy is the original and whether the others are
+regenerable from it. `meta.text` fails that test (it's a peer copy, not a
+derivation); `chunks.content` passes it.
 
 ## See also
 
-- `01-vector-column-and-ann-index.md` — why `content` rides in the SELECT.
-- `03-deterministic-chunk-ids.md` — the other column/`meta` redundancy pair.
-- `audit.md` §2 — normalization-and-duplication, the worst finding.
-- `study-software-design` → information-hiding (the code analog).
-
----
-Updated: 2026-06-24 — re-verified the duplication still holds for memory rows
-written via `@aptkit/memory` (it sets `meta.text` at `conversation-memory.ts:84`;
-buffr derives `content` from it); added the memory-write use case; `ask` → `chat`.
+- `01-vector-column-and-ann-index.md` — the `search` query whose result rows get
+  the `meta.text` rebuild.
+- `03-soft-link-no-fk.md` — the *other* relationship the schema doesn't enforce.
+- `audit.md` Lens 2 — normalization, with the deliberate-vs-accidental split.
+- `study-software-design` — information hiding / duplication, the code analog.

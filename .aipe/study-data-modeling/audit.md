@@ -1,243 +1,252 @@
-# Data Modeling Audit — buffr-laptop
+# audit.md — the seven data-modeling lenses, walked
 
-Pass 1. Seven lenses, walked against `sql/001_agents_schema.sql` and the
-code that reads/writes it. Worst-first within each lens. Every claim carries
-`file:line` or an honest `not yet exercised`. Where a finding has a dedicated
-pattern file, this audit cross-links rather than restating.
+Pass 1. Every lens checked against the real schema and the real query call
+sites, grounded in `file:line`. Lenses that find a deep pattern cross-link to a
+Pass-2 file rather than restate it. Lenses with nothing to find say so — the
+honest `not yet exercised` is as much a finding as a red flag.
 
-**Verdict up front.** The schema is honest and small — five tables, one
-schema, one Postgres instance. It does three things right: a real
-`vector(768)` column with the correct ANN index (HNSW + `vector_cosine_ops`),
-deterministic chunk ids that make re-indexing idempotent, and one genuine
-referential constraint where it matters most (messages → conversations,
-`on delete cascade`). It carries two deliberate compromises that you must be
-able to defend: **text is physically stored twice** in `chunks`, and
-`chunks.document_id` is a **soft link with the FK explicitly dropped**. Both
-are traceable to the same root cause — the schema is shaped to satisfy an
-external `VectorStore` contract that knows nothing about `documents` rows.
-Everything tenant-related (`app_id`) is in *shape only*: no RLS, no
-token-derivation. That's the highest-risk surface if this ever leaves
-single-device.
+The whole persistent surface is one schema file plus five query call sites:
+
+```
+  schema      sql/001_agents_schema.sql            (59 lines, 5 tables)
+  migration   src/migrate.ts                       (transactional runner)
+  writes      src/pg-vector-store.ts  upsert       (chunks)
+              src/runtime.ts          indexDocumentRow (documents)
+              src/supabase-trace-sink.ts persist*  (conversations/messages)
+  reads       src/pg-vector-store.ts  search       (ANN over chunks)
+              src/profile.ts          loadProfile  (profiles)
+```
 
 ---
 
-## 1. The data model and its shape
+## Lens 1 — schema shape
 
-The model is discernible and correct — not a JSON blob, not one wide table.
-Five tables across two natural clusters:
+A clean relational model. Five tables, two clusters, no everything-in-one-blob
+anti-pattern. `jsonb` shows up three times (`documents.meta`, `chunks.meta`,
+`messages.tool_calls`/`tool_results`) and each use is justified: `meta` is
+open-ended provenance, and the tool payloads are genuinely schemaless
+LLM-shaped data. The structured facts (ids, app_id, embedding, chunk_index,
+role, tokens_used) are all promoted to real columns, not buried in jsonb.
 
-- **corpus / retrieval**: `documents` (`sql/001_agents_schema.sql:4-12`) →
-  `chunks` (`:14-25`), linked by a soft `document_id`.
-- **trajectory**: `conversations` (`:32-38`) → `messages` (`:40-50`), the one
-  hard FK in the schema.
-- **profile**: `profiles` (`:52-58`), standalone, read latest-by-`updated_at`.
+```
+  cluster              tables                  what it is
+  ───────────────────  ──────────────────────  ─────────────────────────
+  retrieval            documents, chunks       the RAG corpus + vectors
+  trajectory           conversations, messages the replayable agent trace
+  standalone           profiles                me.md-style prompt context
+```
 
-The split matches the access pattern cleanly: corpus is write-once/read-many
-under vector search; trajectory is append-only per run; profile is a
-single-row lookup. → full diagram + the deep walk in `00-overview.md` and the
-pattern files.
+The one shape decision worth flagging: `chunks` is doing double duty. It's both
+"the chunks of my documents" and "the backing store for an `@aptkit` memory
+engine" (memory rides the same table tagged `meta.kind='memory'`). One table,
+two populations. That's why several other lenses light up here.
+**→ see 01-vector-column-and-ann-index.md and 03-soft-link-no-fk.md.**
 
-One refinement worth naming: `chunks` now holds **two populations** —
-corpus chunks (`id = "<docId>#<index>"`) and episodic-memory chunks
-(`id = "memory:<conv>:<n>"`, `meta.kind = 'memory'`) written by `@aptkit/memory`
-through the same `PgVectorStore` (`src/session.ts:53,67`). Memory rows carry no
-`documents` parent — which the dropped FK (lens 6) is exactly what permits.
-They're distinguished by `meta.kind` at read time (the recall path over-fetches
-then filters on `kind='memory'`), not by a column or a separate table.
+Verdict: clean. No structural red flag.
 
-No red flag here. The data has real structure and the schema reflects it.
+## Lens 2 — normalization and duplication
 
-## 2. Normalization and duplication
+One real duplication: chunk text lives in both `chunks.content` and
+`chunks.meta.text`. `pg-vector-store.ts:46-56` writes both on upsert;
+`pg-vector-store.ts:80-84` reads `content` and rebuilds `meta.text` from it.
+Two editable copies of one fact, no constraint binding them.
 
-**This is the worst finding in the repo, and it's deliberate.** Chunk text
-is stored in *three* places that must agree:
+```
+  the duplicated fact
 
-- `chunks.content` — the text column (`sql/001_agents_schema.sql:22`).
-- `chunks.meta` jsonb — the whole aptkit `meta` object is written verbatim
-  (`src/pg-vector-store.ts:55`, `$8 = c.meta`), and `meta.text` is the same
-  string that `content` was derived from one line earlier
-  (`src/pg-vector-store.ts:46`, `content = c.meta.text`).
-- On read, `content` is reconstructed back *into* `meta.text`
-  (`src/pg-vector-store.ts:83`) so the aptkit citation shape round-trips.
+  write:  c.meta.text ──┬──► chunks.content   (column)
+                        └──► chunks.meta       (jsonb, still holds .text)
+  read:   chunks.content ──► r.content ──► meta.text  (rebuilt)
 
-So the same chunk string lives in `content` AND inside the `meta` jsonb of
-the same row. Nothing enforces they stay equal — if a future writer updates
-one and not the other, the row holds two truths. This is the DB analog of
-information leakage (cross-link `study-software-design` → information-hiding).
-It's defensible: `content` exists so SQL can read text without parsing jsonb,
-and `meta` exists because the `VectorStore` contract hands back an opaque
-`meta` blob. But it's a fact stored twice in one row. → full walk in
-`02-text-stored-twice.md`.
+  → the fact "what this chunk says" is now in two places
+```
 
-Second instance, milder: `chunk_index` is a column (`:21`) *and* lives in
-`meta.chunkIndex` (`src/pg-vector-store.ts:45`). `document_id` is a column
-(`:16`) *and* lives in `meta.docId` (`src/pg-vector-store.ts:44`). Same
-sidecar-redundancy pattern, smaller payload. The `content`/`meta.text`
-duplication now also applies to **memory rows**: `@aptkit/memory` sets
-`meta.text` (`conversation-memory.ts:84`) and the upsert derives `content` from
-it (`pg-vector-store.ts:46`) — same finding, second writer.
+There's a *second*, softer duplication worth naming: `documents.content` holds
+the full source text and `chunks.content` holds slices of that same text. That
+one is a deliberate denormalization — it's the read optimization that makes ANN
+search possible (you can't run cosine over a 10k-token document). The text-twice
+case is the accidental one. **→ see 02-text-stored-twice.md.**
 
-## 3. Indexing vs query patterns
+Verdict: one accidental duplication (fix it), one deliberate (keep it).
 
-Two indexes on `chunks`, and both earn their place against a real query:
+## Lens 3 — indexes vs query patterns
 
-- **`chunks_embedding_hnsw`** (`sql/001_agents_schema.sql:28-29`) — HNSW over
-  `vector_cosine_ops`. Serves the `order by embedding <=> $1::vector`
-  ANN search in `src/pg-vector-store.ts:74`. Without it that ORDER BY is a
-  full-table sequential scan computing distance to every chunk. → deep walk
-  in `01-vector-column-and-ann-index.md`.
-- **`chunks_app_id`** (`:30`) — B-tree on `app_id`. Serves the
-  `where app_id = $2` filter in the same search (`src/pg-vector-store.ts:75`).
-  Today with one tenant (`'laptop'`) it's low-value (the whole table is one
-  app_id), but it's the correct index for the multi-tenant future. →
-  `05-app-id-tenant-column.md`.
+Two indexes exist on `chunks`, both earning their place against the hot path:
 
-**One honest gap.** The HNSW index and the `app_id` filter don't compose. The
-query filters `app_id` *and* orders by vector distance, but HNSW can't use a
-B-tree predicate inside its graph traversal — Postgres runs ANN, then filters
-`app_id`, which under multiple tenants can under-fill `k` (post-filtering an
-ANN result). Single-tenant today, so `not yet exercised` as a real problem —
-but it's the index-vs-query mismatch to watch. Partial/partitioned HNSW per
-tenant is the fix when it bites.
+```
+  query (pg-vector-store.ts:70-77)          supporting index
+  ────────────────────────────────────────  ──────────────────────────────
+  order by embedding <=> $vec  (ANN)        chunks_embedding_hnsw (cosine)
+  where app_id = $appId                     chunks_app_id
+```
 
-`profiles` lookup (`src/profile.ts:5`,
-`where app_id=$1 order by updated_at desc limit 1`) has **no supporting
-index** — full scan + sort. Fine at current row counts (a handful of
-profiles); name it if profiles ever grow.
+The search query — the single most frequent read in the system, run on every
+agent turn — is fully covered. The HNSW index makes the cosine ordering
+sublinear; the `app_id` btree narrows the candidate set first.
+**→ see 01-vector-column-and-ann-index.md.**
 
-No N+1 patterns. `chunks` upsert loops one query per chunk inside a single
-transaction (`src/pg-vector-store.ts:43-57`) — that's a batch in a txn, not an
-N+1 across a request boundary. `eval-cmd.ts` loops one `pipeline.query` per
-eval row (`src/cli/eval-cmd.ts:24-32`), which is the intended shape (one ANN
-search per labeled query), not an accidental fan-out.
+The gap: **`messages` has no index on `conversation_id`.** It's a foreign key
+(`001_agents_schema.sql:42`), but a FK doesn't auto-create an index in Postgres.
+Today nothing reads messages back by conversation — the trajectory is
+write-only (`supabase-trace-sink.ts` only inserts). So it's not a *missing* index
+yet; it's a **latent** one. The day you build "replay this conversation" or a
+transcript view, `select ... where conversation_id = $1 order by created_at`
+does a sequential scan over every message ever written.
 
-## 4. Transactions and integrity
+```
+  not-yet-a-problem, but pre-loaded:
+    messages.conversation_id  → FK, NO index
+    the read that will need it doesn't exist yet (write-only table)
+    → add  create index on agents.messages (conversation_id, created_at)
+      the moment a by-conversation read ships
+```
 
-**Constraints present:**
+No N+1 patterns: `upsert` loops chunk-by-chunk but inside one transaction on one
+connection, and `search` is a single round trip. No unused indexes.
 
-- One real FK: `messages.conversation_id → conversations.id on delete cascade`
-  (`sql/001_agents_schema.sql:42`). Delete a conversation, its messages go
-  with it — atomic at the DB. The one place the DB guards an invariant rather
-  than hoping app code does.
-- `not null` on every load-bearing column (`content`, `embedding`,
-  `chunk_index`, `app_id`, `source_type`). `embedding vector(768) not null`
-  (`:22`) is the strongest one — a null or wrong-dim vector can't enter.
-- PKs everywhere: `text` PKs on `documents`/`chunks` (deterministic ids),
-  `uuid` PKs on the trajectory/profile tables.
-- Dimension is enforced twice: at the DB by `vector(768)` (`:22`) and in app
-  code by `assertDim` before any write or search
-  (`src/pg-vector-store.ts:32-36`). A mismatch throws, never truncates — this
-  is a stated must-not-change constraint and the code honors it.
+Verdict: hot path covered; one latent index gap on `messages`, gated behind a
+read that doesn't exist yet.
 
-**Atomicity:** chunk upsert wraps all chunks of a document in
-`begin … commit` with rollback on error (`src/pg-vector-store.ts:42,58,60`).
-The migration runner does the same for the whole DDL script
-(`src/migrate.ts:11-14`). Both are real transactions.
+## Lens 4 — transactions and integrity
 
-**The integrity gap:** `indexDocumentRow` writes the `documents` row, then
-calls `pipeline.index` which upserts `chunks` — across **two separate
-connections, not one transaction** (`src/runtime.ts:11-17`). If the document
-insert commits and chunk indexing then throws, you get a `documents` row with
-no `chunks`. There's no FK to catch the inverse either (chunks with no
-parent), because the FK was dropped (lens 6 / `04-soft-link-no-fk.md`). The
-invariant "a document and its chunks exist together" is enforced by **neither
-the DB nor a wrapping transaction** — it's hoped for by call order.
+Two transaction stories, opposite verdicts.
 
-## 5. Migrations and evolution
+**Atomic, correct:** `PgVectorStore.upsert` (`pg-vector-store.ts:40-65`) checks
+out one client, `begin`s, loops the chunk inserts, `commit`s, and `rollback`s
+on any throw. A batch of chunks is all-or-nothing. The migration runner
+(`migrate.ts:8-20`) wraps the whole schema script the same way.
 
-One migration file, `sql/001_agents_schema.sql`, run transactionally by
-`src/migrate.ts`. It's written defensively for live data:
+**Not atomic:** `indexDocumentRow` (`runtime.ts:11-17`) writes the `documents`
+row on the *pool*, then calls `pipeline.index(...)` which opens its own
+`begin/commit` on a *different* connection. The pair has no shared transaction.
 
-- Every `create` is `if not exists` (`:2,4,14,32,40,52`) — re-runnable.
-- Every index is `create index if not exists` (`:28,30`) — idempotent.
-- The FK drop is `alter table … drop constraint if exists chunks_document_id_fkey`
-  (`:27`) — idempotent, and crucially backward-compatible: it cleans up
-  databases that were migrated *before* the FK was removed. This is the one
-  genuine schema-evolution event in the repo, and it's done correctly — a
-  destructive change (dropping a constraint) made safe-to-replay.
+```
+  one logical write, two physical transactions
 
-**Honest gaps:**
+  ┌─ runtime.ts:11 ──────────┐   ┌─ pg-vector-store.ts:42 ─────┐
+  │ pool.query(insert docs)  │   │ client.begin                │
+  │   ── implicit txn A ──   │   │   insert chunks...          │
+  │        commits           │   │ client.commit ── txn B ──   │
+  └──────────┬───────────────┘   └──────────┬──────────────────┘
+             │                              │
+             └─── crash here = doc row, ────┘
+                  zero chunks, no rollback
+```
 
-- **No migration versioning / ledger.** There's no `schema_migrations` table,
-  no ordering, no "which migrations have run" record. It's one file replayed
-  idempotently. That works for one file; it does not scale to `002`, `003`.
-  `not yet exercised` — there is no second migration yet.
-- **No down migrations / rollback scripts.** Forward-only by idempotent
-  replay.
-- **No backfill machinery.** Not needed yet (single device, re-index from
-  source is cheap), but there's no pattern for "add a column to a populated
-  `chunks`."
+**→ see 07-non-atomic-document-chunk-write.md.**
 
-## 6. Access patterns and storage choice
+Integrity enforced by the DB: primary keys on all five tables; `not null` on the
+load-bearing columns (`embedding`, `content`, `app_id`); one real FK
+(`messages.conversation_id → conversations(id) on delete cascade`,
+`001:42`). That cascade is the one place the DB guarantees referential cleanup —
+delete a conversation and its messages go with it.
 
-The storage shape matches the access pattern, and the one place it bends is
-the most interesting modeling decision in the repo.
+Integrity *not* enforced by the DB, left to app code:
+- the document↔chunk relationship (FK dropped → **03-soft-link-no-fk.md**)
+- `content == meta.text` (no check → **02-text-stored-twice.md**)
+- `app_id` as a boundary (no RLS → **05-app-id-tenant-column.md**)
+- `embedding` dimension == 768: enforced in TypeScript (`pg-vector-store.ts:32-36`,
+  `assertDim` throws), **not** in the column type — `vector(768)` rejects wrong
+  dims at insert too, so here the DB and app agree. Good belt-and-suspenders.
 
-`chunks.document_id` is a `text` column with **the FK deliberately dropped**
-(`sql/001_agents_schema.sql:16-17` comment, `:27` the `drop constraint`). The
-reason is in the schema comment verbatim: *"the VectorStore contract upserts
-chunks with no notion of a documents row, so a hard FK would break drop-in
-parity."* aptkit's `VectorStore.upsert` (`src/pg-vector-store.ts:38`) takes
-`{id, vector, meta}` — it has never heard of `documents`. A hard FK would
-reject any chunk written before its parent document, breaking the contract.
-So the relational integrity was traded away to keep the store a drop-in
-implementation of an external interface. **This is a relational schema
-bending to fit a document-store-shaped contract** — exactly the seam this
-lens watches for. → full walk in `04-soft-link-no-fk.md`.
+Verdict: per-write atomicity is solid; the cross-write atomicity is the hole.
 
-Storage choice itself is right: relational Postgres for the trajectory and
-corpus metadata, `pgvector` colocated in the *same* instance for the
-embeddings (no separate vector DB to keep in sync). The jsonb `meta` columns
-absorb the schemaless aptkit payload without forcing a column per field —
-document-shaped data in a jsonb sidecar, relational data in real columns.
-That's the correct hybrid for this access pattern.
+## Lens 5 — migrations and evolution
 
-The dropped FK is no longer hypothetical: episodic memory (`@aptkit/memory`)
-writes `memory:<conv>:<n>` chunks with **no `documents` parent at all**
-(`src/session.ts:53,67`) into the shared store. A hard FK would have rejected
-every memory row. So the contract-driven FK drop (lens 6) is what makes the
-"memory shares the corpus store" design possible — the soft link is load-bearing
-for a live, second use of `chunks`, not just a theoretical concession.
+One migration file, `sql/001_agents_schema.sql`, run through a transactional
+runner (`migrate.ts`). The discipline that's present:
 
-## 7. Data-modeling red-flags audit (capstone)
+- **Idempotent.** Every statement is `create ... if not exists` or `create index
+  if not exists`. Re-running the file is safe.
+- **Forward-fixing in place.** `001:27` does
+  `alter table agents.chunks drop constraint if exists chunks_document_id_fkey` —
+  this file *also* repairs databases that were created before the FK was
+  dropped. The migration carries its own backfill of the schema change.
+- **Transactional.** `migrate.ts:11-19` wraps the whole script in `begin/commit`,
+  so a syntax error halfway leaves the schema untouched.
 
-| Red flag | This repo | Where |
-|---|---|---|
-| No discernible model (one blob/table) | **Clear** — 5 tables, 2 clusters | `:4-58` |
-| Same fact editable in two places | **PRESENT** — chunk text in `content` + `meta.text` | `pg-vector-store.ts:46,55,83` → `02` |
-| Frequent query with no index | **Clear** on hot path (HNSW + app_id both indexed); `profiles` lookup unindexed but cold | `:28-30`; `profile.ts:5` |
-| N+1 query in app code | **Clear** — batch-in-txn and one-search-per-eval, not fan-out | `pg-vector-store.ts:43`; `eval-cmd.ts:24` |
-| Multi-write with no transaction | **PRESENT** — doc row + chunk index span two connections | `runtime.ts:11-17` |
-| Invariant only in app code | **PRESENT** — "doc has chunks" guarded by neither FK nor txn | `runtime.ts`; FK dropped `:27` |
-| Destructive migration, no rollback | **Mitigated** — the FK drop is idempotent + back-compatible; no down-scripts though | `:27` |
-| Schema fighting access pattern | **Deliberate bend** — FK dropped for VectorStore parity | `:16-17,27` → `04` |
-| Tenant isolation enforced | **NOT enforced** — `app_id` column, no RLS, not token-derived | `:6,19`; `config.ts:12` → `05` |
+What's `not yet exercised`:
 
-### Not yet exercised (honest)
+```
+  capability            state        buildable target
+  ────────────────────  ───────────  ───────────────────────────────
+  schema versioning     absent       a schema_migrations(version) table;
+                                     today "which migrations ran?" is unknowable
+  down / rollback        absent       no reverse script; forward-only
+  online/zero-downtime   N/A          single device, no live traffic to
+                                     migrate around — add lock-aware DDL
+                                     only when concurrency arrives
+  data backfill          N/A so far   no column has needed populating from
+                                     old rows yet (the FK drop is the
+                                     closest thing, and it needs no data move)
+```
 
-- **Row-Level Security (RLS).** No `enable row level security`, no policies.
-  `app_id` is a filter the app *chooses* to apply
-  (`src/pg-vector-store.ts:75`), not a boundary the DB enforces. Any code
-  path that forgets `where app_id=$2` sees every tenant. → `05`.
-- **`app_id` token-derivation.** `app_id` comes from `AGENT_APP_ID` env /
-  config default `'laptop'` (`src/config.ts:12`), passed as a constructor arg
-  (`src/pg-vector-store.ts:27`). It is **not** derived from an authenticated
-  token. Multi-tenant in shape only.
-- **Partitioning / sharding** of `chunks` (per-tenant HNSW). No `partition by`.
-  Relevant only once `app_id` has more than one value.
-- **Soft deletes.** No `deleted_at` anywhere; deletes are hard. `messages`
-  cascade-delete with their conversation; nothing else deletes.
-- **Schema versioning beyond `001`.** No migration ledger, no `002`. One
-  idempotent file.
-- **Unique constraints beyond PKs.** No `unique` on, e.g.,
-  `(document_id, chunk_index)` — the deterministic id is the only thing
-  preventing duplicate chunks, and it works because the id *encodes*
-  `(docId, index)`. → `03`.
+The risk to name honestly: with one file and no versioning table, the schema's
+identity is "whatever `001` currently says," and re-running it is the only
+deploy primitive. That's correct *for one device with one schema file*. The
+second migration is where you'll want `schema_migrations` — adding it
+retroactively means assuming every existing DB is at `001`.
 
----
-Updated: 2026-06-24 — §1/§2/§6: `chunks` now holds a second live population,
-episodic-memory rows (`memory:<conv>:<n>`, `meta.kind='memory'`) written via
-`@aptkit/memory` with no `documents` parent — making the dropped FK (§6)
-load-bearing, and extending the `content`/`meta.text` duplication (§2) to those
-rows. Trajectory columns (`tool_calls`/`tool_results`/`model`/`tokens_used`,
-`created_at`) are now populated by the fixed trace sink → `06`.
+Verdict: clean and idempotent for its size; versioning is the first thing to add
+when `002` arrives.
+
+## Lens 6 — access patterns and storage choice
+
+Does Postgres earn its place? Yes, and for one specific reason: **vector and
+relational data are colocated in one instance.** The `search` query joins a
+cosine-distance ANN ordering with an `app_id` equality filter in a single SQL
+statement (`pg-vector-store.ts:70-77`). Split the vectors into a dedicated
+vector DB and that becomes a cross-store join you do in app code.
+
+```
+  access pattern            storage answer
+  ────────────────────────  ──────────────────────────────────
+  "k nearest chunks for     pgvector HNSW + btree, one query,
+   this query, this app"    one round trip
+  "full agent trajectory"   relational rows, one FK, jsonb for
+                            the schemaless tool payloads
+  "the user's profile"      single-row lookup by app_id
+```
+
+The storage *architecture* — Postgres here, SQLite as the canonical local store
+in the broader buffr design, single-device, direct `pg` connection, no Edge
+Functions — is a **system-design** question, not a schema-shape one. It lives in
+`study-system-design`, not here. What's in scope here: the *shape* matches the
+*access*, and it does.
+
+`not yet exercised`: local-first sync, multi-device reconciliation, and the
+SQLite↔Postgres mirror are all system-design concerns this schema doesn't
+encode yet (no `synced_at`, no conflict columns, no tombstones).
+
+Verdict: relational + vector colocated is the right call for this access shape.
+
+## Lens 7 — the red-flags capstone
+
+The consolidated checklist, marked against this repo. The deep version with
+fixes is **07-non-atomic-document-chunk-write.md** (the capstone pattern file);
+this is the scorecard.
+
+```
+  red flag                                          fired?  where
+  ────────────────────────────────────────────────  ──────  ──────────────────
+  everything in one JSON blob / one table            no     5 clean tables
+  same fact editable in two places                   YES    chunks text twice → 02
+  frequent query with no supporting index            no*    hot path covered;
+                                                            messages latent → L3
+  a loop issuing one query per row (N+1)             no     upsert is batched txn
+  multi-write operation with no transaction          YES    doc+chunk write → 07
+  invariant enforced only in hopeful app code        YES    doc↔chunk soft link → 03
+                                                            content==meta.text → 02
+  tenancy filter mistakable for a boundary           YES    app_id, no RLS → 05
+  destructive migration with no rollback             no     forward-fix, idempotent
+  column drop with no backfill plan                  no     FK drop needs no data move
+```
+
+Four flags fired. Every one is understood and, in the retrieval cluster,
+**deliberate** — the soft link and the text duplication are both costs paid to
+keep `chunks` a drop-in `VectorStore`. The `app_id`-no-RLS flag is a phase
+decision (single device), not an oversight. The non-atomic write is the one
+flag that's a genuine bug-in-waiting rather than a tradeoff.
+
+Verdict: a small, honest schema. The flags that fired are mostly priced-in
+parity costs; the one to actually fix is the non-atomic write.

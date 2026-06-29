@@ -1,80 +1,151 @@
 # Interview Defense — buffr-laptop
 
-This is the book you read before you defend `buffr-laptop` in an interview. Not the comprehension guides (those live in `.aipe/study-*/` and teach you the patterns one at a time, slowly, with no pressure). This is the performance layer. It teaches you to take what you understand and say it out loud, in ninety seconds, while someone who has interviewed two hundred engineers is looking for the seam in your answer.
+> The project-level defense book. Eight chapters, read in order at
+> least once. Coach voice throughout — I've sat on enough hiring
+> committees to tell you what lands in the room and what gets you a
+> "thanks, we'll be in touch." This book is about getting you through
+> the wide opener ("walk me through what you built") and the follow-ups
+> that come after it, days before you sit down for it.
 
-You built a real thing. A single-device laptop RAG agent: you index your own markdown corpus into Postgres + pgvector, then hold a live conversation with it through an Ink (React-in-terminal) chat CLI — it retrieves chunks and grounds an answer from a local Gemma model, remembers past exchanges across sessions, all on your machine, no cloud. The hard part of the interview is not whether the thing works. It's whether you understand what you shipped well enough to *own every choice in it* — including the ones an AI tool made for you. That last part is the 2026 reality, and this book trains you to meet it head-on rather than flinch.
+You built a self-hosted personal RAG agent. One process, one Postgres,
+one local model, on your own laptop. That's the whole shape, and the
+honesty of that shape is your strongest card — you are not going to
+pretend buffr is a distributed system, and you are not going to get
+caught pretending. What you *are* going to do is own every decision in
+it, name the cost you paid for each one, and volunteer the thing you'd
+reconsider before the interviewer has to dig for it.
 
-```
-  buffr-laptop — the whole system at a glance
-
-  ┌─ CLI layer (entrypoints) ─────────────────────────────────┐
-  │  npm run index      npm run chat       npm run eval        │
-  │  src/cli/index-cmd  src/cli/chat.tsx   src/cli/eval-cmd    │
-  │                     (Ink REPL, one     (precision@k)       │
-  │                      live conversation)                   │
-  └────────┬──────────────────┬─────────────────────┬─────────┘
-           │ index path       │ query path          │ measure
-           ▼                  ▼                     ▼
-  ┌─ Library: @rlynjb/aptkit-core@^0.4.1 (consumed, never edited) ─┐
-  │  RetrievalPipeline   RagQueryAgent (bounded ReAct loop)        │
-  │  search_knowledge_base tool   GemmaModelProvider (emulates     │
-  │  scorePrecisionAtK / scoreRecallAtK   tool-calling)           │
-  │  createConversationMemory (@aptkit/memory — episodic recall)   │
-  └────────┬──────────────────┬─────────────────────┬─────────────┘
-           │ embed + upsert    │ search + generate    │
-           ▼                   ▼                     │
-  ┌─ Models (Ollama, localhost:11434) ──────────────▼────────────┐
-  │  nomic-embed-text:v1.5  → vector(768)                         │
-  │  gemma2:9b              → generation (NO native tool-calling) │
-  └────────┬──────────────────────────────────────────────────────┘
-           │ vectors + relational, ONE instance
-           ▼
-  ┌─ Storage: Postgres + pgvector (db reindb, schema agents) ─────┐
-  │  documents   chunks(embedding vector(768), HNSW cosine)       │
-  │    └─ memory rows ride chunks, tagged meta.kind='memory'      │
-  │  conversations  messages(full 6-event trajectory)  profiles   │
-  │  app_id on every table · NO RLS this phase                    │
-  └───────────────────────────────────────────────────────────────┘
-```
-
-You'll return to this diagram. It's the master picture; every chapter zooms into one band of it.
-
-  ┃ "The interview isn't testing whether the app works.
-  ┃  It's testing whether you can own every line of it —
-  ┃  including the lines an AI wrote."
-
-## The book
-
-Eight chapters, in order. Each one targets a phase of the interview.
-
-| Ch | Title | The question it defends | Densest material for this repo |
-|----|-------|--------------------------|-------------------------------|
-| 01 | The pitch | "Tell me about a project you built." | Compression: 10s / 30s / 90s |
-| 02 | The architecture | "Walk me through the system." | Index path + query path, the live chat session, whiteboarded |
-| 03 | The choices | "Why this stack?" | pgvector, Gemma, local-first, the dropped FK, 768, Ink, memory |
-| 04 | The scale story | "What breaks first at 10x?" | Synchronous index, HNSW untuned, no pooling limits |
-| 05 | The failure story | "What happens when Ollama is down?" | No timeouts/retries, the hung-call freeze, best-effort memory |
-| 06 | The hard parts | "Hardest bug? Proudest? Weakest?" | The dimension door, the faithfulness gap, the trace-sink fix |
-| 07 | The counterfactuals | "What would you do differently?" | Faithfulness eval, atomic index, arg validation |
-| 08 | The AI question | "Did you use AI to build this?" | The three modes of decision ownership |
-
-## How to use it
-
-**First read — in order, one chapter per sitting.** The chapters build. Chapter 2's architecture is the spine everything else hangs on; Chapter 8's AI honesty is woven through all seven before it. Read front to back at least once.
-
-**Review — skim the visual treatments.** Every chapter has the same recurring motifs: the chapter-opening diagram, the "what they're really asking" boxes, the strong-vs-weak side-by-sides, the double-bordered "when you don't know" boxes, the follow-up decision trees, the pull quotes. Skim only those and you've got 70% of the book.
-
-**Night before — read only the one-page summaries.** The last section of each chapter is built for the twelve-hours-out re-read: core claim, the questions with one-line answers, the pull quotes, the one thing you'd change. Eight pages total. That's your final pass.
-
-## Where this fits with the rest of your prep
-
-This book is the *wide opener* — it defends the whole project. When an interviewer drills into one decision (provider abstraction, the composite chunk id, HNSW internals), the *deep dive* lives in the per-concept "Interview defense" blocks inside `.aipe/study-system-design/` and `.aipe/study-ai-engineering/`. Those defend one decision in depth; this defends the project as a whole. Pair them. The concept files prepare you for "tell me more about that specific thing"; this book prepares you for "tell me about the thing."
-
-  ┃ "Concept files for the deep dive. This book for
-  ┃  the wide opener. You need both."
-
-A note on honesty before you start. `buffr-laptop` consumes `@rlynjb/aptkit-core` as a library and never edits it. A lot of the cleverness — the agent loop, the tool-call emulation, the eval scorers, the conversation-memory engine — lives in that library, which an AI helped you assemble. The strong move is never to claim you wrote what you wired. It's to be exact about the seam: what you built (the Postgres persistence layer, the Ink chat CLI, the chat session, the pgvector adapter, the trace sink, the memory wiring), what you wired (the library), and what you'd change. That precision *is* the senior signal. The whole book trains it.
+This book pairs with the comprehension guides already in `.aipe/`. The
+study guides (`study-system-design/`, `study-ai-engineering/`,
+`study-security/`, `study-agent-architecture/`,
+`study-database-systems/`) prepare the *deep dive* — the moment an
+interviewer drills into HNSW internals or the dropped FK. This book
+prepares the *wide opener* — the first ten minutes where you set the
+frame. Use both. Study the concept files for depth; rehearse this book
+for performance.
 
 ---
 
-Updated: 2026-06-24 — reconciled the master diagram and chapter table to the current code: the sole interface is now `npm run chat` (Ink REPL, one live conversation) — `npm run ask` / `ask-cmd.ts` removed; library bumped to ^0.4.1; conversation memory added via `@aptkit/memory` (`createConversationMemory`, episodic recall riding the `chunks` table); trajectory capture upgraded to all six events.
+## The system at a glance — the master diagram
+
+This is the picture you re-anchor to every time the conversation drifts.
+It recurs across the chapters. Memorize its shape.
+
+```
+  buffr-laptop — the whole system, one frame
+
+  ┌─ TRUSTED: your laptop ────────────────────────────────────────────┐
+  │                                                                    │
+  │  ┌─ UI (Ink/React TUI) ─────┐   `npm run chat`                     │
+  │  │ src/cli/chat.tsx         │   one long-lived conversation        │
+  │  │  onSubmit(question)      │   held in-process                    │
+  │  └───────────┬──────────────┘                                      │
+  │              │ in-process call (no network, no auth hop)           │
+  │  ┌─ Session ─▼──────────────┐                                      │
+  │  │ src/session.ts ask()     │   warm pg pool, agent built once     │
+  │  └───────────┬──────────────┘                                      │
+  │              │                                                     │
+  │  ┌─ aptkit agent loop (library, never edited) ────────────────────┐│
+  │  │ RagQueryAgent.answer()   maxTurns 6, maxToolCalls 4            ││
+  │  │   1 tool: search_knowledge_base (read-only allowlist)         ││
+  │  │   Gemma decides: tool_call? → synthesize                      ││
+  │  └───────────┬───────────────────────────────────────────────────┘│
+  │              │ store.search / store.upsert / trace.emit            │
+  │  ┌─ buffr adapters ─────────▼─────────────────────────────────────┐│
+  │  │ PgVectorStore · SupabaseTraceSink · loadProfile               ││
+  │  └───────────┬───────────────────────────────────────────────────┘│
+  └──────────────┼─────────────────────────────────────────────────────┘
+                 │ DATABASE_URL (full-priv)   │ localhost HTTP
+        ┌────────▼─────────┐         ┌─────────▼──────────┐
+        │ Postgres reindb  │         │ Ollama (local)     │
+        │ schema `agents`  │         │ gemma2:9b (gen)    │
+        │ pgvector HNSW    │         │ nomic-embed v1.5   │
+        │ documents·chunks │         │   768-dim          │
+        │ conversations    │         └────────────────────┘
+        │ messages·profiles│
+        └──────────────────┘
+   chunks holds BOTH: documents AND memory (kind=memory) — one HNSW index
+```
+
+That diagram is the spine. Everything in this book hangs on it.
+
+---
+
+## The chapters
+
+```
+  the book — 8 chapters, build on each other
+
+  01 — the pitch            first 60 seconds: 10s / 30s / 90s
+  02 — the architecture     walk the diagram at a whiteboard in 90s
+  03 — the choices          defend every load-bearing tech choice
+  04 — the scale story      what breaks first at 10x / 100x
+  05 — the failure story    what the system does when things break
+  06 — the hard parts       hardest bug · proudest · least confident
+  07 — the counterfactuals  what you'd redo starting today
+  08 — the AI question      "did you use AI to build this?"
+```
+
+| Ch | Covers | The questions it arms you for |
+| --- | --- | --- |
+| 01 | The pitch | "Tell me about a project you built." |
+| 02 | The architecture | "Walk me through the system." "Where does X live?" |
+| 03 | The choices | "Why pgvector?" "Why local models?" "Why build this instead of using a tool?" "Why drop the FK?" |
+| 04 | The scale story | "What breaks at 10x?" "How would you scale this to many users?" |
+| 05 | The failure story | "What happens when Ollama is down?" "What if a write fails halfway?" |
+| 06 | The hard parts | "Hardest bug?" "What are you proudest of?" "What part are you least sure about?" |
+| 07 | The counterfactuals | "What would you do differently?" |
+| 08 | The AI question | "Did you use AI for this?" "Explain this section line by line." |
+
+---
+
+## How to read this book
+
+```
+  three passes, three depths
+
+  FIRST READ      one chapter per sitting, front to back, in order.
+  ───────────     the prose is where the mechanism gets built.
+
+  REVIEW          skim the chapter-opening diagrams, the side-by-sides,
+  ───────         and the pull quotes. ~70% of the content lives in the
+                  visual treatments.
+
+  NIGHT-BEFORE    read ONLY the one-page summary at the end of each
+  ────────────    chapter. eight pages, twelve hours out.
+```
+
+The visual treatments recur in every chapter so your eye learns where
+to look:
+
+- The **chapter-opening diagram** — the chapter's visual anchor.
+- The **"WHAT THEY'RE REALLY ASKING" callout** (single-line box) —
+  before every question, naming the probe under the surface form.
+- The **weak / strong side-by-side** — the contrast does the teaching.
+- The **"I don't know" recovery box** (double-line box) — the territory
+  where you'd get pushed past your depth, and exactly what to say.
+- The **follow-up decision tree** — where the conversation can branch.
+- The **pull quote** (┃ bar) — the lines you carry into the room.
+
+---
+
+## The one thing to internalize before chapter 1
+
+You are a senior frontend engineer — seven years, FedEx, Amazon,
+CoreWeave — building AI-native projects. That is the posture. Not a
+junior pretending to be senior. Not a distributed-systems generalist
+who'll fold the moment someone asks about multi-region replication.
+When the interview wanders into horizontal scale, Kafka, load
+balancing under sustained traffic — that's not your portfolio yet, and
+the strong move is to say so cleanly and pull the conversation back to
+what you *did* ship: RAG, pgvector, local-first, a clean library
+boundary, full-signal trajectory capture. The "I don't know" boxes in
+this book are pinned to exactly those gaps.
+
+```
+  ┃ Own every decision in the system and the cost you paid
+  ┃ for it. The honesty is the senior signal — not the
+  ┃ size of the system.
+```
+
+Start with chapter 1.

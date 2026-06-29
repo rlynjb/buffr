@@ -1,118 +1,126 @@
-# Software Design — buffr-laptop (overview)
+# 00 — Overview: the audit at a glance
 
-> Updated: 2026-06-24 — `ask-cmd.ts` deleted; chat wiring now lives in a new deep
-> module `src/session.ts` (`createChatSession`), driven by a new Ink/React UI
-> `src/cli/chat.tsx` (new deps: ink/react). Memory is now aptkit's
-> `createConversationMemory` with buffr's store injected. Trace sink handles all 6
-> event types. aptkit ^0.4.1. The three ranked fixes below are unchanged.
+The punch list. If you read one file, read this one.
 
-> Source framework: John Ousterhout, *A Philosophy of Software Design* (APOSD).
-> This guide applies its primitives — deep modules, information hiding,
-> complexity, layering, readability — to **this repo's real files**. Read the
-> book for the framework; read this for the findings about your code. Cross-link:
-> `read-aposd` (the framework), `study-system-design` (the altitude above this),
-> `study-testing` (the seam this design buys you).
+---
 
-## The through-line
+## The verdict, first
 
-APOSD has one enemy and one weapon. The enemy is **complexity** — the thing that
-makes a module hard to change without breaking something you didn't know was
-connected. The weapon is the **deep module**: a lot of behavior hidden behind a
-small interface, so callers learn a few names and inherit a lot of correctness.
+buffr-laptop is a **small, deliberately-deep codebase**. Eight source
+files in `src/`, none over ~95 lines, and the two that carry real weight —
+`PgVectorStore` and `createChatSession` — are genuinely deep: small
+interfaces over bodies that hide transactions, dimension guards, encoding,
+distance math, and a five-object lifecycle. That's the good news, and it's
+the dominant story. The design *works*.
 
-buffr is a small, young codebase (~12 source files) — and it is *unusually
-well-shaped for its size*. The reason is structural, not lucky: buffr consumes
-`@rlynjb/aptkit-core` as a library and implements three of aptkit's **contracts**
-(`VectorStore`, `CapabilityTraceSink`, `RetrievalPipeline` consumer). When you
-implement someone else's interface, the interface width is decided *for* you — you
-can't leak, because the contract won't let you. Most of buffr's design quality is
-downstream of that one decision. The newest module, `session.ts`
-(`createChatSession`), extends the same instinct: a two-method `ChatSession`
-interface (`ask`/`close`) hiding the whole warm-pool, single-conversation,
-RAG-plus-memory machine.
+The complexity that exists is not sprawl — it's **two specific leaks**, and
+one is dead weight you can delete today.
+
+---
+
+## Complexity profile — where the symptoms cluster
 
 ```
-  buffr-laptop — where design quality comes from
+  Where complexity lives in buffr-laptop
 
-  ┌─ aptkit-core (the library — never edited here) ──────────────┐
-  │  defines contracts:  VectorStore   CapabilityTraceSink       │
-  │                      RetrievalPipeline   RagQueryAgent        │
-  └───────────────────────────┬──────────────────────────────────┘
-                  buffr implements the contracts ▼  (narrow seam)
-  ┌─ buffr persistence layer ────────────────────────────────────┐
-  │  PgVectorStore      ← deepest module (★ best in repo)         │
-  │  SupabaseTraceSink  ← sync emit / async flush (all 6 events)  │
-  │  loadConfig         ← pure seam (testable)                    │
-  │  db / runtime / profile / migrate  ← thin SQL helpers         │
-  └───────────────────────────┬──────────────────────────────────┘
-                              ▼  orchestration
-  ┌─ session.ts (createChatSession) ─────────────────────────────┐
-  │  deep: builds pool/agent/memory/conversation; ask() / close() │
-  │  injects PgVectorStore UP into aptkit's createConversationMemory│
-  └───────────────────────────┬──────────────────────────────────┘
-                              ▼  imperative shell + UI
-  ┌─ cli/ (index · eval  ·  chat.tsx = Ink/React UI) ────────────┐
-  │  one-shots: env → build → run → drain pool                   │
-  │  chat.tsx: render loop, input, busy — calls session.ask/close│
-  └──────────────────────────────────────────────────────────────┘
-                              ▼
-  ┌─ Storage ────────────────────────────────────────────────────┐
-  │  Postgres + pgvector  (schema `agents`, db `reindb`)          │
-  └──────────────────────────────────────────────────────────────┘
+  ┌─ low complexity ────────────────────────────────────────┐
+  │  config.ts · db.ts · profile.ts · runtime.ts            │
+  │  pure or near-pure, one job each, easy to read          │
+  └──────────────────────────────────────────────────────────┘
+
+  ┌─ earned complexity (deep, pays its way) ────────────────┐
+  │  pg-vector-store.ts   ★ deepest module                  │
+  │  session.ts           ★ deep facade                     │
+  │  supabase-trace-sink.ts  (sync/async split)             │
+  └──────────────────────────────────────────────────────────┘
+
+  ┌─ unearned complexity (the two leaks) ───────────────────┐
+  │  LEAK 1: the schema knob nobody reads (config.ts:13     │
+  │          vs `agents.` hardcoded in 5 files)             │
+  │  LEAK 2: the meta magic-keys contract (docId/chunkIndex │
+  │          /text) known in upsert, search, AND aptkit     │
+  └──────────────────────────────────────────────────────────┘
 ```
 
-## Verdict, ranked
+---
 
-1. **`PgVectorStore` is the deepest module in the repo** and the one to study —
-   two public methods (`upsert`, `search`) hide transactions, dimension
-   validation, the JS→pgvector text-literal encoding, the cosine-distance→score
-   inversion, and the meta-shape rebuild that keeps citations working. Big
-   behavior, tiny surface. `src/pg-vector-store.ts`.
+## The three highest-cost hotspots
 
-2. **A clean imperative shell over a pure-ish core, now with a UI seam.**
-   `loadConfig` is pure (env in, config out — `src/config.ts:9`); the one-shot
-   `cli/*` commands and `session.ts` do the I/O, env-loading, and pool lifecycle.
-   The new `chat.tsx` adds a presentation seam on top — Ink/React render loop that
-   touches only `session.ask`/`session.close`, never a pool. Dirty work at the
-   edges, UI quarantined above orchestration.
+Ranked by cost-to-the-reader, worst first.
 
-3. **One real leak, and it's a dead knob.** `loadConfig` computes
-   `schema` from `AGENT_DB_SCHEMA` (`src/config.ts:13`), but every SQL string
-   hardcodes the literal `agents.` (six call sites). The schema name is known in
-   two places and the config knob is never read. Worst offender in the audit.
+### 1. The dead `schema` knob — information leakage + a false promise
 
-4. **The sync-emit / async-flush split in `SupabaseTraceSink` is a deliberate,
-   load-bearing design move** — aptkit's `emit()` is synchronous, the DB write is
-   not, so writes are queued as promises and drained once by `flush()`. Get it
-   wrong and you either block the agent loop or lose the trajectory.
+**Files:** `src/config.ts:13` (computed) vs `src/pg-vector-store.ts:48,73`,
+`src/runtime.ts:12`, `src/supabase-trace-sink.ts:6,28`, `src/profile.ts:6`
+(consumed as a hardcoded `agents.` literal).
 
-5. **Honest gap:** the codebase is too small to exercise most of APOSD's
-   *failure* lenses (error aggregation, special-case sprawl, deep layering). It
-   has 1-2 layers, not 5; errors are thrown and bubble. Named honestly in the
-   audit rather than padded with manufactured findings.
+`loadConfig` reads `AGENT_DB_SCHEMA` into `cfg.schema` — and **nothing ever
+reads `cfg.schema`**. Every SQL statement hardcodes `agents.` directly. The
+schema name is one decision known in six places; the config knob promises
+you can change it via env, and that promise is a lie — set `AGENT_DB_SCHEMA=foo`
+and every query still hits `agents.`. This is the clearest APOSD red flag in
+the repo: *the same knowledge edited in two places* (here, seven), plus
+*avoidable config exposed to callers* that does nothing. Cheapest fix in the
+repo: delete the field, or make it real. Full walk in `audit.md` §3 and §5.
 
-## Reading order
+### 2. The `meta` magic-keys contract — an undocumented interface
+
+**File:** `src/pg-vector-store.ts:44-46` (write side) and `:83` (read side).
+
+`PgVectorStore` reaches into `c.meta.docId`, `c.meta.chunkIndex`, and
+`c.meta.text` on the way in, and reconstructs exactly those three keys on the
+way out (`:83`). Three string keys are a load-bearing contract between buffr,
+aptkit's retrieval pipeline, and the `search_knowledge_base` tool's
+citations — and it lives only in `typeof` checks, with no type and no
+interface comment naming it. Get a key wrong and retrieval silently returns
+empty `text`. This is the deepest part of the deepest module, and its
+contract is invisible. Walk in `01-adapter-behind-a-contract.md`.
+
+### 3. `db.ts` — the one genuinely shallow module
+
+**File:** `src/db.ts:4-6`.
+
+`createPool` is a one-line pass-through over `new pg.Pool({ connectionString })`.
+The interface (a function taking a URL) is as complex as the body. By the
+book this is a shallow module — but it's a **defensible** one: it's the seam
+where every CLI gets its pool, so a future swap (read replica, pool tuning,
+pg config) lands in one place. Named here for honesty, not as a fix-now.
+Walk in `audit.md` §2.
+
+---
+
+## One-line verdict per primitive
 
 ```
-  00-overview.md   ← you are here
-  audit.md         ← the 8-lens APOSD walk (start here for the full read)
-  01-adapter-behind-a-contract.md   ← PgVectorStore ↔ VectorStore (the deep module)
-  02-pure-core-impure-shell.md      ← loadConfig vs the cli/* edges
-  03-sync-interface-async-work.md   ← trace sink emit() / flush()
-  04-dependency-as-a-boundary.md    ← aptkit imported, never edited
+  primitive                  verdict
+  ─────────────────────────  ───────────────────────────────────────────
+  deep vs shallow modules    mostly DEEP; PgVectorStore is the best,
+                             db.ts the one (defensible) shallow one
+  information hiding         ONE real leak: the schema knob (config.ts:13
+                             vs `agents.` in 5 files) + the meta contract
+  layering                   CLEAN: adapter-behind-contract, pure core /
+                             impure shells; no pass-through layers
+  pull complexity downward   the dimension knob is correctly pulled down
+                             (derived from embedder); the schema knob is
+                             the counterexample — pushed up, does nothing
+  errors & special cases     well-handled: txn rollback localized;
+                             best-effort memory swallow is deliberate
+  readability                strong; comments carry the WHY (the dropped
+                             FK, the jsonb stringify); names are precise
+  red flags                  2 firing (schema leak, undocumented meta),
+                             1 N/A-but-noted (shallow db.ts)
 ```
 
-## Top 3 fixes (ranked across the whole repo)
+---
 
-1. **Kill the dead `schema` knob or wire it through.** Either delete
-   `schema` from `Config` (`src/config.ts:13`) since nothing reads it, or thread
-   `cfg.schema` into the SQL and stop hardcoding `agents.` in six files. Pick one;
-   today the config lies. (See audit Lens 3 + Lens 5.)
-2. **Give `PgVectorStore.upsert` a one-line interface comment naming the meta
-   contract** it reads (`docId`, `chunkIndex`, `text`) — those keys are an
-   undocumented coupling between the store and aptkit's chunker
-   (`src/pg-vector-store.ts:44-46`). (See audit Lens 7.)
-3. **Decide whether `search` should clamp/validate `k`.** Right now `k` passes
-   straight to SQL `limit` (`src/pg-vector-store.ts:76`); a caller-supplied
-   negative or zero is the module's to handle, not the caller's. (See audit
-   Lens 5.)
+## The single highest-leverage fix
+
+**Delete or wire up `cfg.schema`.** It's the most complexity removed for the
+least work: either drop the field from `config.ts` (and the `agents.`
+hardcoding becomes honest — the schema simply *is* fixed), or thread it into
+the five SQL sites (and the env knob becomes real). Today it's the worst of
+both — a knob that looks configurable and isn't. One deletion buys you an
+honest interface.
+
+→ Full lens walk: `audit.md`.
+→ The deep patterns: `01`–`05`.

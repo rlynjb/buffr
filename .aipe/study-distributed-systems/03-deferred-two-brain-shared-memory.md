@@ -1,388 +1,195 @@
-# Deferred: Two-Brain Shared Memory
+# Deferred: Two-Brain Shared Memory — **DESIGN, NOT CODE**
 
-**Multi-writer shared state / convergence** · Industry standard · **DESIGN-NOT-CODE**
+> **Read this banner first.** Nothing in this file exists in the repo. Zero lines of code implement it. It describes a *future* phase captured in `docs/superpowers/specs/2026-06-19-laptop-supabase-graduation-design.md` and `agent-layer-plan.md`, both explicitly marked **deferred**. Every diagram below is the **planned** shape, labeled as such. This file exists because the deferred phase is the *only* genuine distributed-systems problem in this project's future, and naming the problem now — before it's built — is the honest thing to do. Where today's code touches the future plan, that's flagged inline.
 
-> ⚠️ **This file describes a problem that is NOT built.** Nothing in `src/`
-> implements any of it. It exists in `agent-layer-plan.md` and the graduation
-> design spec as a *future* phase, explicitly deferred. It earns a file because
-> it is the one place where buffr's trajectory becomes a genuine
-> distributed-systems problem — and naming the problem now is how you reason
-> about the single-device code that *will* have to grow into it. Every
-> mechanism below is design, not code. There are no `file:line` anchors to
-> implementation because there is no implementation — only to the design docs.
-
----
+**Industry names:** multi-writer shared store · centralized agent layer · tenant isolation via token claims · cross-device memory sync. **Type:** Industry standard (the *plan*; not yet a project pattern).
 
 ## Zoom out, then zoom in
 
-Today buffr is one writer. The deferred plan adds a second brain — a phone —
-and both write the *same* Supabase `agents` schema through an HTTP gateway. The
-moment that second writer exists, every `not yet exercised` lens in `audit.md`
-turns on at once.
+Today `buffr-laptop` has one writer. The deferred design adds a **second brain** — a phone (React Native, on-device model) — that writes the *same* `agents.*` tables through the *same* Supabase, behind an HTTP gateway. The instant that second writer lands, this stops being a single-device program and becomes a real distributed system: shared mutable state, two clocks, isolation-by-token, ordering under partition. Here's where the future seam sits relative to today.
 
 ```
-  Zoom out — the deferred two-brain topology (NOT BUILT)
+  Zoom out — the DEFERRED two-brain shape (NOT BUILT)
 
-  ┌─ Laptop brain ──────┐         ┌─ Phone brain ───────┐
-  │ buffr (built today) │         │ RN + on-device model │
-  │ local cache?        │         │ local cache?         │
-  └──────────┬──────────┘         └──────────┬──────────┘
-             │ HTTPS, JWT(app_id)            │ HTTPS, JWT(app_id)
-             ▼                               ▼
-  ┌─ Edge Functions (the agent API) ─ ★ DEFERRED ★ ───────────┐
-  │  /search /documents /conversations/:id/messages           │
-  └────────────────────────────┬──────────────────────────────┘
-                              writes │ RLS by app_id
-  ┌─ Supabase Postgres ────────▼──────────────────────────────┐
-  │  agents schema — ONE shared memory, TWO writers           │ ← the problem
-  └───────────────────────────────────────────────────────────┘
+  ┌─ Client layer ───────────────────────────────────────────────┐
+  │  laptop brain (EXISTS today)      phone brain (DEFERRED)       │
+  │  app_id='laptop'                  app_id='phone' (planned)     │
+  └─────────┬───────────────────────────────────┬─────────────────┘
+            │ today: direct pg                    │ planned: HTTPS + JWT
+            │                                     │
+            │            ┌─ ★ DEFERRED gateway ★ ─┘  ← THIS FILE (design only)
+            │            │  Edge Functions, app_id from JWT claim, RLS
+            ▼            ▼
+  ┌─ Storage layer (shared, multi-writer in the plan) ───────────┐
+  │  reindb · agents schema                                       │
+  │  documents · chunks · conversations · messages · profiles     │
+  │  TWO writers in Phase B → consistency, ordering, isolation    │
+  └───────────────────────────────────────────────────────────────┘
 ```
 
-Zoom in: the pattern is **multi-writer shared state with convergence and
-isolation.** Two independent clients, each possibly with a local cache,
-read and write one authoritative store. The questions it forces — and that the
-single-device code never has to answer — are: *whose write wins when they
-conflict? does a write on the laptop become visible to the phone, and when? can
-one brain read its own writes? and what stops the phone from reading the
-laptop's private memory?* None of these have answers in `src/` because there's
-one writer and one reader and they're the same device.
+Zoom in: the pattern is a **centralized agent layer with multiple tenant writers, isolated by a token claim, coordinating over one shared Postgres.** The distributed-systems question it raises — the one today's repo never has to answer — is *"when two brains write and read the same store, what stays correct under skew, staleness, and partition?"* The plan answers some of it (isolation via JWT-derived `app_id` + RLS) and explicitly leaves the rest open (cross-device ordering, conflict on shared memory).
 
----
+## The structure pass
 
-## Structure pass
+**Layers (planned).** Three: two client brains (laptop today, phone deferred), an HTTP gateway (Edge Functions, deferred), one shared Postgres. The gateway is the new joint that doesn't exist yet.
 
-**Layers.** Three in the deferred design: the **brains** (laptop, phone — each a
-client), the **gateway** (Edge Functions enforcing auth/RLS), and the **shared
-store** (one Postgres). The gateway is the new seam that doesn't exist today.
-
-**Axis — trace *state ownership / visibility* across the brains.** Hold the
-question: *"when brain A writes, when and how does brain B see it?"*
+**The axis: trust / isolation — what can each writer see or tamper with?** This is the axis the plan is most explicit about, so trace it.
 
 ```
-  One question across the topology: "A writes — when does B see it?"
+  One axis — "what can each writer touch?" — across the DEFERRED gateway
 
-  TODAY (built):        one brain → one store → reads its own writes instantly
-                        no B exists. visibility question is VACUOUS.
-
-  DEFERRED:
-  ┌─ Laptop writes ─────┐
-  │ commit to Postgres   │  → durable immediately
-  └──────────┬───────────┘
-             │ the visibility answer flips at each layer below
-  ┌─ Phone's local cache ▼┐
-  │ stale until it re-reads │ → eventually consistent (cache convergence)
-  └──────────┬─────────────┘
-  ┌─ Phone's next /search ─▼┐
-  │ reads shared store      │ → sees laptop's write (read-through)
-  └─────────────────────────┘
+  ┌─ today (1 writer) ─┐                  ┌─ planned (N writers) ─────────┐
+  │ laptop writes      │   gateway seam   │ each app: JWT carries app_id  │
+  │ app_id='laptop'    │ ═════╪═════════► │ RLS: USING (app_id =          │
+  │ direct pg, no RLS  │  (trust flips)   │   jwt.claim.app_id)           │
+  │ isolation: NONE    │                  │ app_id NEVER from request body│
+  │ (1 tenant, fine)   │                  │ isolation: enforced by DB     │
+  └────────────────────┘                  └───────────────────────────────┘
 ```
 
-**Seam — the gateway is load-bearing for *trust and isolation*; the local
-caches are load-bearing for *consistency*.** Today neither seam exists. In the
-deferred design, the gateway is where `app_id` stops being a convention and
-becomes an enforced RLS boundary derived from the JWT (the design spec's open
-question calls this "a hard prerequisite before a second app writes"). The local
-caches are where staleness and convergence enter — a problem that simply has no
-surface in the single-device code.
+**The gateway is the load-bearing future seam because trust flips across it.** Today there's no trust boundary — one writer, `app_id` hardcoded `'laptop'`, no RLS (the design says so outright: "No RLS this phase"). In the plan, the gateway is where `app_id` stops being a trusted constant and becomes a *claim derived from a token*, with RLS as defense-in-depth. That flip — from "trusted single writer" to "untrusted multi-tenant, isolation enforced by the database" — is the entire reason the deferred phase is hard. The open question the design flags: until app #2 writes, "that isolation is by convention only" (`...graduation-design.md`, Open questions).
 
----
-
-## How it works
+## How it works (the PLANNED mechanism)
 
 ### Move 1 — the mental model
 
-You know optimistic UI: the client updates its local view immediately, then
-reconciles with the server, and you have to decide what happens if the server
-disagrees. Two brains over one store is that, doubled and symmetric — *both*
-sides are clients with local views of one authoritative state, and now the
-conflict can be between two clients, not just client-vs-server.
+You know the shape from any multi-tenant SaaS backend: many clients, one database, and the thing standing between them is "which rows are *yours*." Today buffr skips that entirely because there's one tenant. The plan reintroduces it the standard way — a token per client carrying a tenant id, and a row-level rule that filters every query to that id. The new distributed wrinkle on top: the two tenants here aren't just isolated, they may want to **share** memory (laptop learns something, phone should recall it), which means reads must converge across writers.
 
 ```
-  Pattern — two writers, one authoritative store, convergence
+  The PLANNED pattern — multi-writer, isolated, partly-shared
 
-         brain A ──write──┐         ┌──write── brain B
-                          ▼         ▼
-                   ┌─────────────────────┐
-                   │  shared store (truth)│  ← serializes writes
-                   └──────────┬──────────┘
-              read-through    │   read-through
-                  ▲           │           ▲
-         A's cache (may be stale) ── B's cache (may be stale)
-                  └──── converge on next read ────┘
+   laptop ──┐  JWT{app_id:laptop}    ┌── RLS filters to app_id
+            ▼                        ▼
+        ┌─ gateway ─┐  ──►  ┌─ agents.* ─┐
+            ▲                        ▲
+   phone ──┘  JWT{app_id:phone}     └── shared memory: cross-app read = explicit policy
+            (DEFERRED)                   (default in plan: NO cross-app, strict isolation)
 ```
 
-The kernel: **one authoritative store that serializes writes + per-client caches
-that converge on read + a conflict policy for concurrent writes to the same
-row.** Drop the authoritative store and you have two divergent truths with no
-referee. Drop the conflict policy and concurrent writes silently clobber. Drop
-read-through convergence and the caches drift forever.
+Name the load-bearing parts by what breaks without each (in the *plan*):
+- **JWT-derived `app_id`** — without it, a client could write another tenant's rows by lying in the body. The plan's rule: "`app_id` is **always** derived from the token, never the request body."
+- **RLS on every `agents.*` table** — without it, isolation is convention only; one bug leaks tenants.
+- **A cross-device ordering key that isn't wall-clock** — without it, the two brains' writes to a shared conversation interleave wrong under clock skew (the gap inherited from `02`).
 
-### Move 2 — the walkthrough (what the design implies, not what exists)
+### Move 2 — how today's code already half-prepares for this
 
-**The shared store serializes writes — so there's a single truth.** Bridge from
-the single Postgres buffr already uses: keep *one* database as the authority and
-the hard part (two divergent copies) never arises, because both brains commit to
-the same rows. What the design concretely says: both phone and laptop POST to
-the same Edge Functions writing the same `agents.*` tables (`agent-layer-plan.md`
-architecture diagram). Where it breaks: this only holds while there's *one*
-store. The instant a brain caches writes locally and goes offline, you've
-reintroduced two truths and need sync/merge — which is why the design keeps the
-store central and defers any offline-write story.
+The honest, repo-grounded part: **the current code is built to make this future cheap, and you can see the seams already cut.** Three concrete touchpoints where today's single-device code is shaped by the deferred multi-writer plan:
 
-```
-  Layers-and-hops — a write from each brain (DEFERRED design)
+**1. `app_id` exists on every write, hardcoded to one value.** `startConversation` and `persistMessage` already thread `appId` through (`src/supabase-trace-sink.ts:4`, and `session.ts:55` passes `cfg.appId`):
 
-  ┌─ Laptop ─┐ POST /messages  ┌─ Edge Fn ─┐ insert  ┌─ Postgres ─┐
-  │ brain    │ ───────────────► │ verify JWT │ ──────► │ agents.*   │
-  └──────────┘                  │ set app_id │         │ (RLS)      │
-  ┌─ Phone ──┐ POST /messages  │ from token │ ──────► │            │
-  │ brain    │ ───────────────► └────────────┘         └────────────┘
-  └──────────┘  app_id NEVER from request body — always from the JWT claim
+```ts
+// src/supabase-trace-sink.ts:4 — appId already a parameter, today always 'laptop'
+export async function startConversation(pool, appId, agentName = 'rag-query-agent') {
+  await pool.query(
+    'insert into agents.conversations (app_id, agent_name) values ($1, $2) returning id',
+    [appId, agentName]);   // ← app_id is data today; becomes a JWT claim in the plan
+}
 ```
 
-**Isolation moves from convention to enforcement.** Today `app_id` defaults to
-`'laptop'` and is a *filter* the trusted single client passes
-(`pg-vector-store.ts:74` does `where app_id = $2`). The design is explicit that
-this is "isolation by convention only until app #2," and that the fix is RLS:
-`USING (app_id = current_setting('request.jwt.claim.app_id'))`, with `app_id`
-*always* derived from the token. What concretely changes: a buggy or hostile
-phone client can no longer read laptop rows by passing the wrong `app_id`,
-because the database itself scopes every query to the JWT's claim. Where it
-breaks if skipped: with RLS deferred and `app_id` trusted from the client, a
-second writer is a confused-deputy hole — the design names this as a hard
-prerequisite, not an optimization.
+The column is populated now so adding a second app "needs no migration" (`...graduation-design.md`). What's *missing* for the distributed version: `app_id` here comes from config (`cfg.appId`), trusted. In Phase B it must come from a verified token. Today's `appId` parameter is the seam where that swap happens — the shape is right, the trust source is not yet.
 
-**Consistency becomes a real question — read-your-writes and staleness.** Today
-it's vacuous: one device reads its own writes from the one store immediately.
-With two brains plus local caches, you have to ask whether a brain reads its own
-writes (yes, if it read-throughs to the store; no, if it serves from a stale
-local cache) and how stale the *other* brain's view is. The design's answer is
-to keep reads going through the store (`/search` hits Postgres), which gives
-read-your-writes per brain and bounded staleness for the peer — at the cost of a
-network round-trip per read.
+**2. The dropped FK that makes shared memory possible.** `agents.chunks.document_id` has **no foreign key** (`context.md`, "As-built deviations"). That was done for VectorStore drop-in parity — but it's also exactly what lets conversation memory ride the `chunks` table with no `documents` row (`session.ts:53` comment: "memory chunks live with no documents row, which the dropped FK allows"). In the two-brain plan, *shared* memory across devices rides this same mechanism. The decision that looked like a local convenience is load-bearing for the future shared-memory store.
 
-### Move 2.5 — current state vs future state (the whole point of this file)
-
-This *is* the comparison. The takeaway is how little of the built code has to
-change, because the contracts were chosen to absorb it.
+**3. `created_at` from emit timestamp — the single-clock assumption, written down.** Covered in depth in `02-trace-sink-write-buffering.md`. Restated here because it's *the* distributed correctness gap this phase activates: today one clock makes `created_at`-ordering sound; the phone brain is the second clock that breaks it.
 
 ```
-  Comparison — single-device (BUILT) vs two-brain (DEFERRED)
+  Layers-and-hops — TODAY vs the PLANNED two-writer flow
 
-  BUILT (src/ today)                  DEFERRED (design only)
-  ┌──────────────────────────┐        ┌──────────────────────────────┐
-  │ 1 writer (app_id=laptop)  │        │ 2+ writers (laptop, phone)    │
-  │ direct pg.Pool            │        │ HTTPS → Edge Functions        │
-  │ app_id = trusted filter   │   →    │ app_id = RLS from JWT claim   │
-  │ read-your-writes (trivial)│        │ caches + convergence + staleness│
-  │ no conflict policy needed │        │ concurrent-write conflict policy│
-  │ order = 1 client's clock  │        │ 2 clocks skew → order breaks   │
-  │ (fixed: event.timestamp)  │        │ (need logical clock / LWW)     │
-  └──────────────────────────┘        └──────────────────────────────┘
-  what DOESN'T change: the VectorStore contract. PgVectorStore swaps its
-  transport (pg → HTTP) without the agent noticing. The schema's app_id /
-  user_id / embedding_model columns already exist for exactly this.
+  TODAY (built):                          PLANNED (deferred, NOT built):
+  ┌─ laptop ─┐                            ┌─ laptop ─┐   ┌─ phone ─┐
+  │ cfg.appId│                            │ JWT      │   │ JWT     │
+  └────┬─────┘                            └────┬─────┘   └────┬────┘
+       │ pg.Pool (trusted)                     │ HTTPS       │ HTTPS
+       ▼                                       ▼             ▼
+  ┌─ agents.* ┐                           ┌─ gateway (RLS, app_id from JWT) ┐
+  │ 1 writer  │                           └──────────────┬──────────────────┘
+  └───────────┘                                          ▼
+                                                  ┌─ agents.* (2 writers) ┐
+                                                  │ shared, 2 clocks      │
+                                                  └───────────────────────┘
 ```
 
-The migration cost is concentrated in two places: adding RLS + token-derived
-`app_id` (a security/isolation change), and deciding a conflict policy if the
-same row can be written from two brains. The agent loop, the retrieval pipeline,
-and the `VectorStore` interface are untouched — that's the deliberate payoff of
-the forward-compat schema and the contract-first design.
+### Move 2.5 — current state vs future state
+
+This whole file *is* a current-vs-future treatment, so here's the consolidated ledger of what changes and — more usefully — what doesn't.
+
+```
+  Phase A (BUILT, today)          Phase B (DEFERRED, this file)        Has to change?
+  ──────────────────────          ─────────────────────────────        ──────────────
+  1 writer (app_id='laptop')      N writers (laptop, phone, ...)        yes — add writers
+  app_id from cfg (trusted)       app_id from JWT claim                 yes — trust source
+  no RLS                          RLS on every agents.* table            yes — add policies
+  direct pg.Pool                  HTTP gateway (Edge Functions)          yes — new layer
+  created_at = wall clock         logical/server sequence for ordering   yes — ordering key
+  ── what stays ──
+  agents schema + columns          same schema (app_id/user_id ready)    NO
+  PgVectorStore / VectorStore      same contract                         NO
+  trajectory capture (sink)        same sink, same events                NO
+  dropped-FK shared-memory store   same mechanism, now cross-device      NO
+```
+
+The payoff is the right-hand column: the **schema, the store contract, the capture discipline, and the shared-memory mechanism all survive untouched.** The design built them forward-compatible on purpose ("forward-compat columns, no RLS"). What genuinely has to be built new is the gateway, the RLS, the token-derived `app_id`, and a skew-proof ordering key. That's the real distributed-systems work, and it's all still open.
 
 ### Move 3 — the principle
 
-The single-writer code you have today is the *degenerate case* of the
-multi-writer problem — every distributed-consistency question has a trivial
-answer because there's exactly one of everything. That's not a weakness; it's
-the right place to stop until a second writer actually exists. The discipline
-worth carrying: the project chose its seams (the `VectorStore` contract, the
-`app_id`/`user_id` columns, one central store) so that adding the hard part
-later is a *substitution at known boundaries*, not a rewrite. The principle is
-**defer the distributed-systems complexity, but pick your contracts so the
-deferral is cheap to reverse** — which is exactly what the design did.
-
----
+The cheapest time to make a system distribute-able is *before* it distributes — by writing the tenant key, the store contract, and the capture discipline forward-compatible while there's still one writer to keep it simple. The principle: **a single-device system that names its future distribution seams (the `app_id` column, the trust-source swap, the clock assumption) pays almost nothing now and avoids a rewrite later — but only if it's honest that those seams are unguarded today.** The danger is the opposite: a single-writer system that *pretends* its `app_id` column is isolation. It isn't, until RLS and JWT-derived claims exist. This file's job is to keep that distinction sharp.
 
 ## Primary diagram
 
-The complete deferred picture, with the parts that don't exist clearly marked.
+The deferred two-brain system, full planned shape, with today's reality marked.
 
 ```
-  Two-brain shared memory — the complete DEFERRED design (NOT BUILT)
+  Two-brain shared memory — DEFERRED design (full recap)
 
-  ┌─ Laptop brain (buffr, BUILT) ─┐   ┌─ Phone brain (NOT BUILT) ─────┐
-  │ RagQueryAgent · PgVectorStore │   │ RN · on-device model          │
-  │ [ local cache? — undecided ]  │   │ [ local cache? — undecided ]  │
-  └───────────────┬───────────────┘   └───────────────┬───────────────┘
-                  │ HTTPS JWT(app_id)                  │ HTTPS JWT(app_id)
-  ┌─ Edge Functions (DEFERRED) ───▼────────────────────▼──────────────┐
-  │  enforce RLS · app_id ALWAYS from token, never request body       │
-  └────────────────────────────┬──────────────────────────────────────┘
-                  serialized    │   writes
-  ┌─ Supabase Postgres (BUILT today, single-writer) ──▼───────────────┐
-  │  agents schema — the ONE authoritative shared memory              │
-  │  needs: RLS policies · a same-row conflict policy · cross-device  │
-  │         message ordering (the seq fix from file 02, now critical) │
+  ┌─ Client layer ───────────────────────────────────────────────────┐
+  │  laptop brain (BUILT)            phone brain (DEFERRED, RN)        │
+  │  app_id from cfg                 app_id from JWT claim             │
+  └────────┬──────────────────────────────────┬──────────────────────┘
+           │ today: direct pg                  │ planned: HTTPS + JWT
+           │                                   ▼
+           │                  ┌─ Gateway layer (DEFERRED) ────────────┐
+           │                  │ Edge Functions: /search /documents    │
+           │                  │ /conversations /messages              │
+           │                  │ app_id ALWAYS from token, never body  │
+           │                  └──────────────────┬────────────────────┘
+           ▼                                     ▼
+  ┌─ Storage layer (shared) ─────────────────────────────────────────┐
+  │  reindb · agents schema (pgvector + HNSW)                         │
+  │  • app_id column on every table (BUILT, 1 value today)           │
+  │  • RLS policies (DEFERRED — "no RLS this phase")                 │
+  │  • dropped chunks.document_id FK → shared memory store (BUILT)   │
+  │  • created_at ordering: 1 clock today → needs logical clock w/ 2 │
   └───────────────────────────────────────────────────────────────────┘
 ```
 
----
-
-## Implementation in codebase
-
-**Use cases.** There are none in `src/` — that is the finding. The *design*
-use case (from `agent-layer-plan.md` and the graduation spec): a phone captures
-a conversation on the go, the laptop indexes a corpus at the desk, and both want
-one shared memory so the agent's knowledge and trajectory are continuous across
-devices. The plan's portfolio thesis is "capture every conversation as a
-trajectory now so fine-tuning is answerable later" — which only pays off if both
-brains write the same `agents.messages`.
-
-**The seam that makes the deferral cheap — `src/pg-vector-store.ts` (lines
-19-30).**
-
-```
-  export class PgVectorStore implements VectorStore {   ← aptkit's contract
-    readonly dimension: number;
-    constructor(opts: PgVectorStoreOptions) {
-      this.appId = opts.appId ?? 'laptop';              ← the future tenant key,
-      ...                                                  today a default filter
-    }
-       │
-       └─ Because the agent depends on the VectorStore INTERFACE, not on pg,
-          the two-brain phase swaps THIS class's transport (pg → HTTP gateway)
-          with zero agent changes. The deferral is cheap precisely here.
-```
-
-**The isolation-by-convention that the design flags as a prerequisite —
-`src/pg-vector-store.ts` (lines 67-78).**
-
-```
-  where app_id = $2          ← single trusted client passes its own app_id.
-                                Fine for one writer; a confused-deputy hole
-                                the moment a second, untrusted client writes.
-       │
-       └─ The design's open question: "isolation is by convention only until
-          app #2. Adding RLS + always-derive-app_id-from-token is a hard
-          prerequisite before a second app writes." (graduation spec).
-          NOT a line to change now — a line to remember when the phone arrives.
-```
-
-**The forward-compat columns that pre-pay the migration — `sql/001_agents_schema.sql`.**
-
-```
-  app_id text not null default 'laptop',   (every table)   ← tenant key, ready
-  user_id text,                            (conversations) ← per-user, ready
-  embedding_model text not null default ...(chunks)        ← embedder swap door
-       │
-       └─ These columns do nothing useful for a single writer. They exist so
-          the two-brain phase needs NO schema migration to start scoping by
-          tenant/user — "cheap now, painful to retrofit" (design decision table).
-```
-
----
-
 ## Elaborate
 
-Multi-writer shared state is the foundational distributed-systems problem —
-it's what CRDTs, vector clocks, quorum systems, and last-writer-wins policies
-all exist to answer. The design here sidesteps almost all of it with one move:
-**keep a single authoritative store and route every write through it**, so the
-store serializes writes and there's never two divergent truths to merge. That's
-the cheapest correct answer, and it holds as long as no brain writes offline. The
-day an offline-capable phone caches writes locally is the day this stops being a
-"route through one store" problem and becomes a real sync/merge problem — and
-the design explicitly defers offline writes to avoid exactly that. Read the
-graduation spec's "Out of scope" and "Open questions" sections: every hard part
-is named and pushed out, which is the correct way to defer.
+The centralized-agent-layer idea is lifted, explicitly, from Hermes Agent's trajectory-capture discipline minus its platform machinery (`agent-layer-plan.md`: "borrowing Hermes Agent's trajectory-capture discipline but none of its platform"). The systems-design substance — centralize the *agent layer*, not the *data*; existing per-app schemas stay put; apps consume over HTTP only — is `study-system-design`'s to teach (`study-system-design/07-deferred-body.md` walks the deferral decision). This file's narrow job is the **distributed-correctness** slice: what breaks when the second writer arrives.
 
-What to read next: `audit.md` — Lenses 4, 5, 7 all say `not yet exercised` and
-point here as the phase that activates them. `01-app-to-postgres-boundary.md`
-Move 2.5 shows the same direct-pg → HTTP-gateway transition from the boundary's
-side. `.aipe/study-system-design/` covers the local-first / cloud-mirror
-architecture decisions in depth.
+The two open questions the design itself flags are both distributed-systems questions: (1) the **RLS-later checkpoint** — "isolation is by convention only until app #2," and adding RLS + always-derive-`app_id`-from-token is "a hard prerequisite before a second app writes"; (2) cross-app retrieval defaulting to strict isolation, with sharing as "an explicit policy decision." Both are correctly deferred — building them now would be infrastructure for tenants that don't exist. But both are one-way doors, which is why the columns and the contract were laid down forward-compatible.
 
----
+The clock question (`02`'s Phase B) is the one the design *doesn't* explicitly flag and this guide adds: cross-device `created_at` ordering needs a logical clock. Flagging it now, while it's free, is exactly the move this whole project is built around.
 
 ## Interview defense
 
-**Q: "buffr is single-device. Why does a distributed-systems study even mention
-two brains?"**
+**Q: "Today this is one device. What actually changes when you add the phone brain — what's the hard part?"**
+
+> Three things flip, and one trap to avoid. The flips: `app_id` goes from a trusted config value to a JWT-derived claim; you add RLS on every `agents.*` table (there's none today, by design); and you front it with an HTTP gateway instead of direct `pg`. The trap: the trajectory ordering. Today `created_at` comes from `event.timestamp` on one clock, so replay order is sound. With a second writer you have two clocks — wall-clock ordering silently interleaves wrong on skew. So the hard part isn't the gateway plumbing, it's that I now need a logical clock or a server-assigned sequence for ordering, not `now()`.
 
 ```
-  single-writer is the degenerate case of multi-writer
-
-  TODAY:  [one brain] → [store]      every consistency Q has a trivial answer
-  LATER:  [A] [B] → [store]          the same questions get real answers
+  flips:  app_id cfg→JWT  ·  no-RLS→RLS  ·  direct-pg→gateway
+  trap:   created_at (1 clock, sound) ──► 2 clocks ──► needs logical clock
+  free:   schema, VectorStore contract, trace sink, shared-memory store  (all survive)
 ```
 
-Because the *interesting* distributed-systems problem in this project is
-designed but deferred, and the right way to handle a deferred hard problem is to
-pick your contracts so adding it later is a substitution, not a rewrite. The
-single-writer code is the degenerate case — one of everything, so every
-consistency question is trivial. I'd point at the `VectorStore` interface and
-the forward-compat `app_id`/`user_id` columns: those are the deferral being made
-cheap on purpose.
+> The thing I'd lead with: most of the schema and contracts survive untouched — the `app_id` column, the store contract, the capture discipline were all built forward-compatible while there was one writer. The new work is small and well-scoped. What I would *not* claim is that today's `app_id` column gives isolation — it doesn't, until RLS and token-derived claims exist. It's convention only right now, and the design says so.
 
-*Anchor: `pg-vector-store.ts:19` (the swappable contract), `sql/001_agents_schema.sql` (the pre-paid columns).*
-
-**Q: "When the phone arrives, what's the first thing that has to change?"**
-
-RLS plus token-derived `app_id`. Today `where app_id = $2` trusts a single
-client to pass its own tenant key — fine for one writer, a confused-deputy hole
-the instant a second untrusted client writes. The design names this as a hard
-prerequisite: RLS on every `agents.*` table with `app_id` always derived from
-the JWT claim, never the request body. The *second* thing is a same-row conflict
-policy and a real cross-device message ordering. File 02's single-device ordering
-*is* fixed — `created_at` comes from the client's `event.timestamp` — but that
-fix is exactly what stops holding here: with two devices there are two wall
-clocks, and clock skew means one brain's "later" timestamp can be an earlier
-real-world event. The single-client timestamp that solved ordering on the laptop
-becomes the *cause* of cross-device disorder, which is when you need a logical
-clock (or last-writer-wins on a trusted server clock) instead.
-
-*Anchor: `pg-vector-store.ts:74` (the convention-only filter) and the graduation spec's open question on RLS.*
-
----
-
-## Validate
-
-1. **Reconstruct.** From memory, draw the deferred topology: two brains → Edge
-   Functions (RLS) → one shared store. Mark which boxes exist today (the store,
-   the laptop) and which don't (the gateway, the phone).
-2. **Explain.** Why does keeping one authoritative store sidestep most of the
-   multi-writer problem? What single assumption breaks that (offline writes)?
-3. **Apply.** A phone is about to ship. Sequence the changes: (a) RLS +
-   token-derived `app_id` at `pg-vector-store.ts:74`, (b) a same-row conflict
-   policy, (c) a cross-device ordering scheme that survives clock skew (logical
-   clock or LWW on a server clock — the single-client `event.timestamp` from file
-   02 no longer suffices) — and say why that order.
-4. **Defend.** Argue that deferring all of this was the right call for a
-   single-device portfolio project, citing the design spec's "Out of scope"
-   list and the forward-compat columns that make the deferral reversible.
-
----
+**Anchor:** *"app_id→JWT, add RLS, add a gateway — but the real distributed gotcha is the single-clock created_at ordering breaking on a second writer."*
 
 ## See also
 
-- `audit.md` — Lenses 4 (consistency), 5 (replication/partitioning), 7 (clocks)
-  all point here as the phase that would activate them.
-- `01-app-to-postgres-boundary.md` — Move 2.5 shows the direct-pg → HTTP-gateway
-  transition from the boundary's side.
-- `02-trace-sink-write-buffering.md` — the single-device ordering fix
-  (client `event.timestamp` → `created_at`) that stops being sufficient once two
-  devices with two clocks write `agents.messages`.
-- `.aipe/study-system-design/` — the local-first / cloud-mirror architecture and
-  scale tradeoffs in depth.
-- `agent-layer-plan.md` and `docs/superpowers/specs/2026-06-19-laptop-supabase-graduation-design.md`
-  — the source design docs for everything in this file.
-
----
-
-Updated: 2026-06-24 — reframed the ordering cross-link: file 02's single-device
-ordering bug is now FIXED (client `event.timestamp` → `created_at`), but that fix
-is precisely what breaks across two devices (two wall clocks, skew), so the
-cross-device ordering work becomes "replace the single-client timestamp with a
-logical clock / server-clock LWW." Comparison diagram, conflict-policy prose,
-Validate step 3, and See-also updated. Design remains design-only / NOT BUILT.
+- `02-trace-sink-write-buffering.md` — the single-clock ordering this phase breaks (Phase B).
+- `01-app-to-postgres-boundary.md` — the direct-pg seam the gateway would replace.
+- `audit.md` — lenses 4 (consistency), 7 (clocks), 8 (sagas/outbox); all `not yet exercised` and all activated by this phase.
+- `study-system-design/07-deferred-body.md` — the deferral decision from the architecture side.
+- `study-database-systems/08-replication-and-read-consistency.md` — datastore-local consistency the shared store would lean on.

@@ -1,321 +1,253 @@
 # Arrays, Strings, and Hash Maps
 
-**Indexed sequences / hash tables / sets** — *Industry standard*
+**Industry names:** indexed sequence · dynamic array · hash table / hash map /
+hash set · dense vector. **Type:** Language-agnostic.
+
+---
 
 ## Zoom out, then zoom in
 
-These are the structures the repo actually leans on hardest — and the least
-glamorous. The in-memory store *is* a hash map. The eval harness dedups with a
-set. The chunker walks a string with two pointers. The cosine math loops over
-two arrays in lockstep. Here's where they sit.
+This is the substrate file. Every other structure in the guide is built out of
+these three: the embedding is a `number[]` (array), every chunk id is a string,
+and dedup/membership run on `Set`/`Map`. If you only read one repo-grounded
+file, this is the one with the most actual buffr code in it.
 
 ```
-  Zoom out — the workhorse structures, by layer
+  Zoom out — where these primitives live
 
-  ┌─ buffr CLI layer ────────────────────────────────────┐
-  │  eval-cmd.ts: [...new Set(docs)]  ★ SET ★             │ ← dedup
-  │              scorePrecisionAtK(.., new Set(relevant)) │   + membership
-  └───────────────────────────┬──────────────────────────┘
-                              │
-  ┌─ aptkit library layer ────▼──────────────────────────┐
-  │  in-memory store: chunks = new Map()  ★ HASH MAP ★    │ ← keyed store
-  │  chunker: text.slice(start, start+512) ★ STRING ★     │ ← sliding window
-  │  cosine:  for i in a.length { dot += a[i]*b[i] } ★ARR★│ ← parallel arrays
-  └───────────────────────────┬──────────────────────────┘
-                              │
-  ┌─ pgvector layer ──────────▼──────────────────────────┐
-  │  embedding vector(768) — a fixed-length float array   │ ← the vector
-  └───────────────────────────────────────────────────────┘
+  ┌─ buffr TS layer ─────────────────────────────────────────┐
+  │  ★ number[768] embedding ★   ★ Set<docId> dedup ★         │ ← we are here
+  │  ★ Map<id, chunk> store ★    string ids "<docId>#<index>" │
+  └─────────────────────────┬─────────────────────────────────┘
+                            │  serialized to
+  ┌─ pgvector layer ────────▼─────────────────────────────────┐
+  │  vector(768) column   ·  text id   ·  jsonb meta           │
+  └────────────────────────────────────────────────────────────┘
 ```
 
-Zoom in: an **array** is a contiguous, index-addressable sequence — `O(1)` to
-read by position. A **hash map** trades ordering for `O(1)` average lookup by
-key. A **set** is a hash map with no values — membership only. A **string** is
-an immutable array of characters. The question this file answers: *which of
-these does each piece of the retrieval path reach for, and why that one?*
+Zoom in: an **array** is a contiguous, index-addressable sequence — O(1) to
+read `a[i]`, O(n) to search for a value. A **hash map** trades order for speed —
+O(1) average lookup by key, but no "what's the 3rd element". A **string** is an
+array of characters with its own comparison and slicing rules. The repo reaches
+for each one exactly where its cost profile fits.
+
+---
 
 ## The structure pass
 
-Trace **one axis — "how is a thing looked up?" — across the structures.**
+**Layers** — the same datum at three altitudes:
 
 ```
-  Axis = "given a thing, how do I find it / its score?"
+  one embedding, three representations
 
-  ┌─ chunk by id ───────────────────────────┐
-  │ Map.get("doc.md#3")  → O(1) hash lookup  │  key → value
-  └──────────────────────┬───────────────────┘
-                         │  seam: key access vs scan
-  ┌─ chunk by similarity ▼──────────────────┐
-  │ scan every entry, score each → O(n)      │  NO key for "most similar"
-  └──────────────────────┬───────────────────┘
-                         │  seam: exact vs approximate
-  ┌─ is this doc relevant?▼─────────────────┐
-  │ Set.has(docId)  → O(1) membership        │  key → bool
-  └──────────────────────────────────────────┘
+  ┌─ JS heap ──────────────────────────────────┐
+  │ number[768]  — indexed, mutable, in RAM     │  meta.vector
+  └──────────────────────┬──────────────────────┘
+       ┌─────────────────▼─────────────────────┐
+       │ text literal  "[0.1,0.2,...]"          │  toVectorLiteral()
+       └─────────────────┬─────────────────────┘    pg-vector-store.ts:15
+            ┌────────────▼──────────────────────┐
+            │ vector(768)  — pgvector's binary   │  embedding column
+            └────────────────────────────────────┘
 ```
 
-The load-bearing **seam**: a `Map` gives you `O(1)` lookup *by key*, but
-"the most similar vector" is not a key — there's no hash for "closest in cosine
-space." That's why similarity search has to scan (in-memory) or use a graph
-index (HNSW), while id lookup and relevance checks stay `O(1)`. The axis flips
-from `O(1)` to `O(n)` exactly at the boundary between "lookup by identity" and
-"lookup by proximity." That flip is the reason vector search is a hard problem
-and `Map.get` isn't.
+**Axis — state ownership.** Trace "who owns this array's memory?": the JS
+`number[]` is owned by the V8 heap (GC'd), the text literal is a transient on
+the wire, the `vector(768)` is owned by Postgres on disk. The array *identity*
+survives all three; the ownership flips.
+
+**Seam — the serialization joint** at `toVectorLiteral` (`pg-vector-store.ts:15`).
+A JS array can't cross into SQL as-is; it's flattened to `[0.1,0.2,...]` text
+and cast `$1::vector`. That seam is where a dimension bug would hide — and it's
+exactly why `assertDim` guards it (`pg-vector-store.ts:32-36`).
+
+---
 
 ## How it works
 
 ### Move 1 — the mental model
 
-You know these cold from frontend: a `Map` is the object you reach for when you
-need keyed lookup without prototype-pollution worries; a `Set` is what you use
-to dedup a list before rendering (`[...new Set(items)]`); an array is every
-`.map()` you've ever written; a string is what `key={id}` is built on. The DSA
-framing just makes the cost explicit.
+You already know the array shape cold: it's a `.map()` over a list with a `key`
+in React — index-addressable, ordered, O(1) random access. The hash map is the
+other half of your daily toolkit: `useState` keyed by name, a lookup object
+`{[id]: row}`. The new idea here is only *which cost you're buying*: arrays give
+you order and index; hash maps give you O(1) membership and throw order away.
 
 ```
-  The four structures, by access pattern
+  array vs hash map — what you trade
 
-  array     [a][b][c][d]      index → value      arr[2] = O(1)
-              0  1  2  3
-
-  string    "h e l l o"       index → char       s[1]   = O(1), immutable
-
-  hash map  hash("k") ─┐                          map.get("k") = O(1) avg
-            ┌──────────┴──────────┐
-            │ bucket: k → value   │               (collision → chain)
-            └─────────────────────┘
-
-  set       hash("x") → "is x present?"           set.has("x") = O(1) avg
+  array  [a, b, c, d]      hash map  { x→1, y→2, z→3 }
+   │  ordered               │  unordered
+   │  a[2] is O(1)          │  has("y") is O(1)
+   │  "contains c?" is O(n) │  "what's 2nd?"  — undefined
+   └─ index is the key      └─ key is hashed to a bucket
 ```
 
-The single sentence: **arrays and strings address by position; maps and sets
-address by content (hash).** Pick the one whose access pattern matches your
-question.
+### Move 2 — the three primitives in buffr's code
 
-### Move 2 — each structure where the repo uses it
+**The embedding is a dense array — `number[768]`.** Every vector in this repo is
+a fixed-length JS array. Its length is load-bearing: it's the embedding
+dimension, and a mismatch corrupts ranking silently if unchecked. The repo
+checks it loudly.
 
-**The hash map as the in-memory store.**
-The library's `InMemoryVectorStore` declares `chunks = new Map()` and stores
-each chunk under its id (`"<docId>#<index>"`). Bridge from what you know: it's
-the exact same move as keying React list items — the id is the stable handle.
-`upsert` does `this.chunks.set(chunk.id, chunk)` — `O(1)` amortized per chunk.
-Where it breaks: the `Map` gives you `O(1)` retrieval *by id*, but `search()`
-still has to iterate `this.chunks.values()` and score every one, because
-similarity isn't a key. The `Map` solves identity lookup; it does nothing for
-proximity lookup.
-
-```
-  Map keyed by composite id — the in-memory store
-
-  chunks: Map<string, Chunk>
-  ┌────────────────┬──────────────────────────────┐
-  │ "work.md#0"    │ { vector:[...768], meta:{...} }│
-  │ "work.md#1"    │ { vector:[...768], meta:{...} }│  set/get = O(1)
-  │ "stack.md#0"   │ { vector:[...768], meta:{...} }│  values() = O(n)
-  └────────────────┴──────────────────────────────┘
-                                  │
-                          search() must scan ALL values — no key for "closest"
+```ts
+// pg-vector-store.ts:32-36 — the array's length IS the contract
+private assertDim(v: number[]): void {
+  if (v.length !== this.dimension) {                 // 768 check
+    throw new Error(`dimension mismatch: got ${v.length}, store is ${this.dimension}`);
+  }
+}
 ```
 
-**The set for dedup and membership.**
-The eval CLI retrieves k hits, each carrying a `docId` in its meta, then
-collapses them: `[...new Set(hits.map(h => String(h.meta.docId)))]`. Bridge:
-identical to deduping a tag list before rendering chips. Then the scorer takes
-`relevant` as a `Set` and asks `relevantIds.has(id)` for each retrieved id —
-`O(1)` membership. Where it breaks: if you used an array for `relevant` and did
-`.includes()`, every check becomes `O(m)` and the scorer goes `O(k·m)`. The
-`Set` is what keeps it `O(k)`.
+The annotation that matters: this isn't bounds-checking, it's *contract*
+enforcement. A 768-array and a 512-array are both valid JS arrays; only one is a
+valid query vector. The array type can't express "length 768" — so the code
+does, at the seam.
 
-```
-  Set: dedup then membership — the eval path
+**The string id is a composite key — `"<docId>#<index>"`.** Chunk ids are
+strings built by concatenation (the `#` separator). That string is then used as
+a *hash-map key* in the in-memory store and a *primary key* text column in
+Postgres. String-as-key is the cheapest possible index: no schema, deterministic
+ids mean an upsert is idempotent.
 
-  hits: [work.md#0, work.md#1, stack.md#0]
-         │ .map(docId) → [work.md, work.md, stack.md]
-         ▼ new Set(...)
-  docs: {work.md, stack.md}              ← dedup: 3 → 2, distinct only
-         │
-         ▼ relevantIds.has(docId)        ← O(1) per check
-  matched / total = precision@1
-```
+**The `Set` is the dedup-and-membership primitive — O(1) per op.** This is the
+purest hash-table usage in the repo, and it's two distinct jobs in one line:
 
-**The string as a sliding window — the chunker.**
-`chunkText` walks the document string in fixed steps. Bridge from what you know:
-it's a two-pointer / sliding-window scan — the same pattern as a "max substring
-of length L" problem, except instead of computing a value per window it *emits*
-each window. Step size is `512 - 64 = 448`; window size is `512`; the 64-char
-overlap is the difference. Where it breaks: drop the overlap and a fact that
-straddles a 512-char boundary gets split across two chunks and is retrievable
-from neither cleanly — the overlap is the load-bearing part.
-
-```
-  Sliding window over a string — chunkText, step=448, window=512
-
-  text:  ┌──────────── 512 ────────────┐
-         │ chunk 0                      │
-                              ┌──────────── 512 ────────────┐
-                              │ chunk 1                      │
-                              └─64─┘  ← overlap re-includes the boundary
-         start: 0      448      896 ...   step = size - overlap
+```ts
+// eval-cmd.ts:26-28 — Set doing two jobs
+const docs = [...new Set(hits.map((h) => String(h.meta.docId)))];  // job 1: dedup
+const p = scorePrecisionAtK(docs, new Set(relevant), 1).score;     // job 2: membership
 ```
 
-**Parallel arrays in the cosine loop.**
-Cosine similarity walks two 768-element float arrays in lockstep, one index at a
-time, accumulating three running sums: the dot product and each vector's squared
-magnitude. Bridge: it's a single-pass reduce over two arrays at once — like
-zipping two lists and folding. Where it breaks: the two arrays *must* be the
-same length (same dimension) or `a[i]*b[i]` reads past the end of one. That's
-why `assertDim` exists and throws — a length mismatch silently corrupts the
-score otherwise.
+Walk it one operation at a time:
 
 ```
-  Parallel-array single pass — cosine similarity (d=768)
+  Set as dedup, then Set as membership
 
-  i:    0      1      2    ...   767
-  a:  [a0]   [a1]   [a2]   ...  [a767]
-  b:  [b0]   [b1]   [b2]   ...  [b767]
-       │      │      │
-       ▼ accumulate three sums in ONE pass:
-  dot  += a[i]*b[i]      ← numerator
-  magA += a[i]*a[i]      ← |a|²
-  magB += b[i]*b[i]      ← |b|²
-  result = dot / (√magA · √magB)        ← one divide at the end
+  hits = [ {docId: A}, {docId: A}, {docId: B} ]   ── k=3 hits, A repeats
+     │  .map(h => h.meta.docId)
+     ▼
+  ["A", "A", "B"]
+     │  new Set(...)        ── hash each, collisions collapse
+     ▼
+  Set {"A", "B"}           ── duplicate A gone, O(1) per insert
+     │  [...spread]
+     ▼
+  ["A", "B"]               ── back to an ordered array for scoring
+
+  then:  new Set(relevant)              ── relevant ids → hash set
+         scorePrecisionAtK checks       ── "is each retrieved doc in relevant?"
+         relevantSet.has(doc)  O(1)         O(1) membership, not O(n) scan
 ```
+
+The boundary condition: **`Set` preserves insertion order in JS but you must not
+rely on it as an ordering structure.** Here it's used only for set semantics
+(unique + membership); the ranking order came from the *array* the hits arrived
+in, not the Set. Confusing the two is the classic bug — using a hash set and
+then expecting it to be sorted.
+
+**The in-memory store's `Map` — id → chunk, O(1) upsert and overwrite.** The
+baseline store *is* a hash map (`in-memory-vector-store.ts:12`): `chunks =
+new Map<string, VectorChunk>()`. `upsert` is `this.chunks.set(chunk.id, chunk)`
+— O(1), and the deterministic id means re-indexing the same chunk overwrites
+rather than duplicates. That's hashing buying idempotency.
+
+### Move 2.5 — current vs future (collision handling)
+
+Right now buffr never *sees* a hash collision — JS's `Set`/`Map` handle bucket
+collisions internally, and Postgres handles its own index hashing. The collision
+tradeoff you'd hit if you built the hash table yourself (chaining vs open
+addressing, load factor, resize threshold) is **not yet exercised** — it's
+hidden inside the runtime. It becomes relevant the day you implement a custom
+cache or your own dedup structure rather than reaching for `Set`.
 
 ### Move 3 — the principle
 
-**Match the structure to the question's access pattern.** "Look up by id" wants
-a map. "Is this present" wants a set. "Walk in order" wants an array or string.
-"Find the closest in a metric space" wants *none of these* — it wants a spatial
-index (a graph or tree), which is exactly why HNSW exists and why the in-memory
-store has to fall back to a full scan.
+Reach for the structure whose cost profile matches the operation: array when you
+need order and index, hash map when you need O(1) membership and don't care
+about order. The repo's `Set` dedup is the clean case — it needs uniqueness and
+fast membership, both of which the array can't give cheaply, so it converts to a
+Set and back.
+
+---
 
 ## Primary diagram
 
-The four structures, each at the point in the retrieval path where it's reached
-for.
+The three primitives across the retrieval-and-eval path.
 
 ```
-  The workhorse structures across one query — recap
+  arrays / strings / hash-maps in one frame
 
-  query "what work?" ──embed──► [768-float ARRAY]
-                                      │
-  ┌─ in-memory path ─────────────────▼──────────────────────┐
-  │ Map<id,Chunk>.values()  → scan n  → cosine over PARALLEL │
-  │   (STRING chunks were)              ARRAYS (dot/norm)     │
-  │   sliced in by chunkText                                 │
-  └──────────────────────────────────┬───────────────────────┘
-                                      ▼  ranked hits
-  ┌─ eval path ──────────────────────▼──────────────────────┐
-  │ [...new Set(docIds)]  → SET dedup → relevant.has(id)     │
-  │                                     O(1) membership       │
-  └──────────────────────────────────────────────────────────┘
+  ┌─ buffr TS ──────────────────────────────────────────────┐
+  │ query → embed → number[768]   (ARRAY: dense vector)      │
+  │                     │  assertDim length==768             │
+  │                     ▼                                     │
+  │ search returns hits[] (ARRAY: ordered by score)          │
+  │                     │  .map(docId)                        │
+  │                     ▼                                     │
+  │ new Set(docIds)     (HASH SET: dedup, O(1))              │
+  │ new Set(relevant)   (HASH SET: membership, O(1))         │
+  └─────────────────────┬────────────────────────────────────┘
+                        │  ids are STRINGS "<docId>#<index>"
+  ┌─ pgvector ──────────▼────────────────────────────────────┐
+  │ id text PK  ·  embedding vector(768)  ·  meta jsonb       │
+  └───────────────────────────────────────────────────────────┘
 ```
 
-## Implementation in codebase
-
-**Use cases.** The `Set` dedup runs every time you score retrieval quality
-(`npm run eval`). The composite-id string `"<docId>#<index>"` is how every chunk
-is addressed in both stores — it's the deterministic id buffr's constraints
-require. The sliding-window chunker runs on every `npm run index`.
-
-```
-  src/cli/eval-cmd.ts  (lines 26–28) — Set dedup + membership
-
-  const docs = [...new Set(hits.map((h) => String(h.meta.docId)))];
-       │              │                    │
-       │              │                    └─ pull docId out of each hit's meta
-       │              └─ new Set(...) collapses duplicates: two chunks from
-       │                 the same doc count as one document hit
-       └─ spread back to an array so the scorer can slice(0,k)
-
-  const p = scorePrecisionAtK(docs, new Set(relevant), 1).score;
-                                     │
-                                     └─ relevant is wrapped in a Set so the
-                                        scorer's .has() checks are O(1), not
-                                        O(m) array scans (file 06 for the math)
-```
-
-The composite id that keys the map (built in the library's pipeline, surfaced
-back in buffr's store):
-
-```
-  src/pg-vector-store.ts  (lines 80–84) — rebuilding meta, keyed by id
-
-  return rows.map((r) => ({
-    id: r.id,                         ← the "<docId>#<index>" string key
-    score: Number(r.score),
-    meta: { ...(r.meta ?? {}), docId: r.document_id,
-            chunkIndex: r.chunk_index, text: r.content },
-            │
-            └─ docId is reconstructed into meta so the eval path's
-               h.meta.docId Set-dedup works identically to the in-memory
-               store — same shape across both stores (the seam holds)
-  }));
-```
+---
 
 ## Elaborate
 
-Hash tables date to the 1950s (IBM, Luhn); the `O(1)`-average promise rests on a
-good hash function spreading keys evenly across buckets — collisions degrade it
-toward `O(n)` in the worst case, which is why production hash maps (V8's `Map`,
-Postgres's hash indexes) use careful hashing and resizing. The sliding-window /
-two-pointer pattern is the bread-and-butter of array-and-string interview
-problems; the chunker is the gentlest possible instance of it (fixed step, no
-condition).
+The hash table is arguably the most important data structure in practice — it's
+the one that turns "search a list" (O(n)) into "look it up" (O(1)), and it's
+under the hood of nearly every fast lookup you've ever written (object property
+access, `Map`, DB hash indexes, dedup). The cost you pay is order and worst-case
+guarantees: a pathological set of keys all hashing to one bucket degrades to
+O(n), which is why production hash tables randomize their hash seed. The array's
+deeper story is the *dynamic array* — amortized O(1) append via doubling (file
+01) — which is what a JS `[]` actually is. For this repo the vector-as-array is
+the bridge to file 06: ranking is just sorting an array of (id, score) pairs.
 
-What's *absent* here and worth flagging: no **trie** (prefix structure) anywhere
-— and it's absent from your reincodes portfolio too, so it's a real gap, covered
-in `04`. The repo also never needs a **deque** or a true two-pointer convergence
-(left and right moving toward each other); the chunker's pointer only marches
-forward.
+---
 
 ## Interview defense
 
-**Q: The in-memory store is a `Map`, but `search()` still scans all n entries.
-Why doesn't the map make search fast?**
+**Q: Why a `Set` for the dedup in `eval-cmd.ts`, not an array `.filter` /
+`.includes`?**
 
 ```
-  Map indexes by id, not by proximity
-
-  Map.get("work.md#3")     → O(1)   ← id IS the hash key
-  "find closest to query"  → O(n)   ← "closest" is NOT a key
-                                       must score every value()
+  array dedup:  result.includes(x)  → O(n) per check → O(n²) total
+  set dedup:    seen.has(x)          → O(1) per check → O(n) total
 ```
 
-Answer: "A hash map gives `O(1)` lookup by key, but 'most similar vector' isn't
-a key — there's no hash function for cosine proximity. So `search` falls back to
-scanning `chunks.values()` and scoring each. The map only helps `upsert` and
-id-based retrieval. Making *search* fast needs a spatial index — a graph (HNSW)
-— not a hash map." Anchor: the library's in-memory `search` iterating
-`this.chunks.values()`.
+`includes` scans the array each time — O(n²) for n items. `new Set` hashes each
+id once and collisions collapse — O(n). For `k=3` it's irrelevant, but it's the
+right reflex and it reads cleaner. The Set is doing the same job as a `seen`
+guard, just declaratively.
 
-**Q: Why wrap `relevant` in a `Set` in the eval CLI?**
+**Q: What does the `768` in `number[768]` actually buy, and what breaks without
+the check?**
 
-Answer: "Membership. The scorer asks `relevant.has(id)` for each retrieved id.
-A `Set` makes that `O(1)`; an array would make it `O(m)` and the whole scorer
-`O(k·m)`. For three relevant docs it doesn't matter at runtime — it matters as
-the *correct instinct*: membership questions want a set." Anchor:
-`src/cli/eval-cmd.ts:27`.
+```
+  query vec [768]  vs  stored vec [768]   → distance is meaningful
+  query vec [512]  vs  stored vec [768]   → distance is garbage / throws
+```
 
-## Validate
+The length is the contract — a distance between vectors of different dimensions
+is meaningless, so `assertDim` (`pg-vector-store.ts:32`) throws rather than let
+ranking silently corrupt. The array type can't encode the length, so the guard
+does. Naming "the length is the contract, not the type" is the signal.
 
-1. **Reconstruct.** Write the chunker's step size and window size from memory,
-   and say what the 64-char overlap prevents. (Step 448, window 512; prevents a
-   boundary-straddling fact being split.)
-2. **Explain.** Why is `search()` `O(n)` even though the store is a `Map`?
-   (`src/pg-vector-store.ts` / library in-memory store.)
-3. **Apply.** You need to know "have I already indexed doc X?" before
-   re-indexing. Which structure, and what's the lookup cost?
-   (A `Set` of seen ids, or `Map.has` — `O(1)`.)
-4. **Defend.** Someone replaces `new Set(relevant)` with the raw array in
-   `eval-cmd.ts:27`. What's the complexity change, and when does it bite?
+**Anchor:** "Array for order and index; hash set for O(1) uniqueness and
+membership — and never confuse the Set's insertion order for a ranking."
+
+---
 
 ## See also
 
-- `01-complexity-and-cost-models.md` — the amortized `O(1)` these structures
-  rely on.
-- `03-stacks-queues-deques-and-heaps.md` — the ordering disciplines arrays back.
-- `05-graphs-and-traversals.md` — the spatial index that `Map` *can't* be.
-- `06-sorting-searching-and-selection.md` — the `Set`-based precision@k math.
-- `study-ai-engineering` → why 768-dim float arrays are the embedding, and what
-  cosine similarity means semantically.
+- `01-complexity-and-cost-models.md` — the O(1) vs O(n) costs named here
+- `06-sorting-searching-and-selection.md` — ranking the hits array
+- `04-trees-tries-and-balanced-indexes.md` — the *ordered* alternative to a hash
+  map (when you need range queries, not just membership)
+- Cross-link: `.aipe/study-database-systems/` — the hash index vs B-tree index
+  under the `chunks` table

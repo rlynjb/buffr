@@ -1,384 +1,319 @@
 # Graphs and Traversals
 
-**ANN / HNSW / navigable small-world graph / greedy graph search** — *Industry standard*
+**Industry names:** graph · BFS / DFS · shortest path · greedy best-first search
+· approximate nearest neighbor (ANN) · HNSW (Hierarchical Navigable Small World)
+· union-find. **Type:** Industry standard.
+
+---
 
 ## Zoom out, then zoom in
 
-This is the file. The single most important algorithm in the entire system is a
-graph traversal — and it's invisible, hiding behind one line of SQL and a C
-extension. You've built BFS, DFS, and Dijkstra over adjacency lists from scratch.
-HNSW is the same *family* — frontier, visited set, greedy expansion — pointed at
-a different problem.
+This is the headline file. The single most consequential algorithm in this repo
+is **approximate nearest-neighbor search over a navigable-small-world graph** —
+and it ships as one line of DDL (`sql/001:30-31`) plus a C extension. buffr never
+writes graph code; it writes `order by embedding <=> $1 limit k`
+(`pg-vector-store.ts:74-77`) and Postgres walks the graph. You've built BFS, DFS,
+and Dijkstra by hand in reincodes — HNSW is *those instincts* (frontier + visited
++ greedy descent), with one twist: it's deliberately **approximate**.
 
 ```
-  Zoom out — the graph search hiding under the query, by layer
+  Zoom out — where the graph lives (one DDL line down)
 
-  ┌─ buffr source layer ─────────────────────────────────┐
-  │  store.search(vector, k)  → builds a SQL string       │ ← you see this
-  └───────────────────────────┬──────────────────────────┘
-                              │  order by embedding <=> $1 limit k
-  ┌─ pgvector C extension layer▼─────────────────────────┐
-  │  ★ HNSW GRAPH WALK ★  greedy descent through layers,  │ ← we are here
-  │    expand neighbors, keep a candidate frontier         │   (invisible!)
-  └───────────────────────────┬──────────────────────────┘
-                              │
-  ┌─ your reincodes (anchor) ─▼──────────────────────────┐
-  │  Graph.ts bfs_traversal / dfs_traversal               │ ← same family
-  │  Graph2.ts + PriorityQueue.ts → Dijkstra              │ ← same frontier
-  └───────────────────────────────────────────────────────┘
+  ┌─ buffr TS ────────────────────────────────────────────────┐
+  │  store.search(vector, k)  →  SQL: order by <=> limit k     │
+  └──────────────────────────┬─────────────────────────────────┘
+                             │  one DDL line + C extension
+  ┌─ pgvector HNSW index ────▼─────────────────────────────────┐
+  │  ★ a navigable-small-world GRAPH over the 768-d vectors ★   │ ← we are here
+  │  greedy walk: frontier + visited + move to nearest neighbor │
+  │  layered (skip-list style) for O(log N) entry               │
+  └─────────────────────────────────────────────────────────────┘
 ```
 
-Zoom in: a **graph** is nodes connected by edges; a **traversal** visits nodes by
-following edges from a start point, tracking what it's seen. **HNSW**
-(Hierarchical Navigable Small World) is a graph where each node is a chunk's
-768-dim vector and edges connect *near* vectors — so "walk toward the query" lands
-you on the nearest neighbors. The question this file answers: *how does
-`order by embedding <=> query limit k` become a graph search, and how is that the
-same skill as your reincodes graph work?*
+Zoom in: a **graph** is nodes + edges. **Traversal** is visiting nodes by
+following edges — BFS (level by level, a queue), DFS (deep first, a stack),
+Dijkstra (cheapest first, a priority queue). **HNSW** is a graph where each
+vector is a node, edges connect *near* vectors, and "find the nearest" is a
+*greedy walk* toward the query — frontier and visited set, just like your BFS,
+but it stops at "good enough" instead of "provably best". That word —
+*approximate* — is the whole trade.
+
+---
 
 ## The structure pass
 
-Trace **one axis — "how does the search frontier move toward the target?" —
-across the traversal types you know and this one.**
+**Layers** — the graph at three altitudes:
 
 ```
-  Axis = "how does the frontier expand, and toward what?"
+  one query, three altitudes of "find nearest"
 
-  ┌─ BFS (your Graph.ts) ──────────────────┐
-  │ expand ALL neighbors, level by level    │  unweighted, finds shortest hops
-  └──────────────────────┬──────────────────┘
-                         │  seam: blind vs guided
-  ┌─ Dijkstra (your PQ) ──▼────────────────┐
-  │ expand the CLOSEST frontier node next   │  weighted, priority-driven
-  └──────────────────────┬──────────────────┘
-                         │  seam: exact vs approximate
-  ┌─ HNSW greedy walk ────▼────────────────┐
-  │ jump to the neighbor CLOSEST to query;  │  approximate NN, no backtrack
-  │   stop when no neighbor is closer        │  trades exactness for speed
-  └──────────────────────────────────────────┘
+  ┌─ buffr's view ─────────────────────────────┐
+  │ search(vector, k) → k nearest, by score     │  declarative, no graph seen
+  └──────────────────────┬───────────────────────┘
+       ┌─────────────────▼────────────────────┐
+       │ HNSW: greedy walk over a graph         │  frontier + visited + greedy
+       └─────────────────┬────────────────────┘
+            ┌────────────▼────────────────────┐
+            │ the layered graph: nodes=vectors, │  small-world topology,
+            │ edges=proximity, layers=skip-list │  built at upsert time
+            └───────────────────────────────────┘
 ```
 
-The load-bearing **seam**: between Dijkstra (which provably finds the *exact*
-shortest path by exploring exhaustively via a priority queue) and HNSW (which
-*greedily* walks to a local-best and accepts "good enough"). The axis — how the
-frontier moves — flips from "exhaustive, exact" to "greedy, approximate" at that
-boundary. That single trade (exact → approximate) is what buys HNSW its
-sublinear speed, and it's the whole reason ANN is a different discipline from the
-shortest-path algorithms you've built.
+**Axis — guarantees (exact vs approximate).** Trace "is the answer provably
+correct?": your reincodes Dijkstra returns the *provably* shortest path (exact);
+HNSW returns *probably* the nearest, fast (approximate). Same greedy-walk
+machinery, the guarantee flips. That flip is the seam.
+
+**Seam — the exact/approximate boundary.** This is *the* load-bearing seam in the
+whole repo. On one side: exact nearest neighbor = compare the query to all N
+vectors (the in-memory store, O(N), file 03). On the other: HNSW skips most of
+the graph and accepts a small chance of missing the true nearest — buying
+~O(log N). buffr crosses this seam the moment it uses the HNSW index instead of
+the in-memory scan. The eval (`eval-cmd.ts`) *measures* the cost of that
+approximation as P@k / R@k — recall < 1.0 is partly the graph's approximation
+showing up in the numbers.
+
+---
 
 ## How it works
 
 ### Move 1 — the mental model
 
-You've done this. `Graph.ts` with `bfs_traversal` and `dfs_traversal` over an
-adjacency list; `Graph2.ts` with weighted edges feeding Dijkstra through your
-`PriorityQueue.ts`. Every one of those has the same three parts: a *frontier*
-(where to look next), a *visited set* (don't loop), and an *expansion* step
-(follow this node's edges). HNSW has all three — it just expands toward "closest
-to the query vector" instead of "shortest path to a target node."
+You know the BFS shape cold: a **frontier** of nodes to explore, a **visited**
+set so you don't loop, dequeue-expand-enqueue until you arrive. HNSW search is
+the same skeleton with two changes: (1) it's *greedy* — always step to the
+neighbor closest to the query, like best-first search; (2) it's *layered* — a
+sparse top layer for big jumps, denser layers below for fine approach, exactly
+like a skip list's express lanes.
 
 ```
-  The greedy graph walk — HNSW's kernel (one layer)
+  HNSW greedy walk — frontier + visited + "step toward the query"
 
-  query ★ (a point in 768-dim space)
+  query ✦                  layer 2 (sparse): big jumps
+        entry → ●━━━━━━━━━━━━━━━━━━━━● close-ish
+                              │ drop down
+  layer 1 (denser):    ●──●──●  ●──●
+                          ╲   ╲ │ step to nearest neighbor each time
+  layer 0 (all nodes): ●─●─●─●─●─◎ ← arrive: local minimum ≈ true nearest
 
-  start ●─────● ───● ◄── current node
-        │     │    │
-        ●     ●────●      at each step:
-              │             1. look at current's neighbors
-        ●─────●             2. jump to the neighbor CLOSEST to ★
-                            3. repeat until no neighbor is closer
-  ──────────────────────────────────────────────────
-  greedy descent: always step toward the query, never backtrack
-  termination: current is closer than all its neighbors (local best)
+  greedy: at each node, move to the neighbor nearest ✦; stop when no
+  neighbor is closer than where you stand  (a local optimum, accepted)
 ```
 
-The single sentence: **HNSW is greedy best-first search over a graph whose edges
-connect near vectors — so "follow the edge toward the query" converges on the
-nearest neighbors.** It's Dijkstra's priority-driven frontier, minus the
-guarantee of exactness, plus a layered structure for long jumps.
+That "stop when no neighbor is closer" is the approximation: it's a *local*
+minimum of distance, which is *usually* the global nearest but not guaranteed.
+Your Dijkstra would never stop there — it'd keep a priority queue and prove
+optimality. HNSW trades that proof for speed.
 
-### Move 2 — the walk, one moving part at a time
+### Move 2 — the navigable-small-world graph, walked
 
-**The graph: nodes are vectors, edges connect near neighbors.**
-Each chunk's 768-float embedding is a node. HNSW connects each node to a handful
-of its nearest neighbors in cosine space. Bridge: it's your adjacency list, but
-the "neighbors" are decided by distance, not by a puzzle's rules. Where it
-breaks: if the graph isn't *navigable* (well-connected with both short and long
-edges), greedy descent gets stuck in a bad local region and misses the true
-nearest neighbor — which is why the construction algorithm carefully picks edges.
+**Step 1 — the graph is built at upsert, not at query.** Every `upsert`
+(`pg-vector-store.ts:38-65`) inserts a `vector(768)` and pgvector wires it into
+the HNSW graph: it greedily finds the new node's nearest existing neighbors and
+adds edges to them. So indexing cost is paid on write; query cost is cheap. This
+is the amortization from file 01 — expensive build, cheap reads.
 
 ```
-  Adjacency-by-proximity — the HNSW base layer
+  upsert builds the graph (write-time cost)
 
-  node "work.md#0" ──► [work.md#1, stack.md#0]   ← edges to NEAR vectors
-  node "stack.md#0"──► [work.md#0, coffee.md#0]
-  node "coffee.md#0"─► [stack.md#0, work.md#1]
-       │
-       └─ same shape as Graph.ts adjacency list, but edges = "is near in
-          768-dim cosine space", not "is connected by a rule"
+  new chunk vector  ──insert──►  pgvector finds M nearest existing nodes
+  pg-vector-store.ts:47-56                    │  adds bidirectional edges
+                                              ▼
+                                    graph stays "navigable":
+                                    any node reachable from any other
+                                    in ~log(N) hops  (small-world property)
 ```
 
-**The layers: long jumps up top, fine steps at the bottom.**
-HNSW stacks the graph into layers (the "hierarchical" in the name). The top layer
-is sparse — few nodes, long edges — so you cover huge distance in a few hops. Each
-layer down is denser. You descend coarse → fine. Bridge: it's the "skip list"
-idea (express lanes) applied to a graph, and it's *why* the walk is `O(log n)`
-instead of `O(n)`. Where it breaks: without the upper layers, you'd greedy-walk
-the single dense base layer and take `O(n)` hops across it — the hierarchy is the
-speed.
+**Step 2 — "small world" is why ~O(log N) works.** A small-world graph has the
+six-degrees-of-separation property: mostly local edges plus a few long-range
+ones, so any node reaches any other in a logarithmic number of hops. The layers
+add the express lanes — the top layer has few nodes and long edges (cross the
+space in a few jumps), each lower layer is denser for the fine approach. That
+layered structure is *literally a skip list over a graph* — the self-similarity
+file 03's heap and a skip list share.
 
-```
-  Layered descent — coarse to fine (the "H" in HNSW)
+**Step 3 — the query is a greedy descent, and it's one SQL operator.** Here's the
+entire buffr-side surface of this graph algorithm:
 
-  query ★
-  layer 2  ●──────────────────●        ← enter here, 1-2 long hops
-           │                  │           toward ★'s neighborhood
-  layer 1  ●────●───────●─────●        ← refine, medium hops
-                │       │
-  layer 0  ●─●─●─●─●─●─●─●─●─●          ← final greedy walk to nearest k
-                    ▲
-              drop a layer when no neighbor here is closer to ★
-```
-
-**The frontier: a bounded candidate set (a priority queue in disguise).**
-At the bottom, HNSW doesn't keep just the single best — it keeps a small set of
-the `ef` best candidates seen, expanding their neighbors, so it can return the top
-`k` and resist getting trapped. Bridge: that candidate set is a *bounded priority
-queue* — your `PriorityQueue.ts` with a size cap, exactly the heap from `03`.
-Where it breaks: shrink `ef` to 1 and it's pure greedy with no safety net —
-faster but it misses neighbors; grow `ef` and recall climbs toward exact at the
-cost of speed. That knob *is* the approximate-vs-exact dial.
-
-```
-  The candidate frontier — bounded priority queue (recall knob)
-
-  ef = candidate set size
-  frontier (min-heap by distance to ★): [c1, c2, c3]   ← keep ef best
-    expand c1's neighbors → maybe replace the worst in the set
-    expand c2's neighbors → ...
-  stop when no unexpanded candidate is closer than the worst kept
-       │
-       └─ this is your PriorityQueue.ts, bounded. ef↑ → recall↑, speed↓
+```ts
+// pg-vector-store.ts:70-78 — the whole graph walk is "<=>" + "order by ... limit"
+const { rows } = await this.pool.query(
+  `select id, content, ...,
+          1 - (embedding <=> $1::vector) as score   -- <=> = cosine DISTANCE
+   from agents.chunks
+   where app_id = $2
+   order by embedding <=> $1::vector                -- THIS triggers the HNSW walk
+   limit $3`,                                        -- k results off the graph
+  [toVectorLiteral(vector), this.appId, k],
+);
 ```
 
-#### Move 2 variant — the traversal skeleton, named by what breaks
+The annotation: `order by embedding <=> $query limit k` is the *only* thing buffr
+writes, and it's the trigger for the entire greedy graph traversal. The planner
+sees "order by a distance operator with a matching HNSW index + a small limit"
+and walks the graph instead of scanning + sorting all rows. Drop the `limit`, or
+order by something the index doesn't cover, and the planner falls back to the
+O(N) scan — the graph index goes unused. That's the boundary condition: **the
+index only fires for the top-k, distance-ordered shape.**
 
-1. **Isolate the kernel.** Frontier (priority queue of candidates) + visited set
-   + greedy expansion (jump toward query) + termination (no closer neighbor).
-   That's BFS/Dijkstra's skeleton with a "toward the query" expansion rule —
-   you've built every piece.
-2. **Name each part by what breaks without it.**
-   - Drop the **visited set** and the walk revisits nodes, loops, and never
-     terminates — the exact bug your `Graph.ts` `captured` set prevents in BFS.
-   - Drop the **layers** and it's `O(n)` across the base layer — correctness
-     holds, speed collapses.
-   - Drop the **bounded candidate set (`ef`)** and recall tanks — you get a local
-     best, not the true k-nearest.
-   - Drop the **termination condition** and greedy descent never stops.
-3. **Skeleton vs hardening.** Frontier + visited + expansion + termination is the
-   skeleton (it's just graph search). The hierarchy and the `ef` knob are
-   hardening that turn `O(n)` exact search into `~O(log n)` approximate search.
-
-### Move 2.5 — exact vs approximate (the trade this whole file turns on)
-
-The in-memory store does the *exact* thing: score every node, sort, take k —
-guaranteed correct, `O(n)`. HNSW does the *approximate* thing: greedy-walk a
-graph, `~O(log n)`, occasionally misses a true neighbor. Same question, two
-answers.
+**Step 4 — name the kernel by what breaks (the load-bearing skeleton).** This is
+the BFS-shaped skeleton to reconstruct from memory:
 
 ```
-  Phase A (in-memory): EXACT     vs    Phase B (HNSW): APPROXIMATE
+  HNSW greedy search — the kernel
 
-  score ALL n nodes                    walk a graph, expand a few
-  sort, take top k                     keep ef candidates, take k
-  O(n·d) — always correct              ~O(log n · d) — ~99% recall
-  fine for 3 docs                      necessary for millions
-       │                                    │
-       └─ buffr's in-memory store           └─ buffr's PgVectorStore (shipped)
+  ┌ entry point at the top layer    ── lose it → no start, can't walk
+  ┌ frontier (candidates to expand)  ── lose it → can't track where to go next
+  ┌ visited set                      ── lose it → revisit nodes, may loop  ★
+  ┌ greedy step to nearest neighbor   ── lose it → it's a random walk, not search
+  └ stop at local minimum            ── lose it → never terminates / scans all
 ```
 
-What *doesn't* change crossing from A to B: the `VectorStore.search(vec, k)`
-contract, the caller, the meta shape. That's the payoff of the seam — you swap an
-exact `O(n)` scan for an approximate `O(log n)` graph walk and nothing above the
-interface notices.
+The visited set (★) is the part people forget — same as in your BFS. Without it
+the walk revisits nodes and can cycle. The *difference* from BFS is the
+termination: BFS stops when the frontier empties (exhaustive); HNSW stops at a
+local minimum (approximate). Naming "HNSW terminates on a local optimum, not an
+empty frontier" is the senior signal — it's the one line that captures the
+exact/approximate trade.
+
+### Move 2.5 — current vs future state
+
+```
+  Phase A (now)                      Phase B (if corpus grows huge)
+  ──────────────────────────────     ──────────────────────────────
+  HNSW with default params           tune m / ef_construction / ef_search
+  recall "good enough", small N      higher ef → better recall, slower
+  sql/001:30-31 (no tuning)          the recall↔latency knob
+```
+
+The HNSW index ships with default parameters — no `WITH (m=..., ef_...)` tuning
+in `sql/001:30`. That's the right call now (small corpus, recall is fine, the
+eval shows it). The *knob* you'd reach for at scale is `ef_search`: higher means
+the greedy walk keeps a bigger frontier, explores more, recalls more true
+neighbors — at the cost of latency. That recall↔latency dial is **not yet
+exercised** but it's the natural next move, and the eval harness already exists to
+measure it.
 
 ### Move 3 — the principle
 
-**Approximate nearest neighbor is graph search with the exactness guarantee
-traded for speed.** The frontier, visited set, and greedy expansion are the same
-primitives behind your BFS and Dijkstra — what changes is that HNSW *accepts a
-local best* instead of proving the global one. Recognizing that ANN is "your
-graph traversal, made approximate and hierarchical" is the insight that turns a
-black-box index into something you can reason about.
+When exact nearest-neighbor is too expensive (comparing a query to all N
+high-dimensional points), build a navigable graph and *greedily walk* it toward
+the query, accepting a small approximation for a logarithmic speedup. It's BFS's
+frontier-and-visited skeleton with a greedy step and a local-minimum stop — the
+same instincts you built Dijkstra with, traded from exact to approximate.
+
+---
 
 ## Primary diagram
 
-The whole HNSW search, from SQL to graph walk to result, in one frame.
+The full graph picture — build, walk, and the exact/approximate seam.
 
 ```
-  order by embedding <=> query limit k — the full graph walk — recap
+  HNSW end to end, with the seam marked
 
-  ┌─ Service layer (buffr) ──────────────────────────────────┐
-  │ store.search(vec, k) → "order by <=> $1 limit k"          │
-  └────────────────────────────┬─────────────────────────────┘
-                               │ delegated to the index
-  ┌─ pgvector C extension ─────▼─────────────────────────────┐
-  │  ENTER top layer ──long hops──► coarse neighborhood       │
-  │       │ descend                                            │
-  │  refine middle layers ──medium hops──► closer region       │
-  │       │ descend                                            │
-  │  base layer: greedy walk + ef-bounded candidate frontier   │
-  │       │ (your PriorityQueue.ts, capped)                    │
-  │       ▼ termination: no neighbor closer to query           │
-  │  return k nearest  ── score = 1 - cosine_distance ──►       │
-  └──────────────────────────────────────────────────────────┘
-       primitives: frontier · visited set · greedy expansion · terminate
-                   (the same skeleton as Graph.ts BFS / Dijkstra)
+  WRITE PATH (build the graph):
+   upsert(chunk) ─► find M nearest nodes ─► add edges ─► small-world graph
+   pg-vector-store.ts:38                                  (amortized cost)
+
+  READ PATH (walk the graph):
+   order by <=> limit k  ─► enter top layer ─► greedy descent through layers
+   pg-vector-store.ts:74     │  frontier + visited (BFS-shaped)
+                             ▼
+                          local minimum ≈ k nearest  ◄── APPROXIMATE
+   ═══════════════════════════ the exact/approximate SEAM ════════════════
+   exact alternative: in-memory scan ALL N, sort, slice  ◄── EXACT, O(N)
+   in-memory-vector-store.ts:28-32
+
+  MEASURED BY: eval-cmd.ts P@k / R@k  ── recall<1.0 = approximation showing up
 ```
 
-## Implementation in codebase
-
-**Use cases.** This graph walk fires on *every* `npm run chat` turn (the
-`search_knowledge_base` tool calls `pipeline.query` → `store.search`) and every
-`npm run eval` query. It also fires on every memory write — `@aptkit/memory`
-embeds each chat exchange into the same store, so its recall reuses this exact
-walk (no new DSA, same HNSW path). It is the hot path of the entire RAG system — and it's one
-SQL line in buffr's source, with the graph algorithm itself inside pgvector.
-
-```
-  src/pg-vector-store.ts  (lines 67–78) — the graph walk, as SQL
-
-  async search(vector: number[], k: number): Promise<Hit[]> {
-    this.assertDim(vector);
-    const { rows } = await this.pool.query(
-      `select id, content, ...,
-              1 - (embedding <=> $1::vector) as score   ← cosine SIM from DIST
-       from agents.chunks
-       where app_id = $2
-       order by embedding <=> $1::vector                ← ★ HNSW graph walk ★
-       limit $3`,                                       ← stop after k nearest
-      [toVectorLiteral(vector), this.appId, k],
-    );
-       │
-       └─ "order by <=> ... limit k" is NOT a sort here — the planner uses
-          the HNSW index, so this becomes a greedy descent through the
-          layered proximity graph. Drop the index (file 04 line 28) and
-          this same SQL degrades to an O(n) sequential scan + full sort.
-```
-
-The index declaration that *is* the graph (one line builds the whole structure):
-
-```
-  sql/001_agents_schema.sql  (lines 28–29) — the graph, declared
-
-  create index if not exists chunks_embedding_hnsw
-    on agents.chunks using hnsw (embedding vector_cosine_ops);
-       │                    │                    │
-       │                    │                    └─ edges measured by cosine
-       │                    │                       distance (matches the <=>)
-       │                    └─ the navigable-small-world graph index type
-       └─ this single DDL line builds and maintains the layered graph as
-          chunks are inserted — every upsert adds a node and wires its edges
-```
+---
 
 ## Elaborate
 
-HNSW is Malkov & Yashunin, 2016 — combining navigable small-world graphs (which
-have the "six degrees of separation" property: short paths between any two nodes)
-with a skip-list-style hierarchy. The "small world" idea is why greedy walking
-works: a well-built graph has both local edges (precision) and a few long-range
-edges (reach), so you're never more than `O(log n)` hops from anywhere. pgvector
-0.5+ ships HNSW alongside IVFFlat (a clustering-based ANN — different algorithm,
-same goal).
+HNSW (Malkov & Yashunin, 2016) is the dominant ANN index in production vector
+search — it's what's under pgvector, Qdrant, Weaviate, FAISS' HNSW mode, and
+most "vector database" products. It descends from two older ideas you can see in
+it: navigable small-world graphs (Kleinberg's small-world model) and the skip
+list (Pugh, 1990) — the layering is literally the skip list's probabilistic
+express lanes applied to a graph. The reason it beat tree-based ANN (KD-trees,
+ball trees) is the curse of dimensionality: space-partitioning trees degrade to
+linear scans past ~20 dimensions, and embeddings live in hundreds. A graph of
+"who's near whom" sidesteps that. **Union-find** — the other classic graph
+structure — is `not yet exercised` here and absent from your reincodes too; it's
+the structure for "are these two nodes in the same connected component?" answered
+near-O(1) with path compression, and it's a real drill gap (file 08). Your
+`Graph.ts` `numberOfConnectedComponents` solves that problem the O(V+E) way; the
+union-find way is the upgrade you haven't built.
 
-The connection to your portfolio is direct and strong: your `Graph.ts`
-adjacency list, your BFS `captured` set, your Dijkstra-via-`PriorityQueue`
-frontier — HNSW *is* those primitives, recombined. The honest gap: you've built
-*exact* graph algorithms (BFS finds shortest hops, Dijkstra proves shortest
-weighted path); you haven't built an *approximate* one where you deliberately
-trade correctness for speed. That trade is the new idea here.
-
-`not yet exercised` in buffr's own graph work:
-- **Connected components / union-find** — your reincodes
-  `numberOfConnectedComponents` touches this; buffr never does.
-- **Topological sort / cycle detection** — no DAG processing anywhere.
-- **Building the HNSW graph yourself** — you consume it via pgvector; constructing
-  a navigable small-world graph from scratch would be the deepest possible drill
-  here, and it's the one that would prove you *own* this concept rather than rent
-  it from the extension.
+---
 
 ## Interview defense
 
-**Q: Walk me through what `order by embedding <=> query limit 4` actually does.**
+**Q: Walk me through how `order by embedding <=> $q limit k` finds the nearest
+chunks. What's the data structure and the algorithm?**
 
 ```
-  not a sort — a layered greedy graph walk
-
-  enter top layer → long hops toward query
-       ↓ descend
-  base layer → greedy expand, ef-bounded frontier (priority queue)
-       ↓ terminate when no neighbor is closer
-  return 4 nearest, score = 1 - distance
+  structure: HNSW = a layered navigable-small-world GRAPH
+             nodes = the 768-d vectors, edges = proximity
+  algorithm: greedy best-first walk
+             enter top (sparse) layer → step to neighbor nearest the query
+             → drop a layer → repeat → stop at a local minimum
+  skeleton:  frontier + visited set + greedy step + local-min stop
 ```
 
-Answer: "It looks like a sort but it's a graph traversal. pgvector uses the HNSW
-index — a layered navigable-small-world graph where nodes are embeddings and edges
-connect near vectors. The walk enters a sparse top layer, takes long hops toward
-the query, descends through denser layers refining, and at the base does a greedy
-best-first walk with a bounded candidate frontier — that frontier is a priority
-queue, the same one I built for Dijkstra. It returns the k nearest in `~O(log n)`
-instead of scoring all n. It's approximate — it trades exactness for speed."
-Anchor: `src/pg-vector-store.ts:74` + `sql/001_agents_schema.sql:28`.
+It's a graph traversal — the same frontier-and-visited skeleton as BFS, but it
+steps *greedily* toward the query and stops at a local minimum instead of
+exhausting the frontier. That local-minimum stop is the approximation: ~O(log N)
+instead of O(N), at the cost of *occasionally* missing the true nearest. The
+visited set is the part people drop — without it the walk can cycle.
 
-**Q: How is this different from the Dijkstra you built?**
+**Q: It's "approximate" — where does the error go, and how do you know it's
+acceptable here?**
 
 ```
-  Dijkstra (exact) vs HNSW (approximate)
-
-  Dijkstra: priority queue, exhaustive, PROVES shortest path
-  HNSW:     priority queue, greedy, accepts LOCAL best — no proof
-            └─ the dropped guarantee is what buys O(log n)
+  error source: greedy walk stops at a LOCAL minimum, not guaranteed global
+  shows up as:  R@k < 1.0 — a true-relevant chunk the walk didn't reach
+  measured by:  eval-cmd.ts:28  scoreRecallAtK over labeled queries
+  knob:         ef_search ↑ → bigger frontier → better recall, slower
 ```
 
-Answer: "Same frontier — a priority queue — but Dijkstra explores exhaustively
-and guarantees the exact shortest path; HNSW greedily walks toward the query and
-accepts a local best, no guarantee. Dijkstra answers 'shortest weighted path';
-HNSW answers 'approximately nearest in metric space.' The dropped exactness
-guarantee is exactly what buys the sublinear speed." Anchor: your
-`Graph2.ts`/`PriorityQueue.ts` Dijkstra vs `sql/001_agents_schema.sql:28`.
+The approximation means the greedy walk can settle on a local optimum and miss
+the global nearest. That error surfaces directly in the recall number the eval
+prints (`eval-cmd.ts:33`) — recall below 1.0 is partly the graph approximating.
+You know it's acceptable because the eval *measures* it on labeled queries; if
+recall dropped you'd turn the `ef_search` knob to widen the frontier. Naming that
+the eval is the feedback loop on an approximate algorithm is the strongest
+signal.
 
-**Q: What breaks if the HNSW index is dropped?**
+**Q: Why a graph and not a tree (KD-tree) for nearest-neighbor?**
 
-Answer: "Correctness holds, speed dies. `order by <=> limit k` falls back to a
-sequential scan — score every one of n chunks, full sort, take k. `O(n·d)`
-instead of `~O(log n·d)`. At three docs you'd never notice; at a million the
-query goes from milliseconds to seconds." Anchor: `sql/001_agents_schema.sql:28`.
+```
+  KD-tree: partitions space by axis → degrades to O(N) past ~20 dimensions
+  HNSW:    graph of proximity edges → stays ~O(log N) at 768 dimensions
+  reason:  the curse of dimensionality kills space-partitioning trees
+```
 
-## Validate
+Tree-based ANN partitions space dimension by dimension and collapses to a linear
+scan in high dimensions — and embeddings are 768-dimensional. A proximity graph
+doesn't partition space, so it survives. That's why every modern vector index is
+graph-based.
 
-1. **Reconstruct.** Draw HNSW's three-part traversal kernel (frontier, visited,
-   greedy expansion + termination) and map each part to its equivalent in your
-   `Graph.ts` BFS.
-2. **Explain.** Why is `order by embedding <=> $1 limit k` a graph walk and not a
-   sort? (The HNSW index — `src/pg-vector-store.ts:74`, `sql/...:28`.)
-3. **Apply.** The `ef` candidate-set size is turned down to 1. What happens to
-   recall and speed, and which of your data structures is `ef` bounding?
-   (Recall drops, speed rises; it bounds the priority-queue frontier.)
-4. **Defend.** Argue when the exact in-memory `O(n)` scan is the *right* choice
-   over HNSW. (Tiny corpus, or when 100% recall is required and n is small —
-   buffr's eval/test path.)
+**Anchor:** "HNSW is BFS's frontier-and-visited skeleton turned greedy and
+approximate — it stops at a local minimum for ~O(log N), and the eval's recall
+number is the price of that approximation."
+
+---
 
 ## See also
 
-- `03-stacks-queues-deques-and-heaps.md` — the priority-queue frontier HNSW bounds.
-- `04-trees-tries-and-balanced-indexes.md` — HNSW's layered (tree-like) descent.
-- `06-sorting-searching-and-selection.md` — the exact sort-then-slice HNSW replaces.
-- `01-complexity-and-cost-models.md` — the `O(n)` → `O(log n)` curve this buys.
-- `study-ai-engineering` → why embeddings put semantically-similar text near each
-  other in vector space (what makes proximity meaningful).
-- `study-database-systems` → how Postgres's planner chooses the HNSW index and the
-  on-disk graph layout.
-
-
-Updated: 2026-06-24 — purged `npm run ask` / `src/cli/ask-cmd.ts` references; re-grounded the agent loop on `src/session.ts` (built `:57`, invoked `:62`) and the chat entrypoint `src/cli/chat.tsx`; noted `@aptkit/memory` reuses the same HNSW walk (no new DSA).
+- `03-stacks-queues-deques-and-heaps.md` — the priority-queue frontier; the
+  heap-vs-ANN top-k discussion
+- `06-sorting-searching-and-selection.md` — exact (sort+slice) vs approximate
+  (graph walk) selection
+- `01-complexity-and-cost-models.md` — O(N) scan vs ~O(log N) walk
+- `04-trees-tries-and-balanced-indexes.md` — why a tree index can't do this
+- Cross-link: `.aipe/study-ai-engineering/` — embeddings, why cosine distance is
+  the metric, what P@k / R@k mean for retrieval quality
+- Cross-link: `.aipe/study-database-systems/` — the HNSW index as a storage
+  structure and how the planner chooses it

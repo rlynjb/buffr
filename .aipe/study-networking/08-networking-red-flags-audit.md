@@ -1,270 +1,291 @@
-# Networking Red-Flags Audit — ranked by consequence
+# Networking Red-Flags Audit
 
-**Protocol & network-failure risk ranking** · Project-specific
+**Industry name(s):** network-failure risk audit / resilience review.
+**Type:** Project-specific.
 
 ## Zoom out, then zoom in
 
-This is the verdict file. Every other file taught a mechanism; this one ranks
-what's actually risky on buffr's two wires, worst-first, with the evidence for
-each call. The honest headline: **buffr's network risks are almost all
-absences, and most of them are correctly absent for a single-user CLI.** The few
-that aren't are concentrated in one place — the unguarded, untimed calls.
+This is the verdict file. It ranks every protocol- and network-failure
+risk in `buffr-laptop` by consequence, names the evidence for each, and is
+blunt about what's a real bug versus what's latent versus what's a
+non-issue at this scale. The headline: **the risks are all "what happens
+when a peer leaves the box," and today every peer is on the box** — so the
+posture is defensible now and fragile the moment addressing goes remote.
 
 ```
-  Zoom out — where the risks live
+  Zoom out — where each risk lives
 
-  ┌─ Provider layer ────────────────────────────────────────────────┐
-  │   Postgres :5432 (remote)        Ollama :11434 (loopback)       │
-  └──────┬──────────────────────────────────┬──────────────────────┘
-  ┌─ Risk surface ──────────────────────────────────────────────────┐
-  │   ● hangs (no timeout)   ● TLS-by-string   ○ no retry (ok-ish)   │ ★ THIS FILE ★
-  │   ● pool no connTimeout  ○ /exit-cleanup   ○ streaming absent(ok)│
-  └──────┬──────────────────────────────────┬──────────────────────┘
-  ┌─ Service layer ─────────────────────────────────────────────────┐
-  │   src/db.ts · src/config.ts · src/cli/*                          │
-  └──────────────────────────────────────────────────────────────────┘
-
-  ● = real risk to fix/watch     ○ = acceptable given the CLI context
+  ┌─ UI (chat.tsx) ──────────────────────────────────────────┐
+  │  R1 infinite hang (no timeout behind the spinner)         │ ← HIGH
+  └─────────────────────────────┬─────────────────────────────┘
+  ┌─ Orchestration (session/db) ▼────────────────────────────┐
+  │  R2 no retries · R4 pool defaults (connectTimeout:0)      │ ← MED/LOW
+  └─────────────────────────────┬─────────────────────────────┘
+  ┌─ Transport / config ─────────▼───────────────────────────┐
+  │  R3 sslmode imposes no TLS floor (→ study-security owns)  │ ← MED
+  │  R5 connection-leak-by-missed-release (guarded today)     │ ← LOW
+  └──────────────────────────────────────────────────────────┘
 ```
 
-Zoom in: a red-flags audit answers "*if this breaks in production, what breaks
-first and how bad is it?*" — ranked, not listed. The ranking is the value: a
-flat list of twelve concerns teaches less than three real ones in order.
+Zoom in. The concept is a **ranked risk audit**: not a flat list of
+"things that could be better," but a consequence-ordered set of verdicts,
+each with a file:line, a concrete failure scenario, and the move that fixes
+it. Severity here means *blast radius × likelihood given the realistic
+deployment* (a remote Supabase Postgres, per project context).
 
 ## Structure pass
 
-**Layers.** Risks sort into three severities. Trace *consequence* — what does the
-user actually experience — across them.
+**Layers.** The risks distribute across UI, orchestration, and transport —
+but they share one root cause, which is the axis.
 
-**Axis — "what does the user experience when this fails?"**
+**Axis — "does the risk fire when a peer is local vs remote?"** This single
+question sorts the whole audit:
 
 ```
-  One question across the risk tiers
+  axis: "local peer vs remote peer — when does the risk fire?"
 
-  "what does the user experience?"
+  ┌─ R1 infinite hang ─────────┐  local: rare   remote: ROUTINE  → HIGH
+  ┌─ R2 no retries ────────────┐  local: rare   remote: common   → MED
+  ┌─ R3 no TLS floor ──────────┐  local: moot   remote: REAL     → MED
+  ┌─ R4 pool connectTimeout:0 ─┐  local: never  remote: possible → LOW
+  ┌─ R5 missed release() ──────┐  guarded by finally everywhere  → LOW
 
-  ┌─ TIER 1: hangs ─────────────────────┐  → CLI freezes indefinitely,
-  │  no timeout / no connTimeout         │     no feedback (worst UX)
-  └──────────────────────────────────────┘
-      ┌─ TIER 2: silent insecurity ─────┐  → works fine, but creds may cross
-      │  TLS decided by string           │     the internet in cleartext
-      └──────────────────────────────────┘
-          ┌─ TIER 3: acceptable gaps ───┐  → no retry / no streaming; rerun or
-          │  context makes them fine     │     wait covers it for a human
-          └──────────────────────────────┘
-
-  consequence drops sharply across tiers — that ordering IS the audit
+  every risk's severity is a function of "has a peer left the box?"
 ```
 
-**Seam.** The seam that separates Tier 1 from the rest is the missing
-`AbortSignal`. Close that one seam and the worst tier (indefinite hangs)
-collapses. Everything else is either operator config (TLS) or context-acceptable.
+**Seam.** The load-bearing seam for the entire audit is the addressing
+boundary from file `02`: `localhost`/loopback vs a remote DNS host. On the
+local side of that seam, R1–R4 are dormant. Cross it and they wake up
+together. That's why the audit is really one finding wearing five hats.
 
 ## How it works
 
 ### Move 1 — the mental model
 
-Ranking risk is two multiplications you already do in code review: *likelihood ×
-blast radius*, then *blast radius × how-hard-to-fix*. A rare, contained,
-one-line fix ranks low; a likely, user-facing, structural gap ranks high.
+Think of these as a circuit breaker panel: most breakers are fine, one or
+two are warm to the touch, and which ones trip depends entirely on the load
+you put on the circuit. Here the "load" is *network distance*. At loopback
+load, nothing trips. Push remote load through the same panel and the
+timeout breaker goes first.
 
 ```
-  The ranking kernel
+  The risk panel — severity is set by network distance
 
-  risk score ≈ likelihood × user-impact
-
-  high likelihood + freezes the CLI  ──► TIER 1 (fix first)
-  low likelihood  + silent cleartext ──► TIER 2 (config discipline)
-  any likelihood  + human covers it  ──► TIER 3 (acceptable)
+   local load (loopback):   [R1 ok][R2 ok][R3 n/a][R4 ok][R5 ok]
+   remote load (Supabase):  [R1 ⚠⚠][R2 ⚠ ][R3 ⚠ ][R4 ⚠ ][R5 ok]
+                                ▲
+                    R1 trips first and hardest
 ```
 
 ### Move 2 — the ranked findings
 
-**TIER 1 — indefinite hangs (fix first).**
+Each finding: the verdict, the evidence, the concrete failure, the move.
 
-*No call-site timeout.* `await agent.answer()` and every DB query run with no
-`AbortSignal`. A hung Ollama (loading a 9B model) or a stalled connection freezes
-the CLI for minutes with no feedback — and because `chat` is a long-lived session,
-the hang freezes the *whole session*: `session.ask()` never resolves, so Ink never
-restores the input and you can't even type `/exit`. **Likelihood: moderate**
-(model load, flaky network). **Impact: high** (frozen session, no signal). **Fix:
-one `AbortSignal.timeout(ms)` threaded through** — the seam already exists.
-Evidence: `src/session.ts:62`. → `07`.
-
-*Pool has no `connectionTimeoutMillis`.* A dead Supabase host makes the first
-query hang on the OS connect timeout instead of failing fast. **Likelihood: low**
-(stable managed host). **Impact: high** (hang). **Fix: set
-`connectionTimeoutMillis` on the Pool.** Evidence: `src/db.ts:5`. → `03`, `07`.
+**R1 — No request timeout: a slow peer hangs the turn forever. (HIGH)**
 
 ```
-  Tier 1 — the hang path
+  R1 — the hang has no floor
 
-  ┌─ buffr ─┐ await (no signal) ┌─ slow/dead endpoint ─┐
-  │ frozen  │ ─────────────────►│ never responds       │
-  └─────────┘                   └──────────────────────┘
-       └─ only the OS timeout (minutes) ever frees it
+  evidence:  session.ts:62  await agent.answer()   ← no AbortSignal
+             pg-vector-store search/upsert         ← no statement timeout
+             chat.tsx:48    <Spinner/> thinking…   ← spins with no deadline
+  scenario:  remote Postgres stalls mid-query, OR Ollama wedges
+             mid-generation → ask() never resolves → spinner spins ∞
+             → only escape is kill -9 the process
+  move:      AbortSignal.timeout(ms) on the Ollama path; a pg statement
+             timeout on queries. Bound EVERY network await.
 ```
 
-**TIER 2 — TLS decided by string, not code.** buffr sets no `ssl` option on the
-Pool; encryption depends on `sslmode` inside `DATABASE_URL`, which the
-`.env.example` doesn't pin. A deploy with `sslmode=disable` to a remote host
-sends the password and every row in cleartext, and **no code catches it**.
-**Likelihood: low** (Supabase defaults to TLS). **Impact: high if it happens**
-(credential exposure). **Fix: pin `sslmode=verify-full` in the connection string
-and document it; or set `ssl` explicitly on the Pool.** Evidence: `src/db.ts:5`,
-`.env.example`. This one is also a `study-security` finding. → `04`.
+This is #1 because the failure mode is a *silent* infinite wait, not a
+visible error — the worst kind of failure, the one with no signal. Walked
+in full in file `07`. Local peers rarely hang, which is why it's survived;
+a remote `DATABASE_URL` makes hangs routine.
+
+**R2 — No retries: one transient blip fails the whole turn. (MEDIUM)**
 
 ```
-  Tier 2 — the silent-cleartext path
+  R2 — no recovery from transient failure
 
-  DATABASE_URL (no sslmode) ──► pg.Pool (no ssl:) ──► plaintext to remote
-       │                                                     │
-       └── nothing in buffr asserts encryption ──────────────┘
+  evidence:  no retry wrapper anywhere; every call is a bare await
+             chat.tsx:30  catch → render "error: <msg>"  ← whole recovery
+  scenario:  remote pg drops a connection, or Ollama returns a transient
+             503 → the turn fails → user must retype the question
+  move:      bounded retry (2–3 attempts) on idempotent calls — the search
+             query, the embed — WITH backoff+jitter (R-adjacent). Do NOT
+             blind-retry the non-idempotent inserts without care.
 ```
 
-**TIER 3 — acceptable given the CLI context (watch, don't fix yet).**
+Medium, not high: a failed turn is *visible* (the user sees the error and
+retypes), so it degrades UX but doesn't hang or corrupt. File `07` covers
+the mechanism.
 
-*No network retry.* Transient failures throw and exit; re-running is the retry.
-Fine for a human; the first thing to add if buffr goes unattended. → `07`.
-
-*A thrown turn no longer leaks the pool — but the pool is now genuinely
-long-lived.* Under the old one-shot `ask`, an `agent.answer()` throw unwound past
-`pool.end()` and the OS reclaimed the socket on exit. Under `chat` that's flipped:
-the throw is *caught* by the Ink handler (`src/cli/chat.tsx:30-34`) and rendered
-as an `error:` line, so the session — and its warm pool — survive the bad turn.
-That's better for resilience, but it means the pool genuinely lives for the whole
-session, so the "OS reclaims on exit" safety net no longer applies *during* a run.
-Pool cleanup now hinges on the user actually typing `/exit` to reach
-`session.close()` (`src/session.ts:73`); a hard kill (Ctrl-C, crash) skips it and
-leans on the OS. **Acceptable for a supervised CLI; revisit if unattended.**
-Evidence: `src/cli/chat.tsx:18-21,30-34`, `src/session.ts:72-74`.
-
-*No streaming.* Request/response only; a UX choice, not a risk. → `06`.
-
-*No backpressure.* Sequential loops, nothing to overflow. Correct by structure.
-→ `07`.
-
-*Ollama plaintext HTTP.* Loopback — correct, not a risk. → `04`.
+**R3 — sslmode imposes no TLS floor: encryption is config-only. (MEDIUM —
+owned by study-security)**
 
 ```
-  Tier 3 — why these are fine
+  R3 — the code can't force encryption
 
-  no retry ........ human re-asks on the next turn
-  thrown turn ..... caught by Ink, rendered as error; session survives
-  no streaming .... one final answer, no UX need
-  no backpressure . sequential for-loop is the flow control
-  ollama plaintext  loopback ⇒ no path attacker
+  evidence:  db.ts:5  new pg.Pool({ connectionString })  ← no ssl object
+  scenario:  ship .env with sslmode=disable (or omit it) against a REMOTE
+             Postgres → DB password + every query travel in plaintext over
+             the public internet, sniffable / MITM-able
+  move:      for remote DBs, require sslmode=verify-full in .env; consider
+             a startup assertion that rejects a remote host without it.
+  ownership: the VERDICT (is this safe?) belongs to study-security; this
+             audit only flags that the network layer offers no floor.
+```
+
+Medium and explicitly cross-linked: file `04` walks the mechanism
+(`require` encrypts but doesn't verify; only `verify-full` does), and
+**`study-security`** owns whether the shipped posture is acceptable. Listed
+here so the network audit is complete, not to duplicate that verdict.
+
+**R4 — Pool defaults: `connectionTimeoutMillis: 0` waits forever for a
+connection. (LOW today, latent)**
+
+```
+  R4 — untuned pool, one sharp default
+
+  evidence:  db.ts:5  new pg.Pool({ connectionString })  ← no tuning
+             defaults: max=10, idle=10s, connectionTimeout=0 (wait ∞)
+  scenario:  all 10 conns busy/unreachable → pool.connect() blocks forever
+             (a second face of R1, at the pool layer)
+  why LOW:   single-user CLI, one turn at a time (busy flag, chat.tsx:13)
+             → never approaches max=10. Latent until concurrency rises.
+  move:      set connectionTimeoutMillis (e.g. 5s) so connect() fails fast
+             instead of hanging; revisit max if usage ever fans out.
+```
+
+Low because the `busy` flag caps concurrency at one (file `07`), so pool
+exhaustion can't happen at current scale. It's here as a latent gap, not a
+live bug.
+
+**R5 — Connection leak if a `release()` is ever missed. (LOW — currently
+guarded)**
+
+```
+  R5 — leak risk, currently defended
+
+  evidence:  pg-vector-store upsert() · migrate.ts runMigration()
+             both: client = pool.connect() ... finally { client.release() }
+  scenario:  a future manual-lease path that forgets the finally → that
+             conn never returns → repeat → pool exhausts → deadlock,
+             silently, no error
+  why LOW:   every existing manual lease HAS the finally+release. The risk
+             is regression, not a present defect.
+  move:      keep the connect/try/finally/release discipline; prefer
+             pool.query() (auto-return) wherever a single statement suffices.
+```
+
+Low and almost a non-finding — it's here to name the discipline that keeps
+it low (file `03`), so a future contributor doesn't break it.
+
+**Non-issues — explicitly cleared.** So the audit is honest in both
+directions:
+
+```
+  cleared — not risks in this shape
+
+  · CORS / inbound auth / DDoS  → no inbound server (file 01). N/A.
+  · WebSocket/SSE reconnect storms → no realtime transport (file 06). N/A.
+  · UDP packet loss / reordering → no UDP (file 03). N/A.
+  · DNS poisoning → default is loopback/hosts file (file 02). Minimal
+    surface until a remote host is configured.
+  · Backpressure overflow → single-user, busy-flag serialized (file 07).
 ```
 
 ### Move 3 — the principle
 
-A good audit ranks by consequence and is honest about what *isn't* a problem.
-The skill people miss is the second half — listing every theoretical gap as
-equally urgent signals you can't tell a freeze from a non-issue. buffr's real
-network risk is one tier deep: untimed calls that can hang. Close that, pin TLS,
-and the rest is correctly-sized for what the system is today: a single-user,
-human-supervised, local-first CLI.
+**A risk audit ranks by consequence-given-deployment, and names what's
+cleared as carefully as what's flagged.** The strongest signal here isn't
+the list of absences — it's recognizing they share one trigger (a peer
+leaving the box) and that R1 (the silent infinite hang) is the one that
+bites first and hardest. An audit that flagged all five as equal "missing
+resilience" would teach less than this one, which says: fix the timeout
+first, the rest follow, and half the textbook risks don't apply to this
+shape at all.
 
 ## Primary diagram
 
-The full ranked audit, one frame.
+The complete ranked audit in one frame.
 
 ```
-  buffr networking red-flags — ranked
+  Networking red-flags — ranked by consequence
 
-  TIER 1 (fix first) ─────────────────────────────────────────────
-   ● no call-site timeout        src/session.ts:62      → AbortSignal
-   ● pool no connectionTimeout   src/db.ts:5            → set it
-  TIER 2 (config discipline) ─────────────────────────────────────
-   ● TLS via string, not code    src/db.ts:5 + .env       → pin sslmode
-                                                            (study-security)
-  TIER 3 (acceptable today) ──────────────────────────────────────
-   ○ no network retry            → re-ask next turn; add if unattended
-   ○ pool cleanup needs /exit    src/cli/chat.tsx:18-21  → ok (supervised)
-   ○ no streaming                → UX choice, not a risk
-   ○ no backpressure             → structurally unnecessary
-   ○ ollama plaintext            → correct (loopback)
+  HIGH   R1  no request timeout → silent infinite hang
+             session.ts:62 · pg-vector-store · chat.tsx:48
+             fix: AbortSignal.timeout + pg statement timeout
 
-  the whole Tier 1 collapses behind ONE seam: the AbortSignal buffr never makes
-```
+  MED    R2  no retries → one blip fails the turn (visible)
+             bare awaits · chat.tsx:30 catch
+             fix: bounded retry + backoff on idempotent calls
+  MED    R3  no TLS floor → plaintext if .env says so  [study-security]
+             db.ts:5 (no ssl object) · file 04
+             fix: require verify-full for remote; startup assert
 
-## Implementation in codebase
+  LOW    R4  pool connectionTimeout:0 → connect() hangs (latent)
+             db.ts:5 · guarded by busy-flag concurrency=1
+  LOW    R5  missed release() → pool leak (currently guarded)
+             upsert/migrate finally{release()} · keep the discipline
 
-**Use cases.** This file is read when deciding what to harden before buffr runs
-anywhere a human isn't watching it.
+  CLEARED  CORS · WS/SSE · UDP · DNS-poisoning · backpressure
+           (structurally N/A in this shape)
 
-**Code side by side.** The two Tier-1 lines and the Tier-2 line, together:
-
-```
-  the three highest-ranked findings, in code
-
-  src/db.ts:5
-    new pg.Pool({ connectionString: databaseUrl })
-        │   └─ Tier 2: no ssl: option → TLS is whatever the string says
-        └───── Tier 1: no connectionTimeoutMillis → dead host hangs
-
-  src/session.ts:62
-    const answer = await agent.answer(question);
-        └─ Tier 1: no AbortSignal → hung Ollama freezes the whole session
-
-  one controller + one pool option + one pinned sslmode = all three closed
+  common root: every flagged risk fires harder once a peer goes REMOTE
 ```
 
 ## Elaborate
 
-Risk audits are most useful when they separate *severity* from *urgency*: a
-high-severity, low-likelihood item (cleartext creds) can rank below a
-moderate-severity, high-likelihood one (hangs) depending on context. buffr's
-context — local, single-user, supervised — is what demotes most items to Tier 3.
-The moment that context changes (server deployment, unattended cron), re-run
-this audit: items move *up* tiers as the human backstop disappears. The audit is
-a function of deployment, not just code — the same insight that drives `07`.
+The reason to rank rather than list: it tells the next engineer where to
+spend the first hour. Here that's unambiguous — add a per-call timeout (R1)
+and you remove the only *silent* failure mode in the system; everything
+else either fails loudly (R2) or is dormant at this scale (R4, R5) or is a
+security verdict to hand off (R3). The audit also doubles as a deployment
+checklist: every flagged risk has the same trigger condition — "is the peer
+remote?" — so "we're moving Postgres to Supabase" is precisely the moment to
+work this list top to bottom. That coupling between the addressing decision
+(file `02`) and the resilience gaps (file `07`) is the single most useful
+thing to carry out of this whole guide.
 
 ## Interview defense
 
-**Q: What's the single most important network fix in this repo?**
+**Q: "What's the most serious networking risk in this codebase?"**
+
+> The silent infinite hang. Every network call is a bare `await` with no
+> timeout or `AbortSignal` — `session.ts:62` for Ollama, the pg queries for
+> Postgres — and the Ink spinner has no deadline behind it. If a peer
+> stalls mid-request, the turn never completes and the only escape is
+> killing the process. It's the worst kind of failure because it's silent —
+> no error, just a spinner forever. First fix: bound every network await
+> with a timeout.
 
 ```
-  await agent.answer()  ──+── AbortSignal.timeout(ms) ──► hangs become errors
-  pg.Pool               ──┘   + connectionTimeoutMillis
+  R1 (HIGH): bare await → HANG → spinner ∞ → kill -9
+  fix first; it's the only SILENT failure mode in the system
 ```
 
-Answer: "Timeouts. No call has an `AbortSignal`, so a hung Ollama or dead DB host
-freezes the CLI for minutes. One `AbortSignal.timeout()` threaded through the
-calls and a `connectionTimeoutMillis` on the pool turns indefinite hangs into
-fast, catchable errors — and since `chat` is long-lived, a hang today freezes the
-whole session, not one command, which makes the fix more urgent. The whole worst
-tier collapses behind that one seam." Anchor: `src/session.ts:62`, `src/db.ts:5`.
+Anchor: *"`session.ts:62` is a naked await — no timeout, so a hung peer =
+infinite spinner."*
 
-**Q: What network risks did you decide NOT to fix, and why?**
+**Q: "Which of these risks don't actually matter yet, and why?"**
 
-Answer: "Retries, streaming, backpressure, and pool-cleanup-needs-`/exit`.
-They're all demoted by context — a human runs the CLI and watches it. Re-asking
-on the next turn is the retry; a thrown turn is caught by Ink and the session
-survives; there's no queue to apply backpressure to. The one that shifted is pool
-cleanup: `chat`'s pool is genuinely long-lived, so it relies on `/exit` reaching
-`session.close()` rather than process-exit. I'd revisit every one of them the day
-buffr runs unattended." Anchor: `src/cli/index-cmd.ts:22-26`, `src/cli/chat.tsx:18-21`,
-`src/session.ts:72-74`.
+> R4 (pool `connectionTimeout:0`) and R5 (release leak) are dormant at
+> single-user scale — the `busy` flag caps concurrency at one turn, so the
+> pool never approaches its max. And a whole class is structurally N/A:
+> CORS, WS/SSE, UDP — buffr has no inbound server, no realtime transport,
+> no UDP. The honest audit clears those, not just flags absences. The real
+> trigger for the live risks is a peer going remote.
 
-## Validate
-
-1. **Reconstruct:** the three tiers and the one finding in each that defines it.
-2. **Explain:** why does TLS rank Tier 2 (high severity) below hangs (Tier 1)?
-   (likelihood — Supabase defaults to TLS; hangs are more probable.)
-3. **Apply:** buffr becomes a cron job. Which Tier-3 items move up? (retry and
-   pool-cleanup both rise — the human who re-asks and types `/exit` is gone.)
-4. **Defend:** justify the single highest-priority fix. (`AbortSignal` timeout —
-   collapses the entire hang tier, and a hang now freezes a whole session;
-   `src/session.ts:62`.)
+Anchor: *"`busy` flag (chat.tsx:13) caps concurrency at 1 → pool risks
+latent; no inbound server → CORS/WS cleared."*
 
 ## See also
 
-- `03-tcp-udp-connections-and-sockets.md` — the pool config behind two findings.
-- `04-tls-and-trust-establishment.md` — the Tier-2 TLS-by-string detail.
-- `07-timeouts-retries-pooling-and-backpressure.md` — the mechanisms these
-  findings are absences of.
-- `study-security` — owns the credential-exposure half of the TLS finding.
-- `study-system-design` — where re-running this audit on a new deployment lands.
-
-Updated: 2026-06-24 — Repointed all Tier-1 timeout findings off the deleted `ask-cmd.ts` onto `src/session.ts:62`, and sharpened the consequence: a hang now freezes the whole long-lived `chat` session (input never returns), making the AbortSignal fix more urgent. Reworked the old "uncaught throw unwinds past pool.end()" Tier-3 finding: under `chat` a thrown turn is *caught* by Ink (`src/cli/chat.tsx:30-34`) and the session survives, but the pool is now genuinely long-lived so cleanup hinges on the user typing `/exit` → `session.close()` (`src/session.ts:73`) rather than process-exit.
+- `07-timeouts-retries-pooling-and-backpressure.md` — the mechanisms
+  behind R1, R2, R4.
+- `04-tls-and-trust-establishment.md` — the mechanism behind R3.
+- `03-tcp-udp-connections-and-sockets.md` — the pool discipline behind R5.
+- `02-dns-routing-and-addressing.md` — the local/remote seam that sets
+  every severity.
+- `study-security` — owns the R3 verdict and the broader trust-boundary
+  review.

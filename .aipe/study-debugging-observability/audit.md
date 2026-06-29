@@ -1,224 +1,184 @@
-# audit.md — the 8-lens observability walk
+# Audit — Debugging & Observability (Pass 1)
 
-Pass 1. One `##` per lens. Each lens names what buffr actually does, grounded in
-`file:line`, or emits `not yet exercised`. Significant findings cross-link to the
-Pass 2 pattern files.
-
-> Updated: 2026-06-24 — reconciled against the current code. Two former blind spots are
-> resolved: the sink now persists all six `CapabilityEvent` types (was two), and
-> `created_at` now comes from `event.timestamp` (was server `now()`). The `ask` command
-> is gone — replaced by the long-lived `session.ts` behind the `npm run chat` Ink TUI.
-> Lenses, the red-flag ranking, and pattern cross-links updated accordingly.
-
-The repo under audit: `buffr-laptop`, a single-device TypeScript RAG agent.
-Postgres + pgvector for storage, Ollama for models, `@rlynjb/aptkit-core` (0.4.1) for
-the agent loop. Run by hand from three CLI surfaces: `index`, `chat` (Ink TUI over a
-long-lived `session.ts`), and `eval`.
+The 8-lens walk over buffr-laptop. Each lens names what the code actually does,
+grounded in `file:line`, or says `not yet exercised` and when it starts to
+matter. Significant patterns cross-link to their Pass 2 file.
 
 ---
 
-## 1. observability-map — what's watchable at each boundary
+## 1. observability-map — what can be observed at each boundary
 
-buffr crosses four boundaries; the agent-loop signal now survives the sink intact.
+The evidence surface has exactly one durable store and three ephemeral edges.
 
 ```
-  the four boundaries and what each exposes
-
-  CLI/TUI    →  stdout (index/eval/migrate) · Ink render (chat)   src/cli/*
-  Agent loop →  6 CapabilityEvent types (the rich source)         aptkit-core
-  Sink       →  persists ALL 6 event types, one row each          src/supabase-trace-sink.ts:56
-  Storage    →  messages rows (role/content/tool_calls/results/   sql/001_agents_schema.sql
-                model/tokens_used/created_at=event.timestamp)
+  boundary                  what's observable            durability
+  ─────────────────────────────────────────────────────────────────
+  agent run → trace sink    all 6 event types → rows     DURABLE (Postgres)
+  session → memory write    nothing (swallowed catch)    none
+  Ink turn → screen         "error: <msg>" or answer     ephemeral (frame)
+  index CLI → stdout        "indexed <path>"             ephemeral (terminal)
+  eval CLI → stdout         per-query + mean P@1/R@3      ephemeral (terminal)
 ```
 
-The richest evidence is at the **agent-loop boundary** — the
-`CapabilityEvent` union carries `step`, `tool_call_start`,
-`tool_call_end{durationMs}`, `model_usage{inputTokens,outputTokens}`, `warning`,
-and `error` (`@aptkit/runtime/dist/src/events.d.ts`). That's a full
-trace-and-metrics feed. As of 2026-06-24 the **sink preserves all of it**:
-`src/supabase-trace-sink.ts:56-84` switches over every variant and writes one row
-each — args, `durationMs`, `error`, token counts, warnings, and errors all reach
-storage. The map's load-bearing fact flipped: *the sink is no longer the ceiling;
-the remaining limits are schema shape (durationMs/tokens live in jsonb / a generic
-int, not first-class numeric columns) and the absence of metrics/tracing tooling.*
-→ `02-discarded-trace-signal.md`.
+The durable one is `SupabaseTraceSink.emit()` (`src/supabase-trace-sink.ts:53`)
+writing to `agents.messages` (`sql/001_agents_schema.sql:40`). That is the
+observability map: if it isn't an event the agent loop emits, it leaves no trace.
+→ `01-full-signal-trajectory-capture.md`.
 
-## 2. reproduction-and-evidence — repro, hypotheses, experiments
+## 2. reproduction-and-evidence — repro, hypotheses, evidence collection
 
-Partial. The repo has one genuine reproduction lever: the eval harness.
-`src/cli/eval-cmd.ts` replays a fixed labeled query set (`eval/queries.json`)
-through the retrieval pipeline and prints deterministic P@1/R@3 per query
-(`eval-cmd.ts:24-32`). That's a controlled experiment for *retrieval* regressions —
-change the chunker or embedding model, re-run, compare numbers. → `05-eval-numbers-as-quality-signal.md`.
+Strong here, for one reason: the trajectory is replayable. Because every tool
+call's **args** are persisted (`tool_call` role, `tool_calls` jsonb,
+`src/supabase-trace-sink.ts:62-65`) alongside the **result/error/durationMs**
+(`tool` role, `tool_results` jsonb, `:67-71`), you can answer "why did this answer
+come out wrong?" from the rows alone: which passages were retrieved, what the tool
+returned, whether it errored. The cause is captured next to the effect.
 
-For the **agent answer itself there is still no full reproduction path**, but the
-evidence improved. Chat runs through a long-lived `session.ts` (`src/cli/chat.tsx` →
-`session.ask`); the model is Ollama-served and non-deterministic, and nothing captures
-the retrieved chunks, the prompt, or a seed alongside the answer. So to reproduce a bad
-answer you'd re-run and hope. What changed: the `messages` rows from the prior run now
-*include the tool args* — the sink captures `tool_call_start` into a `tool_call` row's
-`tool_calls.args` (`src/supabase-trace-sink.ts:62-65`), so the actual search query is
-recorded. You can now see both *what was asked of the tool* (the cause) and *what it
-returned* (the effect), plus the `durationMs` and any `error`. The remaining repro gap
-is upstream of the trace: the retrieved chunk set and the assembled prompt aren't
-persisted, and there's no seed.
+The repro gap is the **fallback path**: a question that yields empty model text
+produces a `FALLBACK_ANSWER` the user sees, but *no* `step` row records it
+(detail in lens 6). So one class of "the agent said it couldn't find anything"
+incident has no row to start the repro from. Otherwise: evidence collection is
+deterministic and ordered (lens 5).
 
-## 3. structured-logs-and-correlation — events, levels, context, IDs, redaction
+No controlled-experiment harness for production behavior beyond the offline eval
+(`src/cli/eval-cmd.ts`) — that's a fixed labeled set, not a live A/B. → lens 4,
+`04-eval-numbers-as-quality-signal.md`.
 
-`not yet exercised` as structured logging. What exists is unstructured stdout on the
-batch commands: `process.stdout.write` with hand-formatted strings — `indexed ${path}`
-(`index-cmd.ts:25`), per-query scores (`eval-cmd.ts:31`), `migration applied`
-(`migrate.ts:31`); the chat answer is Ink-rendered, not printed (`chat.tsx:44-46`). No
-log levels, no JSON lines, no timestamps on the lines, no redaction pass.
-→ `04-stdout-as-only-log.md`.
+## 3. structured-logs-and-correlation — events, levels, context, redaction
 
-Correlation is the sharper miss, and it's only half-closed. Every `CapabilityEvent`
-carries a `capabilityId` (`@aptkit/runtime/dist/src/events.d.ts`) — the natural
-correlation/span key tying a turn's events together — and the sink still ignores it on
-every branch (`src/supabase-trace-sink.ts:56-84`); there's no `capability_id` column to
-write it to. What the sink *now* preserves per row is the event `timestamp`
-(`created_at`), which orders the turn but doesn't correlate across runs. The
-`conversations.id` (a UUID, `sql/001_agents_schema.sql`) remains the one correlation key
-that survives: all messages for one chat session share it (`session.ts:55`, passed into
-the sink at `:56`). So you can group a session's turns, but you can't correlate across
-the loop's internal events (the `capabilityId` is still dropped).
+Split verdict.
 
-## 4. metrics-slis-slos-and-alerts — signals, objectives, thresholds
+**The trace sink is effectively structured logging done right** — events are
+typed (`CapabilityEvent`), each carries context (`role`, `model`, `tokensUsed`),
+and they share a correlation key: `conversation_id`
+(`src/supabase-trace-sink.ts:51`, FK at `sql/001_agents_schema.sql:42`). Every
+row of a session ties back to one `conversations` row. That's a correlation ID.
 
-`not yet exercised` as operational metrics. No counters, gauges, or histograms. No
-`/metrics` endpoint. No SLI definitions, no SLO targets, no alerting. The number-shaped
-signals that exist are now *captured* but still not metric-shaped:
+**The CLI/Ink logging is not.** `process.stdout.write` lines
+(`src/cli/index-cmd.ts:25`, `src/cli/eval-cmd.ts:31`, and Ink's rendered
+`error: <msg>` at `src/cli/chat.tsx:31`) have **no level** (no info/warn/error
+distinction — the sink's `warning`/`error` event types never reach stdout), **no
+structure** (free text, not key-value), and **no correlation** beyond the current
+terminal. → `03-stdout-as-only-log.md`.
 
-- **Eval scores** (`eval-cmd.ts:33`) — mean P@1 / R@3 printed once per manual run.
-  No time series, no threshold, no alert. A regression is visible only if a human
-  re-runs and eyeballs it. → `05-eval-numbers-as-quality-signal.md`.
-- **`durationMs`** — emitted per tool call by the loop and **now persisted** into the
-  `tool_results` jsonb (`src/supabase-trace-sink.ts:68-71`). The raw material for a
-  latency histogram now lands in the database — but inside jsonb, not an indexed
-  numeric column, so there's no histogram yet. → `02-discarded-trace-signal.md`.
-- **`tokens_used`** — the `model_usage` event is now handled
-  (`src/supabase-trace-sink.ts:73-78`), so the `messages.tokens_used` column
-  (`sql/001_agents_schema.sql:48`) is **filled** on every model call (summed
-  input+output). It's a captured cost number, not yet an aggregated metric or alert.
+**Redaction: `not yet exercised`, and worth flagging.** Tool args and results are
+persisted raw into jsonb. On a single-user laptop with `me.md`-style personal
+content, that's the point — but there's no redaction seam, so the day this store
+is shared or backed up off-device, the trajectory contains everything verbatim.
+Becomes relevant the moment `app_id` stops meaning "just me."
 
-So the gap moved: the cost/latency evidence is no longer *lost*, it's *unaggregated* —
-captured per row, with no rollup, time series, or threshold over it.
+## 4. metrics-slis-slos-and-alerts — signals, SLIs, objectives, alerts
 
-## 5. traces-and-request-lifecycles — spans, causal chains, latency attribution
+`not yet exercised` for live metrics. There are **no counters, no gauges, no
+aggregation, no alert thresholds**. Nothing computes a rate-over-time.
 
-This is buffr's strongest lens, and as of 2026-06-24 it's a trace with timing and a
-sound clock.
+The one numeric quality signal is **offline**: `scorePrecisionAtK` /
+`scoreRecallAtK` over `eval/queries.json`, printed as `P@1` / `R@3` and their
+means (`src/cli/eval-cmd.ts:22-33`). That's a retrieval-quality SLI measured in a
+batch you run by hand, not a production objective with an alert. Treat it as the
+seam with study-testing. → `04-eval-numbers-as-quality-signal.md`.
 
-What exists: the `messages` table is a real per-conversation trajectory store. One chat
-turn produces a `user` row (`session.ts:61`), then `tool_call`, `tool`, `model_usage`,
-`assistant`, and (on failure) `warning`/`error` rows in emit order
-(`src/supabase-trace-sink.ts:56-84`). Reading those rows back reconstructs the turn
-sequence — a trace, in the trajectory-capture sense, now with latency attribution per
-tool span via `tool_results.durationMs`. → `01-trajectory-capture-as-observability.md`.
+Raw material for real metrics *is* being captured — `durationMs` per tool call
+and `tokens_used` per model call land in `messages`
+(`src/supabase-trace-sink.ts:69`, `:76`) — but nothing rolls them into p50/p95
+latency or a token-budget gauge. The numbers exist; the metric layer doesn't.
+Becomes relevant when you want "is it slow *lately*" instead of "was this one run
+slow."
 
-What's now sound: the per-event `timestamp` the loop stamps (`@aptkit/runtime` emits
-`timestamp: timestamp()` on every event) is **persisted** into `created_at`
-(`src/supabase-trace-sink.ts:54-55`, insert `coalesce($8::timestamptz, now())` at
-`:26-30`). So replay order reflects *emit* time, not server insert time, and survives
-the concurrent `Promise.all` flush (`:91-93`) — the test now asserts replay order equals
-emit order (`test/supabase-trace-sink.test.ts:64-66`). The residual: two events in the
-same millisecond (or an empty event timestamp falling back to `now()`) tie, and a tie is
-undefined under `order by created_at`, with no `seq` tiebreaker column yet.
-→ `03-created-at-replay-ordering-gap.md`.
+## 5. traces-and-request-lifecycles — lifecycles, spans, causal chains, latency
 
-No distributed tracing (no spans, no OTel, no trace propagation) — `not yet
-exercised`, and not needed on one device until a second service enters the path.
+This is the repo's strongest lens, within one process.
 
-## 6. state-snapshots-and-debugging-boundaries — state, network traces, error output
+A single `ask()` (`src/session.ts:60`) is one request lifecycle, and the trace
+captures its causal chain in order: `tool_call_start` (args) → `tool_call_end`
+(result + `durationMs`) → `model_usage` (tokens) → `step` (assistant text). Each
+event carries `event.timestamp`, persisted into `created_at` via
+`coalesce($8::timestamptz, now())` (`src/supabase-trace-sink.ts:30`), so a `select
+... order by created_at` replays the lifecycle in emit order — **not** in the
+order the queued async inserts happened to land. That ordering guarantee is the
+load-bearing detail. → `02-client-timestamp-ordering.md`,
+`01-full-signal-trajectory-capture.md`.
 
-Thin. The inspectable state is the database itself: `agents.documents`,
-`agents.chunks` (with embeddings), `agents.conversations`, `agents.messages`. You
-can `psql` into `reindb` and read any of it directly — that's the de-facto state
-snapshot. The dimension guard is the one explicit before/it-breaks boundary:
-`PgVectorStore.assertDim` throws `dimension mismatch: got X, store is 768` on any
-vector of the wrong width (`src/pg-vector-store.ts:32-36`), called before every
-upsert and search (`:39`, `:68`). That's a deliberate fail-loud debugging boundary —
-a 768/other mismatch surfaces as a clear thrown message, never a silent truncation.
+Latency attribution per span exists at the tool level (`durationMs` from the
+loop), but there's **no whole-request span** — nothing records "the full `ask()`
+took N ms." And it's single-process: no distributed trace, no parent/child span
+IDs crossing a network boundary. Distributed tracing is `not yet exercised`;
+relevant once the loop runs behind a service boundary.
 
-No network-level trace capture (no request/response logging for the Ollama HTTP
-calls or the Postgres wire). A failed Ollama embed or a dead Postgres surfaces as a
-raw thrown error from inside `pg` or the embedding provider, with no buffr-side
-context wrapping it. Error *output* is therefore an unhandled Node stack trace —
-honest, but uncontextualized.
+## 6. state-snapshots-and-debugging-boundaries — state inspection, before/after
 
-## 7. incident-analysis-and-prevention — root cause, remediation, regression guards
+The persisted trajectory *is* the state snapshot — you reconstruct what the agent
+knew at each step by replaying `messages`. No separate snapshot mechanism is
+needed because the event stream is the state.
 
-`not yet exercised` as incident process (no runbooks, no postmortems, no on-call —
-correct for a hand-run laptop tool). What exists is **regression prevention**, and
-it's real:
+**The honest finding lives here.** The fallback answer is a state the snapshot
+never records. In the agent loop, the `step` event is gated:
 
-- The eval set (`eval/queries.json` + `eval-cmd.ts`) is a retrieval-quality
-  regression guard: change retrieval, re-run, catch a P@1/R@3 drop. → `05`.
-- The `node:test` suite (`test/*.test.ts`) guards the persistence and config layers.
-  DB-touching tests gate on `DATABASE_URL` and skip when unset
-  (`test/supabase-trace-sink.test.ts:12`) — so the guard degrades gracefully off-box.
-- The dimension guard (`src/pg-vector-store.ts:32`) prevents the specific incident
-  of a wrong-dim embedding silently corrupting the index.
+```
+  run-agent-loop.js:49   const text = textFromContent(response.content);
+  run-agent-loop.js:50   if (text) {                         // ← gate
+  run-agent-loop.js:51     trace?.emit({ type: 'step', ... })
+  run-agent-loop.js:52   }
+  ...
+  rag-query-agent.js:51  return finalText.trim() || FALLBACK_ANSWER;
+```
 
-The prevention gap that *was* a latent incident is now closed: the sink persists
-`warning` and `error` events (`src/supabase-trace-sink.ts:80-83`). When the loop emits
-an `error` event — a tool failing, a model refusing — it now writes an `error`-role row
-with the message, so a failed turn leaves a durable record in `messages`. The test pins
-this (`test/supabase-trace-sink.test.ts:62-63`). The chat TUI additionally catches the
-throw and renders `error: <message>` (`chat.tsx:30-31`), so the session survives too.
-→ `02-discarded-trace-signal.md`.
+When the model returns empty text: `text` is falsy → no `step` emitted →
+`finalText = ''` → `answer()` substitutes `FALLBACK_ANSWER`
+(`@aptkit/agent-rag-query/dist/src/rag-query-agent.js:21,51`). The user sees "I
+couldn't find anything in the knowledge base to answer that." but **the trace has
+no row for that answer.** The before/after snapshot is missing its "after" for
+exactly the failure case you'd most want to debug. This is an aptkit-side gate,
+not a buffr bug — but buffr is what reads the empty trace.
+
+Network/error output at the boundary: tool errors are captured (`tool_results.error`,
+`src/supabase-trace-sink.ts:69`); the session's `memory.remember()` failure is
+**swallowed by design** (`src/session.ts:66`, "best-effort, the turn already
+succeeded") — a deliberate tradeoff that trades a memory-write incident for never
+losing the answer, but it means a persistent memory-write failure is invisible.
+
+## 7. incident-analysis-and-prevention — root cause, remediation, runbooks
+
+`not yet exercised` as a *practice* — there are no runbooks, no post-incident
+docs, no regression guards wired to observability. But the substrate for root
+cause is unusually good: given a bad answer, the conversation's `messages` rows
+give you retrieved passages, tool errors, token counts, and timing in order, so
+root-causing is a `select ... where conversation_id = ... order by created_at`.
+
+Prevention is offline-only: re-run `npm run eval` against `eval/queries.json` to
+catch retrieval regressions (the study-testing seam). No alert prevents a live
+regression; you find out at the next manual eval run. Becomes a real gap when the
+agent runs unattended.
 
 ## 8. debugging-observability-red-flags-audit — ranked blind spots
 
-Ranked by consequence, each with its evidence. Four of the original six blind spots
-were closed by the 2026-06-24 sink rewrite; they're listed as RESOLVED so the history is
-visible, with the still-open risks ranked first.
+Ranked by consequence for *this* repo at *this* scale.
 
-**R1 — the `FALLBACK_ANSWER` is invisible in the trace (highest open).** The returned
-answer is `finalText.trim() || FALLBACK_ANSWER` in the agent
-(`@aptkit/agent-rag-query/dist/src/rag-query-agent.js`). The loop only emits the final
-`step` when its text is truthy, so a real answer *is* persisted via that step — but when
-the model returns empty and the agent substitutes `FALLBACK_ANSWER`, no `step` fires and
-no row is written. The user sees a fallback the trace store never recorded, even now
-that every emitted event is captured — because no event is emitted for it. → `01`.
+1. **Fallback answers leave no trace (lens 6).** Highest-leverage blind spot:
+   the one answer-class you'd most want to debug ("it said it found nothing") is
+   the one with no row. Evidence: the `if (text)` gate at
+   `run-agent-loop.js:50` vs the `|| FALLBACK_ANSWER` at `rag-query-agent.js:51`.
+   Mitigation lives upstream in aptkit; buffr could persist a synthetic `step`
+   when `answer === FALLBACK_ANSWER`.
 
-**R2 — same-millisecond replay ties have no tiebreaker (open, low).** Replay now orders
-by the persisted `event.timestamp` (`created_at`), which fixed the old insert-race
-scramble. The residual: two events in the same millisecond, or an event with an empty
-timestamp falling back to `now()` (`src/supabase-trace-sink.ts:26,30`), tie — and a tie
-is undefined under `order by created_at`. No `seq` column exists to break it. Narrow on
-one device, one turn at a time. → `03`.
+2. **Same-millisecond timestamp tie has no tiebreaker (lens 5).** `created_at` is
+   millisecond `timestamptz` and there's no monotonic `seq` column, so two events
+   emitted in the same millisecond can replay out of order. Low probability on a
+   single-device flow, real in principle. Evidence: `sql/001_agents_schema.sql:49`
+   (no seq column), `src/supabase-trace-sink.ts:30`. →
+   `02-client-timestamp-ordering.md`.
 
-**R3 — captured cost/latency is unaggregated (open, low).** `durationMs` and
-`tokens_used` are now persisted per row (`src/supabase-trace-sink.ts:68-78`) but live in
-jsonb / a generic int with no rollup, histogram, time series, or alert. You *can* answer
-"why was that answer slow / how much did it cost" by querying a row; you can't yet trend
-it. → `02`, `../study-performance-engineering/`.
+3. **No redaction on persisted args/results (lens 3).** Personal content stored
+   verbatim in jsonb. Acceptable while `app_id='laptop'` means one private device;
+   a sharing/backup blind spot the moment that changes.
 
-**R4 — no liveness signal for Ollama or Postgres (open, low).** No health check, no
-ping. A dead dependency surfaces only as a thrown query/HTTP error mid-command (caught
-and rendered in chat, raw stack trace in the batch commands). `not yet exercised` for
-health probes; low consequence on one device. → `04`.
+4. **Swallowed memory-write failures (lens 6).** Deliberate, but a persistent
+   failure is silent — episodic memory could be quietly broken for a whole
+   session with no signal. Evidence: `src/session.ts:64-68`.
 
-**R5 — the `capabilityId` correlation key is still dropped (open, low).** Every event
-carries `capabilityId` (`events.d.ts`), the natural span key for correlating a turn's
-internal events, and no branch reads it / no column stores it
-(`src/supabase-trace-sink.ts:56-84`). `conversations.id` correlates a session; nothing
-correlates within a turn's event subtree. Relevant when more than one agent/service
-enters the path.
+5. **No live metrics or alerts (lens 4).** You can't see "is it degrading"
+   without manually querying or re-running eval. Lowest urgency at single-user
+   scale; first thing to grow.
 
-**RESOLVED (2026-06-24) — `error`/`warning` events now recorded.** The sink handles both
-(`src/supabase-trace-sink.ts:80-83`); a failed turn leaves an `error` row. Was the
-highest blind spot (false-negative "clean run"); now closed. → `02`.
-
-**RESOLVED (2026-06-24) — replay order is deterministic for the common case.** Persisting
-`event.timestamp` into `created_at` (`src/supabase-trace-sink.ts:54-55`) replaced the
-server-`now()` race. Only the same-ms tie (R2) remains. → `03`.
-
-**RESOLVED (2026-06-24) — latency and token cost are captured.** `durationMs` →
-`tool_results`, `model_usage` → `tokens_used` (`src/supabase-trace-sink.ts:68-78`). The
-evidence exists in the store now; only aggregation (R3) is outstanding. → `02`.
-
-**RESOLVED (2026-06-24) — tool args are captured.** The `tool_call_start` branch writes
-`tool_calls = { toolName, args }` (`src/supabase-trace-sink.ts:62-65`), so the search
-query (the cause) is stored alongside the result (the effect). → `01`, `02`.
+6. **stdout has no levels or correlation (lens 3).** CLI output can't be filtered
+   or tied to a conversation. → `03-stdout-as-only-log.md`.

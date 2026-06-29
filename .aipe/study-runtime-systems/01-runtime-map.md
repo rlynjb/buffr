@@ -1,369 +1,195 @@
-# 01 · Runtime Map
+# Runtime Map — the process, task, and resource map as-built
 
-**The process / task / resource map as-built** · *Project-specific orientation*
-
----
+**Industry name(s):** runtime / resource topology, process model · **Type:** Project-specific
 
 ## Zoom out, then zoom in
 
-Before any single mechanism, here's the whole machine. buffr-laptop is a
-TypeScript ESM project that compiles to `dist/` and runs in **two process
-shapes**. The batch CLIs (`index`, `eval`, `migrate`) are one-shot: born when
-you type a command, own a Postgres pool for one run, die when the `await` chain
-finishes. The primary path — `npm run chat` — is **long-lived**: it builds the
-pool and one conversation once (`src/session.ts:34`), starts an Ink/React render
-loop (`src/cli/chat.tsx:63`), and holds all of it in memory across many turns
-until you type `/exit`.
+Before any single mechanism, here's the whole machine. buffr-laptop is one Node process running one event loop, and that process owns exactly two external resources — a Postgres connection pool and an Ollama HTTP client — plus, in chat mode, the terminal itself.
 
 ```
-  Zoom out — where the runtime sits
+  Zoom out — the runtime as labelled bands
 
-  ┌─ Tooling layer ──────────────────────────────────────────────┐
-  │  tsc → dist/  ·  npm scripts  ·  node --test                  │
+  ┌─ Entry layer ────────────────────────────────────────────────┐
+  │  npm run chat        npm run migrate / index / eval           │
+  │  (Ink TUI, stays up) (top-level await, runs once, exits)      │ ← we are here:
+  └───────────────────────────────┬───────────────────────────────┘   the whole map
+                                  │
+  ┌─ Process / runtime layer ─────▼───────────────────────────────┐
+  │  ONE Node process · ONE event-loop thread · V8 heap           │
+  │  createChatSession() / *-cmd.ts hold the live objects         │
   └───────────────────────────────┬───────────────────────────────┘
-                                  │ launches
-  ┌─ OS / process layer ──────────▼──────────────────────────────┐
-  │  ★ LONG-LIVED: chat (Ink loop, holds state across turns) ★    │  ← we are here
-  │  ★ ONE-SHOT:   index · eval · migrate (born → run → exit) ★    │
-  └───────────────────────────────┬───────────────────────────────┘
-                                  │ runs on
-  ┌─ Node runtime ────────────────▼──────────────────────────────┐
-  │  single thread · one event loop · one pg.Pool resource        │
-  └─────────┬───────────────────────────────────────┬─────────────┘
-            │ TCP (pg protocol)                      │ HTTP
-  ┌─────────▼─────────┐                    ┌─────────▼─────────────┐
-  │ Postgres+pgvector │                    │ Ollama (gemma2,nomic) │
-  │  Storage layer    │                    │  Provider layer       │
-  └───────────────────┘                    └───────────────────────┘
+                                  │  owns these resources:
+  ┌─ Resource layer ──────────────▼───────────────────────────────┐
+  │  pg.Pool ──TCP──► Postgres (reindb)                            │
+  │  fetch   ──HTTP──► Ollama (gemma2:9b + nomic-embed-text)       │
+  │  process.stdin (raw-mode TTY) — chat only                     │
+  └────────────────────────────────────────────────────────────────┘
 ```
 
-Zoom in: the concept this file owns is the **map itself** — the inventory of
-what executes, what it owns, and where the boundaries are. Every later file
-zooms into one box on this map. Get the map right and the rest is detail
-placement.
-
----
+Zoom in: this file answers one question — *what does this process own, and for how long?* Every other file in the guide is a zoom into one band of this picture. The pool is the load-bearing resource; the lifetime question is the load-bearing axis.
 
 ## Structure pass
 
-Three batch CLIs plus one long-lived chat session, one shared library layer, two
-external systems. Read the skeleton before the mechanics.
+**Layers.** Three nested levels: the **entry** (which npm script you ran), the **process** (the live Node runtime + the objects `createChatSession` or a `*-cmd.ts` builds), and the **resources** (pool, HTTP, stdin).
 
-**Layers (outer → inner):**
-
-```
-  Layer            What lives there                    File
-  ───────────────  ──────────────────────────────────  ──────────────────────
-  entry / CLI      arg parse, env load, wire-up, exit   src/cli/*.ts, migrate.ts
-  session          createChatSession (held across turns) src/session.ts
-  domain glue      indexDocumentRow, trace sink, profile src/runtime.ts, etc.
-  adapter          PgVectorStore (VectorStore impl)     src/pg-vector-store.ts
-  resource         createPool                           src/db.ts
-  library          aptkit agent loop / pipeline / memory @rlynjb/aptkit-core
-  external         Postgres, Ollama                     network
-```
-
-**Axis traced — "who owns the lifecycle?"** Hold that one question constant and
-walk down:
+**The axis to hold constant: lifecycle — "how long does this thing live?"** Trace it down the stack and watch the answer flip.
 
 ```
-  "who decides when this thing lives and dies?"
+  One axis — "how long does it live?" — traced down the map
 
-  ┌────────────────────────────────────────────┐
-  │ entry / CLI    → the OS. Process start/exit │  ← lifecycle owner
-  │   batch: dies at end of run                 │
-  │   chat:  stays up until /exit (Ink loop)    │
-  └────────────────────────────────────────────┘
-      ┌──────────────────────────────────────────┐
-      │ resource (pool) → the entry. Batch: made  │  ← owns the pool
-      │   line 1, ended last line. Chat: made once│
-      │   in createChatSession, ended in close()  │
-      └──────────────────────────────────────────┘
-          ┌──────────────────────────────────────┐
-          │ library (agent) → borrows the pool,   │  ← borrows, never owns
-          │                   never creates/closes│
-          └──────────────────────────────────────┘
-              ┌──────────────────────────────────┐
-              │ external → its own lifecycle,     │  ← independent
-              │            survives the process   │
-              └──────────────────────────────────┘
+  ┌──────────────────────────────────────────────┐
+  │ entry: chat process      → until /exit (long) │
+  │        migrate/index/eval → one batch (short) │   ← answer SPLITS here
+  └───────────────────────┬────────────────────────┘
+       ┌──────────────────────────────────────────┐
+       │ process objects: pool, agent, session     │   → = the entry's lifetime
+       └───────────────────────┬───────────────────┘
+            ┌─────────────────────────────────────┐
+            │ a single pg connection (per query)   │   → borrowed for ONE query,
+            └─────────────────────────────────────┘     then returned to pool
+
+  the answer flips twice: entry shape decides everything below it
 ```
 
-The answer flips three times going down, and that's the lesson: the entry point
-owns the pool, hands it *down* into the library and adapter as a borrowed handle,
-and nobody below it is allowed to close it. What differs by process shape is
-*how long* "owns" lasts: one run for the batch CLIs, the whole session for chat
-(`session.close()` → `pool.end()`, `session.ts:72-73`).
+**The seams.** Two boundaries carry contracts:
 
-**Seams — where an axis flips:**
+- **chat vs one-shot** (vertical seam between sibling entry points): the lifecycle axis flips here. Same `createPool()` on both sides; opposite ownership. → walked in `02`, `06`.
+- **pool vs connection** (horizontal seam): the pool lives as long as the process; a *connection* lives for one `query()` or one `connect()/release()` cycle. The pool is the contract that lets every call site pretend it has its own database without paying a TCP handshake each time.
 
-- **entry ↔ pool** (`createPool` call): lifecycle ownership begins. The entry
-  point is now responsible for `pool.end()` — at the end of the run for batch
-  CLIs, inside `session.close()` (`session.ts:73`) for chat.
-- **adapter ↔ pool** (`PgVectorStore` constructor takes `pool`): ownership does
-  *not* transfer — the store borrows. It never calls `pool.end()`. That's a
-  load-bearing contract; if the store closed the pool, the agent's later writes
-  would fail.
-- **process ↔ Postgres/Ollama** (TCP / HTTP): the trust and lifecycle boundary.
-  The external systems outlive every process.
-
----
+Hand off: the mechanics below hang on those two seams.
 
 ## How it works
 
 ### Move 1 — the mental model
 
-You already know two shapes from frontend. A batch CLI is a page load: one trip
-— mount, fetch, render, done. The chat session is a single-page app: mounted
-once, it holds state and reacts to events until you navigate away. buffr has
-both, and the difference is entirely *how long the pool lives*.
+You already know the shape of a `fetch()`: you don't open a new socket per request, the browser keeps a connection alive and reuses it. A `pg.Pool` is exactly that idea for Postgres — a bounded set of warm TCP connections you borrow and return. The runtime map is just *who holds the pool, and for how long*.
 
 ```
-  Two process shapes — batch (one trip) vs chat (held loop)
+  The pattern — borrow / use / return, against a long-lived pool
 
-  BATCH (index / eval / migrate):
-   ┌──────────┐   ┌──────────┐   ┌──────────┐   ┌──────────┐
-   │ load env │ ─►│ make pool│ ─►│ do work  │ ─►│ pool.end │ ─► exit
-   │ + config │   │(resource)│   │ (await…) │   │ + exit   │
-   └──────────┘   └──────────┘   └──────────┘   └──────────┘
-
-  CHAT (createChatSession + Ink render loop):
-   ┌──────────┐   ┌──────────┐   ┌─ render loop ────────────────┐
-   │ load env │ ─►│ make pool│ ─►│ [ ask → answer → flush →      │
-   │ + agent  │   │ + agent  │   │   remember ]ⁿ  until /exit    │─► close()
-   └──────────┘   │ ONCE     │   └──────────────────────────────┘   → pool.end
-                  └──────────┘     pool + conversation held warm
+        ┌─────────── pg.Pool (lives = process) ───────────┐
+        │   [conn] [conn] [conn] ... (idle, warm)         │
+        └───────┬───────────────────────────▲──────────────┘
+        borrow  │ pool.connect()             │ client.release()
+                ▼                            │  (or pool.query() does both)
+            ┌────────────┐                   │
+            │ run a query│ ──── awaits I/O ──┘
+            └────────────┘
 ```
 
-### Move 2 — the processes, one at a time
+### Move 2 — the walkthrough
 
-**`migrate` — schema setup (batch).** `src/migrate.ts:23` runs only as a CLI
-(`import.meta.url === file://${process.argv[1]}` guard). It reads one SQL file,
-runs it in a single transaction (`runMigration`), ends the pool, prints, exits.
-The simplest process: no Ollama, no agent.
+**The pool factory is the same everywhere; the lifetime is not.** Every entry point builds its pool through one tiny factory:
 
-**`index` — corpus ingestion (batch).** `src/cli/index-cmd.ts`. Loads env, makes
-a pool, builds an embedder (Ollama) + a `PgVectorStore` + a retrieval pipeline,
-then loops over file paths reading each whole into memory and calling
-`indexDocumentRow`. The work crosses two external systems per file: Ollama
-(embed) and Postgres (write document row + chunks).
-
-```
-  index-cmd — one file's trip across the layers
-
-  ┌─ CLI ─────────┐ readFile  ┌─ adapter ──────┐ embed   ┌─ Ollama ──┐
-  │ for each path │ ────────► │ pipeline.index │ ──────► │ nomic-... │
-  └───────┬───────┘           └───────┬────────┘ ◄────── └───────────┘
-          │                           │ upsert (begin/commit)
-          │ indexDocumentRow          ▼
-          │ (documents row)    ┌─ Storage ──────┐
-          └──────────────────► │ Postgres chunks│
-                               └────────────────┘
+```ts
+// src/db.ts:4
+export function createPool(databaseUrl: string): pg.Pool {
+  return new pg.Pool({ connectionString: databaseUrl });
+}
 ```
 
-**`chat` — the long-lived agent session.** `src/cli/chat.tsx` + `src/session.ts`,
-the richest path and the primary one. `createChatSession` (`session.ts:34`) does
-the wire-up *once*: pool, embedder, store, pipeline, tool, model, profile,
-episodic memory (`createConversationMemory`, `session.ts:53`), one conversation
-row, the `SupabaseTraceSink`, and the `RagQueryAgent`. Then `chat.tsx:63` renders
-the Ink UI and the process stays up. Each turn, `session.ask()` (`session.ts:60`)
-persists the user message, awaits `agent.answer(question)`, `await trace.flush()`,
-then best-effort `memory.remember(...)`. The pool and conversation are reused
-every turn; nothing is rebuilt. `session.close()` → `pool.end()` runs only on
-`/exit` (`chat.tsx:18-20`).
+No options passed — so `max` is the library default (10 connections), no `idleTimeoutMillis` override. That single line is the only place a pool is born. What *differs* is who keeps it.
 
-```
-  chat — one turn inside the held session (state reused, not rebuilt)
+**In chat, the pool is held by the session closure for the whole run.** `createChatSession()` opens it once and never closes it until `close()`:
 
-  ┌─ Ink UI ───────┐ ask(q)  ┌─ session ──────┐ answer  ┌─ aptkit agent ┐
-  │ TextInput      │ ──────► │ persist user    │ ──────► │ retrieve→tool │
-  │ onSubmit       │ ◄────── │ → answer → flush│ ◄────── │ → generate    │
-  └────────────────┘ render  │ → remember      │         └───────────────┘
-                             └───────┬─────────┘
-                              warm pool + same conversationId, every turn
+```ts
+// src/session.ts:39-57
+const pool = createPool(cfg.databaseUrl);          // born once
+// ...embedder, store, pipeline, model, profile, memory, conversation, trace, agent
+const agent = new RagQueryAgent({ model, tools, profile, trace });
+// ...returned in a closure that captures `pool`
 ```
 
-**`eval` — precision/recall scoring (batch).** `src/cli/eval-cmd.ts`. Reads
-`eval/queries.json`, loops queries, runs `pipeline.query` for each, scores with
-aptkit's `scorePrecisionAtK`/`scoreRecallAtK`, prints a table, ends the pool.
-No agent, no writes — read-only retrieval.
+Every `ask()` (`src/session.ts:60-71`) and `close()` (`72-75`) closes over that same `pool`. The agent, the vector store, the trace sink — all built once, all sharing the one pool. This is the "warm" path: turn 50 pays no setup cost that turn 1 didn't already pay.
+
+**In the one-shot CLIs, the pool is opened, drained, and ended in a straight line.** `index-cmd.ts` is the clearest:
+
+```ts
+// src/cli/index-cmd.ts:17-27
+const pool = createPool(cfg.databaseUrl);   // open
+// ...build store + pipeline
+for (const path of paths) {                 // do all the work
+  await indexDocumentRow(pool, cfg.appId, pipeline, { id: basename(path), text, sourcePath: path });
+}
+await pool.end();                           // drain + close, process exits
+```
+
+`eval-cmd.ts:13,34` and `migrate.ts:27,30` follow the identical open → work → `pool.end()` shape. There's no session, no closure, no second turn — the process *is* the batch.
+
+**A single query borrows one connection, transparently.** `pool.query(...)` checks out a connection, runs the SQL, returns the connection — you never see it. `loadProfile` (`src/profile.ts:5`) is one such call. When you need *several* statements to be atomic, you check out explicitly and hold it:
+
+```ts
+// src/pg-vector-store.ts:40-64 — explicit borrow for a transaction
+const client = await this.pool.connect();   // borrow ONE connection
+try {
+  await client.query('begin');
+  for (const c of chunks) { /* insert each */ }
+  await client.query('commit');
+} catch (err) {
+  await client.query('rollback');
+  throw err;
+} finally {
+  client.release();                          // ALWAYS return it
+}
+```
+
+The `finally { client.release() }` is the load-bearing line — drop it and that connection never returns to the pool, and after 10 leaks the pool is dry and every future query hangs forever. → `06` walks descriptor leaks in depth.
 
 ### Move 3 — the principle
 
-The whole repo is **one resource, owned by the entry point, borrowed
-downward.** That single rule — the entity that creates the pool is the only one
-allowed to end it — is the spine the other seven files hang off. What the chat
-path adds: that ownership can outlive a single request. The pool is now a
-*genuinely long-lived* resource held across turns, ended once in
-`session.close()`. Hold the map and "who owns the pool's lifecycle, and for how
-long" and you can place any new file correctly on the first read.
-
----
+A runtime map is really a *lifetime map*. Find the longest-lived resource (here, the pool), find what holds it (a session closure vs a script's top-level scope), and you know where every "is this still open?" bug can live. The resource doesn't decide its own lifetime — the entry point does.
 
 ## Primary diagram
 
-The full map, every box and boundary labelled.
+The full map, both shapes, one frame.
 
 ```
-  buffr-laptop runtime map — every box, every owner
+  buffr-laptop — runtime map, both process shapes
 
-  Tooling:   tsc ──► dist/ ──► npm run chat/index/eval/migrate
-                                       │ launches
-  ┌─ Process (OS) ──────────────────── ▼ ───────────────────────────┐
-  │  ONE node process · argv · env                                   │
-  │   batch: exits when event loop empties                           │
-  │   chat:  stays up (Ink loop on raw-mode stdin) until /exit       │
-  └───────────────────────────────┬─────────────────────────────────┘
-  ┌─ Node runtime (1 thread) ──────▼─────────────────────────────────┐
-  │  event loop · microtask queue · call stack                       │
-  │                                                                  │
-  │  loadEnv → loadConfig → createPool ─────────┐ (owns lifecycle)   │
-  │       │                                     │                    │
-  │       ▼                                     ▼                    │
-  │  build embedder/store/pipeline/agent  ──► borrows pool (no .end) │
-  │       │                                                          │
-  │       ▼  await … (pg + http)   [chat: repeated per turn]         │
-  │  pool.end()  ← batch: last line · chat: session.close()/exit     │
-  └───────┬───────────────────────────────────────────┬─────────────┘
-          │ TCP pg protocol                            │ HTTP
-  ┌───────▼────────────┐                     ┌─────────▼────────────┐
-  │ Postgres+pgvector  │                     │ Ollama gemma2/nomic  │
-  │ reindb · agents    │                     │ generation + embed   │
-  │ Storage layer      │                     │ Provider layer       │
-  └────────────────────┘                     └──────────────────────┘
+  ┌─ Entry ──────────────────────────────────────────────────────────────┐
+  │  chat.tsx (Ink, long-lived)          index/eval/migrate (one-shot)     │
+  └─────────────┬───────────────────────────────────┬─────────────────────┘
+                │ createChatSession()                 │ top-level await
+  ┌─ Process ───▼──────────────────────┐  ┌──────────▼─────────────────────┐
+  │  pool (held in closure)            │  │  pool (held in module scope)   │
+  │  agent built once, reused          │  │  pipeline built once, looped   │
+  │  ask() per turn ──┐                │  │  for(...) { work } ; pool.end()│
+  └───────────────────┼────────────────┘  └──────────┬─────────────────────┘
+            borrow conn│ return                       │ borrow/return per query
+  ┌─ Resource ─────────▼──────────────────────────────▼─────────────────────┐
+  │  pg.Pool (max 10, default) ──TCP──► Postgres reindb / schema agents      │
+  │  OllamaEmbeddingProvider / GemmaModelProvider ──HTTP──► Ollama :11434     │
+  │  process.stdin raw-mode TTY (chat only)                                   │
+  └──────────────────────────────────────────────────────────────────────────┘
 ```
-
----
-
-## Implementation in codebase
-
-**Use cases.** This map is reached for every time you ask "where does X run?"
-Holding an interactive conversation, indexing a markdown file, scoring eval
-queries, applying the schema — one long-lived session plus three batch
-processes, one shared resource shape.
-
-**The session wire-up, line by line** (`src/session.ts`, lines 34–57):
-
-```
-  src/session.ts  (lines 34–57)
-
-  loadEnv();                                   ← dotenv: .env → process.env
-  const cfg = loadConfig(process.env);         ← pure env→config (config.ts:9)
-  if (!cfg.databaseUrl) throw new Error(...);   ← fail fast, before pool exists
-  const pool = createPool(cfg.databaseUrl);     ← ★ lifecycle ownership BEGINS — held warm ★
-  const embedder = ...; const store = ...;       ← built ONCE, reused every turn
-  const memory = createConversationMemory({...});← episodic memory over the same store
-  const conversationId = await startConversation(pool, ...);  ← one row, all turns
-  const agent = new RagQueryAgent({ model, tools, profile, trace });
-       │
-       └─ this whole block runs ONCE. The returned ChatSession.ask() reuses pool,
-          conversation, and agent across every turn. The pool is closed only in
-          close() → pool.end() (line 73), reached on /exit. Any throw before
-          render skips the loop entirely; a SIGINT mid-session skips close()
-          (see 06, 07).
-```
-
-**The resource factory** (`src/db.ts`, lines 4–6):
-
-```
-  src/db.ts  (lines 4–6)
-
-  export function createPool(databaseUrl: string): pg.Pool {
-    return new pg.Pool({ connectionString: databaseUrl });  ← lazy: no socket yet
-  }
-       │
-       └─ a Pool opens NO connection here. The first await pool.query / connect
-          dials Postgres. The pool is the single shared runtime resource the
-          whole map borrows (see 04 for shared-state, 06 for its lifecycle).
-```
-
-**The migrate guard** (`src/migrate.ts`, line 23):
-
-```
-  src/migrate.ts  (line 23)
-
-  if (import.meta.url === `file://${process.argv[1]}`) {  ← "am I the entry?"
-       │
-       └─ migrate.ts is BOTH a library (runMigration is imported by tests)
-          and a CLI. This guard runs the CLI block only when the file is the
-          process entry point, never when imported. ESM's import.meta.url is
-          the runtime's answer to "who launched me?"
-```
-
----
 
 ## Elaborate
 
-The batch "one process per command" shape is the classic Unix tool model —
-`grep`, `sort`, `cat`: start, stream, exit. Node inherited it through
-`process.argv` and the event loop's natural termination (exit when no work
-remains). The batch CLIs lean on that natural termination as their shutdown
-story. Chat is the deliberate exception: an Ink render loop keeps the event loop
-alive on raw-mode stdin, so the process *won't* terminate naturally — it exits
-only when `exit()` (`chat.tsx:20`) tears the loop down. That's a real
-long-lived-process shape, not a daemon (no socket bind, no request mux) — see
-`02` for the distinction and `07` for the shutdown cost.
-
-The `import.meta.url === file://...` idiom is the ESM replacement for CommonJS's
-`require.main === module`. It's how a file decides at runtime whether it's the
-program or a dependency. Tooling-adjacent, but it's a genuine runtime check.
-
----
+The pool pattern predates Node — it's the same connection-pooling idea you'd find in a JDBC `DataSource` or a Go `database/sql.DB`. The reason it matters more in a *long-lived* process is that the savings compound: a one-shot script could almost get away with a single connection, but the chat process would pay a TCP + auth handshake on every turn without the pool keeping connections warm. The fact that buffr reuses the *same* factory for both shapes and lets the entry point decide the lifetime is the clean part — the lifetime policy lives at the call site, not baked into `createPool`.
 
 ## Interview defense
 
-**Q: Walk me through what happens, process-wise, when I run `npm run chat`.**
+**Q: What does this process own, and what's the longest-lived thing in it?**
+The longest-lived resource is the `pg.Pool`. In chat it's held by the session closure for the whole run; in the batch CLIs it lives for one script execution and is explicitly `pool.end()`-ed.
 
 ```
-  npm run chat  →  tsc build  →  node chat.js
-                                      │
-        ┌─────────────────────────────┘
-        ▼
-   createChatSession: load env → config → createPool (held warm)
-        → build embedder/store/pipeline/agent/memory ONCE → start conversation
-        ▼
-   render(<Chat/>) → Ink loop on raw-mode stdin → process STAYS UP
-        ▼  per turn:
-   persist user msg → agent.answer → trace.flush → memory.remember
-        ▼  /exit:
-   session.close() → pool.end() → exit()
+  pool lifetime = entry-point lifetime
+  chat:  open ──────────── many turns ──────────── /exit → close()
+  batch: open ── one loop of work ── pool.end() → exit
 ```
+Anchor: *the entry point decides the resource's lifetime; `createPool` (`src/db.ts:4`) is identical for both.*
 
-One process, single-threaded, born at `node`, *alive across many turns*. The
-pool and conversation are built once and reused; the Ink loop keeps the event
-loop alive. *Anchor:* one session, many trips, one warm resource held until
-`/exit`.
+**Q: What's the one line that, if removed, leaks a connection?**
+`client.release()` in the `finally` of `PgVectorStore.upsert` (`src/pg-vector-store.ts:63`). Without it a borrowed connection never returns; after 10 leaks (the default pool max) the pool is exhausted and every query hangs.
 
-**Q: Who's allowed to close the pool?** Only the entity that created it —
-`session.close()` for chat (`session.ts:73`), the last line for batch CLIs.
-`PgVectorStore` and aptkit's agent receive the pool as a borrowed handle and
-never call `.end()` — if they did, the agent's next-turn writes would hit a dead
-pool. *Anchor:* create it where you'll end it; borrow it everywhere else.
-
----
-
-## Validate
-
-1. **Reconstruct:** draw both shapes — the batch four-beat (env → pool → work →
-   end) and the chat held-loop (build once → [turn]ⁿ → close) — and place
-   `index`/`eval`/`migrate` on the first, `chat` on the second.
-2. **Explain:** why does `createPool` (`db.ts:4`) open no socket? When does the
-   first connection actually dial Postgres in a chat session?
-3. **Apply:** you add a `stats-cmd.ts` that counts chunks. Is it batch or held?
-   Where does `createPool` go, where does `pool.end()` go, who owns the lifecycle?
-4. **Defend:** in chat, the pool is built once in `createChatSession`
-   (`session.ts:39`) and ended in `close()` (`:73`). Why is rebuilding it per
-   turn (the old `ask` shape) wrong now, and what would a SIGINT skip?
-
----
+```
+  borrow ──► [no release] ──► conn stuck
+  ×10 ──► pool dry ──► next query waits forever
+```
+Anchor: *the `finally`-release is what makes the explicit-transaction path safe.*
 
 ## See also
 
-- `02-processes-threads-and-tasks.md` — why every box here is one thread; the long-lived chat shape
-- `04-shared-state-races-and-synchronization.md` — the pool as shared state held across turns
-- `06-filesystem-streams-and-resource-lifecycle.md` — the pool's lifecycle close (`session.close()`)
-- `00-overview.md` — ranked findings and the not-yet-exercised list
-
----
-
-Updated: 2026-06-24 — reframed as two process shapes (batch CLIs + long-lived chat); purged ask-cmd/`npm run ask`; re-grounded wire-up on `session.ts`, lifecycle on `session.close()`.
+- `02-processes-threads-and-tasks.md` — why one thread serves this whole map
+- `06-filesystem-streams-and-resource-lifecycle.md` — the pool as a descriptor pool, leak + cleanup
+- `study-system-design` — the buffr ↔ Postgres ↔ Ollama topology across boundaries

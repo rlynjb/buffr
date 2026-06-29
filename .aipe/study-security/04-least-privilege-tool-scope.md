@@ -1,350 +1,266 @@
-# Least-Privilege Tool Scope
+# Least-privilege tool scope
 
-*Tool allowlisting / capability scoping + bounded agent loop — Industry standard (agent security).*
+**Industry name(s):** least-privilege agent / tool allowlisting /
+capability scoping. **Type:** Industry standard (security principle
+applied to agent tools).
 
 ## Zoom out, then zoom in
 
-The agent could be handed many tools. It's handed exactly one, behind an
-allowlist, behind a hard call budget. That's the control that keeps the
-prompt-injection surface (`03-`) boring.
+The agent can be talked into anything by a hijacked prompt — but it can
+only *do* what's in its tool allowlist, and that allowlist holds
+exactly one entry: a read-only knowledge-base search. Plus a hard
+budget (6 turns, 4 tool calls) the loop physically can't exceed. This
+is the control that makes every other "what if the model is
+compromised" question end in "...then it searches the knowledge base
+and stops."
 
 ```
-  Zoom out — what the agent is ALLOWED to do
+  Zoom out — where the tool scope is enforced
 
-  ┌─ CLI ────────────────────────────────────────────────────────┐
-  │  registers tools: [ search_knowledge_base ]                   │
-  └─────────────────────────┬────────────────────────────────────┘
-                            │  RagQueryAgent(model, tools, ...)
-  ┌─ Agent ────────────────▼─────────────────────────────────────┐
-  │  policy: allowedTools = [search_knowledge_base]  ← ★ allowlist │
-  │  filterToolsForPolicy strips the model's menu to the allowed   │
-  │  budget: maxTurns 6, maxToolCalls 4              ← ★ hard cap   │
-  └─────────────────────────┬────────────────────────────────────┘
-                            │  model may call only what survived the filter
-  ┌─ Tool ─────────────────▼─────────────────────────────────────┐
-  │  search_knowledge_base — READ ONLY (vector search)            │
-  │  no write tool · no shell · no fetch                          │
-  └───────────────────────────────────────────────────────────────┘
+  ┌─ Provider (Ollama gemma2) ──────────────────────────────────────┐
+  │  model PROPOSES tool calls (could ask for anything)              │
+  └───────────────────────────┬─────────────────────────────────────┘
+                              │ proposed call
+  ┌─ Service (agent loop) ────▼──────────────────────────────────────┐
+  │  ★ filterToolsForPolicy: allowlist = [search_knowledge_base] ★   │ ← we are here
+  │  runAgentLoop: maxTurns 6 · maxToolCalls 4 (forced final)        │
+  └───────────────────────────┬──────────────────────────────────────┘
+                              │ only the allowed, read-only tool runs
+  ┌─ Storage (Postgres) ──────▼──────────────────────────────────────┐
+  │  vector search (read) — no write/exec/egress reachable           │
+  └──────────────────────────────────────────────────────────────────┘
 ```
 
-Zoom in: least privilege is the oldest security principle there is — *give a
-component exactly the access its job needs, no more.* For an agent that
-means: the model proposes tool calls, but it can only actually invoke tools
-on an allowlist, and only a bounded number of times. The question this file
-answers: *if the model is fully compromised by an injected instruction, what
-can it actually do?* The answer here is "run a read-only search up to four
-times, then it's forced to answer." That's a small blast radius, and it's by
-design.
+Zoom in: the pattern is *least privilege* — grant the smallest set of
+capabilities the task needs, deny everything else by default. The thing
+to understand is that this is enforced in **two independent places**:
+what tools the model is even *offered* (the allowlist), and how many
+times it can call them (the budget). Either one alone helps; together
+they make a hijacked agent inert. This is the single strongest security
+control in buffr, and it's worth knowing it lives in aptkit, injected
+by buffr's choice to register only one tool.
 
-## Structure pass
+## The structure pass
 
-**Layers.** Two: *what the model wants* (it can propose any tool call in its
-output) and *what the runtime permits* (only allowlisted tools, only within
-budget). Control flips between them.
+**Layers:** provider (proposes) → agent loop (filters + budgets) →
+storage (executes the one read-only tool). Control flows down; the
+filter sits in the middle.
 
-**Axis — control.** Trace "who decides whether a tool runs?" down the layers:
+**Axis — control.** Trace "who decides what the agent can do?":
 
 ```
-  One axis (control) across the agent's tool layer
+  axis traced = "who decides what runs?"
 
-  ┌─ model layer ─────────────────┐
-  │  proposes tool calls freely    │  → MODEL decides what to ask for
-  └────────────────────────────────┘     (could ask for anything)
-  ┌─ policy filter ───────────────┐
-  │  filterToolsForPolicy          │  → CODE decides what's offered
-  └────────────────────────────────┘     (allowlist — model never sees the rest)
-  ┌─ budget guard ────────────────┐
-  │  maxToolCalls / maxTurns       │  → CODE decides when to stop
-  └────────────────────────────────┘     (forced synthesis when spent)
-
-  control flips from model to code at the policy seam — that flip
-  is the whole security property
+  ┌─ model side ─────────┐  seam: the policy   ┌─ loop side ─────────┐
+  │ model PROPOSES any   │ ════════╪══════════► │ loop ALLOWS only    │
+  │ tool it wants        │  (it flips HARD)     │ allowlisted tools   │
+  └──────────────────────┘                      └─────────────────────┘
+       ▲                                              ▲
+       └──── control flips at the policy seam ────────┘
+             model: "I want X"   loop: "only if X ∈ allowlist"
 ```
 
-**Seam.** The load-bearing seam is `filterToolsForPolicy` — the boundary
-where the model's *desire* meets the runtime's *permission*. On the model
-side, free choice; on the code side, an allowlist the model can't expand.
-This is the same seam shape as `02-`'s "advisory vs enforced," but here the
-enforcement *is* present: the model can't call a tool that isn't in the
-filtered schema list, because it never even sees it.
+**Seam:** `filterToolsForPolicy` — the policy gate. Control flips here:
+the model *proposes*, the loop *disposes*. Unlike `02`'s tenant seam
+(where trust didn't flip), this seam is load-bearing — it's the joint
+the whole agent-security story hangs on. And there's a second seam in
+series: the turn/tool-call budget inside `runAgentLoop`, which caps
+*how long* control stays with the model.
 
 ## How it works
 
-### Move 1 — the mental model
-
-You know how a React component only gets the props you pass it — it can't
-reach up and grab state you didn't hand down. Tool scoping is that, for an
-agent: the model only gets the tools the policy hands it. It can *ask* for a
-`delete_everything` tool in its output, but if that tool isn't in the
-filtered list, the runtime has nothing to dispatch to — the request is a
-no-op. Capability comes from what you pass down, not what the model requests.
+You know this from filesystem permissions: a process runs as a user
+that can only touch certain files — not because the process is trusted,
+but because the OS won't let it reach the rest. Same move here, applied
+to agent tools: the model isn't trusted, the loop just won't offer it
+anything but search.
 
 ```
-  The shape — the model's menu is filtered before it ever chooses
+  The pattern — propose / filter / budget
 
-  all registered tools         policy allowlist        model's actual menu
-  ┌──────────────────┐         ┌──────────────┐        ┌──────────────────┐
-  │ search_kb         │         │ search_kb    │   →    │ search_kb        │
-  │ (none others here)│   ∩     │ (only this)  │        │ (only this)      │
-  └──────────────────┘         └──────────────┘        └──────────────────┘
-                                                              │
-       the model literally cannot name a tool outside this ──┘
-       set, because the set IS its tool schema for the run
+   model proposes        policy filters         budget caps
+   ┌─────────────────┐   ┌──────────────────┐   ┌──────────────────┐
+   │ "call tool X"   │──►│ X ∈ allowlist?   │──►│ calls < 4?       │
+   │  (any name)     │   │  yes: run it     │   │  yes: run        │
+   │                 │   │  no:  not offered│   │  no:  force final│
+   └─────────────────┘   └──────────────────┘   └──────────────────┘
+        anything             ONE tool only          ≤4 times, ≤6 turns
 ```
 
-One sentence: **the model chooses freely, but only from a menu code already
-filtered — and a bounded number of times.**
+### The kernel — three parts, name what breaks without each
 
-### Move 2 — the walkthrough (load-bearing skeleton)
+1. **The policy declaration** — the allowlist. `ragQueryToolPolicy =
+   { allowedTools: [SEARCH_KNOWLEDGE_BASE_TOOL_NAME] }`
+   (`@aptkit/agent-rag-query`). Comment in the source:
+   *"Least-privilege grant: this agent may only search the knowledge
+   base."* *Breaks if missing:* no statement of what's allowed — the
+   model is offered every registered tool.
+2. **The filter that enforces it** — `filterToolsForPolicy` builds
+   `new Set(policy.allowedTools)` and `.filter(t => allowed.has(t.name))`
+   (`@aptkit/tools` `tool-policy.js`). RagQueryAgent runs it before the
+   loop. *Breaks if missing:* the policy is just a comment; the model
+   sees the whole catalog.
+3. **The budget that bounds runtime** — `runAgentLoop`'s
+   `for (let turn = 0; turn < maxTurns; turn++)` plus
+   `budgetSpent = toolCalls.length >= maxToolCalls` →
+   `forceFinal` (`@aptkit/runtime` `run-agent-loop.js:25,27,28`).
+   RagQueryAgent passes `maxTurns: 6, maxToolCalls: 4`. *Breaks if
+   missing:* a hijacked or looping model spins forever / fans out
+   unbounded tool calls.
 
-The kernel of this control has three parts. Remove any one and the blast
-radius grows.
+All three are load-bearing. Drop 1 or 2 and scope is unenforced; drop 3
+and scope is enforced but unbounded.
 
-**Part 1 — the allowlist policy.** `ragQueryToolPolicy` names exactly the
-tools this capability may use: `[search_knowledge_base]`
-(`rag-query-agent.js:7-11`). It's a deny-by-default list — anything not named
-is excluded. What breaks if removed: the model could invoke *any* registered
-tool. With only search registered today that's moot, but the policy is what
-makes adding a dangerous tool to the registry *not* automatically expose it
-to this agent.
+### The allowlist — read the enforcement
 
-**Part 2 — the filter that enforces it.** `filterToolsForPolicy`
-(`tool-policy.js:2-10`) intersects the registered tools with the allowlist
-and returns only the survivors as the model's tool schema
-(`rag-query-agent.js:36-37`). What breaks if removed: the policy becomes a
-comment — declared but unenforced, the `02-` failure mode. The filter is the
-step that turns the allowlist from advisory into enforced; the model's tool
-schema for the run literally *is* the filtered set.
-
-```
-  Allowlist + filter = enforced (not advisory) scope
-
-  policy.allowedTools = ['search_knowledge_base']     ← the declaration
-        │
-        ▼ filterToolsForPolicy(allTools, policy)
-  toolSchemas = [ search_knowledge_base ]             ← what the model receives
-        │
-        ▼ passed to runAgentLoop as `tools: toolSchemas`
-  the model's tool-calling menu is EXACTLY this — it can't name anything else
-```
-
-**Part 3 — the bounded loop.** Hard caps stop the agent from looping
-forever, whether from a confused model or an injection-induced spin:
-`maxTurns: 6`, `maxToolCalls: 4` (`rag-query-agent.js:48-49`), enforced in
-`run-agent-loop.js:25-28`. When the budget is spent, the loop sets
-`forceFinal` and drops the tools from the next call entirely
-(`:28,32`), forcing a synthesis turn (`buildSynthesisInstruction`, `:17-19`).
-What breaks if removed: an unbounded loop — the agent re-searches forever,
-burning the operator's Ollama compute and never answering. The cap is the
-part people forget; it's the agent-loop equivalent of a rate limiter's window
-reset.
+The policy is a declaration (`@aptkit/agent-rag-query`):
 
 ```
-  The loop budget — control flips to code when the budget is spent
-
-  turn 0  ─► model: tool call (search)   toolCalls=1   budget ok
-  turn 1  ─► model: tool call (search)   toolCalls=2   budget ok
-  ...
-  turn N  ─► toolCalls >= maxToolCalls(4) ──► forceFinal = true
-              │
-              ▼ model.complete called with tools: undefined  (:32)
-              + synthesisInstruction appended  (:30)
-              "You have NO more tool calls. Answer now."
-              │
-              ▼ model MUST produce a final answer — no more actions
+  export const ragQueryToolPolicy = {
+    capabilityId: RAG_QUERY_CAPABILITY_ID,
+    allowedTools: [SEARCH_KNOWLEDGE_BASE_TOOL_NAME],   ◄ exactly one tool
+  };
 ```
 
-**Skeleton vs hardening.** The allowlist + filter + budget are the skeleton —
-strip any one and the blast radius or the loop bound is gone. The 16K-char
-tool-output truncation (`run-agent-loop.js:2-7`) and the tool's
-hallucinated-filter no-op (`search-knowledge-base-tool.js:48-53`) are
-*hardening* layered on top — nice limiters, but the security property holds
-without them.
+The enforcement is a default-deny filter (`@aptkit/tools`
+`tool-policy.js`):
 
-### Move 3 — the principle
+```
+  export function filterToolsForPolicy(allTools, policy) {
+    const allowed = new Set(policy.allowedTools);          ◄ allowlist as a Set
+    return allTools
+      .filter((tool) => allowed.has(tool.name))            ◄ deny-by-default: not in
+      .map((tool) => ({ name, description, inputSchema })); ◄ set → never offered
+  }
+```
 
-The principle: **scope an agent to the minimum capability its task needs, and
-enforce the scope in code the model can't reach.** The model is a powerful but
-fundamentally untrusted planner — treat its proposed actions like user input,
-because (via `03-`) they can *be* attacker input. Least privilege turns "the
-model got tricked" from a breach into a non-event: a tricked model that can
-only call one read-only tool, four times, can't do anything worth worrying
-about. The security isn't in trusting the model; it's in bounding it.
+Default-deny is the load-bearing detail: a tool the model could call
+is one the loop chose to *offer*. Anything not in the allowlist isn't
+"blocked when called" — it's never presented, so the model can't even
+name it.
+
+### buffr's half — register only what's granted
+
+aptkit enforces the policy, but buffr decides what's in the registry to
+begin with (`src/session.ts:43-44`):
+
+```
+  const tool = createSearchKnowledgeBaseTool(pipeline, { minTopK: 4 });
+  const tools = new InMemoryToolRegistry(
+    [tool.definition],                          ◄ ONE tool registered, period
+    { [tool.definition.name]: tool.handler });
+```
+
+Two layers of least privilege stack here: buffr registers exactly one
+tool, *and* the policy allowlists exactly that one. Even if buffr
+registered more, the policy would filter them out — but buffr doesn't
+even tempt it. And the one tool is **read-only**: a vector search
+(`src/pg-vector-store.ts:67`). There is no write tool, no shell tool,
+no HTTP tool, no file tool anywhere in the registry.
+
+### Why this caps every other finding
+
+This is the control that downgrades the prompt-injection surface (`03`)
+from "breach" to "wrong answer." Walk it: a poisoned passage tells the
+model to exfiltrate data. The model proposes a tool call to do it.
+There's no such tool in the allowlist — it was never offered. The model
+proposes searching again. Fine, but the budget caps it at 4 calls,
+then forces a final answer. The hijack spends itself against a wall.
+Strip this control out and `03` becomes severe; keep it and `03` stays
+low.
+
+### The principle
+
+Least privilege is the one security control that *compounds* — it makes
+every other weakness less exploitable without knowing what the weakness
+is. You don't have to enumerate the attacks; you enumerate the
+*capabilities* and grant the minimum. For agents specifically: scope
+the tool set to the task, deny by default, and bound the loop. An agent
+whose tools exceed its task is the agent-era version of running
+everything as root.
 
 ## Primary diagram
 
-The full picture: free model proposal, code-enforced allowlist, hard budget,
-read-only floor.
+The full control: declaration, enforcement, budget, and the read-only
+floor.
 
 ```
-  buffr-laptop — least-privilege tool scope, end to end
+  Least-privilege tool scope — buffr-laptop
 
-  ┌─ Model (untrusted planner) ─────────────────────────────────┐
-  │  proposes: search_kb · (or anything it hallucinates)        │
-  └─────────────────────────┬───────────────────────────────────┘
-                            │  but its menu was pre-filtered:
-  ┌─ Policy + filter (code-enforced) ──────────────────────────┐
-  │  allowedTools = [search_knowledge_base]                     │
-  │  filterToolsForPolicy → model only ever sees this one tool  │
-  └─────────────────────────┬───────────────────────────────────┘
-                            │  + budget guard
-  ┌─ Bounded loop (run-agent-loop) ────────────────────────────┐
-  │  maxToolCalls 4 / maxTurns 6 → forceFinal → synthesis turn  │
-  └─────────────────────────┬───────────────────────────────────┘
-                            │  dispatches only allowed, in-budget calls
-  ┌─ Tool floor ───────────▼───────────────────────────────────┐
-  │  search_knowledge_base — READ ONLY                          │
-  │  no write · no shell · no fetch · no exfil path             │
-  └──────────────────────────────────────────────────────────────┘
-```
-
-## Implementation in codebase
-
-**Use cases.** Reached on every `npm run chat` turn. The agent is built once
-per session (`session.ts:34-57`) with a one-tool registry and runs under the
-policy + budget on every question. There's no code path where the agent gets
-a broader tool set — the scope is uniform, even now that conversation memory
-adds a second *retrievable source* (it does not add a tool: memory surfaces
-through the same `search_knowledge_base`, so the allowlist is unchanged).
-
-**Code side by side.**
-
-```
-  src/session.ts  (lines 43–44)
-
-  const tool = createSearchKnowledgeBaseTool(pipeline, { minTopK: 4 });
-  const tools = new InMemoryToolRegistry([tool.definition], {...});
-        │
-        └─ only ONE tool is ever registered. Even before the policy filter,
-           the registry holds a single read-only search tool. The blast-radius
-           floor starts here. createConversationMemory (:53) adds NO tool —
-           it reuses this same search path to recall past turns.
-```
-
-```
-  @aptkit/agent-rag-query rag-query-agent.js  (lines 7–11, 36–37, 48–49)
-
-  export const ragQueryToolPolicy = {
-    capabilityId: RAG_QUERY_CAPABILITY_ID,
-    allowedTools: [SEARCH_KNOWLEDGE_BASE_TOOL_NAME],   ← deny-by-default allowlist
-  };
-  ...
-  const allTools = await this.options.tools.listTools();
-  const toolSchemas = filterToolsForPolicy(allTools, ragQueryToolPolicy);  ← enforce
-  ...
-  maxTurns: 6, maxToolCalls: 4,                        ← hard budget
-        │
-        └─ the policy is declared (7–11), enforced via the filter (37), and
-           the loop is bounded (48–49). All three together are the control.
-```
-
-```
-  @aptkit/tools tool-policy.js  (lines 2–10) — the enforcement seam
-
-  export function filterToolsForPolicy(allTools, policy) {
-    const allowed = new Set(policy.allowedTools);
-    return allTools
-      .filter((tool) => allowed.has(tool.name))   ← intersect with allowlist
-      .map((tool) => ({ name: tool.name, ... }));  ← only survivors become schema
-  }
-        │
-        └─ this is where "the model may only call X" stops being advisory.
-           The returned list IS the model's tool menu for the run. A tool not
-           in `allowed` is never offered, so the model can't name it.
-```
-
-```
-  @aptkit/runtime run-agent-loop.js  (lines 25–32) — the budget guard
-
-  for (let turn = 0; turn < maxTurns; turn += 1) {
-    const budgetSpent = maxToolCalls !== undefined && toolCalls.length >= maxToolCalls;
-    const forceFinal = turn === maxTurns - 1 || budgetSpent;   ← stop condition
-    const response = await model.complete({
-      system: forceFinal && synthesisInstruction ? `${system}\n\n${synthesisInstruction}` : system,
-      tools: forceFinal ? undefined : toolSchemas,             ← tools removed when spent
-      ...
-    });
-        │
-        └─ when the budget is spent, tools are withheld (forceFinal → undefined)
-           and the model is told to answer now. This is what makes the loop
-           terminate even under an injection that keeps requesting searches.
+  ┌─ Provider (Ollama gemma2) ──────────────────────────────────────┐
+  │  proposes tool calls — UNtrusted, could ask for anything         │
+  └───────────────────────────┬─────────────────────────────────────┘
+                              │ proposed call name
+  ┌─ Service (agent loop, aptkit) ───────────────────────────────────┐
+  │  1. policy:  allowedTools = [search_knowledge_base]              │
+  │  2. filter:  new Set(...).has(name)  — default-deny              │
+  │  3. budget:  maxTurns 6 · maxToolCalls 4 → forceFinal           │
+  │  buffr registers ONE tool (session.ts) — read-only               │
+  └───────────────────────────┬──────────────────────────────────────┘
+                              │ only search runs, ≤4 times
+  ┌─ Storage (Postgres) ──────▼──────────────────────────────────────┐
+  │  vector search (READ). No write / exec / egress reachable.        │
+  │  → hijacked model's worst case: search, then stop                 │
+  └──────────────────────────────────────────────────────────────────┘
 ```
 
 ## Elaborate
 
-Least privilege for agents is the direct application of a 1970s OS principle
-(Saltzer & Schroeder) to a 2020s problem. The shift that makes it urgent: an
-agent's "user" is a non-deterministic model whose instructions can be
-attacker-controlled (`03-`). So you treat the model exactly as you'd treat an
-untrusted client — give it the narrowest capability set, enforce it server-
-side (here, in the runtime, not in the prompt), and bound its resource use.
+Least privilege is the oldest principle in security — Saltzer & Schroeder,
+1975 — and it transfers cleanly to agents because an agent's "syscalls"
+are its tools. The agent-era failure mode is giving a model a broad
+toolbelt "to be helpful" (write-to-DB, send-email, run-code) and
+relying on the prompt to keep it in line; prompts are not a security
+boundary, tool scope is. buffr's version is unusually tight: one
+read-only tool. That's partly the phase (a RAG query agent genuinely
+needs only search) and partly discipline (the policy + filter would
+hold even if more tools existed). The budget is the often-forgotten
+half — a correctly-scoped agent with an unbounded loop can still burn
+your token budget or hammer the DB; `maxToolCalls: 4` is the part that
+signals "built it, didn't just read about it."
 
-The pairing with `03-` is the whole story. You can't prevent a hostile chunk
-from misleading the model — that's inherent to retrieval. What you *can* do is
-guarantee that a misled model is harmless, and you do it by making its only
-capability a read-only search behind an allowlist behind a budget. This is
-the difference between a security property that depends on the model behaving
-(fragile) and one that holds even when the model misbehaves (robust). The
-robust one is the one to build, and this repo built it: the security lives in
-the runtime's policy filter and loop bound, where the model can't touch it —
-not in the system prompt, where an injection could.
+The control-flow mechanics of `runAgentLoop` — the forced-synthesis
+final turn, the recovery turn — are an agent-architecture topic; this
+file owns the *security* read (scope + budget as a defense). The deep
+loop walk belongs in that guide when it's generated.
 
 ## Interview defense
 
-**Q: Your agent uses an LLM you've established can be prompt-injected. Why
-isn't that a critical vulnerability?**
+**Q: How do you keep your agent from doing something dangerous if the
+prompt gets hijacked?**
 
-Because a successfully injected model can only do what its tools let it, and
-its tools are one read-only search, capped at four calls. The control is
-three parts:
+I don't trust the model — I scope its capabilities. The agent has an
+allowlist with exactly one tool, a read-only knowledge-base search,
+enforced by a default-deny filter: a tool not in the allowlist is never
+even offered to the model. Plus a hard budget — max 6 turns, max 4 tool
+calls — so it can't loop or fan out. A hijacked prompt can make the
+model *want* to do something bad; there's no tool that *does* anything
+bad, so the worst case is a wrong answer.
 
 ```
-  what stops a compromised model from doing damage
-
-  allowlist   →  only search_knowledge_base permitted (deny-by-default)
-  filter      →  enforced in code — the model's menu IS the filtered set
-  budget      →  maxToolCalls 4 → forced answer, loop can't spin
+  model proposes anything → allowlist offers ONE read-only tool
+  → budget caps it at 4 calls → hijack hits a wall
 ```
 
-The anchor: **I design for the injection succeeding and bound the
-consequences.** Even fully compromised, the worst the model does is run a
-read-only search a few times on my laptop — no write, no shell, no network
-egress, no exfiltration path. The security isn't "the model won't get
-tricked"; it's "a tricked model is harmless."
+Anchor: *prompts aren't a security boundary; tool scope is. Deny by
+default, bound the loop.*
 
-**Q: What's the one part of this people forget?**
+**Q: What's the load-bearing part people forget?**
 
-The loop budget. Everyone gets the allowlist; the part that's easy to skip is
-the hard `maxToolCalls`/`maxTurns` cap with a forced synthesis turn
-(`rag-query-agent.js:48-49`, enforced at `run-agent-loop.js:25-32`). Without
-it, an injection that keeps saying "search again" spins the agent forever,
-burning compute and never answering. The cap is the agent-loop equivalent of
-a rate limiter's window reset — name it and it signals you've actually run an
-agent loop in anger, not just read about ReAct.
+The budget. Everyone scopes the tool *set* and forgets to bound the
+*loop*. `maxToolCalls: 4` with a forced final answer is what stops a
+correctly-scoped agent from still spinning forever or hammering the DB.
+Scope plus budget — both, or it's only half the control.
 
-## Validate
-
-1. **Reconstruct.** Name the three skeleton parts (allowlist / filter /
-   budget) and, for each, what specifically an attacker gains if it's
-   removed.
-2. **Explain.** Why does enforcing the scope in `filterToolsForPolicy`
-   (code) rather than in the system prompt matter, given `03-`?
-3. **Apply.** A teammate wants to add a `write_note` tool so the agent can
-   save findings. Walk the exact changes to the policy and the blast-radius
-   analysis, and say what new mitigation you'd require.
-4. **Defend.** Argue why shipping an agent over potentially-injectable
-   retrieved content is acceptable *here* — tie it to the specific tool floor
-   and budget, not a general "it's probably fine."
+Anchor: *least privilege without a loop budget is half a control.*
 
 ## See also
 
-- `03-indirect-prompt-injection-surface.md` — the partner. This file is *why*
-  that surface has low blast radius. Read them together: one is the surface,
-  one is the containment.
-- `02-shape-only-tenant-isolation.md` — the contrast on enforcement. There,
-  the scope is advisory (no RLS); here, the tool scope is genuinely enforced
-  in code. Same "advisory vs enforced" axis, opposite verdict.
-- `study-agent-architecture` — the ReAct loop, the tool registry, the
-  capability-policy model these controls live inside.
-
-Updated: 2026-06-24 — purged `ask-cmd.ts` ref → `session.ts:43-44`; noted conversation memory adds a retrievable source, not a tool — the one-tool allowlist (and the blast radius) is unchanged.
+- `audit.md` — lens 7 (llm-and-agent-security), where this is the
+  strongest control found.
+- `03-indirect-prompt-injection-surface.md` — the surface this control
+  caps from breach to wrong-answer.
+- `02-shape-only-tenant-isolation.md` — the other "control sized to the
+  phase" decision; both turn up when the agent gains a write tool.
+- `../study-system-design/` — the agent loop + tool registry
+  architecture.

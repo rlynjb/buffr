@@ -1,146 +1,144 @@
-# Chapter 05 — The Close + The Ask   (8:45–9:30, 45 seconds)
+# Chapter 05 — The close   (8:45–9:30, 45 seconds)
 
 ## Opening hook
 
-Forty-five seconds to land the plane — and the single most common way demos fumble the ending is trailing off into "yeah, so… that's it, I guess." Don't do that. You end on a beat: a clear future, a clear ask, and one sentence you want the room repeating to each other on the way out. The room remembers the first thing they saw and the last thing they heard. The first was the money shot. Make the last one count.
+Forty-five seconds to end on a beat instead of trailing off into "yeah, so, that's it." The close has three jobs and no more: point at where this goes next (framed clearly as future, never demoed as if it exists), make a specific ask of the room, and land one sentence you want them repeating to each other afterward. Then stop talking and let the buffer breathe. The demo already did the persuading at 2:30 — the close just gives the room something to carry out the door.
 
-The discipline of the close is restraint. You do not demo the future — you *frame* it, clearly marked as future, never shown as if it exists. buffr today is single-device, single-conversation memory across sessions, emulated tools. The honest "what's next" is the in-prompt turn history that's still missing, and a native-tool model to harden the fragile seam. Name those as the road ahead, not as features you're hiding. Then ask for the one thing you actually want, and drop your last line.
+The discipline here is restraint. Do not re-explain the architecture. Do not re-demo. Do not list more features. The money shot is the thing they remember; your last line should point straight back at it. "It remembers me" walked in the door at minute three; "it remembers me" should walk out the door in their mouths.
 
 ## The time-budget bar
 
-You own forty-five seconds, then thirty seconds of buffer to the buzzer. End early, on a beat.
+You own 8:45 to 9:30, then a 30-second buffer you deliberately leave unused. Finishing early is the goal, not a failure.
 
 ```
-  ┌──────────────────────────────────────────────────────────┐
-  │ ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░▓▓▓░░░░░░░░░░░░ │
-  │ 0:00                       8:45 ─ 9:30 ──── 10:00         │
-  │        THE CLOSE — you own 8:45 to 9:30 (45 sec)           │
-  │        then 0:30 buffer — finish EARLY, not at the buzzer  │
-  └──────────────────────────────────────────────────────────┘
+  ┌──────────────────────────────────────────────────────┐
+  │ ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░▓▓░░░░░░░░░ │
+  │ 8:45 ─ 9:30 ─────────────────────── buffer ──────── 10:00 │
+  │       THE CLOSE — you own 8:45 to 9:30 (45 sec)       │
+  │       then finish EARLY into the buffer               │
+  └──────────────────────────────────────────────────────┘
 ```
 
-## The chapter-opening diagram — now vs next, clearly separated
+## The chapter-opening diagram — the close, three beats
 
-This is the picture that keeps you honest: what's real today on the left, what's framed as future on the right. You point at the left as "this is what you just saw," the right as "this is where it goes." Never blur the line.
-
-```
-  NOW (demoed, real) │ NEXT (framed as future — NOT demoed)
-  ───────────────────┼─────────────────────────────────────────
-  local RAG, grounded│ in-prompt turn history (sequential context
-  + cited            │   within a session — still missing today)
-                     │
-  recall across      │ a native tool-calling model to harden the
-  sessions (★ shown) │   emulated-tools seam (a provider swap)
-                     │
-  knows me (profile) │ multi-device sync (today it's single-device)
-                     │
-  all local, my data │ RLS / multi-user (no RLS this phase)
-  ───────────────────┴─────────────────────────────────────────
-   point LEFT: "you saw this"   point RIGHT: "this is where it goes"
-```
-
-Everything on the right is in the codebase's own honest backlog — the in-prompt history gap is documented in `src/session.ts`, the single-device and no-RLS constraints in the project context. You're not inventing a roadmap; you're reading the real one.
-
-## The body — the beats in order
-
-### Beat 1 — the vision, framed as future (8:45–9:05)
-
-One sentence of where it goes. Marked as future, not demoed.
+The shape of your last forty-five seconds. Three beats, descending in length, ending on the one line.
 
 ```
-┃ "Today buffr is single-device and remembers across sessions.
-┃  Next is sequential turn-history inside a session, a native-tool
-┃  model to harden that emulated seam, and multi-device sync — so
-┃  your agent follows you, still fully yours."
+  THE CLOSE — vision → ask → last line
+
+   8:45 ───────────► 9:10 ──────► 9:25 ──► 9:30 ──┐ buffer
+    │                  │             │            │
+    ▼                  ▼             ▼            ▼
+  ┌──────────────┐  ┌──────────┐  ┌──────────┐  (silence —
+  │ VISION       │  │ THE ASK  │  │ LAST LINE│   let it land,
+  │ where next   │→ │ what you │→ │ one      │   walk off on
+  │ (clearly     │  │ want from│  │ sentence │   time)
+  │  FUTURE)     │  │ the room │  │ they     │
+  │              │  │          │  │ repeat   │
+  └──────────────┘  └──────────┘  └──────────┘
+   ~20 sec          ~15 sec        ~5 sec
+
+   each beat shorter than the last → you accelerate into the line
 ```
 
-### Beat 2 — the ask (9:05–9:20)
+## The body — the three beats
 
-Ask for one concrete thing. At a hackathon that's usually a vote, or a specific conversation. Be direct — a vague "let me know what you think" gets nothing.
+### Beat 1 — the vision (8:45–9:10): where it goes next
 
-```
-┃ "What I want from you: if a personal AI that runs on YOUR machine
-┃  and remembers YOU — without sending your life to someone's cloud —
-┃  is worth building, tell me. That's the bet I'm making."
-```
-
-### Beat 3 — the last line (9:20–9:30)
-
-The sentence you want them repeating. Short, concrete, and it ties the whole demo together — knows you, remembers you, all yours.
+One forward step, framed unmistakably as future. Do not let it sound like it already exists — that's the no-vaporware line and crossing it costs you all the credibility the demo earned. Use future tense out loud.
 
 ```
-┃ "An AI that knows me, remembers me, and never leaves my laptop.
-┃  That's buffr."
+  SHOW (on screen / slide)            SAY (out loud)
+  ────────────────────────────────    ─────────────────────────────────
+  one slide: "what's next" — 2-3       "Right now buffr knows what I
+  bullets, clearly future              indexed and remembers what I told
+                                       it, on one laptop. Next, I want it
+                                       to index my whole working life —
+                                       and to harden the tool-calling so
+                                       it never skips a retrieval."
 ```
 
-Then stop. Hands down, eyes up, done. Do not add "so, yeah." The silence after a clean last line is the strongest beat in the whole slot.
+Note what you're *not* claiming: you're not saying it already indexes your whole life. You're saying that's where it goes. The hardening line ties back to the rough edge you owned in chapter 04 — it shows you know exactly what the next commit is.
 
-## Strong vs weak — the close
+### Beat 2 — the ask (9:10–9:25): something specific
+
+Vague asks ("check us out") get nothing. Ask for the one concrete thing you actually want from this room.
 
 ```
-  WEAK CLOSE                         STRONG CLOSE
-  ─────────────────────────────      ─────────────────────────────────
-  "there's a lot more we could       "next is turn-history, a native-tool
-   do, like maybe sync and stuff,     model, and sync — fully yours."
-   the possibilities are endless"      (specific, real, framed as future)
-
-  "anyway let me know what you        "if a personal AI that runs on YOUR
-   think, thanks" (no real ask)        machine is worth building, tell me"
-
-  trails off, looks at the screen     ends on the last line, eyes up,
-                                       then SILENCE
-  → forgettable                       → repeatable
+┃ "If you care about AI that's actually yours — your data, your model,
+┃  your machine — come find me. I want to talk about what you'd want
+┃  your second brain to remember."
 ```
+
+That's a real ask: a conversation, with a hook (the privacy angle) and a prompt (what would *you* want it to remember). It invites the room to imagine using it, which is the strongest thing an ask can do.
+
+### Beat 3 — the last line (9:25–9:30): the one they repeat
+
+End on the sentence that points back at the money shot. Say it, then stop. Do not add "so, yeah, thanks." The silence is the ending.
+
+```
+┃ "Most AI forgets you the second you close the tab. This one's mine,
+┃  it's on my laptop, and it remembers me."
+```
+
+Then you're done — at roughly 9:30, with thirty seconds of buffer unspent. Walking off on time, on a clean line, with breathing room left, reads as control. Running to the buzzer reads as panic. Finish early on purpose.
+
+Here's the contrast that matters most in the close:
+
+```
+  WEAK close                          STRONG close
+  ──────────────────────────────      ──────────────────────────────────
+  "So that's buffr, um, there's a     [vision in future tense] → [specific
+   lot more we could do, like maybe    ask] → "it's on my laptop, and it
+   mobile and teams and… yeah,         remembers me." [stop. silence.]
+   thanks for watching, any            → ends on the money shot, on time,
+   questions?"                          in control
+  → trails off, eats the buffer,      
+    invites Q&A INTO the slot          → Q&A happens AFTER, on their time
+```
+
+That last point is load-bearing: do not invite questions inside your slot. The Q&A (chapter 06) runs after the clock. Your last spoken word in the timed slot is the last line, not "any questions?"
 
 ## The IF-IT-BREAKS box
 
-The only thing that breaks in the close is the clock — you arriving here with no time, or with too much.
+No live beat in the close — nothing to crash. The failure mode is purely human: you trail off, or you run long and eat the buffer.
 
 ```
 ╔══════════════════════════════════════════════════════════════════╗
-║ IF IT BREAKS — the clock is against you                          ║
-║                                                                   ║
-║ Almost out of time → skip Beats 1 and 2 entirely. Say ONLY the   ║
-║ last line: "An AI that knows me, remembers me, and never leaves   ║
-║ my laptop. That's buffr." A clean last line with no vision/ask    ║
-║ beats a rushed full close.                                        ║
-║                                                                   ║
-║ Way ahead of the clock → do NOT pad. Land the last line, stop,    ║
-║ and take questions early. Finishing at 9:00 with a clean close    ║
-║ reads as control. Talking until 10:00 reads as no edit.           ║
+║ IF IT BREAKS (you feel yourself trailing off)                     ║
+║                                                                    ║
+║ Lost your place / tempted to ramble → skip straight to the last   ║
+║ line. "This one's mine, it's on my laptop, and it remembers me."  ║
+║ Then stop. A clean early ending beats a complete late one. NEVER  ║
+║ say "any questions?" inside the slot — Q&A runs after the clock.  ║
 ╚══════════════════════════════════════════════════════════════════╝
 ```
 
-## The "tighten it" treatment
+## The "tighten it" cut
+
+Under a tight slot, cut the vision beat (beat 1) entirely and go ask → last line. The vision is the most cuttable thing in the whole presentation because it's the one beat that's about the future instead of the working thing. The floor: you end on the last line, deliberately, on a beat. Never trail off; always land the sentence.
+
+## The one-page run sheet — CHAPTER 05
 
 ```
-  TIGHTEN IT
-    cut:    Beat 1 (the vision) — the future can wait for Q&A.
-            Compress the ask into the last line's setup.
-    keep:   the ask (one sentence) + the last line.
-    floor:  the last line is non-negotiable — "knows me, remembers me,
-            never leaves my laptop. That's buffr." End on the beat. A
-            demo that ends on its last line is remembered; one that
-            trails off is not.
+  ┌─ THE CLOSE ─ 8:45–9:30 ─ 45 sec ─ then finish EARLY ────────┐
+  │                                                              │
+  │  BEAT 1 (8:45–9:10) vision — FUTURE TENSE:                   │
+  │    "next, index my whole working life + harden tool-calling" │
+  │                                                              │
+  │  BEAT 2 (9:10–9:25) the ask — specific:                      │
+  │    ┃ "if you want AI that's actually yours, come find me —   │
+  │    ┃  let's talk about what you'd want it to remember."      │
+  │                                                              │
+  │  BEAT 3 (9:25–9:30) the last line — then STOP:               │
+  │    ┃ "Most AI forgets you the second you close the tab.      │
+  │    ┃  This one's mine, it's on my laptop, and it remembers   │
+  │    ┃  me."                                                   │
+  │                                                              │
+  │  NAIL THIS LINE: the last line. Then silence.                │
+  │  NEVER say "any questions?" in the slot. Finish at ~9:30.    │
+  │  TIGHTEN: cut the vision beat. Floor: land the last line.    │
+  └──────────────────────────────────────────────────────────────┘
 ```
 
-## The one-page run sheet — THE CLOSE
-
-```
-  ┌─ RUN SHEET · 05 THE CLOSE · 8:45–9:30 (then 0:30 buffer) ───────┐
-  │                                                                 │
-  │  GOAL: vision (future) → ask → last line → SILENCE. Finish early│
-  │                                                                 │
-  │  SAY, in order:                                                 │
-  │   1. VISION (future, not demoed): "next is turn-history inside  │
-  │       a session, a native-tool model, and multi-device sync —  │
-  │       still fully yours"                                        │
-  │   2. ASK: "if a personal AI that runs on YOUR machine and       │
-  │       remembers YOU is worth building, tell me"                │
-  │   3. LAST LINE (nail it): "An AI that knows me, remembers me,   │
-  │       and never leaves my laptop. That's buffr." → STOP        │
-  │                                                                 │
-  │  IF NO TIME: last line only.  IF AHEAD: land it, stop, take Q&A.│
-  │  TIGHTEN: ask + last line only. Floor = the last line, clean.   │
-  └─────────────────────────────────────────────────────────────────┘
-```
+On to chapter 06 — the Q&A prep, which runs after the clock.

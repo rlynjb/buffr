@@ -1,82 +1,69 @@
-# Pure core, impure shell — `loadConfig` vs the `cli/*` edges
+# 02 — Pure core, impure shell
 
-> Updated: 2026-06-24 — `ask-cmd.ts` deleted. Its shell role split: `src/session.ts`
-> (`createChatSession`) now does the env-load → `loadConfig` → `DATABASE_URL` guard
-> → build, and exposes `close()` instead of a bottom-of-script `pool.end()`. The
-> remaining one-shot shells are `index-cmd`, `eval-cmd`, `migrate`. `loadConfig`
-> stays the one pure core; the dead `cfg.schema` knob (Move 2.5) is still dead.
-
-**Subtitle:** Functional Core / Imperative Shell — *Industry standard*.
-The pure function `loadConfig` is the testable core; the CLI files are the
-imperative shell that does all the I/O.
+**Industry name(s):** Functional core / imperative shell · "pure config
+seam" · dependency injection at the edge. **Type:** Industry standard.
 
 ---
 
 ## Zoom out, then zoom in
 
-The CLIs are where all the dirty work lives — reading `.env`, opening a pool,
-draining it, writing to stdout. But buried in the middle of every one of them is a
-single pure function that takes the environment and returns a config object with
-no side effects at all. That separation is the whole pattern.
+Every entry point in buffr — the chat session, the migrate runner, the
+index CLI, the eval CLI — needs the same answer to one question: *what's my
+configuration?* That answer is computed by one pure function, `loadConfig`,
+which touches nothing but its `env` argument. Everything *impure* —
+reading `.env` off disk, opening pools, hitting Ollama — happens in the
+shells around it.
 
 ```
-  Zoom out — where the pure core sits inside the impure shell
+  Zoom out — the pure seam, and the impure shells around it
 
-  ┌─ cli/ (impure shell) ────────────────────────────────────────┐
-  │  loadEnv()           ← reads .env from disk      (side effect)│
-  │  process.env         ← ambient global            (side effect)│
-  │     │                                                          │
-  │     ▼                                                          │
-  │  ┌─ ★ loadConfig(env) ★ ──────────────────────┐               │ ← we are here
-  │  │  pure: env in → Config out, no I/O          │  (core)       │
-  │  └─────────────────────────────────────────────┘               │
-  │     │                                                          │
-  │     ▼                                                          │
-  │  createPool() · readFile() · agent.answer() · pool.end()       │
-  │                       (all side effects)                       │
-  └──────────────────────────────────────────────────────────────┘
+  ┌─ impure shells (do I/O) ───────────────────────────────────┐
+  │  chat.tsx · session.ts · migrate.ts · index-cmd · eval-cmd  │
+  │  loadEnv() reads .env · createPool opens sockets · fetch    │
+  └───────────────────────────┬─────────────────────────────────┘
+                              │  pass process.env
+  ┌─ pure core ──────────────▼─────────────────────────────────┐
+  │  ★ loadConfig(env) ★   config.ts   env in → Config out      │ ← here
+  │  no disk, no network, no clock, no globals                  │
+  └─────────────────────────────────────────────────────────────┘
 ```
 
-**Zoom in.** The pattern is *functional core, imperative shell*. `loadConfig`
-(`src/config.ts:9`) is the core: deterministic, no I/O, the same env always
-produces the same config. Everything around it — `cli/index-cmd.ts`,
-`cli/eval-cmd.ts`, `migrate.ts`, and now `session.ts` — is the shell: it gathers
-the impure inputs, calls the pure core, then performs the effects the core decided.
-You test the core without a database; you keep the shell thin enough that there's
-little left to test.
+Zoom in: a pure function is one whose output depends only on its inputs and
+which causes no side effects — so it's trivially testable (no mocks, no
+setup) and trivially reasoned about (read it once, know it forever). The
+question this file answers: **how does buffr keep the testable decision
+separate from the untestable I/O, and where does the seam earn its keep?**
 
 ---
 
-## Structure pass — layers · axis · seams
+## Structure pass
 
-Two layers: the shell (CLI files) and the core (`loadConfig`). The axis that makes
-the boundary pop is **side effects** — who is allowed to touch the outside world.
+**Layers.** Two: the shell that does I/O, the core that computes.
 
 ```
-  Axis traced = "is a side effect allowed here?"
+  one axis traced: "can I test this without a database?"
 
-  ┌─ shell: cli/*.ts ─┐  seam: loadConfig()  ┌─ core: config.ts ─┐
-  │  YES — reads .env,│ ════════╪═══════════► │  NO — pure fn,    │
-  │  opens pools,     │   (effects flip OFF)  │  env→Config,      │
-  │  writes stdout    │                       │  no I/O           │
-  └───────────────────┘                       └───────────────────┘
-       ▲                                              ▲
-       └─ effects live out here ── decisions live in here ─┘
+  ┌─ shell ─────────────────────┐  answer: NO — needs .env, pg, Ollama
+  │  loadEnv → createPool → ...  │
+  └───────────────┬─────────────┘
+        seam ◄── testability flips here ──►
+  ┌─ core ───────▼──────────────┐  answer: YES — pass a fixture env object
+  │  loadConfig(env): Config    │
+  └──────────────────────────────┘
 ```
 
-- **The seam: `loadConfig(env)`.** Above it, side effects are everywhere. Below
-  it, none. The function takes `env` *as an argument* rather than reaching for the
-  global `process.env` itself — that's the move that flips the axis. The shell
-  passes `process.env`; a test passes a fixture object.
-- **Why the seam is load-bearing:** it's the substitution point. Because
-  `loadConfig` doesn't read the global, a test calls `loadConfig({ AGENT_APP_ID:
-  'x' })` with no environment setup and asserts the output. The effect-free core
-  is the only thing in the config path worth unit-testing, and the seam is what
-  makes it reachable.
-- **The shell's discipline:** every CLI follows the identical preamble —
-  `loadEnv()`, `loadConfig(process.env)`, guard `DATABASE_URL`, build objects,
-  run, `pool.end()`. The effects are sequenced at the edge, never interleaved into
-  the core.
+**Axis — "can I test this without a database?"** In the shell: no. Every
+shell function needs a live `.env`, a reachable Postgres, a running Ollama.
+In the core: yes — `loadConfig` takes a plain object and returns a plain
+object. **The axis flips at the function boundary**, which is exactly why
+that boundary is worth drawing.
+
+**Seam.** The signature `loadConfig(env: NodeJS.ProcessEnv): Config`
+(`config.ts:9`) is the seam. The shell passes `process.env` (the real
+thing); a test passes `{ DATABASE_URL: '...', AGENT_APP_ID: 'test' }` (a
+fixture). Same function, two callers, no I/O in between. The comment at
+`config.ts:8` names it outright: "The CLI passes process.env; tests pass a
+fixture."
 
 ---
 
@@ -84,229 +71,186 @@ the boundary pop is **side effects** — who is allowed to touch the outside wor
 
 ### Move 1 — the mental model
 
-You know how a React reducer is a pure `(state, action) => state` and the
-`dispatch`/effects live outside it in `useEffect`? Same split here. `loadConfig`
-is the reducer — pure, total, testable. The CLI is the effect layer that feeds it
-inputs and acts on its output. The strategy: **push the side effects to the edges
-and keep a deterministic core in the middle.**
+You've written a React reducer: `(state, action) => newState`, pure, no
+side effects, which is *why* you can unit-test it with no DOM. `loadConfig`
+is a reducer over the environment: `(env) => Config`. The strategy: **push
+all the impurity to the edges and keep one pure function in the middle that
+holds every decision.**
 
 ```
-  The shape — effects funnel in, pure decision, effects funnel out
+  functional core / imperative shell — the shape
 
-   .env ─┐
-   env   ├─► loadConfig(env) ─► Config ─► createPool · readFile · run
-   args ─┘     (pure core)                   (effects, back at the edge)
-        impure in            pure              impure out
+  ┌────────────── imperative shell ──────────────┐
+  │  side effects: read disk, open pool, fetch    │
+  │     │                              ▲          │
+  │     │ env in                       │ Config   │
+  │     ▼                              │ out      │
+  │  ┌──────────── pure core ──────────┴───────┐  │
+  │  │  loadConfig(env) — no effects, total fn  │  │
+  │  └──────────────────────────────────────────┘  │
+  └────────────────────────────────────────────────┘
 ```
 
 ### Move 2 — the step-by-step walkthrough
 
-**The core is total — every field has a defined value.** `loadConfig` never
-returns `undefined` for `appId`, `schema`, or `ollamaHost`; each falls back to a
-default with `||` (`src/config.ts:12-14`). `databaseUrl` is the one allowed to be
-`undefined` — because "no database configured" is a real state the shell must
-handle, not a default the core can invent. The boundary condition: pass an empty
-env `{}` and you still get a valid `Config` with `appId: 'laptop'`. The core can't
-fail.
+**Part 1 — the pure function itself (what breaks: testability).**
 
-```
-  loadConfig — defaults make it total
+**File:** `src/config.ts` · **Function:** `loadConfig` · **Lines:** 9-16.
 
-   env.AGENT_APP_ID   || 'laptop'     ← always a string
-   env.AGENT_DB_SCHEMA|| 'agents'     ← always a string (but see: dead, below)
-   env.OLLAMA_HOST    || 'http://...' ← always a string
-   env.DATABASE_URL   || undefined    ← deliberately optional: shell decides
+```ts
+export function loadConfig(env: NodeJS.ProcessEnv): Config {
+  return {
+    databaseUrl: env.DATABASE_URL || undefined,
+    appId:       env.AGENT_APP_ID  || 'laptop',
+    schema:      env.AGENT_DB_SCHEMA || 'agents',   // ← the dead knob (§5)
+    ollamaHost:  env.OLLAMA_HOST   || 'http://localhost:11434',
+  };
+}
 ```
 
-**The shell guards what the core left optional.** The core returns
-`databaseUrl?: undefined`; the shell turns that into a hard failure at the
-entrance: `if (!cfg.databaseUrl) throw new Error('DATABASE_URL is not set')`
-(`src/cli/index-cmd.ts:12`, `src/session.ts:37`, `cli/eval-cmd.ts:11`). This is the right
-division of labor — the core *describes* the world (db may be absent), the shell
-*decides* what to do about it (die loudly). Move the guard into the core and
-you've made `loadConfig` throw, which means tests can no longer call it with a
-fixture that omits the URL.
+Every line is `env.X || default`. No `readFile`, no `new pg.Pool`, no
+`Date.now()`, no module-level mutable state. Make it impure — say, read
+`.env` *inside* `loadConfig` — and you've welded the decision to the disk,
+and now testing config requires a temp file. Keeping it pure means
+`config.test.ts` passes a literal and asserts the output. **This is the
+seam's whole value.**
 
-```
-  Division of labor across the seam
+**Part 2 — the shell injecting the real env (what breaks: nothing, by
+design).**
 
-   core:  "databaseUrl might be undefined"   (describes reality, no opinion)
-   shell: "undefined? throw and die"         (acts on it, owns the effect)
-```
+**File:** `src/session.ts` · **Lines:** 35-37 (the pattern repeats in
+every CLI).
 
-**The shell drains its own resources.** Each one-shot ends with `await pool.end()`
-(`src/cli/index-cmd.ts:27`, `cli/eval-cmd.ts:34`, `migrate.ts`). The core never
-opens a pool, so it never has to close one. The chat path is the variant: because
-the session is long-lived, `session.ts` doesn't drain at the bottom of a script —
-it hands a `close()` method to the caller (`src/session.ts:72-74`), which the Ink
-UI invokes on `/exit` (`src/cli/chat.tsx:18-20`). Same principle (the shell owns
-lifecycle), different shape (caller-triggered teardown vs script-end). The boundary
-still bites: forget `close()`/`pool.end()` and the process hangs because idle
-connections keep the event loop alive.
-
-### Move 2.5 — the dead knob in the core
-
-One honest wart: the core computes a field nothing in the shell reads.
-`schema: env.AGENT_DB_SCHEMA || 'agents'` (`src/config.ts:13`) produces
-`cfg.schema`, but every SQL string in the persistence layer hardcodes the literal
-`agents.` instead of interpolating it. So the core promises a configurable schema
-the shell never honors.
-
-```
-  Current state vs intended state — the schema knob
-
-   intended:  loadConfig → cfg.schema → SQL uses `${cfg.schema}.chunks`
-   current:   loadConfig → cfg.schema → (read by nobody)
-                                         SQL hardcodes `agents.chunks`
-
-   fix: pick one — delete cfg.schema, OR thread it into the SQL.
-        Today the core's output lies about what's configurable.
+```ts
+loadEnv();                          // impure: reads .env off disk
+const cfg = loadConfig(process.env);// pure: env → Config
+if (!cfg.databaseUrl) throw new Error('DATABASE_URL is not set (see .env)');
 ```
 
-This is a core/shell mismatch: the pure core offers a decision the impure shell
-declines to use. See `audit.md` Lens 3 and Lens 5.
+The shell does the two impure things — `loadEnv()` (dotenv, disk) and
+passing `process.env` — then hands the *result* to the pure core. Notice the
+order: load the file into `process.env`, *then* read `process.env`. The pure
+function never knows a file existed. This exact three-line dance repeats in
+`migrate.ts:24-26`, `index-cmd.ts:10-12`, `eval-cmd.ts:9-11`. Same seam, four
+shells.
+
+```
+  layers-and-hops — env crosses the seam once per entry point
+
+  ┌─ Disk ──────┐ hop1: dotenv reads ┌─ process.env ─┐
+  │  .env file  │ ─────────────────► │  (mutated)    │
+  └─────────────┘                    └───────┬───────┘
+                              hop2: passed by value
+                                             ▼
+                                    ┌─ pure core ────┐
+                                    │  loadConfig    │
+                                    └───────┬────────┘
+                              hop3: Config returned
+                                             ▼
+                                    ┌─ shell uses it ┐
+                                    │  createPool... │
+                                    └────────────────┘
+```
+
+**Part 3 — the crack in the seam: the dead `schema` field.**
+
+The seam is clean except for one thing it computes and nobody uses:
+`schema` (`config.ts:13`). It's pure (good), but it's a *pure computation of
+a value no impure shell ever reads* — every SQL site hardcodes `agents.`
+(audit §3, §5). A pure function that returns a field no one consumes isn't a
+seam, it's dead code wearing a seam's clothes. The pure-core discipline makes
+this *easy to fix*: delete the line, the function stays pure, every test still
+passes, and the interface stops promising a knob that does nothing. The
+purity is what makes the deletion safe.
 
 ### Move 3 — the principle
 
-The value of the split isn't purity for its own sake — it's that **the only part
-worth testing in isolation is the part with no I/O, and you can only reach it if
-it doesn't reach for I/O itself.** `loadConfig` takes `env` as a parameter so it
-never touches `process.env`. That one choice is what turns "test the config" from
-"set up environment variables and a process" into "call a function with an
-object." Pure cores are testable cores.
+Separate the *decision* from the *effect*. Decisions (what's my config, what's
+my dimension, which schema) are pure functions of their inputs and belong in a
+core you can test with literals. Effects (disk, network, clock, pool) belong
+in a thin shell that injects real inputs and consumes the decision. The payoff
+is asymmetric: the core holds the logic worth testing and is the easiest thing
+to test; the shell holds the I/O and barely needs testing because it has no
+logic. When a pure function grows a field nobody reads, the purity is also
+what makes it cheap to cut.
 
 ---
 
 ## Primary diagram
 
-The whole pattern in one frame.
+The seam, its four shells, and the dead field, in one frame.
 
 ```
-  Functional core / imperative shell across the entry points
+  loadConfig — one pure seam, four impure shells
 
-  ┌─ impure shell (cli/index · cli/eval · session.ts · migrate) ─┐
-  │  loadEnv() ─► loadConfig(process.env) ─► guard DATABASE_URL   │
-  │      │              │                          │              │
-  │   reads .env    ┌───▼──────────────┐       throw if unset     │
-  │   (effect)      │ config.ts:9      │                          │
-  │                 │ pure: env→Config │  ← the only unit-tested  │
-  │                 │ no I/O           │     thing in this path   │
-  │                 └───┬──────────────┘                          │
-  │                     ▼                                         │
-  │  createPool ─► OllamaEmbeddingProvider ─► PgVectorStore ─► run│
-  │                                                   │           │
-  │                                              await pool.end() │
+  ┌─ shells (impure, do I/O) ──────────────────────────────────┐
+  │  session.ts  migrate.ts  index-cmd.ts  eval-cmd.ts          │
+  │     each: loadEnv() → loadConfig(process.env) → createPool  │
+  └──────────────────────────┬──────────────────────────────────┘
+                  process.env │  (real)        fixture │ (tests)
+                             ▼                         ▼
+  ┌─ pure core ──────────────────────────────────────────────────┐
+  │  loadConfig(env): Config         config.ts:9-16               │
+  │    databaseUrl ─┐                                             │
+  │    appId        ├─ consumed by shells ✓                       │
+  │    ollamaHost  ─┘                                             │
+  │    schema ───────  consumed by NOBODY ✗  ← delete (audit §5)  │
   └──────────────────────────────────────────────────────────────┘
-```
-
----
-
-## Implementation in codebase
-
-**Use cases.** Every entry reaches for this split. Indexing
-(`src/cli/index-cmd.ts:10-12`), the chat session (`src/session.ts:35-37`), and eval
-(`src/cli/eval-cmd.ts:9-11`) all run the identical core call + shell guard. The
-migration runner does too (`src/migrate.ts:24-26`), inside its `import.meta.url`
-main-module check. The core is one function reused by four shells.
-
-**Code side by side.**
-
-```
-  src/config.ts  (loadConfig, lines 9-16)  — the pure core
-
-  export function loadConfig(env: NodeJS.ProcessEnv): Config {
-    return {                                  ← no I/O, no globals, just a map
-      databaseUrl: env.DATABASE_URL || undefined,  ← optional: shell decides
-      appId: env.AGENT_APP_ID || 'laptop',         ← total: always a value
-      schema: env.AGENT_DB_SCHEMA || 'agents',      ← DEAD: computed, never read
-      ollamaHost: env.OLLAMA_HOST || 'http://localhost:11434',
-    };
-  }
-       │
-       └─ takes `env` as a PARAM, not process.env directly. That's the
-          whole testability story: test passes {AGENT_APP_ID:'x'}, no
-          environment setup, no process. (Lens: pull complexity down.)
-```
-
-```
-  src/session.ts  (the shell, lines 35-39, 72-74) — effects at the edge
-
-  loadEnv();                                  ← side effect: read .env from disk
-  const cfg = loadConfig(process.env);        ← cross into the pure core, once
-  if (!cfg.databaseUrl)                        ← shell acts on the core's optional
-    throw new Error('DATABASE_URL is not set (see .env)');
-  const pool = createPool(cfg.databaseUrl);   ← open resource (effect)
-  ...                                          ← build agent/memory/conversation
-  return {
-    async ask(q) { ... },                      ← run turns (effects)
-    async close() { await pool.end(); },       ← drain resource — caller-triggered
-  };                                              (chat.tsx calls it on /exit)
 ```
 
 ---
 
 ## Elaborate
 
-Functional core / imperative shell (Gary Bernhardt's framing) is the testing-flavored
-cousin of dependency inversion. The point is to maximize the surface that's
-deterministic and minimize the surface that needs integration tests. buffr applies
-it narrowly — only `loadConfig` is a true pure core; the rest of the "core"
-(`PgVectorStore`, `loadProfile`) is impure because it talks to Postgres, but those
-take an *injected* pool, which is the same testability idea by a different
-mechanism (dependency injection rather than purity). The pattern's neighbor is
-`04-dependency-as-a-boundary.md`: both are about keeping the parts you reason
-about separate from the parts you can't control.
+"Functional core, imperative shell" is Gary Bernhardt's framing of a much
+older idea (referential transparency from FP). APOSD's angle: pure functions
+are *deep* in a specific way — a huge amount of "what's the right config"
+logic could live behind a trivial `(env) => Config` interface, and it's
+maximally testable because it has no hidden dependencies.
+
+You use this shape everywhere without naming it — a Redux reducer, a Vue
+computed property, a pure `formatPrice(cents)` helper. buffr's contribution
+is doing it at the *config boundary*, which is where most apps get sloppy and
+read `process.env` deep inside business logic. Keeping config a pure function
+of `env` means every CLI shares one tested decision.
+
+Read next: `audit.md` §5 (the `schema` knob as the pull-complexity-downward
+finding) and `.aipe/study-testing/` *(when generated)* — this seam is the
+design reason the test suite can run without a database for config.
 
 ---
 
 ## Interview defense
 
-**Q: Why does `loadConfig` take `env` as a parameter instead of reading
-`process.env` directly?** Because reaching for the global makes the function
-impure and untestable without environment manipulation. As a parameter, the
-function is a pure `env → Config` map: a test passes a fixture object and asserts
-the result with zero setup (`test/config.test.ts`). The shell passes the real
-`process.env`; the core never knows the difference.
+**Q: Why is `loadConfig` a separate pure function instead of just reading
+`process.env` where you need it?**
+Testability and single-source-of-truth. Pure `(env) => Config` means
+`config.test.ts` passes a literal object and asserts the result — no temp
+files, no env mutation, no mocks. And every entry point gets the *same*
+defaults (`appId = 'laptop'`, `ollamaHost = localhost:11434`) instead of four
+copies drifting apart. The shell does I/O; the core does the decision.
 
 ```
-  reads global (bad)              takes param (chosen)
-  ──────────────────              ────────────────────
-  loadConfig() { process.env }    loadConfig(env) { env }
-  test: mutate process.env        test: pass {AGENT_APP_ID:'x'}
-  impure, order-dependent         pure, deterministic
+  why pure: the test needs no world
+
+  test ─► loadConfig({DATABASE_URL:'x'}) ─► assert cfg.appId === 'laptop'
+          no disk · no pool · no network · runs in microseconds
 ```
 
-**Q: Should the `DATABASE_URL` guard live in `loadConfig`?** No. If the core
-throws, it's no longer total — tests can't construct a config without a URL, and
-you've coupled "describe the config" to "demand a database." The core describes
-(`databaseUrl?: undefined`); the shell decides (`throw`). Keep them apart.
+**Q: Is there a flaw in the current config?**
+Yes — `schema` (`config.ts:13`) is computed from `AGENT_DB_SCHEMA` and never
+read; every query hardcodes `agents.`. It's a pure field with no consumer, so
+the env knob is a false promise. Because the function is pure, deleting the
+field is a one-line, fully-safe change — that's a side benefit of the
+discipline.
 
-**Q: What's the wart in the core?** `cfg.schema` is computed and read by nobody
-(`src/config.ts:13`) — the SQL hardcodes `agents.`. The core promises
-configurability the shell doesn't deliver. Fix: delete the field or thread it
-through.
-
----
-
-## Validate
-
-1. **Reconstruct:** which one field of `Config` is allowed to be `undefined`, and
-   why is that the core's job to leave open rather than default? (`databaseUrl`,
-   `src/config.ts:11`.)
-2. **Explain:** why is `loadConfig` the only thing in the config path worth a unit
-   test? (No I/O; deterministic; `env` injected.)
-3. **Apply:** add an `OLLAMA_TIMEOUT_MS` knob. Which file gets the parse + default,
-   which file consumes it? (Core: `config.ts`; shell: a `cli/*` that builds the
-   provider.)
-4. **Defend:** a reviewer wants the `pool.end()` moved into `loadConfig` "to keep
-   cleanup near config." Refute it. (Core must stay effect-free; cleanup is a shell
-   concern; `src/session.ts:73` `close()`.)
+**Anchor:** "Decisions are pure functions of their inputs; effects live in a
+thin shell that injects the inputs and consumes the decision."
 
 ---
 
 ## See also
 
-- `audit.md` — Lens 5 (the dead `schema` knob), Lens 3 (schema leak).
-- `01-adapter-behind-a-contract.md` — the injected pool, the DI cousin of purity.
-- `04-dependency-as-a-boundary.md` — the broader dependency-direction story.
-- `study-testing` → `test/config.test.ts` is the payoff of this seam.
+- `audit.md` §5 (pull complexity downward — the `schema` knob), §1.
+- `03-dependency-as-a-boundary.md` — the impure shell wires aptkit's deps.
+- `.aipe/study-testing/` *(when generated)* — the seam's payoff in tests.
