@@ -34,6 +34,34 @@ Reversible (it's just the consumption seam). This is the line between *using* ap
 
 ---
 
+## How to run this — a loop, not a waterfall
+
+The phases below are drawn as a line (0 → 5), but that arrow is a *priority / dependency* ordering, **not a sequence you march through**. The actual unit of work is an iteration, and there are two loops:
+
+```
+  INNER LOOP  (per change — minutes to hours)
+    hypothesis → change it by hand → run the eval → did the number move?
+        │                                              │
+        │              keep it ◄──── yes    no ────► revert it
+        └──────────────────────── repeat ──────────────────────┘
+
+  OUTER LOOP  (per session — driven by what the eval says is weakest)
+    eval report → "faithfulness is low" / "it misses multi-part questions" →
+      pick the component that fixes THAT → may jump phases →
+        back into the inner loop
+```
+
+What this means in practice:
+
+- **The phases are a menu, not a railroad.** After Phase 0, the *eval* decides your order. If the number says retrieval is the bottleneck, you do Phase 4 before Phase 2. The list says *what* to improve and roughly *what depends on what* — not a fixed order.
+- **You never "finish" a phase.** You run many small eval-gated changes; some you keep, most you revert. "Improve results" *is* this loop, run over and over.
+- **Only two hard orderings exist:** Phase 0 comes first (no ruler → no iteration, just tinkering), and the aptkit-local-deps move comes before Phase 2 (can't edit the loop without the source). Everything else floats on priority.
+- **This doc is a living plan.** As evals surface new weak spots and your goals shift, you revise it — same way you re-run the study materials. It's version 0 of a plan you keep editing, not a contract.
+
+The eval is what turns this from open-ended tinkering into a real iterative process: it's the feedback signal that tells you whether the last iteration was progress or noise. Without it you're just changing things; with it, you're converging.
+
+---
+
 ## The phases
 
 ```
