@@ -9,7 +9,7 @@
     "migrate": "npm run build && node dist/src/migrate.js",
     "index": "npm run build && node dist/src/cli/index-cmd.js",
     "eval": "npm run build && node dist/src/cli/eval-cmd.js",
-    "chat": "npm run build && node dist/src/cli/chat.js"
+    "chat": "npm run build && bun dist/src/cli/chat.js"
   },
   "dependencies": {
     "@opentui/core": "^0.4.5",
