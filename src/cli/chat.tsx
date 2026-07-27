@@ -25,7 +25,7 @@ function Chat({ session, onExit }: { session: ChatSession; onExit: () => Promise
     const q = value.trim();
     if (busy || !q) return;
     if (q === '/exit' || q === '/quit') {
-      void onExit();
+      onExit().catch(err => { console.error(err); process.exit(1); });
       return;
     }
     setTurns(t => [...t, { role: 'you', text: q }]);
