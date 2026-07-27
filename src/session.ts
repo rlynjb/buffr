@@ -3,7 +3,7 @@ import {
   OllamaEmbeddingProvider, createRetrievalPipeline, createSearchKnowledgeBaseTool,
   InMemoryToolRegistry, GemmaModelProvider, ContextWindowGuardedProvider, RagQueryAgent,
   createConversationMemory,
-} from '@rlynjb/aptkit-core';
+} from '@buffr/kernel';
 import { loadConfig } from './config.js';
 import { createPool } from './db.js';
 import { PgVectorStore } from './pg-vector-store.js';

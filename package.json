@@ -19,7 +19,6 @@
     "@buffr/kernel": "0.0.1",
     "@opentui/core": "^0.4.5",
     "@opentui/react": "^0.4.5",
-    "@rlynjb/aptkit-core": "^0.4.1",
     "dotenv": "^16.4.0",
     "pg": "^8.11.0",
     "react": "^19.2.8"

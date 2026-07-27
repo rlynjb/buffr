@@ -1,7 +1,9 @@
 import { config as loadEnv } from 'dotenv';
 import { readFile } from 'node:fs/promises';
-import { OllamaEmbeddingProvider, createRetrievalPipeline } from '@rlynjb/aptkit-core';
-import { scorePrecisionAtK, scoreRecallAtK } from '@rlynjb/aptkit-core';
+import {
+  OllamaEmbeddingProvider, createRetrievalPipeline,
+  scorePrecisionAtK, scoreRecallAtK,
+} from '@buffr/kernel';
 import { loadConfig } from '../config.js';
 import { createPool } from '../db.js';
 import { PgVectorStore } from '../pg-vector-store.js';
