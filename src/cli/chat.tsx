@@ -1,63 +1,80 @@
-import { useState } from 'react';
-import { render, Box, Text, useApp } from 'ink';
-import TextInput from 'ink-text-input';
-import Spinner from 'ink-spinner';
+/** @jsxImportSource @opentui/react */
+import { useState, useEffect } from 'react';
+import { createCliRenderer, TextAttributes } from '@opentui/core';
+import { createRoot } from '@opentui/react';
 import { createChatSession, type ChatSession } from '../session.js';
 
 type Turn = { role: 'you' | 'buffr'; text: string };
 
-function Chat({ session }: { session: ChatSession }) {
-  const { exit } = useApp();
+const FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+function Spinner() {
+  const [frame, setFrame] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setFrame(f => (f + 1) % FRAMES.length), 80);
+    return () => clearInterval(id);
+  }, []);
+  return <text fg="#FFFF00">{FRAMES[frame]} thinking…</text>;
+}
+
+function Chat({ session, onExit }: { session: ChatSession; onExit: () => Promise<void> }) {
   const [turns, setTurns] = useState<Turn[]>([]);
-  const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
 
-  const onSubmit = async (value: string): Promise<void> => {
+  const onSubmit = (value: string): void => {
     const q = value.trim();
-    if (busy) return;
+    if (busy || !q) return;
     if (q === '/exit' || q === '/quit') {
-      await session.close();
-      exit();
+      void onExit();
       return;
     }
-    if (!q) return;
-    setInput('');
-    setTurns((t) => [...t, { role: 'you', text: q }]);
+    setTurns(t => [...t, { role: 'you', text: q }]);
     setBusy(true);
-    try {
-      const answer = await session.ask(q);
-      setTurns((t) => [...t, { role: 'buffr', text: answer }]);
-    } catch (err) {
-      setTurns((t) => [...t, { role: 'buffr', text: `error: ${(err as Error).message}` }]);
-    } finally {
-      setBusy(false);
-    }
+    session.ask(q).then(
+      answer => {
+        setTurns(t => [...t, { role: 'buffr', text: answer }]);
+        setBusy(false);
+      },
+      err => {
+        setTurns(t => [...t, { role: 'buffr', text: `error: ${(err as Error).message}` }]);
+        setBusy(false);
+      },
+    );
   };
 
   return (
-    <Box flexDirection="column">
-      <Box marginBottom={1}>
-        <Text dimColor>buffr chat — one conversation, held in-process. Type /exit to quit.</Text>
-      </Box>
+    <box flexDirection="column">
+      <box marginBottom={1}>
+        <text fg="#888888">buffr chat — one conversation, held in-process. Type /exit to quit.</text>
+      </box>
       {turns.map((t, i) => (
-        <Box key={i} flexDirection="column" marginBottom={1}>
-          <Text bold color={t.role === 'you' ? 'cyan' : 'green'}>{t.role}</Text>
-          <Text>{t.text}</Text>
-        </Box>
+        <box key={i} flexDirection="column" marginBottom={1}>
+          <text attributes={TextAttributes.BOLD} fg={t.role === 'you' ? '#00FFFF' : '#00FF00'}>{t.role}</text>
+          <text>{t.text}</text>
+        </box>
       ))}
       {busy ? (
-        <Text color="yellow">
-          <Spinner type="dots" /> thinking…
-        </Text>
+        <Spinner />
       ) : (
-        <Box>
-          <Text color="cyan">{'> '}</Text>
-          <TextInput value={input} onChange={setInput} onSubmit={onSubmit} placeholder="ask buffr" />
-        </Box>
+        <box>
+          <text fg="#00FFFF">{'> '}</text>
+          {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
+          <input placeholder="ask buffr" onSubmit={onSubmit as any} focused />
+        </box>
       )}
-    </Box>
+    </box>
   );
 }
 
 const session = await createChatSession();
-render(<Chat session={session} />);
+const renderer = await createCliRenderer({ exitOnCtrlC: false });
+
+createRoot(renderer).render(
+  <Chat
+    session={session}
+    onExit={async () => {
+      await session.close();
+      process.exit(0);
+    }}
+  />,
+);
