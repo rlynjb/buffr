@@ -109,6 +109,42 @@ a TypeScript toolkit for building agents.
 > _
 ```
 
+## Where it gets data
+
+Every answer is assembled from three sources at query time:
+
+```
+Your question
+     │
+     ▼
+ Ollama nomic-embed-text  ← embeds your question into a vector
+     │
+     ▼
+ pgvector (Supabase)      ← searches for the closest chunks
+     │
+     ├── Document chunks  ← .md files you indexed with `npm run index`
+     │                      (work.md, stack.md, notes, etc.)
+     │
+     └── Memory chunks    ← past Q&A pairs from previous sessions,
+                             stored in the same vector table (kind=memory)
+                             so relevant exchanges surface automatically
+     │
+     ▼
+ Gemma 2 (Ollama)         ← generates the answer using retrieved chunks
+                             + your profile (me.md from the DB)
+     │
+     ▼
+ Your answer
+```
+
+**Documents** are anything you index with `npm run index`. Each file is chunked, embedded, and stored in `agents.chunks` in Postgres. The agent retrieves the top-4 most relevant chunks per turn.
+
+**Memory** is written automatically after every turn — the question and answer are embedded and stored in the same vector table. Future turns can surface them via the same retrieval tool. You never manage this manually.
+
+**Profile** (`agents.profiles`) is a free-form text field loaded fresh each turn and injected into the system prompt. If you have a `me.md` stored in the DB it shapes every answer — tone, context, priorities.
+
+**Trace** — every agent run (steps, tool calls, token counts, timestamps) is written to `agents.messages` under a `conversations` row. Nothing is lost; you can inspect or replay any run from the DB.
+
 ## Questions you can ask
 
 Questions work best when you've indexed documents covering the topic. The agent recalls relevant chunks by semantic similarity.
