@@ -1,0 +1,2 @@
+// Kernel package - placeholder
+export {};

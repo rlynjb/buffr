@@ -3,15 +3,20 @@
   "version": "0.0.0",
   "type": "module",
   "private": true,
+  "workspaces": ["packages/*"],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build:packages": "npm run build -w @buffr/contracts && npm run build -w @buffr/kernel",
+    "build": "npm run build:packages && tsc -p tsconfig.json",
     "test": "npm run build && node --test --test-concurrency=1 dist/test/*.test.js",
+    "test:kernel": "npm run build -w @buffr/kernel && node --test --test-concurrency=1 packages/kernel/dist/test/*.test.js",
     "migrate": "npm run build && node dist/src/migrate.js",
     "index": "npm run build && node dist/src/cli/index-cmd.js",
     "eval": "npm run build && node dist/src/cli/eval-cmd.js",
     "chat": "npm run build && bun dist/src/cli/chat.js"
   },
   "dependencies": {
+    "@buffr/contracts": "0.0.1",
+    "@buffr/kernel": "0.0.1",
     "@opentui/core": "^0.4.5",
     "@opentui/react": "^0.4.5",
     "@rlynjb/aptkit-core": "^0.4.1",

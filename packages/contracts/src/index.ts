@@ -1,0 +1,2 @@
+// Contracts package - placeholder
+export {};
