@@ -18,13 +18,13 @@ import { startConversation, persistMessage, SupabaseTraceSink } from './supabase
  *
  * Memory model:
  * - Knowledge (indexed docs) and profile are recalled every turn (RAG + system prompt).
- * - Retrievable conversation memory via @aptkit/memory: after each turn the exchange is
- *   embedded into the SAME vector store (tagged kind=memory), so future turns surface
- *   relevant past exchanges via the existing search_knowledge_base tool — across sessions.
- *   The memory engine is aptkit's; buffr only injects its PgVectorStore.
+ * - Retrievable conversation memory: after each turn the exchange is embedded into the
+ *   SAME vector store (tagged kind=memory), so future turns surface relevant past
+ *   exchanges via the existing search_knowledge_base tool — across sessions.
+ *   The memory engine lives in @buffr/kernel; buffr only injects its PgVectorStore.
  * - Still missing: sequential in-prompt turn history (RagQueryAgent.answer() treats each
- *   question independently). That's an aptkit-side change; retrieval-based recall above
- *   gives relevance-based memory without it.
+ *   question independently). Retrieval-based recall above gives relevance-based memory
+ *   without it.
  */
 export type ChatSession = {
   ask(question: string): Promise<string>;
@@ -47,9 +47,9 @@ export async function createChatSession(): Promise<ChatSession> {
   const profile = await loadProfile(pool, cfg.appId);
 
   // Retrievable episodic memory over buffr's own store. The engine (embed, tag,
-  // recall) is aptkit's; buffr injects the PgVectorStore. Sharing the document
-  // store means memory surfaces via the existing search_knowledge_base tool — and
-  // memory chunks live with no documents row, which the dropped FK allows.
+  // recall) lives in @buffr/kernel; buffr injects the PgVectorStore. Sharing the
+  // document store means memory surfaces via the existing search_knowledge_base
+  // tool — memory chunks live with no documents row, which the dropped FK allows.
   const memory = createConversationMemory({ embedder, store });
 
   const conversationId = await startConversation(pool, cfg.appId);

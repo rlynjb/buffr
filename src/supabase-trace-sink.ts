@@ -36,7 +36,7 @@ export async function persistMessage(
   );
 }
 
-/** Captures the agent's trajectory. emit() is sync (aptkit's contract); writes
+/** Captures the agent's trajectory. emit() is sync per CapabilityTraceSink; writes
  *  are queued and awaited via flush() after the run.
  *
  *  Every CapabilityEvent variant is persisted — not just assistant steps and
