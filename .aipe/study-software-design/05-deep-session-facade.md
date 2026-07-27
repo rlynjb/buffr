@@ -17,7 +17,7 @@ Role-vocabulary (facade + deep module), named once:
   `ask` / `close`. The narrow door.
 - **the subsystem** — the eleven wired pieces behind it (the agent,
   pipeline, store, memory, trace, pool, conversation).
-- **the client** — `cli/chat.tsx`, the Ink UI; it holds a `ChatSession`
+- **the client** — `cli/chat.tsx`, the OpenTUI UI; it holds a `ChatSession`
   and calls only the two methods.
 - **the resource** — the warm `pg.Pool` + the single `conversationId`
   held across turns; what `close()` releases.

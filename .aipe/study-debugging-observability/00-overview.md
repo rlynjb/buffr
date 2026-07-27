@@ -20,7 +20,7 @@ This is the system as observability bands: where a signal exists, and where ther
   ┌─ CLI layer (src/cli/) ──────────────────────────────────────┐
   │  index-cmd.ts   → process.stdout.write("indexed X")          │
   │  eval-cmd.ts    → process.stdout.write(P@1 / R@3)            │  ← stdout only
-  │  chat.tsx       → Ink render; CATCHES per-turn errors (l.30) │
+  │  chat.tsx       → OpenTUI render; CATCHES per-turn errors (l.30) │
   └───────────────────────────────┬──────────────────────────────┘
                                    │  session.ask()
   ┌─ Session layer (src/session.ts) ──────▼──────────────────────┐
@@ -50,7 +50,7 @@ Ordered by consequence — what to look at first.
 
 3. **The FALLBACK_ANSWER path fires no `step` event — an answer the trace never records.** `RagQueryAgent.answer()` returns `finalText.trim() || FALLBACK_ANSWER` (aptkit `agent-rag-query/dist/src/rag-query-agent.js:51`). When synthesis comes back empty, the user sees `"I couldn't find anything…"` but the agent loop emitted no `step` for it — so `agents.messages` has no assistant row for that turn. The trace says the agent answered nothing; the user got an answer. This is the one place the full-signal table lies. → `audit.md` lens 6, and `01-`.
 
-4. **stdout is the only log surface outside the trace table.** No log levels, no structured fields, no correlation IDs in the CLI output (`src/cli/index-cmd.ts:25`, `eval-cmd.ts:31`). The chat UI catches per-turn errors and renders them inline (`src/cli/chat.tsx:30-31`) — good for the user, but the caught error is never persisted or logged anywhere durable. → `03-stdout-as-only-log.md`
+4. **stdout is the only log surface outside the trace table.** No log levels, no structured fields, no correlation IDs in the CLI output (`src/cli/index-cmd.ts:25`, `eval-cmd.ts:31`). The chat UI catches per-turn errors and renders them inline (`src/cli/chat.tsx:39-31`) — good for the user, but the caught error is never persisted or logged anywhere durable. → `03-stdout-as-only-log.md`
 
 5. **Eval numbers are the only retrieval-quality signal.** `eval-cmd.ts` prints per-query P@1 / R@3 and a mean (`:31-33`). That's the repo's entire "is retrieval healthy" instrument — run by hand, printed to stdout, compared by eyeball. → `04-eval-numbers-as-quality-signal.md`
 
@@ -61,7 +61,7 @@ Named honestly, with when each becomes relevant:
 - **Metrics / SLIs / SLOs (Prometheus, StatsD).** No counters, gauges, or histograms anywhere. Relevant the moment buffr runs unattended or multi-user and you need "p95 turn latency" without replaying the table by hand.
 - **Distributed tracing / OpenTelemetry.** The `CapabilityEvent` stream is a *local* trace, not a distributed one — no trace/span IDs propagate across the Ollama or Postgres hops. Relevant when buffr grows a second service or an Edge Function tier.
 - **Log levels / structured logging.** `process.stdout.write` is the whole logger; no `debug`/`info`/`warn`/`error` severity, no JSON log lines, no redaction. Relevant once logs are shipped somewhere and need filtering.
-- **Error tracking (Sentry, etc.).** The chat UI swallows-and-renders (`chat.tsx:30`); the memory write swallows silently (`session.ts:66-68`). No error reaches a tracker with a stack trace and a fingerprint. Relevant the first time a bug only reproduces on someone else's machine.
+- **Error tracking (Sentry, etc.).** The chat UI swallows-and-renders (`chat.tsx:39`); the memory write swallows silently (`session.ts:66-68`). No error reaches a tracker with a stack trace and a fingerprint. Relevant the first time a bug only reproduces on someone else's machine.
 - **Health checks / readiness probes.** No `/healthz`, no pool-liveness check, no Ollama-reachability probe. Relevant when something other than a human at a terminal needs to know buffr is up.
 
 ## Cross-links

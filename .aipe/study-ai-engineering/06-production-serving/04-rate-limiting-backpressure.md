@@ -60,7 +60,7 @@ You already understand this from the client side — you back off when an API re
 
 #### The live piece: `if (busy) return` in `chat.tsx`
 
-The Ink chat guards against concurrent submits with a boolean (`src/cli/chat.tsx:13,17,26,33`):
+The OpenTUI chat guards against concurrent submits with a boolean (`src/cli/chat.tsx:22,26,32,36`):
 
 ```ts
 // src/cli/chat.tsx:13
@@ -175,7 +175,7 @@ The trigger that flips it is sharp and worth memorizing: **the moment buffr has 
 
 **Q: "How does buffr handle rate limiting and backpressure?"**
 
-Honestly: it mostly doesn't, and that's correct for a single-user local agent. The one real piece is a single-flight lock — `if (busy) return` in the Ink chat — which stops the user from double-submitting and getting interleaved generations. But that's a *UI* guard, not server admission control: it only protects the one chat instance and does nothing against a script or a future HTTP wrapper calling `session.ask()` concurrently. There's no queue, no concurrency cap, no load shedding. The thing that actually saturates is the Ollama server, which serializes generations on one GPU — so uncapped concurrency wouldn't crash, it'd just make everyone slow with no fairness.
+Honestly: it mostly doesn't, and that's correct for a single-user local agent. The one real piece is a single-flight lock — `if (busy) return` in the OpenTUI chat — which stops the user from double-submitting and getting interleaved generations. But that's a *UI* guard, not server admission control: it only protects the one chat instance and does nothing against a script or a future HTTP wrapper calling `session.ask()` concurrently. There's no queue, no concurrency cap, no load shedding. The thing that actually saturates is the Ollama server, which serializes generations on one GPU — so uncapped concurrency wouldn't crash, it'd just make everyone slow with no fairness.
 
 ```
 buffr backpressure today

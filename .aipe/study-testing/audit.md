@@ -22,7 +22,7 @@ What's tested, and it's the right thing per file:
 What isn't, ranked by risk:
 
 - **`src/session.ts` — the orchestrator, zero tests.** `createChatSession()` wires the pool, store, pipeline, tool, model, memory, trace, and agent (`session.ts:34-57`); `ask()` runs the persist-then-answer-then-flush-then-remember sequence (`session.ts:60-71`). This is the most complex code in the repo and the least tested. **Red flag firing:** the most important code is the least covered.
-- **`src/cli/chat.tsx` — the Ink UI, zero tests.** Real branches: the `busy` re-entrancy guard (`chat.tsx:17`), `/exit` close (`chat.tsx:18-22`), the error-turn `catch` (`chat.tsx:30-32`).
+- **`src/cli/chat.tsx` — the OpenTUI UI, zero tests.** Real branches: the `busy` re-entrancy guard (`chat.tsx:17`), `/exit` close (`chat.tsx:18-22`), the error-turn `catch` (`chat.tsx:30-32`).
 - `src/db.ts` — a 2-line `Pool` factory; too thin to earn a test.
 - `src/cli/index-cmd.ts` — a thin file-reading CLI over the tested `indexDocumentRow`.
 - `src/cli/eval-cmd.ts` — **not a unit test at all.** It's the eval/reporting script (precision@k, recall@k over `eval/queries.json`, `eval-cmd.ts:22-33`). It prints, never asserts → that's the *eval* half of the seam, cross-linked to `study-ai-engineering`.
@@ -159,5 +159,5 @@ The consolidated checklist, marked against this repo.
 The honest "not yet exercised" list, stated plainly:
 
 - **CI** — green-by-skip without `DATABASE_URL`; no workflow provisions Postgres.
-- **e2e of chat against live Gemma** — no test drives the Ink UI through a real model turn.
+- **e2e of chat against live Gemma** — no test drives the OpenTUI UI through a real model turn.
 - **error-branch coverage** — swallowed memory-write, migration rollback, transaction rollback, the chat error turn.

@@ -14,7 +14,7 @@ streaming would slot in, why it's absent, and what it would cost to add — beca
 ```
   Zoom out — where streaming WOULD live (but doesn't)
 
-  ┌─ UI layer (Ink TUI) ────────────────────────────────────────┐
+  ┌─ UI layer (OpenTUI) ────────────────────────────────────────┐
   │  busy spinner ── then the WHOLE answer appears at once        │
   │       ▲                                                        │
   │       │ one string, after the full turn completes             │
@@ -95,7 +95,7 @@ const answer = await agent.answer(question);   // Promise<string> — resolves O
 handler, no chunk callback. The turn blocks until the complete answer exists, then
 returns it.
 
-**The Ink UI renders the whole string in one `setState`.** The render side
+**The OpenTUI UI renders the whole string in one `setState`.** The render side
 matches (`src/cli/chat.tsx:28-29`):
 
 ```ts
@@ -118,7 +118,7 @@ transport, whole string at the session, whole block at the UI.
 ```
   Layers-and-hops — the whole-answer path (no stream anywhere)
 
-  ┌─ Ink TUI ─────────────┐
+  ┌─ OpenTUI ─────────────┐
   │ spinner while busy     │  ◄── nothing rendered until done
   └──────────┬─────────────┘
              │ hop 1: session.ask(q)  → awaits whole string
@@ -152,7 +152,7 @@ at a spinner for the full generation time.
 
 Phase B (if streaming is added): the cost is a contract change at `agent.answer`
 — it'd have to yield tokens (async iterator or callback), the transport would
-switch to consuming Ollama's NDJSON stream, and the Ink component would append to
+switch to consuming Ollama's NDJSON stream, and the OpenTUI component would append to
 the in-flight turn. What *doesn't* change: the pg-wire path, the trace flush, the
 memory write — all of those still happen after the stream completes. Streaming is
 a UX change on the model path only. It's an aptkit-side change first (the transport

@@ -39,7 +39,7 @@ src/profile.ts             loadProfile — me.md into the system prompt
 src/supabase-trace-sink.ts SupabaseTraceSink — full-trajectory capture
 src/cli/index-cmd.ts       npm run index — chunk → embed → store
 src/cli/eval-cmd.ts        npm run eval — precision@k / recall@k
-src/cli/chat.tsx           the Ink chat TUI
+src/cli/chat.tsx           the OpenTUI chat TUI
 sql/001_agents_schema.sql  documents/chunks/conversations/messages/profiles
 eval/queries.json          the labeled eval set
 ```

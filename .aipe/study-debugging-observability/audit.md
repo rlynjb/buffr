@@ -16,7 +16,7 @@ The evidence map — what can be observed at each boundary.
   boundary                     signal that exists              gap
   ───────────────────────────  ──────────────────────────────  ─────────────
   CLI → user (index/eval)      process.stdout.write text       no level/field
-  chat UI → user               Ink render + caught error       not persisted
+  chat UI → user               OpenTUI render + caught error       not persisted
   session → agent              trace.emit() per event          —
   sink → agents.messages       one INSERT per CapabilityEvent  same-ms tie
   agent → Ollama (model)       model_usage tokens (in trace)   no span/latency
@@ -75,7 +75,7 @@ The before/after snapshot mechanism is, again, `agents.messages`: each turn appe
 
 Two debugging boundaries are worth naming precisely:
 
-- **The chat UI error boundary.** `src/cli/chat.tsx:30-31` catches any error from `session.ask()` and renders `error: <message>` inline as a buffr turn. Good UX — one bad turn doesn't crash the session — but the caught error is **not persisted**; it lives only in the terminal scrollback. If the failure was thrown *before* `trace.flush()`, the trace table has no record of it either.
+- **The chat UI error boundary.** `src/cli/chat.tsx:39-31` catches any error from `session.ask()` and renders `error: <message>` inline as a buffr turn. Good UX — one bad turn doesn't crash the session — but the caught error is **not persisted**; it lives only in the terminal scrollback. If the failure was thrown *before* `trace.flush()`, the trace table has no record of it either.
 - **The silent memory-write swallow.** `src/session.ts:64-69` wraps `memory.remember()` in `try { } catch { }` with an empty catch, deliberately, so a memory failure never loses the answer. Correct call — but it's a state-change that vanishes with zero evidence. The episodic memory silently didn't get written and nothing anywhere knows.
 
 The honest finding for this lens is the **FALLBACK_ANSWER snapshot gap**: the user-visible answer state (`"I couldn't find anything…"`) has no corresponding row, because the fallback is returned past the trace, not emitted through it (aptkit `agent-rag-query/dist/src/rag-query-agent.js:51`). The before/after snapshot is missing its "after."
@@ -105,7 +105,7 @@ Ranked blind spots by consequence, with the evidence for each verdict.
    2    same-millisecond timestamp tie,     events.js:2 (ISO ms;  replay order
         no seq tiebreaker                    no counter)           non-deterministic
                                             sink.ts:54             within a ms
-   3    errors caught but never persisted   chat.tsx:30-31         a failed turn
+   3    errors caught but never persisted   chat.tsx:39-31         a failed turn
                                             session.ts:66-68       leaves no trail
    4    no metrics / SLIs / alerts          (absent)              no unattended
                                                                   health signal
@@ -119,7 +119,7 @@ Ranked blind spots by consequence, with the evidence for each verdict.
 
 **2 — same-millisecond ordering tie.** The trace's deterministic-replay claim holds *across* milliseconds but not *within* one. `timestamp()` is `new Date().toISOString()` (aptkit `runtime/dist/src/events.js:2`) — millisecond resolution, no monotonic sequence. Two events emitted in the same millisecond sort arbitrarily on `created_at`. For a fast local loop this is reachable. → `02-`.
 
-**3 — caught errors leave no durable trail.** `chat.tsx:30-31` and `session.ts:66-68` both swallow-or-render and move on. Correct for resilience, wrong for forensics — neither path persists the error.
+**3 — caught errors leave no durable trail.** `chat.tsx:39-31` and `session.ts:66-68` both swallow-or-render and move on. Correct for resilience, wrong for forensics — neither path persists the error.
 
 **4 — no metrics.** Covered in lens 4. Defensible at current scope, first thing you need when buffr goes unattended.
 

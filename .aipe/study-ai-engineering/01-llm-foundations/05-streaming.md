@@ -88,7 +88,7 @@ gate 2: the agent's return contract
 
 #### Gate 3: the TUI shows a spinner, not tokens
 
-`session.ask()` awaits the whole answer, then `chat.tsx` appends it as one turn. While waiting, `busy` is true and an Ink `<Spinner>` shows "thinking…". From `chat.tsx:27–34` and `:48–51`:
+`session.ask()` awaits the whole answer, then `chat.tsx` appends it as one turn. While waiting, `busy` is true and an OpenTUI `<Spinner>` shows "thinking…". From `chat.tsx:27–34` and `:48–51`:
 
 ```tsx
 const answer = await session.ask(q);                 // ← blocks until full answer
@@ -179,7 +179,7 @@ streaming in buffr — three gates
 
 **Q: "Does buffr stream, and what would it take to add it?"**
 
-Model answer: No — it's `stream:false` end to end. Three gates: the Gemma provider types `stream` as the literal `false` and returns `Promise<ModelResponse>`; the agent returns `Promise<string>`; the Ink TUI shows a spinner with no partial-text state. Adding streaming is a new `completeStream` yielding tokens from Ollama's `stream:true`, a session method that forwards them, and a UI state that appends chunks. The catch — and this is the important part — you stream the *final answer*, not the tool-call JSON, because you can't parse `{"tool":...}` until it's fully arrived. Streaming lowers perceived latency, not actual; the token count and bill are unchanged.
+Model answer: No — it's `stream:false` end to end. Three gates: the Gemma provider types `stream` as the literal `false` and returns `Promise<ModelResponse>`; the agent returns `Promise<string>`; the OpenTUI shows a spinner with no partial-text state. Adding streaming is a new `completeStream` yielding tokens from Ollama's `stream:true`, a session method that forwards them, and a UI state that appends chunks. The catch — and this is the important part — you stream the *final answer*, not the tool-call JSON, because you can't parse `{"tool":...}` until it's fully arrived. Streaming lowers perceived latency, not actual; the token count and bill are unchanged.
 
 ```
 the answer in one frame

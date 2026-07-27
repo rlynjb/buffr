@@ -21,7 +21,7 @@ region. Know which zone every question lands in.
   │  the trace sink             all 6 event types → messages            │
   │  the dropped-FK decision    contract parity + memory enablement     │
   │  the aptkit boundary        ports vs adapters, what you own         │
-  │  Ink UI                     React-in-terminal, your home turf       │
+  │  OpenTUI UI                     React-in-terminal, your home turf       │
   └─────────────────────────────────────────────────────────────────────┘
 
   ┌─ FIRM BUT WATCH THE EDGE (defend, know the limit) ─────────────────┐

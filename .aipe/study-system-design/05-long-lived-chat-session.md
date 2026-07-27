@@ -13,7 +13,7 @@ opened and closed everything per call. The session is the layer between the UI a
   Zoom out — the session in the system
 
   ┌─ UI layer ────────────────────────────────────────────────────┐
-  │  src/cli/chat.tsx — Ink TUI, calls session.ask(q) per submit   │
+  │  src/cli/chat.tsx — OpenTUI, calls session.ask(q) per submit   │
   └───────────────────────────────┬──────────────────────────────┘
                                   │  in-process call (no HTTP)
   ┌─ Session layer (buffr owns) ──▼──────────────────────────────┐

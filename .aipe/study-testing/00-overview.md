@@ -23,7 +23,7 @@ The verdict: **the test design is sound where it exists** — real integration a
   └──────────────────────────────────────────────────────────────┘
   ┌─ UNTESTED — the orchestration + UI layer ───────────────────┐
   │  ★ src/session.ts       ✗ createChatSession + per-turn ask() │ ← highest leverage
-  │    src/cli/chat.tsx      ✗ Ink UI (busy-guard, /exit, error)  │
+  │    src/cli/chat.tsx      ✗ OpenTUI UI (busy-guard, /exit, error)  │
   │    src/db.ts             ✗ trivial Pool factory (low value)   │
   │    src/cli/index-cmd.ts  ✗ thin CLI wrapper                   │
   │    src/cli/eval-cmd.ts   ✗ EVAL script, not a unit test       │ → study-ai-engineering

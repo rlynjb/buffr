@@ -117,7 +117,7 @@ RAG-quality levers, each proven by precision@k + faithfulness.
 - **Ref:** `.aipe/study-ai-engineering/03-retrieval-and-rag/`.
 
 ### Phase 5 — UX / serving
-- **Token streaming** (Gemma provider `stream: true` + the Ink UI), richer chat surface, better conversation continuity.
+- **Token streaming** (Gemma provider `stream: true` + the OpenTUI UI), richer chat surface, better conversation continuity.
 - **Ref:** `.aipe/study-frontend-engineering/`, `.aipe/study-ai-engineering/06-production-serving/`.
 
 ---

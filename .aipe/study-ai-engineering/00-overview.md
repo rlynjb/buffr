@@ -12,7 +12,7 @@ The whole system in one picture — every box below maps to a sub-section of thi
 buffr-laptop — the AI system, end to end
 
 ┌─ UI layer ─────────────────────────────────────────────────────────┐
-│  Ink chat TUI (src/cli/chat.tsx)   ·   index/eval CLIs (src/cli/)    │
+│  OpenTUI chat TUI (src/cli/chat.tsx)   ·   index/eval CLIs (src/cli/)    │
 └───────────────────────────────┬────────────────────────────────────┘
                                 │  ask(question)  ·  npm run index/eval
 ┌─ Session layer ───────────────▼────────────────────────────────────┐

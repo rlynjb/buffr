@@ -19,7 +19,7 @@ doors on purpose**.
   ┌─ SHIPPED (v1b — smallest persistent slice) ───────────────────────┐
   │  one agent · one device · one user (app_id='laptop')              │
   │  direct pg · Supabase pgvector + HNSW · trajectory capture        │
-  │  Ink chat TUI · profile injection · episodic memory               │
+  │  OpenTUI chat TUI · profile injection · episodic memory               │
   └───────────────────────────────┬───────────────────────────────────┘
                                   │  every door below is DEFERRED,
                                   │  named in the design specs, reachable
@@ -184,7 +184,7 @@ The shipped slice in the center, every cut radiating out with its reason and its
                         │   SHIPPED: one agent · one   │
                         │   device · one user · pg +   │
                         │   pgvector · trajectory cap  │
-                        │   · Ink TUI · precision@k    │
+                        │   · OpenTUI · precision@k    │
                         └──────────────┬──────────────┘
         deferred,                      │                    deferred,
         reachable                      │                    reachable

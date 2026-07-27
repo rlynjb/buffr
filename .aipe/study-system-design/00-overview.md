@@ -14,7 +14,7 @@ on the diagram.
   buffr-laptop — the full system (single device, one user)
 
   ┌─ UI layer ───────────────────────────────────────────────────────────┐
-  │  src/cli/chat.tsx — Ink (React-in-terminal) chat                       │
+  │  src/cli/chat.tsx — OpenTUI (React-in-terminal via Zig) chat                       │
   │    one input box, a scrollback of turns, a "thinking…" spinner         │
   └───────────────────────────────┬───────────────────────────────────────┘
                                   │  session.ask(question)  — in-process call
@@ -62,7 +62,7 @@ on the diagram.
 
 | Component | What it is | What it owns | Talks to |
 |---|---|---|---|
-| `chat.tsx` | Ink TUI, the only interface | screen state (turns, input, busy) | `session.ask()` |
+| `chat.tsx` | OpenTUI, the only interface | screen state (turns, busy) | `session.ask()` |
 | `session.ts` | the orchestrator buffr owns | the warm pool, the one conversation id, the wiring | aptkit agent, both adapters, memory |
 | `RagQueryAgent` (aptkit) | the agent loop | the per-turn reasoning, tool dispatch | model, tools, trace |
 | `GemmaModelProvider` (aptkit) | the model port impl | Ollama wire format mapping | Ollama `/api/chat` |

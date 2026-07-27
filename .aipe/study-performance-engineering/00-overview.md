@@ -7,7 +7,7 @@ The one question this guide answers: **what is measurably slow or expensive, and
 ```
   buffr-laptop — where time and money go on one chat turn
 
-  ┌─ CLI layer (Ink TUI) ───────────────────────────────────────┐
+  ┌─ CLI layer (OpenTUI) ───────────────────────────────────────┐
   │  src/cli/chat.tsx   user types a question                    │
   └───────────────────────────┬──────────────────────────────────┘
                               │  ask(question)

@@ -17,7 +17,7 @@ Node process; both endpoints are on (or reachable from) the same machine.
   buffr-laptop — the complete on-the-wire map
 
   ┌─ Process layer (one Node ESM process) ───────────────────────┐
-  │  npm run chat → Ink TUI → createChatSession()                 │
+  │  npm run chat → OpenTUI → createChatSession()                 │
   │     │                                                         │
   │     ├──► PgVectorStore / trace sink / profile  (src/*.ts)     │
   │     │         uses the connection pool (pg.Pool)              │
@@ -89,8 +89,8 @@ says when it would start to matter.
   string (`src/session.ts:62`); the model response is awaited in full, not
   streamed token-by-token. → `06-websockets-sse-streaming-and-realtime.md`.
 - **No retries, no timeouts, no backoff, no jitter.** A failed `fetch` or a
-  dropped pg connection throws straight up to the Ink catch
-  (`src/cli/chat.tsx:30`). → `07-timeouts-retries-pooling-and-backpressure.md`.
+  dropped pg connection throws straight up to the OpenTUI catch
+  (`src/cli/chat.tsx:39`). → `07-timeouts-retries-pooling-and-backpressure.md`.
 - **No pool tuning.** `new pg.Pool({ connectionString })` takes node-postgres
   defaults — `max: 10`, no `idleTimeoutMillis` override, no
   `connectionTimeoutMillis`. → `07-timeouts-retries-pooling-and-backpressure.md`.

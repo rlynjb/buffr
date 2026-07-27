@@ -2,7 +2,7 @@
 
 **Phase 5 of the AI-engineering curriculum.** This is the layer between "the agent answers correctly in a notebook" and "the agent stays up, stays cheap, and stays safe under real traffic." Everything before this — foundations (01), prompts (02), retrieval (03), the agent loop (04), evals (05) — assumes one well-behaved request at a time. Production serving is what happens when requests *stack*, *repeat*, *fail*, or *attack*.
 
-This sub-section is anchored to **buffr-laptop** — a local RAG agent: `gemma2:9b` for generation, `nomic-embed-text:v1.5` (768-dim) for embeddings, Postgres + pgvector for retrieval, an Ink TUI for chat. Generation runs through `GemmaModelProvider` (in aptkit), wrapped by `ContextWindowGuardedProvider`; the whole session is wired in `src/session.ts`.
+This sub-section is anchored to **buffr-laptop** — a local RAG agent: `gemma2:9b` for generation, `nomic-embed-text:v1.5` (768-dim) for embeddings, Postgres + pgvector for retrieval, an OpenTUI for chat. Generation runs through `GemmaModelProvider` (in aptkit), wrapped by `ContextWindowGuardedProvider`; the whole session is wired in `src/session.ts`.
 
 Read this section with one fact held front of mind: **buffr is local, single-device, single-user.** That is not an excuse — it is the architecture. Several "production serving" concerns that are load-bearing for a multi-tenant cloud service are *honestly N/A or not-yet-built* here, and the cost optimization story is about *latency and compute*, not dollars, because Ollama is free and local. Each file says plainly whether the concept is **built**, **partial**, or **Case B** (the slot exists, the code doesn't), and turns every gap into a buildable exercise. Do not let a clean diagram fool you into thinking a thing ships.
 

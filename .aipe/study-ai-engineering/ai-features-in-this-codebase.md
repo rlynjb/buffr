@@ -52,7 +52,7 @@ Two models do all the work, both served locally by Ollama: `gemma2:9b` (generati
 
 ### 2. Grounded chat answer — the bounded agent + RAG
 
-- **Inputs:** a natural-language question from the Ink chat TUI (`src/cli/chat.tsx` → `session.ask(question)`).
+- **Inputs:** a natural-language question from the OpenTUI chat TUI (`src/cli/chat.tsx` → `session.ask(question)`).
 - **Outputs:** a grounded answer string, citing retrieved chunks, or the fallback ("I couldn't find anything in the knowledge base to answer that.").
 - **Model and provider:** `gemma2:9b` via `GemmaModelProvider`, wrapped by `ContextWindowGuardedProvider({maxTokens:8192})`.
 - **Mechanism:** `RagQueryAgent.answer` runs the agent loop (`runAgentLoop`): the system prompt forces a `search_knowledge_base` call first, the loop gathers chunks (`maxToolCalls:4`, `maxTurns:6`), then a forced synthesis turn strips the tools and demands a final grounded answer (`buildSynthesisInstruction`). Least-privilege: the agent may call only `search_knowledge_base`.

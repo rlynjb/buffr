@@ -14,7 +14,7 @@ Here's the whole thing. You know how a browser's Network tab shows you every req
   Zoom out — where trajectory capture lives
 
   ┌─ CLI layer (src/cli/chat.tsx) ──────────────────────────────┐
-  │  Ink UI → session.ask(question)                             │
+  │  OpenTUI UI → session.ask(question)                             │
   └────────────────────────────────┬─────────────────────────────┘
                                     │  one turn
   ┌─ Session layer (src/session.ts) ──────▼─────────────────────┐

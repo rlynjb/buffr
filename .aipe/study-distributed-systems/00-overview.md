@@ -28,7 +28,7 @@ there's only one of everything.*
   buffr-laptop — the whole coordination map (one process, two remotes)
 
   ┌─ Client (one Node process) ──────────────────────────────────────┐
-  │   src/cli/chat.tsx  (Ink TUI)                                     │
+  │   src/cli/chat.tsx  (OpenTUI)                                     │
   │        │ in-process call                                          │
   │   src/session.ts  createChatSession → ask()                      │
   │        │                                                          │

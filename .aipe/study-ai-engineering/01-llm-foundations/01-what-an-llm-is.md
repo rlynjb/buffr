@@ -9,7 +9,7 @@ Here is the whole buffr stack, top to bottom. The thing this file is about — t
 ```
 buffr stack — where the model sits
 ┌───────────────────────────────────────────────────────────┐
-│ chat.tsx (Ink TUI)        you type → setTurns → spinner     │ UI
+│ chat.tsx (OpenTUI)        you type → setTurns → spinner     │ UI
 ├───────────────────────────────────────────────────────────┤
 │ session.ask()            persist turn → agent.answer()      │ orchestration
 ├───────────────────────────────────────────────────────────┤

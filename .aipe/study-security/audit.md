@@ -122,7 +122,7 @@ sanitization gate on retrieved content — but the blast radius is bounded by le
 
 No command execution, no filesystem path built from user input, no SSRF (the only
 outbound HTTP targets are hardcoded `localhost` Ollama endpoints), no XSS (the UI
-is an Ink TTY, not a DOM).
+is an OpenTUI TTY, not a DOM).
 
 ---
 
@@ -189,7 +189,7 @@ Posture is reasonable for the phase.
 - **Lockfile present** — `package-lock.json` (35 KB, committed). Installs are
   reproducible.
 - **Surface is small** — runtime deps are `@rlynjb/aptkit-core`, `dotenv`, `ink`
-  (+ two ink addons), `pg`, `react` (`package.json`). aptkit is first-party
+  (+ two opentui packages), `pg`, `react` (`package.json`). aptkit is first-party
   (the operator's own toolkit), consumed and never edited here per the project's
   must-not-change constraint.
 - **No postinstall scripts** in this package's `package.json` — nothing runs on

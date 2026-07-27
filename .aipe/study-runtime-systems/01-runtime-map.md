@@ -12,12 +12,13 @@ Before any single mechanism, here's the whole machine. Everything `buffr-laptop`
   Zoom out — where the runtime map sits
 
   ┌─ Interface layer ────────────────────────────────────────┐
-  │  npm run chat (Ink TTY)   ·   npm run migrate/index/eval  │
+  │  npm run chat (OpenTUI · Bun) · npm run migrate/index/eval │
   └───────────────────────────┬──────────────────────────────┘
                               │  one process each
   ┌─ Runtime layer ───────────▼──────────────────────────────┐
   │  ★ THE RUNTIME MAP ★                                      │ ← we are here
-  │  one V8 thread · event loop · heap · pool (`pgPool`)      │
+  │  chat: Bun/JSC thread · event loop · heap · pool          │
+  │  batch: Node/V8 thread · event loop · heap · pool         │
   └───────────────────────────┬──────────────────────────────┘
                               │  async I/O
   ┌─ Storage / Provider ──────▼──────────────────────────────┐
@@ -38,7 +39,7 @@ Zoom in: this file is the *map* the other seven hang off. It answers three quest
 ```
   One axis held constant: "when is this resource born and when does it die?"
 
-  ┌─ the process itself ────────────┐   born: `node dist/...`   dies: event loop empties
+  ┌─ the process itself ────────────┐   born: `bun dist/...` (chat) / `node dist/...` (batch)   dies: event loop empties
   └─────────────────────────────────┘   chat: never empties until /exit
 
       ┌─ the pool (`pgPool`) ───────┐   born: createPool()      dies: pool.end()
@@ -61,13 +62,16 @@ The answer flips at every altitude — and that's the lesson. The process lives 
 
 ### Move 1 — the mental model
 
-You already know the shape of a React app: one render tree, one source of truth for state, effects that reach out to the world. A Node process is the same idea one level down — **one thread of control, one event loop deciding what runs next, and a handful of long-lived handles to the outside world.** The runtime map is just the inventory of those handles plus their lifetimes.
+You already know the shape of a React app: one render tree, one source of truth for state, effects that reach out to the world. A Node (or Bun) process is the same idea one level down — **one thread of control, one event loop deciding what runs next, and a handful of long-lived handles to the outside world.** The runtime map is just the inventory of those handles plus their lifetimes.
+
+The one split: `npm run chat` runs under **Bun** (required by OpenTUI's `bun:ffi` bridge to its Zig rendering core). Every other script (`build`, `test`, `index`, `eval`, `migrate`) runs under **Node**. Both are single-threaded, event-loop-based JavaScript runtimes; the fundamental map below applies to both — only the engine (JSC vs V8) and the entry command differ.
 
 ```
   The runtime map — pattern shape
 
          ┌──────────────────────────────────────────┐
-         │            ONE V8 THREAD                  │
+         │  ONE THREAD (Bun/JSC for chat, Node/V8   │
+         │   for batch — same model either way)      │
          │   (runs one callback to completion,       │
          │    then asks the loop for the next)       │
          └───────────────────┬──────────────────────┘
@@ -86,15 +90,16 @@ Everything in the later files is one of these handles seen up close.
 
 ### Move 2 — the walkthrough
 
-**The process boundary.** Each `npm run *` script is `node <entry>.js` — a fresh OS process. There is no shared memory between two runs; `npm run index` and a running `npm run chat` are entirely separate processes that happen to talk to the same Postgres. The chat entry is the bottom of `src/cli/chat.tsx`:
+**The process boundary.** Each `npm run *` script spawns a fresh OS process. There is no shared memory between two runs; `npm run index` and a running `npm run chat` are entirely separate processes that happen to talk to the same Postgres. The chat entry (`npm run chat` → `bun dist/src/cli/chat.js`) is the bottom of `src/cli/chat.tsx`:
 
 ```ts
-// src/cli/chat.tsx:62-63 — the entire process bootstrap
+// src/cli/chat.tsx:69-79 — the entire process bootstrap (runs under Bun)
 const session = await createChatSession();   // top-level await: opens the pool, builds the agent
-render(<Chat session={session} />);          // hands control to Ink's render loop
+const renderer = await createCliRenderer({ exitOnCtrlC: false });  // OpenTUI Zig core via bun:ffi
+createRoot(renderer).render(<Chat session={session} onExit={…} />);  // hands control to OpenTUI
 ```
 
-Two lines, but they set the process's whole character: a `createChatSession()` that opens long-lived resources, then `render()` which *never returns* — Ink takes over the loop until `exit()` is called. Contrast the batch shape:
+Three lines, but they set the process's whole character: a `createChatSession()` that opens long-lived resources, then `createCliRenderer()` + `createRoot().render()` which *never return* — OpenTUI takes over the loop until `process.exit(0)` is called from the `/exit` handler. Contrast the batch shape (still Node):
 
 ```ts
 // src/cli/index-cmd.ts:17-27 — the batch process bootstrap
@@ -103,7 +108,7 @@ const pool = createPool(cfg.databaseUrl);    // open
 await pool.end();                            // close → loop drains → process exits
 ```
 
-The difference is the whole `02` file: `render()` keeps the loop alive forever; `await pool.end()` lets it die.
+The difference is the whole `02` file: `createRoot().render()` keeps the loop alive forever (OpenTUI holds it open until `process.exit(0)`); `await pool.end()` lets it die.
 
 **The pool as the one shared runtime resource.** `createPool` is four lines (`src/db.ts:4`) — it wraps `new pg.Pool({ connectionString })` and nothing else. No `max`, no `idleTimeoutMillis`, so node-postgres' defaults apply (max 10 connections). In the chat process this single pool is created once (`src/session.ts:39`) and every turn's queries — `loadProfile`, `startConversation`, `persistMessage`, every `PgVectorStore.search`/`upsert` — borrow from it. That's the warm-pool win: turn 2 reuses turn 1's TCP connections instead of paying a fresh handshake.
 
@@ -126,7 +131,7 @@ The difference is the whole `02` file: `render()` keeps the loop alive forever; 
 
 **The connection inside the pool.** When a transaction is needed — `PgVectorStore.upsert` and `runMigration` — the code checks out a single connection, runs `begin`/`commit`/`rollback` on *that* connection, and releases it in `finally` (`src/pg-vector-store.ts:40-64`). Simple `pool.query()` calls (`search`, `loadProfile`, `persistMessage`) skip the checkout — node-postgres grabs an idle connection, runs the one query, and returns it automatically. The boundary condition: a thrown error between `connect()` and `release()` that isn't in a `try/finally` leaks the connection. The repo always uses `finally` — that's the discipline that keeps the pool healthy.
 
-**The heap.** Everything else — `turns[]` in the React tree, `pending[]` in the sink, the `rows[]` from a query, the `hits[]` from a search — lives on V8's managed heap and dies when unreachable. No manual frees. The one place this matters is `turns[]`, which grows unbounded across a long session (`05`).
+**The heap.** Everything else — `turns[]` in the React tree, `pending[]` in the sink, the `rows[]` from a query, the `hits[]` from a search — lives on the managed heap (JSC for chat, V8 for batch) and dies when unreachable. No manual frees. The one place this matters is `turns[]`, which grows unbounded across a long session (`05`).
 
 ### Move 3 — the principle
 
@@ -141,22 +146,23 @@ The full map, every resource and its lifetime in one frame.
 ```
   buffr-laptop runtime map — resources and lifetimes
 
-  ┌─ ONE OS PROCESS · ONE V8 THREAD · ONE EVENT LOOP ─────────────────┐
-  │                                                                   │
-  │  HEAP (GC-managed)          POOL (`pgPool`, src/db.ts:4)          │
-  │  turns[]  pending[]         max 10 conns (default)                │
-  │  rows[]   hits[]            ┌────────────────────────────────┐    │
-  │  born: alloc               │ chat:  held across turns        │    │
-  │  die:  unreachable→GC       │        dies at /exit→pool.end() │    │
-  │                            │ batch: dies at end of run       │    │
-  │  TTY stdin (chat only)      └──────────────┬─────────────────┘    │
-  │  raw mode, Ink owns it                     │ checkout/release     │
-  └─────────────────────────────┬──────────────┼────────────────────-┘
+  ┌─ ONE OS PROCESS · ONE THREAD · ONE EVENT LOOP ─────────────────────┐
+  │  chat: Bun/JSC    batch: Node/V8   (same model, different engine)  │
+  │                                                                    │
+  │  HEAP (GC-managed)          POOL (`pgPool`, src/db.ts:4)           │
+  │  turns[]  pending[]         max 10 conns (default)                 │
+  │  rows[]   hits[]            ┌────────────────────────────────┐     │
+  │  born: alloc               │ chat:  held across turns        │     │
+  │  die:  unreachable→GC       │        dies at /exit→pool.end() │     │
+  │                            │ batch: dies at end of run       │     │
+  │  TTY (chat only)            └──────────────┬─────────────────┘     │
+  │  OpenTUI Zig core via bun:ffi              │ checkout/release      │
+  └─────────────────────────────┬──────────────┼─────────────────────-┘
             async I/O ▼          │              ▼ one conn per txn
   ┌─ Provider: Ollama (HTTP) ─┐  │   ┌─ Storage: Postgres (pgvector) ─┐
   │ gemma2:9b · nomic-embed   │  │   │ agents schema · HNSW index     │
   └───────────────────────────┘  │   └────────────────────────────────┘
-                                 │ stdout: rendered Ink frames
+                                 │ stdout: rendered OpenTUI frames
                                  ▼ (chat) / line writes (batch)
 ```
 
@@ -182,10 +188,10 @@ Where this comes from: the "inventory your long-lived handles" discipline is how
   pool   ──► createPool ........ pool.end()   (/exit in chat, end-of-run in batch)
   socket ──► per Ollama request  GC / close
   heap   ──► alloc ............. unreachable → GC
-  stdin  ──► Ink raw mode ...... exit() restores cooked mode (chat only)
+  stdin  ──► OpenTUI raw mode ... process.exit(0) on /exit (chat only)
 ```
 
-**Anchor:** "One pool, opened in `createChatSession` at `src/session.ts:39`, closed only at `/exit` — that single fact explains both the warm-pool speedup and the missing graceful shutdown."
+**Anchor:** "One pool, opened in `createChatSession` at `src/session.ts:39`, closed only at `/exit` via `process.exit(0)` — that single fact explains both the warm-pool speedup and the missing graceful shutdown. Chat runs under Bun (OpenTUI needs `bun:ffi`); every other script runs under Node — same event-loop model, different engine."
 
 ---
 

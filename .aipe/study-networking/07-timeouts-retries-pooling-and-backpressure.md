@@ -45,7 +45,7 @@ failing.* buffr's answer is "the pool reuses sockets; everything else throws."
   │ error → throws up          │   │ non-2xx → throws (no retry) │
   └────────────┬───────────────┘   └─────────────┬──────────────┘
                └──────────► both land in ◄────────┘
-                       the Ink catch (chat.tsx:30)
+                       the OpenTUI catch (chat.tsx:39)
                        → render "error: <message>", turn over
 ```
 
@@ -121,7 +121,7 @@ const answer = await agent.answer(question);   // no signal, no timeout, no dead
 ```
 
 So a wedged Ollama (model loading, OOM, stuck) leaves the `fetch` open
-indefinitely. The Ink spinner spins forever; there's no deadline to trip. The fix
+indefinitely. The OpenTUI Spinner spins forever; there's no deadline to trip. The fix
 is small and the seam is named: thread an `AbortSignal.timeout(ms)` from `ask`
 into `agent.answer` (an aptkit signature it already accepts).
 
@@ -144,7 +144,7 @@ into `agent.answer` (an aptkit signature it already accepts).
   └──────────┬─────────────┘
              │ hop 3: rejection
              ▼
-  ┌─ Ink catch (chat.tsx:30) ─┐
+  ┌─ OpenTUI catch (chat.tsx:39) ─┐
   │ setTurns(… "error: 503")   │  ← turn over, user re-types to retry
   └────────────────────────────┘
 ```
@@ -155,7 +155,7 @@ automatic single retry with a short backoff would silently recover most blips �
 but it's not there. This is `not yet exercised`.
 
 **Backpressure and request collapse: not exercised, and barely relevant today.**
-The Ink UI guards against concurrent turns with `if (busy) return`
+The OpenTUI UI guards against concurrent turns with `if (busy) return`
 (`src/cli/chat.tsx:17`) — so a single user can't fire two overlapping `ask` calls.
 That's a UI-level serialization, not network backpressure, but it means buffr never
 generates the load that would *need* backpressure. There's no request queue, no
@@ -242,7 +242,7 @@ and the slot is already there in aptkit.
 Answer: "One thing — the connection pool, on defaults. Everything else is absent.
 No HTTP timeout (the `AbortSignal` slot in aptkit's transport exists but buffr
 passes nothing — `src/session.ts:62`), no pg connect timeout, no retry or backoff.
-A hung Ollama spins forever; a transient failure throws to the Ink catch. For a
+A hung Ollama spins forever; a transient failure throws to the OpenTUI catch. For a
 single-user local CLI that's a defensible deferral, and the seams to fix it are all
 named and small."
 

@@ -16,7 +16,7 @@ Here's the honest picture. Structured logging (absent — `process.stdout.write`
   ┌─ CLI layer (src/cli/) ──────────────────────────────────────┐
   │  index-cmd.ts → process.stdout.write("indexed X\n")  ★ here ★│
   │  eval-cmd.ts  → process.stdout.write(P@1 / R@3)      ★ here ★│
-  │  chat.tsx     → Ink render; catch → render "error:…" inline  │
+  │  chat.tsx     → OpenTUI render; catch → render "error:…" inline  │
   └────────────────────────────────┬─────────────────────────────┘
             no level / field / id   │
   ┌─ Session / Sink layer ─────────▼─────────────────────────────┐
@@ -102,14 +102,14 @@ The diagram is the whole lesson: the operation *knows* its chunk count and `app_
 
 These P@1 / R@3 numbers are real retrieval-quality signal — but they're *printed*, not *recorded*. No run is stored, so you can't diff today's mean against last week's without copy-pasting terminal output. → `04-eval-numbers-as-quality-signal.md` treats this as its own pattern.
 
-**The chat UI's caught error — rendered, not logged.** `chat.tsx` catches per-turn errors so one bad turn doesn't kill the session (`src/cli/chat.tsx:30-31`):
+**The chat UI's caught error — rendered, not logged.** `chat.tsx` catches per-turn errors so one bad turn doesn't kill the session (`src/cli/chat.tsx:39-31`):
 
 ```
-  src/cli/chat.tsx:30   } catch (err) {
+  src/cli/chat.tsx:39   } catch (err) {
   :31     setTurns((t) => […, { role: 'buffr', text: `error: ${(err as Error).message}` }]);
 ```
 
-Good resilience UX. But notice what's *not* here: no `console.error`, no persist, no stack. The error message lands in the Ink render and the terminal scrollback; the moment the user scrolls or exits, it's gone. If the throw happened before `trace.flush()`, the trace table has no record either — so a failed turn can leave **zero durable evidence**.
+Good resilience UX. But notice what's *not* here: no `console.error`, no persist, no stack. The error message lands in the OpenTUI render and the terminal scrollback; the moment the user scrolls or exits, it's gone. If the throw happened before `trace.flush()`, the trace table has no record either — so a failed turn can leave **zero durable evidence**.
 
 **The silent memory swallow — not even a sentence.** `session.ask()` wraps the episodic-memory write in an empty catch (`src/session.ts:64-69`):
 
@@ -147,7 +147,7 @@ The honest framing: at buffr's scope — single-device, a human at the terminal 
   ───────────────────────  ────────────────  ──────────────────  ────────
   index-cmd.ts:25          "indexed X"       (throws, uncaught)  no
   eval-cmd.ts:31-33        P@1 / R@3 lines   (throws, uncaught)  no
-  chat.tsx:30-31           (trace row)       render "error:…"    no (scroll)
+  chat.tsx:39-31           (trace row)       render "error:…"    no (scroll)
   session.ts:66-68 memory  (trace row)       SILENT — nothing    no — none
 
        ▲                                          ▲

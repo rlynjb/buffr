@@ -15,7 +15,7 @@ architecture.
 
   ┌─ Process layer ─────────────────────────────────────────────┐
   │  one Node ESM process (npm run chat)                         │
-  │  Ink TUI ── session.ask() ── RagQueryAgent                   │
+  │  OpenTUI ── session.ask() ── RagQueryAgent                   │
   └───────┬──────────────────────────────────┬──────────────────┘
           │ ★ NETWORK BOUNDARY 1 ★            │ ★ NETWORK BOUNDARY 2 ★
           │ pg-wire / TCP / :5432             │ HTTP / TCP / :11434
@@ -135,11 +135,11 @@ is the layers-and-hops view of a single turn:
      │ hop 4: POST /api/chat           (HTTP)    ──► │  Ollama    │
      │ hop 5: POST /api/embed (memory) (HTTP)    ──► └────────────┘
      ▼
-  answer string returned to Ink TUI
+  answer string returned to OpenTUI
 ```
 
 The numbers are the rough order within a turn; the point is that one keystroke
-in the Ink input drives roughly seven wire crossings, split across two protocols.
+in the OpenTUI input drives roughly seven wire crossings, split across two protocols.
 
 ### Move 3 — the principle
 
@@ -200,7 +200,7 @@ client on both boundaries." Anchor: `src/session.ts:60-71`.
 
 Answer: "Either boundary. Postgres unreachable → `pool.connect()` rejects.
 Ollama down → `fetch` rejects with a connection error. Both surface as a thrown
-error caught in the Ink UI (`src/cli/chat.tsx:30`) — no retry, no fallback."
+error caught in the OpenTUI UI (`src/cli/chat.tsx:39`) — no retry, no fallback."
 Anchor: the two seams in the structure pass.
 
 ## See also

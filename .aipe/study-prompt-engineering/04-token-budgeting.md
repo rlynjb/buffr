@@ -96,7 +96,7 @@ if (!estimate.ok) {
 }
 ```
 
-This is the specific bug the spec names — "a chain that worked on small inputs starts truncating at scale because nobody counted tokens" — pre-empted. buffr chose to fail loudly. The boundary condition: the question + retrieved chunks + profile + tool catalog must collectively fit 7424 tokens, or the turn errors out (and the Ink UI shows `error: …`, `chat.tsx:31`).
+This is the specific bug the spec names — "a chain that worked on small inputs starts truncating at scale because nobody counted tokens" — pre-empted. buffr chose to fail loudly. The boundary condition: the question + retrieved chunks + profile + tool catalog must collectively fit 7424 tokens, or the turn errors out (and the OpenTUI UI shows `error: …`, `chat.tsx:31`).
 
 **The other compression lever — capped tool results.** Retrieved content is bounded before it ever hits the prompt: tool results truncate at 16,000 chars (`run-agent-loop.js:2`), and search snippets cap at ~160 chars (`search-knowledge-base-tool.js:57`). Retrieval *is* context compression — you don't stuff the whole corpus, you retrieve the top-k relevant chunks.
 

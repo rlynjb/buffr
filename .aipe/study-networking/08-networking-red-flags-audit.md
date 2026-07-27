@@ -35,7 +35,7 @@ the move to fix it.
 
 ```
   trigger: Ollama hangs (model load, OOM, stuck generation)
-  result:  agent.answer never resolves → Ink spinner spins forever
+  result:  agent.answer never resolves → OpenTUI Spinner spins forever
 
    await agent.answer(q)   ── no AbortSignal, no deadline
    └─ aptkit transport accepts `signal` … buffr passes none

@@ -228,7 +228,7 @@ browser policy, not a server-side or Node-`fetch` concern.
 
 Answer: "Coarsely — one class. `res.ok` false throws `ollama HTTP <status>:
 <body>`. No per-status logic, no 429 backoff. Every failure is the same error, and
-it surfaces in the Ink catch (`src/cli/chat.tsx:30`) with no retry."
+it surfaces in the OpenTUI catch (`src/cli/chat.tsx:39`) with no retry."
 
 ## See also
 

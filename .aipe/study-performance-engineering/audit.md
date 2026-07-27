@@ -47,7 +47,7 @@ Low-pressure and `not yet measured`, which together mean: nothing here is a conc
 
 **Allocation shapes worth naming.** `toVectorLiteral` (`src/pg-vector-store.ts:15-17`) builds a string of 768 floats joined by commas for every upsert and every search — a transient allocation per vector. At one query per turn it's invisible; in a tight indexing loop over a large corpus it's a small, real GC churn. The `search` result mapping (`src/pg-vector-store.ts:80-84`) rebuilds a meta object per hit, bounded by `k` (typically 3-4), so trivial.
 
-**Heavy memory lives outside this process.** The embedding model and `gemma2:9b` hold their weights in Ollama, not in the Node heap. buffr's own footprint is the pg pool buffers, the Ink render tree, and per-turn transient strings. No retention, no leak surface, no GC tuning needed at this scale. No heap snapshot has been taken — this is inference from the code shape, not a measurement.
+**Heavy memory lives outside this process.** The embedding model and `gemma2:9b` hold their weights in Ollama, not in the Node heap. buffr's own footprint is the pg pool buffers, the OpenTUI render tree, and per-turn transient strings. No retention, no leak surface, no GC tuning needed at this scale. No heap snapshot has been taken — this is inference from the code shape, not a measurement.
 
 ---
 
@@ -79,7 +79,7 @@ Worth naming: the trace INSERTs are *queued* during the agent run (`emit()` is s
 
 `not yet exercised` in the web/mobile sense — there is no browser bundle, no DOM, no main-thread budget.
 
-The one client surface is the Ink (React-in-terminal) TUI at `src/cli/chat.tsx`. It re-renders the terminal on each state change. At the scale of a single conversation transcript this is negligible; Ink's reconciler is the constraint and it's well under any perceptible budget here. No bundle size, no startup-time, no frame budget applies to a terminal app of this size. (For the real-time frame-budget shape, that lives in the `contrl` project, not buffr.)
+The one client surface is the OpenTUI (React-in-terminal via Zig) TUI at `src/cli/chat.tsx`. It re-renders the terminal on each state change. At the scale of a single conversation transcript this is negligible; Ink's reconciler is the constraint and it's well under any perceptible budget here. No bundle size, no startup-time, no frame budget applies to a terminal app of this size. (For the real-time frame-budget shape, that lives in the `contrl` project, not buffr.)
 
 ---
 

@@ -22,7 +22,7 @@ vision is `agent-layer-plan.md`.
   provider contract, runtime agent loop, retrieval pipeline, tools, evals, context, and
   `@aptkit/memory`). The conversation-memory engine (`createConversationMemory`) was
   extracted *up* from buffr into aptkit and is re-consumed via this bundle.
-- **UI:** `ink` (React-in-terminal) + `react` + `ink-text-input`/`ink-spinner` for the chat TUI.
+- **UI:** `@opentui/react` + `@opentui/core` for the chat TUI (OpenTUI — React reconciler over a Zig native renderer). Requires **Bun** as the runtime for the chat command (`npm run chat` invokes `bun dist/src/cli/chat.js`). React 19.2.8. Previously Ink; migrated to OpenTUI because Ink became inactive.
 - **Database:** Postgres + `pgvector` (`pg` / node-postgres, direct connection — no Edge
   Functions this phase). HNSW cosine index.
 - **Models:** Ollama-served — `gemma2:9b` (generation), `nomic-embed-text:v1.5` (embeddings,
@@ -56,7 +56,7 @@ vision is `agent-layer-plan.md`.
 - `src/profile.ts` — `loadProfile` from `agents.profiles`.
 - `src/session.ts` — `createChatSession()`: warm pool + one conversation held across turns;
   builds the agent once; per-turn `ask()` persists, runs the agent, and remembers the exchange.
-- `src/cli/chat.tsx` — the Ink interactive chat UI (the interface).
+- `src/cli/chat.tsx` — the OpenTUI interactive chat UI (the interface). Uses `@opentui/react` JSX primitives (`<box>`, `<text>`, `<input>`), a custom `Spinner` component (braille frames + `setInterval`), and `process.exit(0)` on `/exit`/`/quit`. Run via `bun` (OpenTUI uses `bun:ffi` for its Zig core).
 - `src/cli/{index,eval}-cmd.ts` — index corpus / score precision@k (one-shot CLIs).
 - `test/` — mirrors `src/`; `sql/` — migrations; `eval/queries.json` — labeled eval set.
 

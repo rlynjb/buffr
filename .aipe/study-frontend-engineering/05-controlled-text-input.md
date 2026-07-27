@@ -1,4 +1,12 @@
-# Controlled text input — value owned by React, over raw-mode stdin
+# Controlled text input — SUPERSEDED (see 05-uncontrolled-input-with-submit.md)
+
+> **This file describes the Ink era.** buffr's TUI was migrated from Ink to OpenTUI in 2026-07. OpenTUI's `<input>` is uncontrolled — no `value` prop, no `onChange`, no `input` useState. The paradigm flipped. Read `05-uncontrolled-input-with-submit.md` instead.
+>
+> This file is kept as a historical reference for the controlled-input pattern and the contrast it provides.
+
+---
+
+# [ARCHIVE] Controlled text input — value owned by React, over raw-mode stdin
 
 **Industry name(s):** controlled component · controlled input · single-source-of-truth input. **Type:** Industry-standard pattern (controlled vs uncontrolled), project-specific platform: raw-mode TTY stdin instead of a DOM input.
 

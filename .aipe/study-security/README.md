@@ -19,7 +19,7 @@ which is which.
   buffr-laptop — trace "what can an attacker reach?" down the stack
 
   ┌─ UI layer ───────────────────────────────────────────────┐
-  │  Ink chat (src/cli/chat.tsx) — operator types at a TTY    │
+  │  OpenTUI chat (src/cli/chat.tsx) — operator types at a TTY    │
   │  trust: the operator IS the owner. No remote caller yet.   │
   └───────────────────────────────┬───────────────────────────┘
                                   │  in-process call

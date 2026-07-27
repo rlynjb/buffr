@@ -55,7 +55,7 @@ The kernel: when a step can emit one of two modes, you need a deterministic clas
 
 ### Move 2 — the walkthrough
 
-**The chain declares one output mode.** `RagQueryAgent.answer` returns `finalText.trim() || FALLBACK_ANSWER` (`rag-query-agent.js:51`) — always prose, never JSON. The consumer (`session.ask` → the Ink UI) renders it as text (`chat.tsx:29`). One producer mode, one consumer expectation. No mismatch at the chain boundary.
+**The chain declares one output mode.** `RagQueryAgent.answer` returns `finalText.trim() || FALLBACK_ANSWER` (`rag-query-agent.js:51`) — always prose, never JSON. The consumer (`session.ask` → the OpenTUI UI) renders it as text (`chat.tsx:29`). One producer mode, one consumer expectation. No mismatch at the chain boundary.
 
 **The in-loop mismatch — JSON or prose?** Inside the loop, each model reply is ambiguous: it might be a tool call (`{"tool": ...}`) or it might be the answer in plain English. The provider classifies by *trying to parse* and falling back on a tell:
 

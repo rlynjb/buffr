@@ -215,7 +215,7 @@ a set of pieces this one build *composes*.
   contrl     ─┼─►  buffr agent layer = all of these, deliberately, ONCE:
   aipe       ─┤  on-device model + RAG + trajectory capture + the judgment
   buffr (RN) ─┘  layer (ship/iterate/fine-tune from evals)
-                 + 7 yrs frontend (the Ink TUI is a frontend engineer's
+                 + 7 yrs frontend (the OpenTUI is a frontend engineer's
                    instinct applied to an AI surface)
 ```
 
@@ -224,7 +224,7 @@ a set of pieces this one build *composes*.
 > pgvector with tool-calling and session memory. dryrun and contrl run AI *on-device* with
 > fallback. aipe is meta-tooling — describe, diagnose, act. This agent layer is the seam that
 > joins them into one system: a local model, a RAG pipeline I built, trajectory capture, and
-> a measurement-driven ship-or-iterate decision. And the chat surface is an Ink TUI — that's
+> a measurement-driven ship-or-iterate decision. And the chat surface is an OpenTUI — that's
 > seven years of frontend instinct applied to an AI product surface, not bolted on. The
 > combination is the case, and I'm the person who's already shipped every half of it."
 

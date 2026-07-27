@@ -20,7 +20,7 @@ Three trust/ownership bands, and the load-bearing boundary sits in the middle.
 ```
 
 **Major components and what they own:**
-- `src/cli/chat.tsx:9-60` — the Ink UI. Owns only screen state; delegates all work to the session.
+- `src/cli/chat.tsx:9-60` — the OpenTUI UI. Owns only screen state; delegates all work to the session.
 - `src/session.ts:34-76` — `createChatSession()`. The orchestrator. Owns the warm pool, the
   one conversation id, and the wiring of every aptkit piece to every buffr adapter.
 - `src/pg-vector-store.ts:19-86` — `PgVectorStore implements VectorStore`. The adapter behind
@@ -178,7 +178,7 @@ memory is downstream and optional. This is graceful degradation at the right gra
 (`session.ts:63-66`). If generation crashes, the user turn is already a row. Ordering is the
 reliability mechanism.
 
-**3. UI-level error containment.** `chat.tsx:30-32` catches any `session.ask` rejection and
+**3. UI-level error containment.** `chat.tsx:39-32` catches any `session.ask` rejection and
 renders it as a buffr turn rather than crashing the TUI. The session stays alive for the next
 question.
 

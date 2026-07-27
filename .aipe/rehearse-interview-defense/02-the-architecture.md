@@ -74,7 +74,7 @@ is the most senior thing on the board.
 
 Trace it as a flow, one hop at a time. This is the answer, in your voice:
 
-> "I type a question into the Ink input and hit enter. `onSubmit` in `chat.tsx` calls
+> "I type a question into the OpenTUI input and hit enter. `onSubmit` in `chat.tsx` calls
 > `session.ask()` — that's hop one, an in-process call, no network.
 >
 > Inside `ask`, three things happen in a fixed order. First I persist the user turn to the
