@@ -2,9 +2,20 @@
 import { useState, useEffect, useRef } from 'react';
 import { createCliRenderer, TextAttributes } from '@opentui/core';
 import { createRoot, useKeyboard } from '@opentui/react';
-import { createChatSession, type ChatSession } from '../session.js';
+import { createChatSession, type ChatSession, type TurnStats } from '../session.js';
 
-type Turn = { role: 'you' | 'buffr'; text: string };
+type Turn = { role: 'you' | 'buffr'; text: string; stats?: TurnStats };
+
+function formatStats(s: TurnStats): string {
+  const secs = s.durationMs / 1000;
+  const time = secs >= 60
+    ? `${Math.floor(secs / 60)}m ${Math.round(secs % 60)}s`
+    : `${secs.toFixed(1)}s`;
+  const tok = s.inputTokens + s.outputTokens > 0
+    ? ` · ${s.inputTokens.toLocaleString()} in / ${s.outputTokens.toLocaleString()} out`
+    : '';
+  return `${time}${tok}`;
+}
 
 const FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
@@ -35,13 +46,17 @@ function Chat({ session, onExit }: { session: ChatSession; onExit: () => Promise
     setTurns(t => [...t, { role: 'you', text: q }]);
     setBusy(true);
     setStatus('thinking…');
-    session.ask(q, { onStatus: (msg) => setStatus(msg) }).then(
+    let capturedStats: TurnStats | undefined;
+    session.ask(q, {
+      onStatus: (msg) => setStatus(msg),
+      onComplete: (s) => { capturedStats = s; },
+    }).then(
       answer => {
-        setTurns(t => [...t, { role: 'buffr', text: answer }]);
+        setTurns(t => [...t, { role: 'buffr', text: answer, stats: capturedStats }]);
         setBusy(false);
       },
       err => {
-        setTurns(t => [...t, { role: 'buffr', text: `error: ${(err as Error).message}` }]);
+        setTurns(t => [...t, { role: 'buffr', text: `error: ${(err as Error).message}`, stats: capturedStats }]);
         setBusy(false);
       },
     );
@@ -81,6 +96,9 @@ function Chat({ session, onExit }: { session: ChatSession; onExit: () => Promise
               <>
                 <text attributes={TextAttributes.BOLD} fg="#00EE66">◆ buffr</text>
                 <text fg="#E8E8E8" marginLeft={2}>{t.text}</text>
+                {t.stats && (
+                  <text fg="#555555" marginLeft={2}>{formatStats(t.stats)}</text>
+                )}
               </>
             )}
           </box>

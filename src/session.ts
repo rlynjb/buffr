@@ -34,7 +34,11 @@ import type { CapabilityTraceSink, CapabilityEvent } from '@buffr/kernel';
  *   question independently). Retrieval-based recall above gives relevance-based memory
  *   without it.
  */
-export type AskOptions = { onStatus?: (msg: string) => void };
+export type TurnStats = { durationMs: number; inputTokens: number; outputTokens: number };
+export type AskOptions = {
+  onStatus?: (msg: string) => void;
+  onComplete?: (stats: TurnStats) => void;
+};
 
 const TOOL_LABELS: Record<string, string> = {
   search_knowledge_base: 'searching knowledge base',
@@ -110,13 +114,19 @@ export async function createChatSession(): Promise<ChatSession> {
   const conversationId = await startConversation(pool, cfg.appId);
   const supabaseTrace = new SupabaseTraceSink({ pool, conversationId });
 
-  // Thin wrapper that intercepts tool_call_start to forward live status to the TUI.
-  // onStatus is swapped per-ask so the same agent instance handles it.
+  // Thin wrapper that intercepts events to forward live status and accumulate
+  // token usage to the TUI. Mutable slots are swapped per-ask.
   let currentOnStatus: ((msg: string) => void) | undefined;
+  let currentInputTokens = 0;
+  let currentOutputTokens = 0;
   const trace: CapabilityTraceSink = {
     emit(event: CapabilityEvent) {
       if (event.type === 'tool_call_start' && currentOnStatus) {
         currentOnStatus(toolStatusLabel(event.toolName));
+      }
+      if (event.type === 'model_usage') {
+        currentInputTokens  += event.inputTokens  ?? 0;
+        currentOutputTokens += event.outputTokens ?? 0;
       }
       supabaseTrace.emit(event);
     },
@@ -171,9 +181,17 @@ export async function createChatSession(): Promise<ChatSession> {
   return {
     async ask(question: string, opts?: AskOptions): Promise<string> {
       currentOnStatus = opts?.onStatus;
+      currentInputTokens = 0;
+      currentOutputTokens = 0;
+      const startMs = Date.now();
       await persistMessage(pool, conversationId, 'user', question);
       const answer = await agent.answer(question);
       currentOnStatus = undefined;
+      opts?.onComplete?.({
+        durationMs: Date.now() - startMs,
+        inputTokens: currentInputTokens,
+        outputTokens: currentOutputTokens,
+      });
       await supabaseTrace.flush();
       // Best-effort: a memory-write failure must not lose the answer the user has.
       try {
