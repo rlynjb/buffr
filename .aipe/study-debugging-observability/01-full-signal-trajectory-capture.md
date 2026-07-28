@@ -11,24 +11,27 @@ The repo's strongest observability investment: the trace / structured event stre
 Here's the whole thing. You know how a browser's Network tab shows you every request, not just the final rendered page — the URL that went out, the status that came back, the timing bar? This is that, for an agent turn. Each turn produces a stream of events; this pattern catches all of them and writes one database row per event.
 
 ```
-  Zoom out — where trajectory capture lives
+  Zoom out — where trajectory capture lives (dual-path)
 
   ┌─ CLI layer (src/cli/chat.tsx) ──────────────────────────────┐
-  │  OpenTUI UI → session.ask(question)                             │
+  │  OpenTUI UI → session.ask(question, { onStatus, onTokens }) │ ← callbacks in
   └────────────────────────────────┬─────────────────────────────┘
                                     │  one turn
-  ┌─ Session layer (src/session.ts) ──────▼─────────────────────┐
+  ┌─ Session layer (src/session.ts:120-138) ──▼──────────────────┐
+  │  currentOnStatus/currentOnTokens ← swapped per ask()        │
   │  agent.answer() ── emits ──►  ★ trace.emit() per event ★    │ ← we are here
   │                  then         trace.flush()                  │
-  └────────────────────────────────┬─────────────────────────────┘
-            CapabilityEvent ×6      │  (6 variants)
-  ┌─ Sink (src/supabase-trace-sink.ts) ───▼─────────────────────┐
-  │  SupabaseTraceSink.emit() → persistMessage() → INSERT       │
-  └────────────────────────────────┬─────────────────────────────┘
-                                    │
-  ┌─ Storage (agents.messages) ────▼────────────────────────────┐
-  │  one row per event — the replayable trajectory              │
-  └──────────────────────────────────────────────────────────────┘
+  └───────────────┬────────────────┬─────────────────────────────┘
+     live path    │                │  durable path
+  ┌──────────────▼─────┐  ┌───────▼──────────────────────────────┐
+  │ currentOnStatus()  │  │ SupabaseTraceSink.emit()             │
+  │ currentOnTokens()  │  │   → persistMessage() → INSERT        │
+  │ → fires on         │  └───────────────────────┬──────────────┘
+  │   tool_call_start  │            CapabilityEvent│×6
+  │   model_usage      │  ┌─ Storage ─────────────▼──────────────┐
+  │   → updates spinner│  │  agents.messages                     │
+  └────────────────────┘  │  one row per event — replayable      │
+                           └───────────────────────────────────────┘
 ```
 
 Now zoom in. The question this pattern answers: *when a turn goes wrong, can I reconstruct exactly what the agent did — including why it called a tool and what came back?* The pattern is **capture every event variant, not just the visible output**. The comment on the sink names the stakes directly: tool-call args (the cause), `durationMs` + error, and token usage "were previously dropped on the floor" (`src/supabase-trace-sink.ts:39-48`). Catching them is what turns a log into a trajectory.
@@ -111,6 +114,23 @@ The point the diagram makes: six tags, six row shapes, and the two that carry th
 
 Read the two cases together. `tool_call_start` (`:62-66`) writes `args` into the `tool_calls` jsonb column — that's the input you handed the tool. `tool_call_end` (`:67-72`) writes `result`, `error`, *and* `durationMs` into `tool_results`. Put the two rows side by side for the same `toolName` and you have a complete call record: what went in, what came out, whether it failed, how long it took. That's the trajectory.
 
+**The dual-path intercept (added with the live TUI).** The `trace` object in `session.ts` is **not** `SupabaseTraceSink` directly — it's a wrapper that fires the mutable TUI callbacks first, then delegates to the sink:
+
+```
+  src/session.ts:120   const trace: CapabilityTraceSink = {
+  :121     emit(event: CapabilityEvent) {
+  :122       if (event.type === 'tool_call_start' && currentOnStatus)
+  :123         currentOnStatus(toolStatusLabel(event.toolName));   // ← live spinner label
+  :124       if (event.type === 'model_usage') {
+  :125         currentOnTokens?.({ input: event.inputTokens, output: event.outputTokens });
+  :126       }
+  :127       supabaseTrace.emit(event);                            // ← durable sink
+  :128     },
+  :129   };
+```
+
+Every `emit()` call does two things in sequence: update the spinner (if the user is watching this turn), then persist the row. The `currentOnStatus` and `currentOnTokens` slots are module-level variables swapped per `ask()` call — a **mutable-trace-slot pattern** that threads per-turn TUI callbacks into a trace object that was otherwise designed for a single durable sink. The `TOOL_LABELS` map translates raw tool names (`web_search_brave`) to human strings (`'searching Brave'`) before they hit the spinner. The slots are reset to `undefined` after each turn completes, so a leftover callback from the previous turn can't fire into the next one's UI state.
+
 **Why queue-then-flush.** `push()` (`:87-89`) just appends the insert promise to `this.pending`; `flush()` (`:91-93`) does `Promise.all(this.pending)`. The session calls it once after the run (`src/session.ts:62-63`):
 
 ```
@@ -130,6 +150,8 @@ The irreducible kernel of this pattern, the part you'd reconstruct from memory:
 2. **A total switch over every event variant** — drop a `case` and that event type silently vanishes from the trajectory. The `step` case's `if (event.content)` guard (`:58`) is exactly this failure in miniature: empty-content steps are *intentionally* dropped, which is why the FALLBACK_ANSWER turn (empty synthesis) leaves no row.
 3. **The cause/effect pair** — `args` on start, `result`/`error` on end. Drop `args` and you can see *that* a tool failed but never *why* you called it.
 4. **A correlation key** — `conversationId`, threaded through every `persistMessage`. Drop it and the rows are an undifferentiated heap; you can't reconstruct a single turn.
+
+**Extension: the mutable-slot intercept** (`src/session.ts:120-138`). The wrapper trace object that wraps the sink is the fifth load-bearing piece in the extended system — it's what makes the single `emit()` call drive both the live spinner and the durable row. Without it, TUI callbacks would have to live inside the sink (coupling observability infrastructure to UI concerns) or be threaded through a separate callback API at every tool-call site. The slot pattern isolates the coupling to one four-line wrapper.
 
 Optional hardening layered on top: `durationMs` (latency attribution — nice, not load-bearing for correctness), `tokens_used` (cost tracking), the queue/flush batching (a throughput optimization over inserting inline).
 

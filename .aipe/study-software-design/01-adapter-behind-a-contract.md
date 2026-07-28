@@ -318,6 +318,17 @@ Adjacent in this repo: the same inversion appears at `03-dependency-as-a-
 boundary.md` (the memory engine), and the client-side facade that holds
 this adapter is `05-deep-session-facade.md`.
 
+**A second adapter family: `DataConnector<P,D>` and web search.** The connector tools added in `@buffr/connectors` are a parallel example of the same pattern at a smaller scale. The port is `DataConnector<P,D>`:
+
+```ts
+// @buffr/connectors — the port
+interface DataConnector<P, D> {
+  fetch(params: P): Promise<D>;
+}
+```
+
+Three adapters implement it — `BraveConnector`, `TavilyConnector`, `GoogleConnector` — each hiding: API key injection, HTTP construction (endpoint URL, headers), response parsing, and the vendor-specific error shape. `session.ts:76-107` depends on the port (conditionally instantiating adapters based on env keys), not on any particular search vendor. The seam is narrower than `VectorStore` (one method vs two, no transaction complexity), but the shape is identical: port → adapter → external API. Comparing the two adapters side-by-side is a clean exercise in how the same move scales from deep-module-with-five-decisions to thin-adapter-with-one-concern.
+
 ---
 
 ## Interview defense

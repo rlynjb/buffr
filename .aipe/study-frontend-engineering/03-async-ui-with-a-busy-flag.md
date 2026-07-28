@@ -25,7 +25,7 @@ Every UI that awaits something has this machine: idle → loading → (success |
   └───────────────────────────────────────────────────────┘
 ```
 
-**Zoom in:** the concept is the **async UI state machine** — the discipline of representing "something is in flight" as explicit state so the render can show progress and the handler can refuse to re-enter. Buffr's whole machine is one `boolean busy` plus a `try/finally` (`src/cli/chat.tsx:13–35`). The interesting parts: the re-entrancy guard and the `finally` that *cannot* be skipped.
+**Zoom in:** the concept is the **async UI state machine** — the discipline of representing "something is in flight" as explicit state so the render can show progress and the handler can refuse to re-enter. Buffr's machine is one `boolean busy`, a `try/finally`, and a `<Spinner>` that ticks independently (`src/cli/chat.tsx`). The interesting parts: the re-entrancy guard, the `finally` that *cannot* be skipped, and the real-time elapsed + token counter that updates every 100ms regardless of the backend's pace.
 
 ---
 
@@ -114,30 +114,47 @@ try {
 
 Walk it: the handler suspends at `await session.ask(q)` and the render is already showing the spinner. When the promise settles, exactly one of two branches runs — append the answer, or append the stringified error. Then `finally` runs **on both paths**, flipping `busy` back to false, which re-renders the input field. Boundary condition, and the part people get wrong: put `setBusy(false)` at the end of `try` instead of `finally`, and any throw from `ask()` skips it — the spinner spins forever and the UI is wedged. The `finally` is load-bearing precisely because it's the one line that runs whether the await succeeds or blows up.
 
-#### The render branch reads the flag
+#### The render branch reads the flag — and shows live feedback
 
 ```tsx
-// src/cli/chat.tsx:48–57
-{busy ? (
-  <Text color="yellow"><Spinner type="dots" /> thinking…</Text>
-) : (
-  <Box><Text color="cyan">{'> '}</Text>
-    <TextInput value={input} onChange={setInput} onSubmit={onSubmit} placeholder="ask buffr" />
-  </Box>
-)}
+// src/cli/chat.tsx:107, 126
+{busy && <Spinner status={status} tokens={liveTokens} />}
+// ...when not busy:
+<textarea ref={taRef} placeholder="type your message…" … />
 ```
 
-The flag the handler sets is the flag the view reads. `busy === true` mounts the spinner subtree; `false` mounts the input. The reconciler unmounts one and mounts the other on each flip (the `<TextInput>` is fully torn down during `busy`, which is *why* the guard exists — there's no field to type into mid-turn, but a buffered keystroke could still reach a handler).
+The flag the handler sets is the flag the view reads. `busy === true` mounts `<Spinner>`; `false` shows the input. The `<Spinner>` receives two live props: `status` (updated by `onStatus` callbacks — e.g. `"searching Google"`, `"fetching RSS feed"`) and `tokens` (accumulated by `onTokens` callbacks from `model_usage` events).
+
+The spinner ticks independently of both:
+
+```tsx
+// src/cli/chat.tsx:22–46
+function Spinner({ status, tokens }) {
+  const startRef = useRef(Date.now());   // capture start time at mount
+  useEffect(() => {
+    startRef.current = Date.now();       // reset on each mount (each turn)
+    const id = setInterval(() => {
+      setFrame(f => (f+1) % FRAMES.length);
+      setElapsedMs(Date.now() - startRef.current);  // tick every 100ms
+    }, 100);
+    return () => clearInterval(id);
+  }, []);
+  // renders: "⠹ searching Google · 3.2s · 1,204 tok"
+}
+```
+
+Two moving parts: `elapsedMs` updates on a 100ms clock (always ticking); `tokens` is pushed by the backend's `onTokens` callbacks (only fires on model calls). They are independent — elapsed is always counting; tokens grow in discrete jumps when Gemma uses tokens. `useRef` for `startRef` is the right call: a `useState` would trigger a re-render when we capture the start time, and we don't want that.
 
 ### Move 2 variant — the load-bearing skeleton
 
-Strip it to the irreducible core: **a boolean + a guard that reads it + a `finally` that resets it.** Three parts, named by what breaks:
+Strip it to the irreducible core: **a boolean + a guard + a `finally` + a ticking spinner.** Four parts, named by what breaks:
 
 - Drop the **guard** (`if (busy) return`) → concurrent turns; two `ask()` calls race into one conversation.
 - Drop the **`finally`** (reset in `try` instead) → one thrown error wedges the UI on the spinner permanently.
 - Drop the **render branch** on `busy` → no progress feedback; the UI looks frozen during a multi-second model call.
+- Drop the **`useRef` start-time capture** (use `Date.now()` inline in the render instead) → `startRef` exists *because* you can't rely on a `useState` not causing a re-render at capture time; `useRef` mutates without triggering a re-render.
 
-Optional hardening *not* present (and honestly so): no `AbortController` to cancel a slow turn (`audit.md` red flag #3), no timeout, no retry/backoff, no error-type discrimination. Those are the layers a production async machine adds on top of this skeleton.
+Optional hardening *not* present (and honestly so): no `AbortController` to cancel a slow turn, no timeout, no retry/backoff, no error-type discrimination. Those are the layers a production async machine adds on top of this skeleton.
 
 ### Move 3 — the principle
 

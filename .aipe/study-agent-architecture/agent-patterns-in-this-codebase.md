@@ -4,26 +4,31 @@ The patterns buffr actually runs, not the study catalogue. One shape, named hone
 the control envelope and the eval seam called out. Read `00-overview.md` first for the
 whole-system frame; this file is the close-out.
 
-## The shape: single-agent bounded ReAct loop
+## The shape: single-agent bounded ReAct loop over multiple tools
 
 buffr is one actor — a `RagQueryAgent` running a ReAct loop (`run-agent-loop`) over a local
-Gemma2:9b, with exactly one read-only tool. The session layer (`src/session.ts`) wraps that
-loop in a fixed three-step sequence per turn, so the *outer* shape is chain-like and the
-*inner* shape is a true agent loop. Verdict: hybrid — pipeline outside, loop inside.
+Gemma2:9b, with up to **six read-only tools** (KB search always present; web search, RSS,
+Amazon conditional on API key / availability). The session layer (`src/session.ts`) wraps that
+loop in a fixed sequence per turn. Verdict: hybrid — pipeline outside, loop inside.
 
 ```
-  buffr's one loop — single actor, one read-only tool
+  buffr's one loop — single actor, 6 read-only tools
 
   ┌─ Session (pipeline, src/session.ts) ──────────────────────────┐
-  │  ask(q):  persist user turn ─► agent.answer(q) ─► remember()   │
+  │  ask(q):  set trace slots ─► persist user turn                 │
+  │           ─► agent.answer(q) ─► clear slots ─► remember()     │
   │           (fixed order — engineer wrote these steps)          │
   └───────────────────────────┬───────────────────────────────────┘
                               │  agent.answer(q)  — the loop starts
   ┌─ ReAct loop (run-agent-loop.ts:76-202) ───────────────────────┐
   │   turn 0..5 (maxTurns:6):                                      │
   │     model.complete ──► model chooses:                         │
-  │        ├─ tool_use: search_knowledge_base  (≤ maxToolCalls:4) │
-  │        │     └─ harness runs it, feeds result back as obs     │
+  │        ├─ tool_use: search_knowledge_base  (always)           │
+  │        ├─ tool_use: web_search_google/brave/tavily (if keyed) │
+  │        ├─ tool_use: fetch_rss_feed (always)                   │
+  │        ├─ tool_use: fetch_amazon_reviews (always)             │
+  │        │     └─ harness runs it, fires onStatus callback      │
+  │        │          feeds result back as observation             │
   │        └─ text only ──► SUCCESS exit (finalText)              │
   │     last turn OR budget spent ──► FORCED SYNTHESIS            │
   │        (tools stripped, "no more tool calls") ─► BUDGET exit  │
@@ -42,13 +47,25 @@ The patterns buffr exercises, the shape each instantiates, and why it's the righ
   │                          │ (run-agent-loop)       │ model finds; dynamic        │
   ├──────────────────────────┼────────────────────────┼─────────────────────────────┤
   │ knowledge retrieval      │ agentic RAG (ReAct      │ model decides whether/what  │
-  │                          │ whose tool is search)  │ to search, 0..4 times       │
+  │ + minScore filter        │ whose tool is search)  │ to search; threshold guards │
+  │                          │                        │ against topic-drift answers │
   ├──────────────────────────┼────────────────────────┼─────────────────────────────┤
-  │ session turn flow        │ sequential pipeline of  │ known steps: persist →      │
-  │ (session.ts)             │ functions (not agents) │ answer → remember           │
+  │ web search               │ conditional capability  │ keys present → live web;   │
+  │ (google/brave/tavily)    │ fan-out (DataConnector) │ priority: tavily > brave   │
+  │                          │                        │ > google (first available)  │
   ├──────────────────────────┼────────────────────────┼─────────────────────────────┤
-  │ tool exposure            │ capability scoping      │ one read-only tool =        │
-  │                          │ (ragQueryToolPolicy)   │ smallest blast radius       │
+  │ RSS live feed            │ DataConnector<P,D>      │ current articles on demand  │
+  │ (fetch_rss_feed)         │ connector adapter       │ — same tool-dispatch path   │
+  ├──────────────────────────┼────────────────────────┼─────────────────────────────┤
+  │ session turn flow        │ sequential pipeline of  │ known steps: set slots →    │
+  │ (session.ts)             │ functions (not agents) │ persist → answer → remember │
+  ├──────────────────────────┼────────────────────────┼─────────────────────────────┤
+  │ tool exposure            │ capability scoping      │ read-only tools only =      │
+  │                          │ (allowedTools list)    │ smallest blast radius       │
+  ├──────────────────────────┼────────────────────────┼─────────────────────────────┤
+  │ live TUI status          │ mutable-trace-slot      │ per-ask callback slots in   │
+  │ (onStatus / onTokens)    │ pattern (session.ts:   │ trace.emit() — no agent     │
+  │                          │ 120-138)               │ loop changes needed         │
   ├──────────────────────────┼────────────────────────┼─────────────────────────────┤
   │ past-exchange recall     │ retrieval-based         │ relevance-recall across     │
   │ (@aptkit/memory)         │ episodic memory        │ sessions; same search tool  │
@@ -73,23 +90,22 @@ The patterns buffr exercises, the shape each instantiates, and why it's the righ
   │  user question (no input guardrail — read-only downstream)     │
   └───────────────────────────┬───────────────────────────────────┘
   ┌─ Agent loop ──────────────▼───────────────────────────────────┐
-  │  • iteration cap     maxTurns:6      (rag-query-agent.ts:75)   │
-  │  • tool-call budget  maxToolCalls:4  (rag-query-agent.ts:76)   │
-  │  • forced synthesis  on budget/last  (run-agent-loop.ts:101-9) │
-  │  • capability scope  ONE read tool   (ragQueryToolPolicy:15-18)│
-  │  • context guard     maxTokens:8192  (session.ts:46)           │
-  │  • result truncation 16k chars       (run-agent-loop.ts:52-57) │
+  │  • iteration cap     maxTurns:6        (rag-query-agent.ts:75) │
+  │  • tool-call budget  maxToolCalls:4    (rag-query-agent.ts:76) │
+  │  • forced synthesis  on budget/last    (run-agent-loop.ts:101) │
+  │  • capability scope  6 read-only tools (session.ts:144-153)   │
+  │  • context guard     maxTokens:8192    (session.ts:106)        │
+  │  • result truncation 16k chars         (run-agent-loop.ts:52) │
+  │  • KB quality gate   minScore:0.65     (session.ts:72)         │
+  │  • routing rules     tool-use rules 1-7 in system prompt      │
   └───────────────────────────┬───────────────────────────────────┘
   ┌─ Output ──────────────────▼───────────────────────────────────┐
   │  finalText or FALLBACK_ANSWER — no side effects possible       │
-  │  (the only tool is a read; nothing the agent emits can act)    │
+  │  (all tools are reads; nothing the agent emits can write)      │
   └───────────────────────────────────────────────────────────────┘
 ```
 
-The load-bearing control is **forced synthesis** (`run-agent-loop.ts:101-109`): nothing
-guarantees the model reaches the success exit on its own, so the budget exit strips the
-tools and demands an answer. That is what makes this a shipped agent rather than a demo that
-can loop forever.
+The load-bearing control is still **forced synthesis** (`run-agent-loop.ts:101-109`). The addition of five more tools increases the schema injected into the system prompt — a real context-window cost, since Gemma's emulated tool calling encodes schemas as text. The `maxToolCalls:4` budget now covers multi-source synthesis in most turns (KB + web + RSS in three calls, leaving one for a follow-up).
 
 ## The eval seam
 
@@ -101,19 +117,21 @@ it recover — is the gap: the signal is recorded, not yet scored.
 
 ## What buffr is not (and why that's the right call)
 
-- **Not multi-agent.** One loop, one tool. The single-agent baseline hasn't hit a quality
-  ceiling that decomposes into independent specialties — so the senior move is to stay
-  single-agent. The two-brain laptop+phone split (`agent-layer-plan.md`) is the deferred,
-  design-only topology buffr could grow into. See `03-multi-agent-orchestration/`.
-- **Not plan-execute / reflexion / tree-of-thoughts.** Plain ReAct is the measured baseline.
-  See `01-reasoning-patterns/`.
+- **Not multi-agent.** One loop, multiple tools. The single-agent baseline hasn't hit a quality
+  ceiling that decomposes into independent specialties — the right call is to stay
+  single-agent with more tools rather than split. The two-brain laptop+phone split
+  (`agent-layer-plan.md`) is the deferred design-only topology. See `03-multi-agent-orchestration/`.
+- **Not plan-execute / reflexion / tree-of-thoughts.** Plain ReAct with routing rules is the
+  measured baseline. See `01-reasoning-patterns/`.
 - **No in-prompt conversational threading.** `RagQueryAgent.answer` treats each question
   independently; relevance-recall via episodic memory stands in for it. See
   `04-agent-infrastructure/02-agent-memory-tiers.md`.
-- **No MCP.** Tools are wired directly via `InMemoryToolRegistry`. See
-  `04-agent-infrastructure/03-tool-calling-and-mcp.md`.
-- **No fan-out / circuit-breaker state machine.** Single-device, single-user, local Ollama —
-  no provider rate limit to manage. See `05-production-serving/`.
+- **No MCP.** Tools are wired directly via `InMemoryToolRegistry`. The six current tools are
+  all buffr-owned wrappers. See `04-agent-infrastructure/03-tool-calling-and-mcp.md`.
+- **No fan-out parallelism.** Tools are called sequentially (Gemma calls one at a time;
+  the harness awaits each result before the next turn). See `05-production-serving/`.
+- **No web-search retry / fallback.** If Tavily 429s, that tool call fails and Gemma may
+  or may not try Brave next. No circuit-breaker, no automatic fallback across providers.
 
 ## See also
 

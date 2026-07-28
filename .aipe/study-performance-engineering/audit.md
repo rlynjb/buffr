@@ -33,7 +33,7 @@ So every "does this matter" verdict in this audit is an *estimate*, not a measur
 
 `not yet exercised` for tail behavior, partially exercised for latency composition.
 
-**Latency composition (observed structure, inferred timing).** One `ask()` turn (`src/session.ts:60-71`) is a fixed sequence: persist user message → `agent.answer()` (embed query → HNSW search → `gemma2:9b` generate, possibly multi-step) → `trace.flush()` → `memory.remember()`. The generation step is the dominant term by an order of magnitude; the embed roundtrips and HNSW search are the next tier; the DB writes are noise. This is structural inference from the call order, not a measured distribution.
+**Latency composition (observed structure, inferred timing).** One `ask()` turn (`src/session.ts:60-71`) is a fixed sequence: persist user message → `agent.answer()` (embed query → HNSW search → optional web API call → `gemma2:9b` generate, possibly multi-step) → `trace.flush()` → `memory.remember()`. The generation step is the dominant term by an order of magnitude; web search API calls (200-800ms external HTTP when triggered) are the next real tier; the embed roundtrips and HNSW search are below that; the DB writes are noise. Web API latency is the one new external factor added since the original audit — it's not in `durationMs` yet because no span wraps the per-tool HTTP calls. This is structural inference from the call order, not a measured distribution.
 
 **Throughput.** Single-user, single-conversation, in-process (`src/session.ts:34` holds one conversation across turns). There is no concurrency, no queue, no fan-in, so there is no throughput figure to report and no contention to measure.
 
@@ -63,13 +63,15 @@ The richest lens — this is where buffr's real I/O patterns live, all of them d
 
 Worth naming: the trace INSERTs are *queued* during the agent run (`emit()` is sync, pushes a promise) and *awaited together* in `flush()` (`src/supabase-trace-sink.ts:87-93`). So they overlap rather than blocking the run serially — a deliberate, decent choice. They still all hit the DB; `flush()`'s `Promise.all` means they race the connection pool.
 
+**Web search I/O (added).** When a web connector tool fires, `session.ts:76-107` routes to a `DataConnector` that makes an outbound HTTP call to Brave/Tavily/Google. These are external-network round-trips: latency is not buffr-controlled and not currently measured as a span. `TOOL_LABELS` in `session.ts:112` maps tool names → human status strings for the TUI spinner, which is the current visibility into which tool is in flight (not a perf number, just a label). Quota exhaustion (Google: 100/day) surfaces as a tool error, not a timeout — adding a per-connector latency trace and a remaining-quota counter is the measurement gap for this tier.
+
 ---
 
 ## 6. caching-batching-and-backpressure
 
 **Batching — exercised, partially.** Embedding is batched per document: one `/api/embed` call carries all of a document's chunks (handled inside aptkit's pipeline). The trace writes are batched in the sense of queued-then-flushed (`src/supabase-trace-sink.ts:91-93`). What is *not* batched: the chunk INSERTs (one per chunk, lens 5 / file `03`) and the cross-file embed calls (serial, file `02`).
 
-**Caching — `not yet exercised`.** No embedding cache, no query cache, no result memoization. An identical query — the same string asked twice, or the eval harness re-run unchanged — pays the full embed roundtrip and HNSW search every time (`src/pg-vector-store.ts:67`, `src/cli/eval-cmd.ts:25`). → see `06-no-caching.md`.
+**Caching — `not yet exercised`.** No embedding cache, no query cache, no result memoization, and no web-search response cache. An identical query — the same string asked twice, or the eval harness re-run unchanged — pays the full embed roundtrip and HNSW search every time (`src/pg-vector-store.ts:67`, `src/cli/eval-cmd.ts:25`). Web search results are also never cached — the same topic asked twice fires two external API calls (quota consumption doubles for no new information). → see `06-no-caching.md`.
 
 **Backpressure — `not yet exercised` and correctly so.** There is no queue, no fan-in, no concurrent producer, so there's nothing to apply backpressure to. `flush()`'s `Promise.all` (`src/supabase-trace-sink.ts:92`) fires all pending writes at once with no bound — fine at ~6 writes, would need a bound only if the trace ever fanned out to hundreds of events per turn.
 

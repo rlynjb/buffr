@@ -8,15 +8,15 @@ The honesty rule matters here. A guide that claims buffr does few-shot prompting
 
 ## 1. Anatomy of a production prompt — EXERCISED
 
-Three of the four classic sections are present and assembled across three owners. System prompt = `BASE_SYSTEM` (`agent-rag-query/dist/src/rag-query-agent.js:12`). Context injection = profile prepended by `injectProfile` (`context/dist/src/profile-injector.js:15`, called at `rag-query-agent.js:29`). User message = the question (`session.ts:62`). Few-shot examples = the missing fourth section. → see [01-anatomy.md](01-anatomy.md).
+Three of the four classic sections are present and assembled across three owners. System prompt = `BASE_SYSTEM` (`agent-rag-query/dist/src/rag-query-agent.js:12`) **plus a routing prompt** built in `session.ts:142-182` listing 7 tool-usage rules and all active tools (search_knowledge_base, RSS, Amazon reviews, web search connectors). Context injection = profile prepended by `injectProfile` (`context/dist/src/profile-injector.js:15`, called at `rag-query-agent.js:29`). User message = the question (`session.ts:62`). Few-shot examples = the missing fourth section. → see [01-anatomy.md](01-anatomy.md).
 
 ## 2. Structured outputs via tool calling — EXERCISED (load-bearing)
 
 Tool calling is **emulated**, not native. Gemma 2 9B has no tool API, so `GemmaModelProvider.buildSystemText` renders the tool catalog as JSON text and demands a JSON reply (`provider-gemma/dist/src/gemma-provider.js:82–105`). The model's reply is parsed back with `parseToolCall` (`:107`), gated on a cheap `{`-tell via `looksLikeToolAttempt` (`:127`), and given exactly one corrective retry with `RETRY_NUDGE` (`:2`). The generic structured-output reprompt (`generateStructured` + `DEFAULT_STRICT_SUFFIX`, `runtime/dist/src/structured-generation.js:3`) exists in aptkit but the RAG path does not call it. → see [02-structured-outputs.md](02-structured-outputs.md).
 
-## 3. Prompts as code: versioning + observability — PARTIAL
+## 3. Prompts as code: versioning + observability — PARTIAL (improved)
 
-The prompt text is version-controlled, but **in aptkit's repo, not buffr's** — `BASE_SYSTEM` ships inside `node_modules/@rlynjb/aptkit-core` pinned to `^0.4.1` (`package.json`). buffr's only prompt-shaped source is the profile rows in Postgres and `me.md`-style content. Observability exists at the *trajectory* level: every turn's full signal (steps, tool calls, model+tokens) persists via `SupabaseTraceSink` (`src/supabase-trace-sink.ts`, schema `agents.messages`). What's missing: a prompt-version stamp on each output, and a prompt+model-version pairing. → see [03-prompts-as-code.md](03-prompts-as-code.md).
+`BASE_SYSTEM` is still in aptkit (`node_modules/@rlynjb/aptkit-core ^0.4.1`), but buffr now owns a **routing prompt** directly in `session.ts:142-182` — 7 tool-usage rules, the full tool description block, and conditional logic based on configured connectors. This routing prompt is version-controlled in buffr's source: a PR diff shows exactly which rules changed. It's the first prompt buffr controls directly. Observability exists at the trajectory level via `SupabaseTraceSink`. What's still missing: a prompt-version stamp on each output, and a prompt+model-version pairing. → see [03-prompts-as-code.md](03-prompts-as-code.md).
 
 ## 4. Token budgeting + context window — EXERCISED
 
@@ -50,9 +50,9 @@ The agent answers once. No second pass evaluates the answer; no N-sample vote. T
 
 buffr does not use an LLM to write its prompts. The canonical example lives in a sibling project (aipe: markdown templates + slash commands that compose prompts). buffr's only meta-shaped data is the profile, which is human-authored, not LLM-generated. → see [11-meta-prompting.md](11-meta-prompting.md).
 
-## 12. Prompt injection defense (author side) — PARTIAL
+## 12. Prompt injection defense (author side) — PARTIAL (new surface added)
 
-One real defense, one real hole. The defense: the profile is injected under a labeling heading (`# About the person you are assisting`, `rag-query-agent.js:20`), which frames it as data. The hole: retrieved chunks and recalled memory are concatenated into tool results **with no delimiter and no "treat as data" framing** — and memory is *prior model output* re-entering the prompt, which is the classic second-order injection surface. No instruction hierarchy is stated. → see [12-prompt-injection-defense.md](12-prompt-injection-defense.md).
+One real defense, two real holes now. The defense: the profile is injected under a labeling heading (`# About the person you are assisting`, `rag-query-agent.js:20`), which frames it as data. The original hole: retrieved chunks and recalled memory are concatenated into tool results **with no delimiter and no "treat as data" framing** — and memory is *prior model output* re-entering the prompt, which is the classic second-order injection surface. **New hole (higher risk):** web search results from Brave/Tavily/Google are also injected as tool output with no sanitization gate — these are external internet content that anyone can craft to embed injection payloads. See security audit `03-indirect-prompt-injection-surface.md` for the full walk; from a prompt-engineering perspective, the defense would be an explicit "treat the following as UNTRUSTED EXTERNAL DATA" framing around web-result tool outputs. → see [12-prompt-injection-defense.md](12-prompt-injection-defense.md).
 
 ## 13. Forbidden patterns / rotating formulas — NOT YET EXERCISED
 

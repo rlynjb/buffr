@@ -33,9 +33,17 @@ Map every place untrusted input crosses into trusted code.
   │  @aptkit/memory       │   → re-enters prompt via the SAME search tool
   └───────────────────────┘   trust: model-generated text, recycled as input
 
+  ┌─ web search results ──┐   Brave/Tavily/Google results injected as tool obs.
+  │  external internet    │   → arbitrary web content enters the prompt
+  └───────────────────────┘   trust: EXTERNAL — highest injection risk surface
+
   ┌─ DATABASE_URL ────────┐   full-privilege Postgres creds, .env (gitignored)
   │  loaded via dotenv     │   → every pool query runs with these rights
   └───────────────────────┘
+
+  ┌─ API keys (.env) ─────┐   GOOGLE_API_KEY · GOOGLE_CX · BRAVE_API_KEY
+  │  src/config.ts:14-18  │     TAVILY_API_KEY — gitignored, .env only
+  └───────────────────────┘   trust: same .env pattern as DATABASE_URL
 
   ┌─ Ollama HTTP ─────────┐   localhost:11434, no auth on the loopback
   │  gemma2 + nomic-embed │   → generation + embeddings
@@ -120,9 +128,14 @@ sanitization gate on retrieved content — but the blast radius is bounded by le
 (one read-only tool, bounded turns). Deep walk:
 `03-indirect-prompt-injection-surface.md`.
 
-No command execution, no filesystem path built from user input, no SSRF (the only
-outbound HTTP targets are hardcoded `localhost` Ollama endpoints), no XSS (the UI
-is an OpenTUI TTY, not a DOM).
+No command execution, no filesystem path built from user input, no XSS (the UI
+is an OpenTUI TTY, not a DOM). **SSRF surface note:** the three web connector tools
+(`web_search_google`, `web_search_brave`, `web_search_tavily`) make outbound HTTP
+to third-party cloud APIs (`session.ts:76-84`). These are operator-configured
+targets (keys in `.env`, not model-controlled URLs), so a model-driven redirect isn't
+possible today — but the attack surface is larger than "localhost only," and
+web search results flowing back into the prompt are the new highest-risk injection
+path (see lens 7).
 
 ---
 
@@ -206,14 +219,7 @@ Posture is reasonable for the phase.
 
 This is an AI repo, so this lens carries weight. Three sub-questions:
 
-**Tool/permission scope — minimal, by design.** The agent is granted exactly one
-tool. `ragQueryToolPolicy` allowlists `search_knowledge_base` and nothing else
-(`agents/rag-query/src/rag-query-agent.ts:15-18` in aptkit), and
-`filterToolsForPolicy` (`tools/src/tool-policy.ts:11-23`) intersects the registry
-against that allowlist before any schema reaches the model. The tool is read-only
-— it runs `pipeline.query`, a `SELECT` (`src/pg-vector-store.ts:67`). No write
-tool, no shell, no fetch is reachable by the model. That's least privilege made
-concrete. Deep walk: `02-least-privilege-tool-scope.md`.
+**Tool/permission scope — minimal per task, expanded for web search.** The core retrieval tool (`search_knowledge_base`) is still governed by `ragQueryToolPolicy` in aptkit. However `session.ts:76-107` now wires up to 6 additional connector tools (RSS, Amazon reviews, Google Trends, plus up to 3 web search connectors: `web_search_google`, `web_search_brave`, `web_search_tavily`) into the same `InMemoryToolRegistry` — all read-only, no write surface. The web search tools make outbound HTTP calls (operator-configured endpoints), so the effective tool scope is "local reads + external HTTP reads." Still no write tool, no shell, no filesystem path — but the attack surface is larger. Deep walk: `02-least-privilege-tool-scope.md`.
 
 **Bounded turns.** The loop caps at `maxTurns: 6` and `maxToolCalls: 4`
 (`agents/rag-query/src/rag-query-agent.ts:75-76`). On the final turn `forceFinal`
@@ -227,14 +233,7 @@ privileged sink. Tool *results* re-enter the prompt as opaque JSON content
 (`run-agent-loop.ts:162,189`), truncated at 16 KB (`run-agent-loop.ts:52`) — they
 inform the next turn but don't execute.
 
-**Prompt injection via retrieved/recalled content — the real surface.** Both
-indexed docs and recalled memory flow into context as tool output with no
-sanitization gate. A poisoned document could try to steer the model. Why it's
-low-blast-radius here: the worst a hijacked agent can do is call
-`search_knowledge_base` again (read-only) or emit bad text to the operator's own
-screen — there's no privileged tool to pivot into, no exfiltration channel (no
-outbound tool, Ollama is local), and turns are bounded. Deep walk:
-`03-indirect-prompt-injection-surface.md`.
+**Prompt injection via retrieved/recalled content — and now web search.** Indexed docs, recalled memory, **and web search results** all flow into context as tool output with no sanitization gate. Web results are the highest-risk new surface: unlike docs (operator-authored) and memory (model-generated in-house), web results are arbitrary external internet content that anyone can craft to target buffr. A poisoned page could embed `Ignore previous instructions` in a headline or body. Why it's still bounded: the worst a hijacked agent can do is call another read-only tool or emit bad text to the operator's own screen — no write tool, no exfiltration channel (outbound HTTP is for read-only search, not data upload), turns capped at 6. But the risk level is meaningfully higher than "one local read-only tool." Deep walk: `03-indirect-prompt-injection-surface.md`.
 
 **Data exfiltration through tool calls:** `not yet exercised` as a threat — the
 only tool reads the local store and returns to the local model. There's no tool
@@ -255,17 +254,21 @@ Marked against this repo. `app_id` numbers are illustrative location anchors.
 | Tenant isolation not enforced (no RLS) | **Fires (deferred)** | `app_id` shape only, `sql/001_agents_schema.sql` | Med (multi-tenant phase) | Add RLS keyed on `app_id`/`user_id` |
 | Tenant key not token-derived | **Fires (deferred)** | `app_id` from env default `'laptop'` (`src/config.ts:13`) | Med | Derive from auth token in remote phase |
 | Memory/docs share store, no metadata-scoped read | **Fires (low)** | `src/session.ts:53` | Low | Today single-tenant; RLS closes it later |
-| Agent tool scope exceeds task | **No** | one read-only tool (`ragQueryToolPolicy`) | — | Least privilege holds |
+| Agent tool scope exceeds task | **Partial (accepted)** | 7 tools (RAG + RSS + trends + Amazon + 3 web search) all read-only (`session.ts:76-107`) | Low | No write/shell tool; web-search tools add outbound HTTP surface |
 | Model output flows into a sink ungated | **No** | `finalText` is a string to TTY (`src/session.ts:62`) | — | Never eval'd / run |
-| Unsanitized retrieved content in prompt | **Fires (low)** | docs + memory as tool output (`run-agent-loop.ts:189`) | Low | Bounded by one read-only tool + capped turns |
+| Unsanitized retrieved content in prompt | **Fires (medium now)** | docs + memory + web results as tool output | Medium | Web search = external adversary-controlled input; still bounded by read-only tools + capped turns |
+| Multiple API keys with no vault | **Fires (deferred)** | `BRAVE_API_KEY`, `TAVILY_API_KEY`, `GOOGLE_API_KEY`, `GOOGLE_CX` — static `.env` | Low | Same gitignore pattern as `DATABASE_URL`; rotation story is phone-phase work |
 | No lockfile | **No** | `package-lock.json` present | — | Reproducible installs |
 | Known CVEs unpatched / no audit | **Unknown** | no CI `npm audit` (`.github/workflows` absent) | Low | Add `npm audit` step in CI |
 | No rate limiting | **N/A** | single operator, no network ingress | — | Phone-phase concern |
 | No secret rotation | **Fires (deferred)** | static `.env` string | Low | Vault + rotation in remote phase |
 | Verbose error to caller | **No (acceptable)** | `chat.tsx:31` to own TTY | — | Operator entitled to own errors |
 
-**The single worst exposure today:** none is reachable by a remote attacker,
-because there is no remote attacker. The highest-leverage *forward* item is the
-full-privilege client-held credential (`DATABASE_URL`) — it's the control that has
-to change first the moment buffr stops being single-device, and it pairs with RLS
-to make multi-tenant safe.
+**The single worst exposure today:** none is reachable by a remote attacker from
+outside the device, because there's no network ingress. The highest-leverage
+*forward* item is still the full-privilege client-held credential (`DATABASE_URL`)
+— it's the control that changes first when buffr goes multi-device, and it pairs
+with RLS. The highest-leverage *current* item (already real) is **web search
+injection** — arbitrary internet content now enters the agent's prompt, and the
+only guard is the limited tool scope and turn cap. A sanitization or content-safety
+gate on web tool results would close it.

@@ -14,15 +14,17 @@ on the diagram.
   buffr-laptop — the full system (single device, one user)
 
   ┌─ UI layer ───────────────────────────────────────────────────────────┐
-  │  src/cli/chat.tsx — OpenTUI (React-in-terminal via Zig) chat                       │
-  │    one input box, a scrollback of turns, a "thinking…" spinner         │
+  │  src/cli/chat.tsx — OpenTUI (React-in-terminal) chat                 │
+  │    spinner: tool name · elapsed time · live token count              │
   └───────────────────────────────┬───────────────────────────────────────┘
-                                  │  session.ask(question)  — in-process call
+                                  │  session.ask(q, {onStatus, onTokens, onComplete})
                                   ▼
   ┌─ Session layer (buffr owns) ──────────────────────────────────────────┐
   │  src/session.ts — createChatSession()                                  │
   │    • ONE warm pg.Pool          • ONE conversationId across all turns   │
-  │    • agent built ONCE          • per-turn: persist → answer → remember │
+  │    • agent built ONCE          • per-turn: slots → persist → answer   │
+  │    • mutable trace slots:        → clear slots → flush → remember     │
+  │      currentOnStatus/Tokens   • TOOL_LABELS map → human status names  │
   └───────┬─────────────────┬───────────────────┬─────────────────────────┘
           │                 │                   │
           │ builds once     │ run per turn      │ remember per turn
@@ -31,46 +33,50 @@ on the diagram.
   │  RagQueryAgent.answer()      run-agent-loop, ReAct-style               │
   │    GemmaModelProvider ─ guarded by ContextWindowGuardedProvider(8192)  │
   │    createRetrievalPipeline ─ OllamaEmbeddingProvider + VectorStore     │
-  │    createSearchKnowledgeBaseTool ─ the one tool the agent can call     │
+  │    createSearchKnowledgeBaseTool(minTopK:4, minScore:0.65) ─ tool 1   │
   │    createConversationMemory ─ embed+tag+recall episodic memory engine  │
   └───────┬───────────────────────────────────┬──────────────┬────────────┘
           │ store port (VectorStore)           │ trace port   │ uses same store
           ▼                                    ▼              ▼
   ┌─ Adapter layer (buffr owns) ──────────────────────────────────────────┐
-  │  PgVectorStore         SupabaseTraceSink        (memory injects the    │
-  │  implements VectorStore implements              same PgVectorStore)    │
-  │  src/pg-vector-store.ts CapabilityTraceSink                            │
-  │                         src/supabase-trace-sink.ts                     │
+  │  PgVectorStore         SupabaseTraceSink + mutable-slot wrapper       │
+  │  implements VectorStore implements CapabilityTraceSink                 │
+  │  src/pg-vector-store.ts  src/supabase-trace-sink.ts + session.ts slots│
+  │                                                                        │
+  │  Connector tools (buffr/packages/connectors):                          │
+  │    RssConnector         → fetch_rss_feed   (always active)            │
+  │    AmazonReviewsConnector → fetch_amazon_reviews (always active)      │
+  │    GoogleSearchConnector  → web_search_google  (key-gated)            │
+  │    BraveSearchConnector   → web_search_brave   (key-gated)            │
+  │    TavilySearchConnector  → web_search_tavily  (key-gated)            │
   └───────────────────────────────┬───────────────────────────────────────┘
-                                  │  node-postgres (pg), direct TCP — no HTTP layer
+                                  │  node-postgres (pg), direct TCP
                                   ▼
   ┌─ Storage layer (Postgres `reindb`, schema `agents`) ──────────────────┐
-  │  documents   source-of-truth corpus rows                              │
-  │  chunks      embedding vector(768), HNSW cosine index, app_id index   │
-  │              ↑ conversation memory ALSO lives here (meta.kind=memory)  │
-  │  conversations / messages   full-signal trajectory (6 event types)    │
-  │  profiles    the me.md-style user profile injected into the prompt    │
+  │  documents · chunks(vector) · conversations · messages · profiles     │
   └───────────────────────────────────────────────────────────────────────┘
-                                  ▲
-                                  │  HTTP (localhost:11434)
-  ┌─ Provider layer (Ollama, local box) ──────────────────────────────────┐
-  │  gemma2:9b — generation        nomic-embed-text:v1.5 — embeddings 768d │
-  └───────────────────────────────────────────────────────────────────────┘
+                  ▲ HTTP localhost:11434           ▲ HTTPS (external, key-gated)
+  ┌─ Local Ollama ─────────────────┐  ┌─ Web Search APIs ────────────────┐
+  │  gemma2:9b · nomic-embed-text  │  │  Google CSE · Brave · Tavily     │
+  └────────────────────────────────┘  └──────────────────────────────────┘
 ```
 
 ## Legend — what each component is, owns, and talks to
 
 | Component | What it is | What it owns | Talks to |
 |---|---|---|---|
-| `chat.tsx` | OpenTUI, the only interface | screen state (turns, busy) | `session.ask()` |
-| `session.ts` | the orchestrator buffr owns | the warm pool, the one conversation id, the wiring | aptkit agent, both adapters, memory |
-| `RagQueryAgent` (aptkit) | the agent loop | the per-turn reasoning, tool dispatch | model, tools, trace |
+| `chat.tsx` | OpenTUI, the only interface | screen state (turns, busy, liveTokens); Spinner with elapsed + token count | `session.ask(q, {onStatus, onTokens, onComplete})` |
+| `session.ts` | the orchestrator buffr owns | warm pool, conversation id, tool wiring, mutable-trace slots, `TOOL_LABELS` | aptkit agent, adapters, connectors, memory |
+| `RagQueryAgent` (aptkit) | the agent loop | per-turn reasoning, tool dispatch | model, tools (6), trace |
 | `GemmaModelProvider` (aptkit) | the model port impl | Ollama wire format mapping | Ollama `/api/chat` |
-| `PgVectorStore` (buffr) | the **adapter** behind the `VectorStore` **port** | the SQL for upsert + cosine search | `agents.chunks` |
-| `SupabaseTraceSink` (buffr) | the **adapter** behind the `CapabilityTraceSink` **port** | turning events into rows | `agents.messages` |
-| `createConversationMemory` (aptkit) | the episodic-memory engine | embed/tag/recall logic | injected `PgVectorStore` |
-| Postgres `agents` schema | the only durable store | all corpus, chunks, trajectories, profiles | `pg` driver |
-| Ollama | the local model server | weights + inference | hit over HTTP |
+| `PgVectorStore` (buffr) | **adapter** behind `VectorStore` **port** | SQL for upsert + cosine search; `minScore` filter | `agents.chunks` |
+| `SupabaseTraceSink` (buffr) | **adapter** behind `CapabilityTraceSink` **port** | turning events into rows | `agents.messages` |
+| mutable-trace slots (session.ts) | per-ask callback injection | `currentOnStatus`, `currentOnTokens`; fires live TUI updates | `trace.emit()`, `<Spinner>` |
+| Connector tools (buffr) | `DataConnector<P,D>` adapters | RSS fetch, Amazon reviews, Google/Brave/Tavily search | external HTTP APIs |
+| `createConversationMemory` (aptkit) | episodic-memory engine | embed/tag/recall logic | injected `PgVectorStore` |
+| Postgres `agents` schema | the only durable store | corpus, chunks, trajectories, profiles | `pg` driver |
+| Ollama | local model server | weights + inference | HTTP localhost:11434 |
+| Google CSE / Brave / Tavily | web search APIs (key-gated) | live web index | HTTPS, free-tier quota |
 
 ## The three flows worth knowing (full walks in `audit.md` lens 2)
 
@@ -78,9 +84,17 @@ on the diagram.
   1. INDEX   index-cmd → indexDocumentRow → documents row + pipeline.index
              → embed chunks → PgVectorStore.upsert → agents.chunks
 
-  2. ASK     chat.tsx → session.ask → persist user msg
-             → agent.answer (loop: model → search_knowledge_base tool → model)
-             → trace.flush (all events → agents.messages) → memory.remember
+  2. ASK     chat.tsx → session.ask(q, {onStatus, onTokens, onComplete})
+             → set mutable slots → persist user msg
+             → agent.answer (loop:
+                 model → search_knowledge_base (minScore:0.65)
+                      → onStatus("searching knowledge base")
+                 model → web_search_google/brave/tavily OR fetch_rss_feed
+                      → onStatus("searching Google" / etc.)
+                      → onTokens({input, output}) on model_usage events
+                 model → final synthesised answer)
+             → clear slots → trace.flush (all events → agents.messages)
+             → onComplete(TurnStats) → memory.remember
 
   3. EVAL    eval-cmd → pipeline.query per labeled question
              → scorePrecisionAtK / scoreRecallAtK → print the numbers

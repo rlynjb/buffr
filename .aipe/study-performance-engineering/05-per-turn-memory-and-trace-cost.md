@@ -73,10 +73,14 @@ You know how a single user action in an event-sourced system writes one row to t
 **The turn sequence.** `src/session.ts:60-71` is the whole fan-out:
 
 ```ts
-async ask(question: string): Promise<string> {
+async ask(question: string, opts?: AskOptions): Promise<string> {
+  const t0 = Date.now();
+  currentOnTokens = opts?.onTokens;         // ← slot set (tokens accumulate below)
   await persistMessage(pool, conversationId, 'user', question);  // write 1
   const answer = await agent.answer(question);                   // the BIG cost
   await trace.flush();                                           // writes 2..7
+  opts?.onComplete?.({ durationMs: Date.now()-t0,               // ← TurnStats fired
+    inputTokens: currentInputTokens, outputTokens: currentOutputTokens });
   try {
     await memory.remember({ conversationId, question, answer }); // embed + write 8
   } catch { /* best-effort: don't lose the answer */ }
@@ -99,7 +103,9 @@ switch (event.type) {
 
 Named by what breaks if removed:
 - **the queue-then-flush split** (`push` at `:87`, `Promise.all` at `:92`) — without it, every event would block the agent run serially on a DB write. With it, the writes *overlap* the run and resolve together at the end. This is the part that keeps the fan-out off the critical path — the writes race the pool rather than stalling generation. Load-bearing, and a good choice.
-- **`durationMs` (`:69`) and `tokensUsed` (`:76`)** — these are the *measurement* payload. They're captured here and, per the audit, never read back. The capture is right; the loop that aggregates them is the missing piece (audit lens 2). This is where the highest-leverage fix lives.
+- **`durationMs` (`:69`) and `tokensUsed` (`:76`)** — these are the *measurement* payload. They're captured here and, per the audit, never read back by aggregation. The capture is right; the loop that aggregates them is the missing piece (audit lens 2). This is where the highest-leverage fix lives.
+
+**The live token counter (added with the TUI refresh).** `model_usage` events now also fire the `currentOnTokens` callback (mutable-slot side channel — `session.ts:120-138`), which the TUI accumulates in `liveTokens` state during the turn. At the end of `ask()`, `opts?.onComplete` fires with `TurnStats { durationMs, inputTokens, outputTokens }` — the same per-turn numbers that live in `model_usage` rows, but available in-memory without a DB query. This is the in-memory counterpart to the trace fan-out: same measurement, two delivery paths (live callback + durable row). Neither is redundant — the callback is for the current-turn display; the row is for replay and historical aggregation.
 
 **The memory cost — the only extra model call.** `memory.remember` (`src/session.ts:66`) embeds the question+answer into the *same* vector store tagged `kind=memory`, so future turns resurface it via the existing search tool. The performance fact: this is a *second* embedding roundtrip to Ollama on every turn, on top of the query embed inside `answer()`. It's wrapped in try/catch (`:65-69`) so a memory failure never loses the user's answer — best-effort, correct.
 

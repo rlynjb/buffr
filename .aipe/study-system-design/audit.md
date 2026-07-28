@@ -43,8 +43,7 @@ Three trust/ownership bands, and the load-bearing boundary sits in the middle.
 - **Secrets boundary:** `DATABASE_URL` / Ollama host come from `.env` via `dotenv` (`session.ts:35`,
   `config.ts:9-16`); `.env` is gitignored. No secret is in code.
 
-**External dependencies:** Postgres `reindb` (over `pg`), Ollama at `localhost:11434` (two
-models). Both are local/self-hosted — there is no third-party cloud API in the hot path.
+**External dependencies:** Postgres `reindb` (over `pg`), Ollama at `localhost:11434` (two models). Three optional cloud APIs — Google Custom Search (`GOOGLE_API_KEY`+`GOOGLE_CX`), Brave (`BRAVE_API_KEY`), Tavily (`TAVILY_API_KEY`) — activate when their env keys are present (`src/session.ts:76-84`). These are the first third-party cloud APIs in the hot path; they carry quota and failure modes Ollama/Postgres do not.
 
 ---
 
@@ -182,12 +181,7 @@ reliability mechanism.
 renders it as a buffr turn rather than crashing the TUI. The session stays alive for the next
 question.
 
-**`not yet exercised`:** retries, timeouts, and backoff against Ollama or Postgres. There is no
-retry on a failed embed, no timeout on `agent.answer`, no circuit breaker. The `pg.Pool`
-(`db.ts:4-6`) gives connection reuse but no configured statement timeout. For a single local user
-this is acceptable; the moment Ollama is remote or Postgres is Supabase-cloud, timeouts become the
-first gap. Coordination mechanics (partial failure across services) → cross-link
-`study-distributed-systems` — but honestly, this repo has no cross-service coordination to fail.
+**`not yet exercised`:** retries, timeouts, and backoff against Ollama, Postgres, or web APIs. No retry on a failed embed, no timeout on `agent.answer`, no circuit breaker. The `pg.Pool` gives connection reuse but no configured statement timeout. The three web search APIs have no retry or fallback — a Google 429 (quota exhausted, hit during development) surfaces to Gemma as a tool error, which it may or may not handle gracefully. No automatic fallback from Google → Brave → Tavily when one is rate-limited. Coordination mechanics → cross-link `study-distributed-systems`.
 
 ---
 
@@ -230,9 +224,7 @@ Ranked by architectural risk, each grounded in evidence. The honest framing: mos
    writes (`...graduation-design.md:193-195`). The risk is forgetting it's convention-only when
    the second writer arrives.
 
-2. **No timeouts on external calls (medium).** Neither Ollama nor pg calls have a timeout
-   (`session.ts`, `db.ts:4-6`). A hung Ollama hangs the turn with no upper bound. Lowest-effort,
-   highest-value hardening when the model server goes remote.
+2. **No timeouts on external calls (medium, now higher risk).** Neither Ollama, pg, nor any of the three web search APIs have a timeout. A hung Ollama hangs the turn indefinitely; a slow Google CSE request does the same. Web search APIs also have no retry/fallback: a 429 from Google (daily quota exhausted — happened in development) propagates as a tool error; Gemma decides what to do with that unguided.
 
 3. **Best-effort memory hides failures silently (low, accepted).** `session.ts:67-68` swallows
    the error with no log. The right call for not losing the answer, but a silent catch means a
@@ -249,7 +241,4 @@ Ranked by architectural risk, each grounded in evidence. The honest framing: mos
    function (`session.ts:34-58`). Fine at this size; the place that grows complex first if the body
    expands. Not a problem yet — flagged so it's watched.
 
-**`not yet exercised` (named so the audit is honest, not padded):** caching/invalidation, retries
-and timeouts, horizontal scale, multi-region, an API gateway, enforced RLS, queue/streaming
-infrastructure, fine-tuning. Each is deferred *on purpose* in the design specs, not absent by
-oversight.
+**`not yet exercised` (named so the audit is honest, not padded):** caching/invalidation, retries and timeouts (including for web APIs), horizontal scale, multi-region, an API gateway, enforced RLS, queue/streaming infrastructure, fine-tuning, web-search result caching, API cost tracking across Google/Brave/Tavily. Each is deferred on purpose, not absent by oversight.

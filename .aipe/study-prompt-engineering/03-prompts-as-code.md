@@ -65,6 +65,22 @@ Treat the prompt the way you treat a function: source-controlled, reviewed, depl
 
 **The profile is the prompt-shaped source buffr DOES own.** Profile rows in `agents.profiles` (read by `loadProfile`, `src/profile.ts:4`) carry `updated_at`, and `loadProfile` takes the most recent. That's a crude version history — you can see *when* the personalization text last changed, though not diff two versions in a PR.
 
+**The routing prompt — new, and owned by buffr.** `session.ts:142-182` now builds an inline routing system prompt that IS directly in buffr's code. It includes: a tool description block listing all active tools (search_knowledge_base, RSS feeds, Amazon reviews, and any web search connectors present) and 7 explicit tool-usage rules:
+
+```
+1. ALWAYS call search_knowledge_base first for any question.
+2. ALWAYS also call <primaryWebSearch> for any question about: companies,
+   people, products, news, current events. (rule conditional: fires only
+   if a web search connector is configured)
+3. For product reviews, call fetch_amazon_reviews.
+4. Synthesize ALL tool results into one answer. Do not stop after just one tool.
+5. Cite sources when available.
+6. If the knowledge base returns zero relevant results, say so clearly.
+7. NEVER fabricate information. Only use what the tools returned.
+```
+
+This routing prompt is version-controlled in buffr's own source — a PR diff shows exactly which rules changed. It's the first prompt buffr owns directly (not inherited from aptkit). The conditional logic in rule 2 (`primaryWebSearch ? ... : ...`) is code branching on configuration, making the final prompt dynamic based on which API keys are present.
+
 **Observability is real, at the trajectory level.** Every turn persists its full signal through `SupabaseTraceSink` into `agents.messages` — all six `CapabilityEvent` types (step, tool_call_start/end, model_usage, warning, error), with `model` and `tokens_used` populated and `created_at` from the event timestamp for deterministic replay (`context.md`, `src/supabase-trace-sink.ts`).
 
 ```js
@@ -101,11 +117,13 @@ A prompt is a behavior contract; version it like one. The prompt+model-version p
   PROMPT SOURCE                         PRODUCTION TRAJECTORY
   ┌─ BASE_SYSTEM (aptkit ^0.4.1) ─┐     ┌─ agents.messages ──────────┐
   │  reviewed via dependency bump  │     │  step · tool_call · usage  │
-  ├─ profile rows (agents.profiles)│ ──► │  model · tokens_used       │
-  │  updated_at = crude history    │     │  ✗ no prompt_version stamp │
-  └────────────────────────────────┘     └────────────────────────────┘
-       diffable: partial                      observable: trajectory yes,
-                                              prompt-version no
+  ├─ routing prompt (session.ts) ──┤ ──► │  model · tokens_used       │
+  │  7 rules, PR-diffable, code    │     │  ✗ no prompt_version stamp │
+  ├─ profile rows (agents.profiles)│     └────────────────────────────┘
+  │  updated_at = crude history    │          observable: trajectory yes,
+  └────────────────────────────────┘          prompt-version no
+       diffable: partial (routing prompt
+       now fully in PR history)
 ```
 
 ## Elaborate

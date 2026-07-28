@@ -15,14 +15,7 @@ design (see `03`).
 
 ## 1. Distributed system map — nodes, boundaries, messages, ownership, failure domains
 
-**Present, but minimal.** Nodes: one Node process (the client), one Postgres
-(`reindb`/`agents`), one Ollama box. Boundaries: `client → Postgres` over a
-pool (`src/db.ts:4`) and `client → Ollama` over HTTP (owned by aptkit; buffr
-passes `cfg.ollamaHost` at `src/session.ts:40,46`). Ownership: the single
-process owns all control flow and all decisions; the remotes only answer.
-Failure domains: three independent processes, but no fan-out — a request
-touches Ollama *and* Postgres sequentially within one `ask()`
-(`src/session.ts:60-71`), never two replicas of the same thing.
+**Present, and now expanded.** Nodes: one Node process (the client), one Postgres (`reindb`/`agents`), one Ollama box, and up to three cloud web APIs (Brave Search, Tavily, Google Custom Search — active when their API keys are present in `.env`). Boundaries: `client → Postgres` over a pool (`src/db.ts:4`), `client → Ollama` over HTTP (aptkit-owned; buffr passes `cfg.ollamaHost`), and `client → web API` over HTTPS (`session.ts:76-107`, `DataConnector.fetch()`). Ownership: the single process owns all control flow; the remotes only answer. Failure domains: now five independent processes/services. A request may sequentially touch Postgres (INSERT), Ollama (embed), Postgres (SELECT), Ollama (generate), web API (search), and Postgres again (trace flush) — all within one `ask()`. No two remotes are touched in parallel (sequential waterfall), so failure domains are independent but the failure *surface* is larger than it was.
 
 → The full map and the ranked findings live in `00-overview.md`. The only
 boundary deep enough to warrant its own walk is `client → Postgres` →
@@ -38,9 +31,7 @@ boundary deep enough to warrant its own walk is `client → Postgres` →
   than a buffr-imposed deadline. There is **no timeout the repo controls** on
   the database path.
 - **Nothing retries.** `ask()` calls `persistMessage` → `agent.answer` →
-  `trace.flush` straight through (`src/session.ts:61-64`); a thrown error
-  propagates to the CLI. There is no backoff, no jitter, no retry budget,
-  because there's no retry at all.
+  `trace.flush` straight through; a thrown error propagates to the CLI. There is no backoff, no jitter, no retry budget. Web search connectors are the same — a Google 429 (quota exhausted, hit during development) propagates as a tool error to Gemma with no retry or fallback to another connector.
 - The one explicit failure-classification choice: the memory write is wrapped
   `try/catch` and swallowed (`src/session.ts:65-69`) — a memory-write failure
   must not lose the answer the user already has. That's a deliberate

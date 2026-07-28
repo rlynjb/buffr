@@ -78,17 +78,23 @@ The strategy in one sentence: **the component depends on a narrow contract, not 
 
 ### Move 2 — the walkthrough
 
-#### The contract — two async methods, nothing else
+#### The contract — two async methods, with optional live-feedback callbacks
 
 ```ts
-// src/session.ts:29–32
+// src/session.ts:37-42
+export type TurnStats = { durationMs: number; inputTokens: number; outputTokens: number };
+export type AskOptions = {
+  onStatus?: (msg: string) => void;
+  onTokens?: (delta: { input: number; output: number }) => void;
+  onComplete?: (stats: TurnStats) => void;
+};
 export type ChatSession = {
-  ask(question: string): Promise<string>;
+  ask(question: string, opts?: AskOptions): Promise<string>;
   close(): Promise<void>;
 };
 ```
 
-This type *is* the seam. Bridge from what you know: it's the prop interface of a presentational component — the only surface the view is allowed to touch. Everything the data layer does (persist, retrieve, generate, trace, remember) collapses into `ask(): Promise<string>`. The view can't reach a pg client through this type even if it tried; the contract physically hides it.
+This type *is* the seam. The view's job is to call `session.ask(q, opts)` with its three callbacks and render whatever comes back. Everything the data layer does (set trace slots, persist, retrieve, generate, trace, remember) collapses into `ask(): Promise<string>` — the callbacks are the live-feedback channel out. The view can't reach a pg client through this type; the contract physically hides it. The `opts` are optional: the session works the same if you omit them (they just won't fire). That optionality is what lets the same `ChatSession` work for the interactive TUI *and* the one-shot `ask` CLI.
 
 #### The container — wired once, off the render path
 
@@ -124,14 +130,23 @@ render(<Chat session={session} />);          // inject it
 
 This is dependency injection, plain and direct: build the data layer outside the component, pass it in. Bridge: it's the same move as passing an `onSubmit` handler or a data prop down to a dumb child — the child declares what it needs (`{ session }`) and the parent supplies it. Because injection happens at the root, swapping the real `ChatSession` for a fake one in a test is a one-line substitution — the component never constructs its own dependency, so there's nothing to mock around.
 
-#### The one call site
+#### The one call site — with live feedback wired in
 
 ```tsx
-// src/cli/chat.tsx:28
-const answer = await session.ask(q);
+// src/cli/chat.tsx:69-73
+session.ask(q, {
+  onStatus: (msg) => setStatus(msg),           // "searching Google", "fetching RSS…"
+  onTokens: (d) => setLiveTokens(t => ({
+    input: t.input + d.input, output: t.output + d.output
+  })),
+  onComplete: (s) => { capturedStats = s; },   // durationMs + final token counts
+}).then(
+  answer => { setTurns(…); setBusy(false); },
+  err    => { setTurns(…); setBusy(false); },
+);
 ```
 
-That single line is every interaction the UI has with the entire backend. Persist, retrieve-augmented generation, trace flush, memory write — all of it is behind those eleven characters. The view's job ends at "await the string, render it."
+The UI has exactly one touch point to the backend, but now that touch point carries three callbacks as an options bag. The pattern: the contract's core is still `ask(): Promise<string>` — the view awaits a string. The callbacks are side-channel signals pushed *during* the await, not part of the resolved value. `onStatus` updates the spinner label as tools fire; `onTokens` accumulates the live token counter; `onComplete` captures final stats for the per-turn footer after `setBusy(false)`.
 
 ### Move 2 variant — the load-bearing skeleton
 

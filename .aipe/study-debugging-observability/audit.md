@@ -17,11 +17,17 @@ The evidence map — what can be observed at each boundary.
   ───────────────────────────  ──────────────────────────────  ─────────────
   CLI → user (index/eval)      process.stdout.write text       no level/field
   chat UI → user               OpenTUI render + caught error       not persisted
+  chat UI → spinner (live)     onStatus (tool name) · elapsed  —
+                               timer · onTokens (per model call)
   session → agent              trace.emit() per event          —
+  mutable-slot → TUI           currentOnStatus / currentOnTokens swapped per ask
   sink → agents.messages       one INSERT per CapabilityEvent  same-ms tie
   agent → Ollama (model)       model_usage tokens (in trace)   no span/latency
+  agent → web APIs             onStatus fires; result in trace  no latency span
   pipeline → Postgres (pg)     none (pool errors uncaught)     no query log
 ```
+
+The new signal path — **mutable-trace-slot → TUI** — is the live feedback channel added alongside the durable sink. Each `ask()` sets `currentOnStatus`/`currentOnTokens` in `session.ts:120-138`; the intercepting `trace.emit()` fires these before forwarding to `SupabaseTraceSink`. So tool activity is observable in two independent places: in real-time on the spinner, and durably in `agents.messages`.
 
 The strong boundary is **session → sink → storage**: the trace / structured event stream (`CapabilityEvent` → `agents.messages`) gives one observable row per agent event. `src/session.ts:62-63` runs `agent.answer()` then `trace.flush()`; `src/supabase-trace-sink.ts:53` is where every event becomes a row.
 

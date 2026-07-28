@@ -15,11 +15,17 @@ buffr's AI features — what's wired
 │ Corpus indexing        │ chunk → embed → upsert  │ one job: make notes      │
 │ (npm run index)        │ (the RAG index path)    │ searchable by meaning    │
 ├────────────────────────┼─────────────────────────┼──────────────────────────┤
-│ Grounded chat answer   │ bounded tool-calling    │ answer ONLY from your    │
-│ (the chat TUI)         │ agent + RAG             │ notes, cite sources      │
+│ Grounded chat answer   │ bounded tool-calling    │ KB + web + RSS + reviews │
+│ (the chat TUI)         │ agent + 6 tools         │ — synthesise all sources │
 ├────────────────────────┼─────────────────────────┼──────────────────────────┤
-│ Knowledge-base search  │ embed → HNSW ANN → rank │ semantic recall, not     │
-│ (search_knowledge_base)│ (dense retrieval)       │ keyword match            │
+│ KB search w/ threshold │ embed → HNSW ANN →      │ semantic recall + score  │
+│ (search_knowledge_base)│ minScore 0.65 filter    │ guard vs. topic drift    │
+├────────────────────────┼─────────────────────────┼──────────────────────────┤
+│ Web search             │ connector fan-out        │ live facts outside the   │
+│ (Google/Brave/Tavily)  │ (DataConnector<P,D>)    │ personal knowledge base  │
+├────────────────────────┼─────────────────────────┼──────────────────────────┤
+│ Live RSS feed          │ connector: fetch+parse  │ current AI/tech articles │
+│ (fetch_rss_feed)       │ (RssConnector)          │ on demand, per question  │
 ├────────────────────────┼─────────────────────────┼──────────────────────────┤
 │ Episodic memory        │ retrieval-based memory  │ past exchanges resurface │
 │ (createConversation-   │ over conversation       │ via the same search tool │
@@ -31,12 +37,13 @@ buffr's AI features — what's wired
 │ Retrieval eval         │ precision@k / recall@k  │ measure retrieval before │
 │ (npm run eval)         │ on a golden set         │ trusting answers         │
 ├────────────────────────┼─────────────────────────┼──────────────────────────┤
-│ Trajectory capture     │ full-signal trace sink  │ every step replayable;   │
-│ (SupabaseTraceSink)    │ → agents.messages       │ tokens captured          │
+│ Trajectory capture +   │ full-signal trace sink  │ every step replayable;   │
+│ live TUI callbacks     │ + per-ask onStatus/     │ real-time status + token │
+│ (SupabaseTraceSink)    │   onTokens/onComplete   │ count shown live in chat │
 └────────────────────────┴─────────────────────────┴──────────────────────────┘
 ```
 
-Two models do all the work, both served locally by Ollama: `gemma2:9b` (generation) and `nomic-embed-text:v1.5` (768-dim embeddings). No cloud provider, no API key, no per-call dollar cost.
+Two local models via Ollama: `gemma2:9b` (generation) and `nomic-embed-text:v1.5` (768-dim embeddings). Three optional cloud search APIs (Google Custom Search, Brave, Tavily) are activated by their respective env keys — when present they carry a per-call API cost but stay within free-tier limits (Google: 100 req/day, Tavily: 1k/month, Brave: 2k/month).
 
 ## Feature specs
 
@@ -50,24 +57,25 @@ Two models do all the work, both served locally by Ollama: `gemma2:9b` (generati
 - **Failure modes observed / latent:** dimension mismatch throws loudly (`assertDim`, `assertWiring`, SQL `vector(768)`) — the 768 one-way door. Re-indexing is manual; an edited doc carries stale embeddings until you re-run `npm run index` (no `embedding_stale_at` tracking). Deleted source files leave orphan chunks (no delete handling). See `03-retrieval-and-rag/09-stale-embeddings.md` and `10-incremental-indexing.md`.
 - **Eval set:** indirectly — retrieval quality over the indexed corpus is measured by `eval/queries.json`.
 
-### 2. Grounded chat answer — the bounded agent + RAG
+### 2. Grounded chat answer — the bounded agent + 6 tools
 
 - **Inputs:** a natural-language question from the OpenTUI chat TUI (`src/cli/chat.tsx` → `session.ask(question)`).
-- **Outputs:** a grounded answer string, citing retrieved chunks, or the fallback ("I couldn't find anything in the knowledge base to answer that.").
+- **Outputs:** a grounded answer string synthesising KB chunks, web search results, and RSS articles; or the fallback ("I couldn't find anything in the knowledge base to answer that.").
 - **Model and provider:** `gemma2:9b` via `GemmaModelProvider`, wrapped by `ContextWindowGuardedProvider({maxTokens:8192})`.
-- **Mechanism:** `RagQueryAgent.answer` runs the agent loop (`runAgentLoop`): the system prompt forces a `search_knowledge_base` call first, the loop gathers chunks (`maxToolCalls:4`, `maxTurns:6`), then a forced synthesis turn strips the tools and demands a final grounded answer (`buildSynthesisInstruction`). Least-privilege: the agent may call only `search_knowledge_base`.
-- **Approximate token / compute cost per call:** input = system prompt + injected me.md profile + rendered tool schema (gemma has no native tools, so the schema lives in the system *text* — not free) + question + retrieved chunks; output = the answer. Token counts are captured per call (see feature 7). No dollar cost (local).
-- **Failure modes observed / latent:** the headline one — gemma's tool-calling is **emulated** (JSON parsed from prose) with **no argument-schema validation**. A wrong key (`{"q":...}` for `{"query":...}`) is accepted and the search runs on an empty string, returning noise the model then answers confidently. One retry nudge, then it falls through to prose. See `04-agents-and-tool-use/02-tool-calling.md`. No groundedness/faithfulness check verifies the answer actually used the chunks (see feature 6).
-- **Eval set:** retrieval is covered by `eval/queries.json`; the generation step is **not** evaluated (faithfulness is unwired).
+- **Tools available (session.ts:86-103):** `search_knowledge_base` (always), `fetch_rss_feed` (always), `fetch_amazon_reviews` (always), `web_search_google` / `web_search_brave` / `web_search_tavily` (each conditional on API key presence; trends tool disabled — scrapes unofficial endpoint Google blocks). The routing prompt mandates calling KB search first *and* the first available web-search tool for any question about companies, people, products, or news — regardless of what KB returned.
+- **Mechanism:** `RagQueryAgent.answer` runs the agent loop (`runAgentLoop`): tool calls dispatched by Gemma in emulated JSON, up to `maxToolCalls:4`, `maxTurns:6`, then forced synthesis. Status of each tool call is forwarded live to the TUI via `currentOnStatus` (the mutable-trace-slot pattern — see feature 9).
+- **Approximate token / compute cost per call:** input = system prompt + injected profile + rendered tool schemas for all enabled tools (Gemma has no native tools; schemas in system text — grows with each new tool) + question + all tool results; output = the synthesised answer. Token counts (input + output) accumulated live via `currentInputTokens`/`currentOutputTokens` and forwarded to `onTokens` callback; captured in `TurnStats.onComplete`. No dollar cost for local inference; web-search APIs carry free-tier per-call cost.
+- **Failure modes observed / latent:** Gemma's tool calling is **emulated** (JSON parsed from prose), no argument-schema validation. Wrong key accepted, search on empty string, model answers the noise confidently. Google Custom Search returned 429 (quota exhausted) when the daily 100-query free limit was hit during setup. No groundedness/faithfulness check. See `04-agents-and-tool-use/02-tool-calling.md`.
+- **Eval set:** retrieval covered by `eval/queries.json`; generation and multi-tool synthesis are **not** evaluated (faithfulness unwired).
 
-### 3. Knowledge-base search — dense retrieval
+### 3. Knowledge-base search — dense retrieval with score threshold
 
 - **Inputs:** `{ query, top_k?, filter? }` from the agent's tool call.
-- **Outputs:** `{ query, results: [{ id, score, citation: "[docId] snippet", meta }] }`.
+- **Outputs:** `{ query, results: [{ id, score, citation: "[docId] snippet", meta }] }` — filtered to `score >= 0.65`.
 - **Model and provider:** `nomic-embed-text:v1.5` (query embedding) + Postgres/pgvector HNSW cosine search.
-- **Mechanism:** `createSearchKnowledgeBaseTool(pipeline, {minTopK:4})` → `pipeline.query` → `PgVectorStore.search`: `1 - (embedding <=> $1::vector) as score`, `order by embedding <=> $1::vector limit $3`, scoped `where app_id = $2`. A `filter` over-fetches `topK*4` then post-filters; a hallucinated filter key can't wipe results (`matchesFilter` only excludes hits that *have* the key with a different value).
+- **Mechanism:** `createSearchKnowledgeBaseTool(pipeline, {minTopK:4, minScore:0.65})` (`src/session.ts:72`) → `pipeline.query` → `PgVectorStore.search`: `1 - (embedding <=> $1::vector) as score`, `order by embedding <=> $1::vector limit $3`, scoped `where app_id = $2`. The `minScore:0.65` threshold (`packages/kernel/src/retrieval/search-tool.ts`) then filters out any hit with a cosine similarity below 0.65 *before* returning to Gemma — preventing topic-drift answers like word-match false positives (e.g. "health" in nutrition chunks matching "guardoc health" questions). A `filter` over-fetches `topK*4` then post-filters; a hallucinated filter key can't wipe results.
 - **Cost:** one query embedding + one ANN search per tool call. Local, cheap.
-- **Failure modes:** pure dense retrieval — exact terms, rare identifiers, and code tokens that don't embed well are missed (no BM25/hybrid, see `03-retrieval-and-rag/05-dense-vs-sparse.md`). Single-stage ANN, no reranking, so the best chunk isn't reliably ordered first (lost-in-the-middle risk, see `02-context-and-prompts/02-lost-in-the-middle.md`).
+- **Failure modes:** pure dense retrieval — exact terms, rare identifiers, and code tokens that don't embed well are missed (no BM25/hybrid, see `03-retrieval-and-rag/05-dense-vs-sparse.md`). Single-stage ANN, no reranking. The `minScore` threshold is a blunt instrument — too high and relevant-but-loosely-worded chunks are discarded; 0.65 was chosen empirically. If KB returns zero hits above threshold, the routing prompt rules push Gemma to web search instead.
 - **Eval set:** `eval/queries.json` (3 labeled queries).
 
 ### 4. Episodic memory — RAG over conversation history
@@ -96,24 +104,27 @@ Two models do all the work, both served locally by Ollama: `gemma2:9b` (generati
 - **Mechanism:** `src/cli/eval-cmd.ts` runs `pipeline.query(query, 3)`, dedupes docIds, scores with aptkit's `scorePrecisionAtK` / `scoreRecallAtK` (distinct-hit counting; not-well-formed guard when nothing retrieved).
 - **Failure modes / honest gaps:** measures **retrieval** identity only. No **faithfulness** eval — the `RubricJudge` exists in aptkit but is **unwired** in buffr, so nobody checks whether the generated answer stays grounded in the retrieved chunks. No adversarial set, no regression set. See `05-evals-and-observability/`.
 
-### 7. Trajectory capture — full-signal observability
+### 7. Trajectory capture + live TUI callbacks — full-signal + real-time
 
 - **Inputs:** every `CapabilityEvent` the agent emits (step, tool_call_start, tool_call_end, model_usage, warning, error).
-- **Outputs:** rows in `agents.messages` — assistant text, tool args (the cause), tool results + `durationMs` (spans), `model='provider/model'`, `tokens_used = input + output`, `created_at = event.timestamp` (deterministic replay order).
-- **Mechanism:** `SupabaseTraceSink` (`src/supabase-trace-sink.ts`) — `emit()` is sync (aptkit's contract), queues writes, awaited via `flush()` after each turn.
-- **Failure modes / honest gaps:** capture is replay-*ready* (timestamps preserved) but aptkit's replay runner is **unwired**; no dashboard; `tokens_used` is a lossy `input + output` sum, and there's no dollar conversion (Ollama is free). See `05-evals-and-observability/04-llm-observability.md`.
+- **Outputs (durable):** rows in `agents.messages` — assistant text, tool args, tool results + `durationMs`, `model`, `tokens_used = input + output`, `created_at` (deterministic replay order).
+- **Outputs (live):** `onStatus(msg)` fired on every `tool_call_start` event (displays human-readable label like "searching Google" in the TUI spinner); `onTokens({input, output})` fired on every `model_usage` event (accumulates live in `liveTokens` state); `onComplete(TurnStats)` called after `agent.answer()` returns with total `durationMs`, `inputTokens`, `outputTokens`.
+- **Mechanism:** `SupabaseTraceSink` (`src/supabase-trace-sink.ts`) handles durable writes. Wrapped by a **mutable-trace-slot** in `session.ts:120-138`: before each `ask()`, `currentOnStatus` and `currentOnTokens` slots are set to the caller's callbacks; `trace.emit()` fires both the slot (live TUI) and the sink (Postgres); slots are cleared after the agent returns. The `TOOL_LABELS` map (`session.ts:44-52`) translates tool names → human strings. Real-time elapsed time is tracked in `<Spinner>` via `useRef(Date.now())` (`src/cli/chat.tsx:26-36`), independent of the callback path.
+- **Failure modes / honest gaps:** capture is replay-*ready* but aptkit's replay runner is **unwired**; no dashboard; `tokens_used` is a lossy sum — no dollar conversion for cloud APIs yet (web-search API costs are untracked). The mutable slots are **not thread-safe**: a hypothetical second concurrent `ask()` call would overwrite them. Single-user single-call assumption makes this safe today. See `05-evals-and-observability/04-llm-observability.md`.
 
 ## What's captured but not yet exercised
 
 The honest ledger — these are the strongest project-exercise targets:
 
 - **Fine-tuning.** The captured trajectories in `agents.messages` are a fine-tuning corpus. No FT runs. This is the ceiling (`08-machine-learning/07-transfer-learning.md`).
-- **Faithfulness eval.** `RubricJudge` is built in aptkit, never wired in buffr.
-- **Reranking, hybrid/keyword search, query rewriting/HyDE, GraphRAG.** None present — pure single-stage dense retrieval over the raw question.
-- **Streaming.** `stream: false`; the chat shows a spinner, not tokens.
-- **Caching.** No prompt, semantic, or exact-match cache.
+- **Faithfulness eval.** `RubricJudge` is built in aptkit, never wired in buffr. The multi-tool synthesised answer is also not evaluated.
+- **Reranking, hybrid/keyword search, query rewriting/HyDE, GraphRAG.** None present — pure single-stage dense retrieval over the raw question, post-filtered by `minScore:0.65`.
+- **Web search eval.** The three web search connectors are functional but not evaluated — no golden set, no latency baseline, no accuracy measurement.
+- **Streaming.** `stream: false`; the chat shows a spinner + live token count, not streaming tokens.
+- **Caching.** No prompt, semantic, or exact-match cache. Web search results are not cached either.
 - **Chunking-strategy tuning.** Fixed 512-char windows, never tuned against the eval set.
 - **Heuristic-before-LLM, model routing.** The agent always calls the LLM; one model.
+- **Web-search retry / quota handling.** Google 429 (quota exhausted) is visible to the agent as a tool error; no retry, no fallback to the next provider.
 
 ## See also
 

@@ -16,13 +16,15 @@ architecture.
   ┌─ Process layer ─────────────────────────────────────────────┐
   │  one Node ESM process (npm run chat)                         │
   │  OpenTUI ── session.ask() ── RagQueryAgent                   │
-  └───────┬──────────────────────────────────┬──────────────────┘
-          │ ★ NETWORK BOUNDARY 1 ★            │ ★ NETWORK BOUNDARY 2 ★
-          │ pg-wire / TCP / :5432             │ HTTP / TCP / :11434
-          ▼                                   ▼
-  ┌─ Storage layer ─────────┐         ┌─ Provider layer ─────────┐
-  │  Postgres + pgvector    │         │  Ollama (local models)   │
-  └─────────────────────────┘         └──────────────────────────┘
+  └───────┬──────────────────┬──────────────────────────────────┘
+          │ ★ BOUNDARY 1 ★   │ ★ BOUNDARY 2 ★   ★ BOUNDARY 3 ★
+          │ pg-wire/:5432    │ HTTP/:11434      HTTPS/internet
+          ▼                  ▼                      ▼
+  ┌─ Storage ────────┐ ┌─ Provider ────────┐ ┌─ Cloud APIs ────────┐
+  │ Postgres+pgvector│ │ Ollama (gemma2)   │ │ Brave / Tavily /    │
+  └──────────────────┘ └───────────────────┘ │ Google Custom Search│
+                                              └─────────────────────┘
+                                              (optional; key-present activates)
 ```
 
 Zoom in: a "network map" is just the answer to *which sockets open, in which
@@ -76,17 +78,17 @@ once to a model server (over HTTP). The "map" is just both calls drawn at once,
 with the in-process orchestration that fires them in the middle.
 
 ```
-  Pattern — one process, two outbound clients (a "client tee")
+  Pattern — one process, three outbound clients (a "client tee")
 
                     ┌──────────────────┐
         question ──►│  session.ask()   │
-                    └───┬──────────┬────┘
-            pg-wire     │          │     HTTP
-        ┌───────────────┘          └───────────────┐
-        ▼                                           ▼
-   [ Postgres ]                               [ Ollama ]
-   retrieval rows, trace writes,         generation + embedding
-   profile, memory                       (chat + embed endpoints)
+                    └───┬──────────┬────────────────┐
+            pg-wire     │          │     HTTP        │ HTTPS
+        ┌───────────────┘          └──────────┐      └──────────────────┐
+        ▼                                      ▼                         ▼
+   [ Postgres ]                          [ Ollama ]              [ Brave/Tavily/Google ]
+   retrieval rows, trace writes,    generation + embedding       web search results
+   profile, memory                  (chat + embed endpoints)     (optional, key-gated)
 ```
 
 ### Move 2 — the walkthrough

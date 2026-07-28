@@ -20,12 +20,15 @@ Calibration note for you: this is a terminal React UI. Treat every browser insti
 
 ## 2. state-architecture
 
-The entire client state graph is **two `useState` hooks in one component** (`src/cli/chat.tsx:21–22`):
+The client state graph is **four `useState` hooks plus a `useRef` in one component** (`src/cli/chat.tsx`):
 
 | state | type | role | who transitions it |
 |-------|------|------|--------------------|
-| `turns` | `Turn[]` | the transcript, append-only | `setTurns(t => [...t, …])` on submit and on answer/error (`chat.tsx:31,35,39`) |
-| `busy` | `boolean` | loading flag, one turn in flight | `setBusy(true)` before the async hop, `setBusy(false)` in both `.then` and `.catch` (`chat.tsx:32,36,40`) |
+| `turns` | `Turn[]` | the transcript, append-only | `setTurns(t => [...t, …])` on submit and on answer/error |
+| `busy` | `boolean` | loading flag, one turn in flight | `setBusy(true)` before the async hop, `setBusy(false)` in both `.then` and `.catch` |
+| `status` | `string` | live spinner label ("searching Google…") | `onStatus` callback from `session.ask()` opts |
+| `liveTokens` | `{input,output}` | live token counter, accumulated during turn | `onTokens` callback from `model_usage` events |
+| `startRef` | `useRef<number>` | spinner start-time (NOT useState — avoids render on capture) | reset at each turn's mount |
 
 Input text is **not in React state** — OpenTUI's `<input>` is uncontrolled: it holds its own text buffer and fires `onSubmit(value)` on Enter. No `onChange`, no `input` useState. Clearing is automatic via unmount/remount (the `busy` ternary at `chat.tsx:56`). → `05-uncontrolled-input-with-submit.md`.
 
@@ -37,13 +40,15 @@ Input text is **not in React state** — OpenTUI's `<input>` is uncontrolled: it
 
 **One component plus one helper, no composition tree to speak of.** `<Chat>` (`chat.tsx:20`) is the main application component; `<Spinner>` (`chat.tsx:11`) is a custom leaf that owns its own `setInterval` animation. The rest are OpenTUI primitives (`<box>`, `<text>`, `<input>`). No children/slots/render-props/compound/headless patterns — there's nothing to compose yet.
 
-**The boundary that *does* exist is vertical, not within the tree:** the container/presentational seam between `<Chat>` (presentational: renders, owns ephemeral UI state) and `createChatSession` (container: owns data acquisition). `<Chat>` receives `session` as a prop (`chat.tsx:20`) — dependency injection — and never imports pg, the agent, or the embedder. That's the one component-architecture decision worth defending. → `04-session-as-the-data-layer.md`. Module/interface depth behind `ChatSession` is owned by `study-software-design`.
+**The boundary that *does* exist is vertical, not within the tree:** the container/presentational seam between `<Chat>` (presentational: renders, owns ephemeral UI state) and `createChatSession` (container: owns data acquisition). `<Chat>` receives `session` as a prop (`chat.tsx:9`) — dependency injection — and never imports pg, the agent, or the embedder. That's the one component-architecture decision worth defending. → `04-session-as-the-data-layer.md`. Module/interface depth behind `ChatSession` is owned by `study-software-design`.
+
+`<Spinner>` now takes two live props: `status` (updated by `onStatus` callbacks during tool calls — e.g. `"searching Brave"`) and `tokens` (accumulated from `onTokens` callbacks from `model_usage` events). It owns its own `useRef(Date.now())` start-time capture and `setInterval(100ms)` elapsed counter. This is a lean real-time component: no props drilling of the whole session, just the two live signals it needs.
 
 ---
 
 ## 4. data-fetching-and-cache
 
-**One fetch path, no cache layer.** Server state crosses into the UI through a single async hop: `session.ask(q).then(…).catch(…)` (`chat.tsx:33`). No react-query, no SWR, no route loaders, no optimistic updates, no cache invalidation, no retry/backoff in the UI.
+**One fetch path, no cache layer — but now with live callbacks.** Server state crosses into the UI through a single async hop: `session.ask(q, { onStatus, onTokens, onComplete }).then(…).catch(…)`. No react-query, no SWR, no route loaders, no optimistic updates, no cache invalidation, no retry/backoff in the UI. The three callbacks are the side-channel for live progress updates: `onStatus` drives `setStatus` (spinner label), `onTokens` accumulates `setLiveTokens`, `onComplete` captures `TurnStats` (durationMs, inputTokens, outputTokens) for the post-turn footer displayed after `setBusy(false)`. The core contract — one `ask()` awaited for the answer string — is unchanged; the callbacks are additive.
 
 What *is* present is the **loading/success/error state machine** hand-rolled around that one call: `setBusy(true)` → `.then` success appends a `buffr` turn / `.catch` appends an error turn / both clear `busy` (`chat.tsx:32–41`). The re-entrancy guard `if (busy || !q) return` (`chat.tsx:26`) is the manual stand-in for what a query library's `isFetching` would gate. → `03-async-ui-with-a-busy-flag.md`.
 

@@ -31,36 +31,28 @@ the move to fix it.
 
 ## The ranked findings
 
-### R1 — No request timeout on the model call (highest consequence)
+### R1 — No request timeout on model or web API calls (highest consequence)
 
 ```
-  trigger: Ollama hangs (model load, OOM, stuck generation)
+  trigger: Ollama hangs OR cloud web search API stalls
   result:  agent.answer never resolves → OpenTUI Spinner spins forever
 
-   await agent.answer(q)   ── no AbortSignal, no deadline
-   └─ aptkit transport accepts `signal` … buffr passes none
+   await agent.answer(q)             ── no AbortSignal, no deadline
+   └─ aptkit transport accepts signal … buffr passes none
+   connector.fetch() (Brave/Tavily/Google) ── no timeout, no AbortSignal
 ```
 
-**Evidence:** `src/session.ts:62` calls `agent.answer(question)` with no signal;
-aptkit's `defaultHttpTransport` honors a `signal` if given but buffr supplies
-nothing. **Why it's #1:** it's the only failure mode with *no exit* — every other
-failure throws and ends the turn; this one hangs indefinitely. **Move:** thread
-`AbortSignal.timeout(ms)` from `ask` into `agent.answer` (the slot already exists).
+**Evidence:** `src/session.ts:187` calls `agent.answer(question)` with no signal; connector tools (`session.ts:76-107`) call external cloud APIs with no configured timeout or `AbortSignal`. **Why it's #1:** it's the only failure mode with *no exit* — every other failure throws and ends the turn; this one hangs indefinitely. Ollama is local and usually responsive; cloud APIs are external and have variable latency plus quota-reset events (Google 429 resets at midnight Pacific). **Move:** thread `AbortSignal.timeout(ms)` into `agent.answer`; add a per-connector timeout in the DataConnector fetch call.
 → `07-timeouts-retries-pooling-and-backpressure.md`.
 
-### R2 — No retry on transient failures
+### R2 — No retry on transient failures (model or web API)
 
 ```
-  trigger: Ollama 503 (swapping models) or a momentary connection refusal
-  result:  immediate throw → "error: ollama HTTP 503" → user re-types
+  trigger: Ollama 503 (swapping models), Google 429 (quota), Brave/Tavily 5xx
+  result:  immediate throw → "error: HTTP 429" → user re-types
 ```
 
-**Evidence:** the `res.ok` binary split in aptkit's transport throws on any
-non-2xx; no retry wrapper anywhere in `session.ts` or the CLI. **Why it matters:** a
-single jittered retry would silently recover the most common transient blip.
-**Move:** wrap the model call in one retry with short backoff for 503 /
-connection-refused. **Honest framing:** for a local model the blip window is small,
-so this is a real-but-modest gap. → `07`.
+**Evidence:** no retry wrapper anywhere in `session.ts` or the CLI. **Why it matters:** a single jittered retry would silently recover the most common transient blip (Ollama swap) or a momentary cloud API hiccup. Web search APIs add a new failure mode — Google 429 (daily quota exhausted, happened during development) is not transient; retrying would only burn more quota. The right move is to distinguish: retry 503 (transient), do NOT retry 429 (quota), and log the difference. **Move:** wrap model and connector calls in one retry with short backoff for 5xx / connection-refused; pass 429 through as a non-retryable error. → `07`.
 
 ### R3 — Connection pool runs on defaults
 

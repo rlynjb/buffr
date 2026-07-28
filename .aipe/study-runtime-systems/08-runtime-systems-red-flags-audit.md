@@ -56,11 +56,11 @@ The seam that matters: **single-device + human-paced** is the boundary that keep
 **What breaks:** Ctrl-C on the chat process kills it without draining the pool or flushing in-flight trace writes. A turn interrupted mid-`flush` (`src/session.ts:63`) loses its queued `agents.messages` rows.
 **Why it's still defensible:** single-device, human-driven; the OS reclaims sockets and a lost trace row is harmless. **The verdict:** the cheapest, highest-value fix — three lines wiring SIGINT to `session.close()`. The first thing to add if buffr ever runs unattended. → `07`.
 
-### R2 — No deadline or timeout on the model/DB calls · **HIGH**
+### R2 — No deadline or timeout on the model/DB/web calls · **HIGH**
 
-**Evidence:** `await agent.answer(q)` (`src/session.ts:62`) has no timeout; no `statement_timeout` set on the pool; no timeout option passed to Ollama from buffr.
-**What breaks:** a wedged Ollama (model loading, GPU contention, hung socket) or a slow pg query hangs the turn forever — the spinner spins, `busy` stays `true`, the UI accepts no input until the process is killed (which then hits R1).
-**The fix:** `Promise.race([agent.answer(q), timeout(N)])`; the existing `catch` in `onSubmit` (`src/cli/chat.tsx:30-32`) already renders an error gracefully, so the wiring is small. → `07`.
+**Evidence:** `await agent.answer(q)` (`src/session.ts:62`) has no timeout; no `statement_timeout` set on the pool; no timeout option passed to Ollama from buffr. The connector tools (Brave/Tavily/Google — `session.ts:76-107`) make external HTTP calls with no configured timeout.
+**What breaks:** a wedged Ollama *or* a stalled web API call (Google CSE responding slowly, Tavily down) hangs the turn forever — the spinner spins, `busy` stays `true`, the UI accepts no input. Web APIs are the new addition to this risk: unlike Ollama (local), these are cloud-hosted and subject to network conditions buffr doesn't control.
+**The fix:** `Promise.race([agent.answer(q), timeout(N)])`; the existing `catch` in `onSubmit` (`src/cli/chat.tsx:30-32`) already renders an error gracefully, so the wiring is small. For the connector tools specifically, an `AbortSignal` with a per-connector timeout is the right granularity. → `07`.
 
 ### R3 — No cancellation; a started turn can't be stopped · **MEDIUM**
 

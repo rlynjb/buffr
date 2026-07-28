@@ -207,6 +207,10 @@ decision owned by `study-system-design`.
 
 ---
 
+### The minScore post-retrieval filter note (not a red flag, but relevant here)
+
+`createSearchKnowledgeBaseTool` applies a `minScore: 0.65` cosine similarity threshold *in app code* after the pgvector query returns (retrieval path in aptkit). The pgvector `<=>` operator returns cosine **distance** (0→most-similar, 2→opposite); `PgVectorStore.search` flips it to similarity (`1 - distance`) before returning. The `minScore` filter is applied to that already-flipped value — so 0.65 means "only chunks whose cosine similarity to the query is ≥ 0.65." This is not a SQL WHERE clause; it's a JS `.filter()` after the db round-trip. The implication: pgvector fetches `k` candidates (currently `minTopK: 4`), and any below the threshold are dropped before they reach the model. The risk: a threshold set too high silently returns fewer results with no error or warning — the model sees an empty context and may fabricate. Confirmed grounding: `src/session.ts:108` (or wherever `createSearchKnowledgeBaseTool` is called with `{minTopK:4}`); the `minScore` application is in aptkit's tool internals. Named here because it's a pgvector/scoring decision; the retrieval-quality angle is `study-ai-engineering`.
+
 ### The N+1 note (not a top risk, but real)
 
 `upsert` inserts one chunk per round trip (`src/pg-vector-store.ts:43`) and the trace

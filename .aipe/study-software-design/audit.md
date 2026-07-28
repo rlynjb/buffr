@@ -89,11 +89,13 @@ encoding (`:14-17`), the cosine-distance→similarity-score flip
 A caller — `session.ts:41` — names none of that. **This is the best
 deep module in the repo.** → `01-adapter-behind-a-contract.md`.
 
-**Runner-up — `createChatSession` (`session.ts:34-76`).** Wider job
+**Runner-up — `createChatSession` (`session.ts:34-107`).** Wider job
 (it wires the embedder, store, pipeline, tool, model, profile, memory,
-conversation, trace, and agent) behind a 2-method interface:
-`ask(question)` and `close()` (`session.ts:29-32`). Eleven constructed
-things, two exposed verbs. Deep. → `05-deep-session-facade.md`.
+conversation, trace, up to 7 connector tools, and the agent) behind a 2-method interface:
+`ask(question, opts?)` and `close()` (`session.ts:29-32`). Fourteen constructed
+things, two exposed verbs. Deep — and getting deeper as connectors accumulate. → `05-deep-session-facade.md`.
+
+**New cognitive load — the mutable-trace-slot.** `session.ts:120-138` introduces module-level mutable variables (`currentOnStatus`, `currentOnTokens`, `currentInputTokens`, `currentOutputTokens`) that are swapped on each `ask()` call and reset after. This is not wrong — the pattern works — but it is the first piece of `session.ts` that requires temporal reasoning to understand (you have to know *when* these slots are set to know which turn's callbacks fire). A reader who sees `currentOnStatus` at the top of the module without following its assignment in `ask()` will be confused. The APOSD name for this: a **temporal coupling** embedded in global mutable state. It's the narrowest candidate for a future refactor (e.g., wrapping the trace intercept in a closure per-call rather than module-level variables). Not a problem today; flagged because it's the first non-obvious piece in `session.ts`.
 
 **The shallowest modules — and why it's fine here.** `db.ts` is one
 function wrapping one constructor (`createPool` → `new pg.Pool`,
@@ -385,7 +387,15 @@ it fires. Sorted by severity for buffr.
   Repetition (same code N times)   N/A       too small; no duplicated logic
                                              block beyond the schema literal
 
-  God class / over-large module    N/A       largest file is 94 lines
+  God class / over-large module    N/A       largest file is session.ts
+                                             (~150 lines post-connectors);
+                                             worth watching
+
+  Temporal coupling via module-    FIRES     currentOnStatus / currentOnTokens
+   level mutable state             minor     module-level vars swapped per-ask;
+                                             first temporal reasoning needed
+                                             → no fix yet; refactor if session
+                                               grows a second concurrent caller
 ```
 
 **The actionable index, ranked across the whole repo:**
@@ -397,6 +407,10 @@ it fires. Sorted by severity for buffr.
    Closes the unknown-unknown.
 3. **Throw (or warn) on missing `text` meta.** Turn a silent empty
    citation into a loud failure. `pg-vector-store.ts:46`.
+4. **Watch the mutable-slot pattern.** `session.ts:120-138` — currently
+   the only place in the codebase with temporal-coupling via module globals.
+   Not a problem for single-user single-threaded use; a refactor target if
+   concurrent `ask()` calls ever become possible.
 
 Everything else is praise or "too small to bite yet." For an
 eight-file repo, that's a healthy audit — the design instincts (deep
