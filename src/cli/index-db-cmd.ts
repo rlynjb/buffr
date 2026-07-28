@@ -6,6 +6,11 @@ import { PgVectorStore } from '../pg-vector-store.js';
 import { indexDocumentRow } from '../runtime.js';
 import { DB_SOURCES } from '../db-sources.js';
 
+// Postgres rejects lone UTF-16 surrogates in JSON columns; strip them.
+function sanitize(s: string): string {
+  return s.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '');
+}
+
 loadEnv();
 const cfg = loadConfig(process.env);
 if (!cfg.databaseUrl) throw new Error('DATABASE_URL is not set (see .env)');
@@ -20,7 +25,7 @@ for (const source of DB_SOURCES) {
   for (const row of rows) {
     await indexDocumentRow(pool, cfg.appId, pipeline, {
       id: source.toId(row),
-      text: source.toText(row),
+      text: sanitize(source.toText(row)),
       sourceType: 'db',
     });
   }
