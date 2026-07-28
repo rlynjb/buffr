@@ -1,0 +1,235 @@
+
+> buffr-laptop@0.0.0 test
+> npm run build && node --test --test-concurrency=1 dist/test/*.test.js
+
+
+> buffr-laptop@0.0.0 build
+> npm run build:packages && tsc -p tsconfig.json
+
+
+> buffr-laptop@0.0.0 build:packages
+> npm run build -w @buffr/contracts && npm run build -w @buffr/kernel && npm run build -w @buffr/connectors
+
+
+> @buffr/contracts@0.0.1 build
+> tsc -p tsconfig.json
+
+
+> @buffr/kernel@0.0.1 build
+> tsc -p tsconfig.json
+
+
+> @buffr/connectors@0.0.1 build
+> tsc -p tsconfig.json
+
+TAP version 13
+# Subtest: createFetchReviewsTool
+    # Subtest: tool name is fetch_amazon_reviews
+    ok 1 - tool name is fetch_amazon_reviews
+      ---
+      duration_ms: 0.219875
+      type: 'test'
+      ...
+    # Subtest: input schema requires asin
+    ok 2 - input schema requires asin
+      ---
+      duration_ms: 0.208041
+      type: 'test'
+      ...
+    # Subtest: handler returns asin, productTitle, fetchedAt, reviews array
+    ok 3 - handler returns asin, productTitle, fetchedAt, reviews array
+      ---
+      duration_ms: 0.129292
+      type: 'test'
+      ...
+    # Subtest: handler passes limit to connector
+    ok 4 - handler passes limit to connector
+      ---
+      duration_ms: 0.091333
+      type: 'test'
+      ...
+    1..4
+ok 1 - createFetchReviewsTool
+  ---
+  duration_ms: 1.28175
+  type: 'suite'
+  ...
+# Subtest: loadConfig
+    # Subtest: defaults appId, schema, and ollama host when env is sparse
+    ok 1 - defaults appId, schema, and ollama host when env is sparse
+      ---
+      duration_ms: 0.195584
+      type: 'test'
+      ...
+    # Subtest: reads overrides from the provided env
+    ok 2 - reads overrides from the provided env
+      ---
+      duration_ms: 0.039083
+      type: 'test'
+      ...
+    1..2
+ok 2 - loadConfig
+  ---
+  duration_ms: 0.548708
+  type: 'suite'
+  ...
+# Subtest: Gemma smoke: tool_use → retrieval → synthesis
+ok 3 - Gemma smoke: tool_use → retrieval → synthesis # SKIP
+  ---
+  duration_ms: 0.233459
+  type: 'test'
+  ...
+# Subtest: agents schema migration
+    # Subtest: creates the agents tables idempotently
+    ok 1 - creates the agents tables idempotently
+      ---
+      duration_ms: 373.73075
+      type: 'test'
+      ...
+    1..1
+ok 4 - agents schema migration
+  ---
+  duration_ms: 375.464833
+  type: 'suite'
+  ...
+# Subtest: PgVectorStore
+    # Subtest: upserts and ranks the planted chunk on top
+    ok 1 - upserts and ranks the planted chunk on top
+      ---
+      duration_ms: 170.854959
+      type: 'test'
+      ...
+    # Subtest: throws on a dimension mismatch
+    ok 2 - throws on a dimension mismatch
+      ---
+      duration_ms: 25.437959
+      type: 'test'
+      ...
+    1..2
+ok 5 - PgVectorStore
+  ---
+  duration_ms: 407.535375
+  type: 'suite'
+  ...
+# Subtest: loadProfile
+    # Subtest: returns the stored profile content, or empty string when none
+    ok 1 - returns the stored profile content, or empty string when none
+      ---
+      duration_ms: 71.211917
+      type: 'test'
+      ...
+    1..1
+ok 6 - loadProfile
+  ---
+  duration_ms: 301.505625
+  type: 'suite'
+  ...
+# Subtest: createFetchRssTool
+    # Subtest: tool name is fetch_rss_feed
+    ok 1 - tool name is fetch_rss_feed
+      ---
+      duration_ms: 0.3485
+      type: 'test'
+      ...
+    # Subtest: input schema requires url
+    ok 2 - input schema requires url
+      ---
+      duration_ms: 0.298625
+      type: 'test'
+      ...
+    # Subtest: handler returns feedTitle, url, fetchedAt, articles array
+    ok 3 - handler returns feedTitle, url, fetchedAt, articles array
+      ---
+      duration_ms: 0.544333
+      type: 'test'
+      ...
+    # Subtest: handler passes limit to connector
+    ok 4 - handler passes limit to connector
+      ---
+      duration_ms: 0.073041
+      type: 'test'
+      ...
+    # Subtest: handler defaults limit to 10 when not provided
+    ok 5 - handler defaults limit to 10 when not provided
+      ---
+      duration_ms: 0.063875
+      type: 'test'
+      ...
+    1..5
+ok 7 - createFetchRssTool
+  ---
+  duration_ms: 1.830666
+  type: 'suite'
+  ...
+# Subtest: indexDocumentRow
+    # Subtest: writes a documents row and its chunks
+    ok 1 - writes a documents row and its chunks
+      ---
+      duration_ms: 227.206166
+      type: 'test'
+      ...
+    1..1
+ok 8 - indexDocumentRow
+  ---
+  duration_ms: 474.306125
+  type: 'suite'
+  ...
+# Subtest: SupabaseTraceSink
+    # Subtest: persists assistant steps and tool results as messages
+    ok 1 - persists assistant steps and tool results as messages
+      ---
+      duration_ms: 228.560709
+      type: 'test'
+      ...
+    # Subtest: captures the full event signal, not just role + content
+    ok 2 - captures the full event signal, not just role + content
+      ---
+      duration_ms: 248.162459
+      type: 'test'
+      ...
+    1..2
+ok 9 - SupabaseTraceSink
+  ---
+  duration_ms: 689.520625
+  type: 'suite'
+  ...
+# Subtest: createFetchTrendsTool
+    # Subtest: tool name is fetch_search_trends
+    ok 1 - tool name is fetch_search_trends
+      ---
+      duration_ms: 0.321792
+      type: 'test'
+      ...
+    # Subtest: input schema requires keywords
+    ok 2 - input schema requires keywords
+      ---
+      duration_ms: 0.311459
+      type: 'test'
+      ...
+    # Subtest: handler returns fetchedAt and trends array
+    ok 3 - handler returns fetchedAt and trends array
+      ---
+      duration_ms: 0.22275
+      type: 'test'
+      ...
+    # Subtest: handler defaults geo to empty string and timeframe to "now 7-d"
+    ok 4 - handler defaults geo to empty string and timeframe to "now 7-d"
+      ---
+      duration_ms: 0.081958
+      type: 'test'
+      ...
+    1..4
+ok 10 - createFetchTrendsTool
+  ---
+  duration_ms: 1.953583
+  type: 'suite'
+  ...
+1..10
+# tests 23
+# suites 9
+# pass 22
+# fail 0
+# cancelled 0
+# skipped 1
+# todo 0
+# duration_ms 2908.981208
