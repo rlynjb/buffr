@@ -69,12 +69,8 @@ function Chat({ session, onExit }: { session: ChatSession; onExit: () => Promise
           border={true}
           borderStyle="rounded"
           borderColor="#444444"
-          title=" buffr "
-          titleColor="#666666"
-          paddingLeft={2}
-          paddingRight={2}
-          paddingTop={1}
-          paddingBottom={1}
+          paddingLeft={1}
+          paddingRight={1}
           marginTop={1}
         >
           {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
