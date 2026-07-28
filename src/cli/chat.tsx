@@ -8,10 +8,79 @@ type Turn = { role: 'you' | 'buffr'; text: string };
 
 const FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
-// Enter = submit, Shift+Enter = newline — merged with textarea defaults by the setter.
-const KEY_BINDINGS = [
-  { name: 'return', shift: false, action: 'submit'  } as const,
-  { name: 'return', shift: true,  action: 'newline' } as const,
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type KB = { name: string; action: string; ctrl?: boolean; shift?: boolean; meta?: boolean; super?: boolean };
+
+// Full textarea key bindings: defaults verbatim, except return/kpenter now submit
+// and shift+return inserts a newline. The keyBindings setter replaces, not merges.
+const KEY_BINDINGS: KB[] = [
+  { name: 'left',     action: 'move-left' },
+  { name: 'right',    action: 'move-right' },
+  { name: 'up',       action: 'move-up' },
+  { name: 'down',     action: 'move-down' },
+  { name: 'left',     shift: true, action: 'select-left' },
+  { name: 'right',    shift: true, action: 'select-right' },
+  { name: 'up',       shift: true, action: 'select-up' },
+  { name: 'down',     shift: true, action: 'select-down' },
+  { name: 'home',     action: 'buffer-home' },
+  { name: 'end',      action: 'buffer-end' },
+  { name: 'home',     shift: true, action: 'select-buffer-home' },
+  { name: 'end',      shift: true, action: 'select-buffer-end' },
+  { name: 'a',        ctrl: true, action: 'line-home' },
+  { name: 'e',        ctrl: true, action: 'line-end' },
+  { name: 'a',        ctrl: true, shift: true, action: 'select-line-home' },
+  { name: 'e',        ctrl: true, shift: true, action: 'select-line-end' },
+  { name: 'a',        meta: true, action: 'visual-line-home' },
+  { name: 'e',        meta: true, action: 'visual-line-end' },
+  { name: 'a',        meta: true, shift: true, action: 'select-visual-line-home' },
+  { name: 'e',        meta: true, shift: true, action: 'select-visual-line-end' },
+  { name: 'f',        ctrl: true, action: 'move-right' },
+  { name: 'b',        ctrl: true, action: 'move-left' },
+  { name: 'w',        ctrl: true, action: 'delete-word-backward' },
+  { name: 'backspace', ctrl: true, action: 'delete-word-backward' },
+  { name: 'd',        meta: true, action: 'delete-word-forward' },
+  { name: 'delete',   meta: true, action: 'delete-word-forward' },
+  { name: 'delete',   ctrl: true, action: 'delete-word-forward' },
+  { name: 'd',        ctrl: true, shift: true, action: 'delete-line' },
+  { name: 'k',        ctrl: true, action: 'delete-to-line-end' },
+  { name: 'u',        ctrl: true, action: 'delete-to-line-start' },
+  { name: 'backspace', action: 'backspace' },
+  { name: 'backspace', shift: true, action: 'backspace' },
+  { name: 'd',        ctrl: true, action: 'delete' },
+  { name: 'delete',   action: 'delete' },
+  { name: 'delete',   shift: true, action: 'delete' },
+  // --- overrides: Enter=submit, Shift+Enter=newline ---
+  { name: 'return',   action: 'submit' },
+  { name: 'return',   shift: true, action: 'newline' },
+  { name: 'kpenter',  action: 'submit' },
+  { name: 'linefeed', action: 'newline' },
+  { name: 'return',   meta: true, action: 'submit' },
+  { name: 'kpenter',  meta: true, action: 'submit' },
+  // ---------------------------------------------------
+  { name: '-',        ctrl: true, action: 'undo' },
+  { name: '.',        ctrl: true, action: 'redo' },
+  { name: 'z',        super: true, action: 'undo' },
+  { name: 'z',        super: true, shift: true, action: 'redo' },
+  { name: 'f',        meta: true, action: 'word-forward' },
+  { name: 'b',        meta: true, action: 'word-backward' },
+  { name: 'right',    meta: true, action: 'word-forward' },
+  { name: 'left',     meta: true, action: 'word-backward' },
+  { name: 'right',    ctrl: true, action: 'word-forward' },
+  { name: 'left',     ctrl: true, action: 'word-backward' },
+  { name: 'f',        meta: true, shift: true, action: 'select-word-forward' },
+  { name: 'b',        meta: true, shift: true, action: 'select-word-backward' },
+  { name: 'right',    meta: true, shift: true, action: 'select-word-forward' },
+  { name: 'left',     meta: true, shift: true, action: 'select-word-backward' },
+  { name: 'backspace', meta: true, action: 'delete-word-backward' },
+  { name: 'left',     super: true, action: 'visual-line-home' },
+  { name: 'right',    super: true, action: 'visual-line-end' },
+  { name: 'up',       super: true, action: 'buffer-home' },
+  { name: 'down',     super: true, action: 'buffer-end' },
+  { name: 'left',     super: true, shift: true, action: 'select-visual-line-home' },
+  { name: 'right',    super: true, shift: true, action: 'select-visual-line-end' },
+  { name: 'up',       super: true, shift: true, action: 'select-buffer-home' },
+  { name: 'down',     super: true, shift: true, action: 'select-buffer-end' },
+  { name: 'a',        super: true, action: 'select-all' },
 ];
 
 function Spinner() {
@@ -87,7 +156,8 @@ function Chat({ session, onExit }: { session: ChatSession; onExit: () => Promise
             placeholder="type your message… (Shift+Enter for new line)"
             textColor="#CCCCCC"
             placeholderColor="#555555"
-            keyBindings={KEY_BINDINGS}
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          keyBindings={KEY_BINDINGS as any}
             onSubmit={handleSubmit}
             focused
           />
