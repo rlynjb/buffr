@@ -23,6 +23,55 @@ Self-hosted personal RAG agent. Ask questions about yourself — your work, stac
 | Chat TUI | OpenTUI (`@opentui/react`) — requires Bun |
 | Language | TypeScript / Node.js (ESM) |
 
+## What's implemented
+
+### Agent
+- **`RagQueryAgent`** — the only agent. Calls `search_knowledge_base` first, then synthesizes an answer. Bounded to 6 turns / 4 tool calls. Profile injected into the system prompt.
+
+### Model gateway
+- **`GemmaModelProvider`** — Ollama Gemma 2 via HTTP
+- **`ContextWindowGuardedProvider`** — wraps any provider and truncates input at a token ceiling (currently 8 192)
+
+### Retrieval pipeline
+- **`OllamaEmbeddingProvider`** — nomic-embed-text:v1.5 via Ollama
+- **Chunker** — fixed-size text chunking with overlap
+- **`RetrievalPipeline`** — index (chunk → embed → store) and search (embed query → top-k) in one call
+- **`search_knowledge_base` tool** — the tool the agent calls each turn
+
+### Vector stores
+- **`PgVectorStore`** — Postgres + pgvector, used in production
+- **`InMemoryVectorStore`** — used in tests only
+
+### Memory
+- **`ConversationMemory`** — after each turn, embeds the Q+A pair and writes it to the same vector store tagged `kind=memory`. Surfaces automatically via `search_knowledge_base` — no separate recall step.
+
+### Workflow runtime
+- **`runAgentLoop`** — bounded agentic loop: model call → tool dispatch → repeat
+- **`structuredGeneration`** — coerces Gemma's loose JSON output into valid structured responses
+
+### Tool runtime
+- **`InMemoryToolRegistry`** — holds tool definitions and handlers
+- **Policy filter** — `filterToolsForPolicy` restricts which tools a capability can invoke
+
+### Live connectors
+- **`RssConnector`** → `fetch_rss` tool — fetches and parses RSS feeds
+- **`GoogleTrendsConnector`** → `fetch_trends` tool — fetches trending keywords
+- **`AmazonReviewsConnector`** → `fetch_amazon_reviews` tool — fetches product reviews
+
+### Evals
+- **`precisionAtK`** — P@k scorer for retrieval quality
+- **`rubricJudge`** — faithfulness judge using Gemma as the grader
+
+### Infrastructure
+- **`SupabaseTraceSink`** — writes every agent step to `agents.messages`
+- **`loadProfile`** — reads `me.md` from `agents.profiles` and injects it into each turn
+- **`indexDocumentRow`** — chunks, embeds, and upserts one document into the store
+- **8 DB sources** (`loopd` + `contrl`) for `npm run index:db`
+
+### Contracts (`@buffr/contracts`)
+Interfaces only — no implementations in this repo. Defines the DI platform shape:
+`Capability`, `Engine`, `AgentResult`, `Evidence`, `AgentContext`, `EvalCase`, `DomainPack`, `DecisionJournalEntry`, `ScorecardDefinition`
+
 ## Prerequisites
 
 - [Node.js](https://nodejs.org) ≥ 20
