@@ -58,29 +58,38 @@ function Chat({ session, onExit }: { session: ChatSession; onExit: () => Promise
   });
 
   return (
-    <box flexDirection="column" paddingLeft={2} paddingRight={2} paddingTop={1}>
-      <box marginBottom={1}>
+    <box flexDirection="column" height="100%" paddingLeft={2} paddingRight={2}>
+
+      {/* header — fixed height */}
+      <box flexShrink={0} paddingTop={1} marginBottom={1}>
         <text fg="#888888">buffr chat — one conversation, held in-process. Type /exit to quit.</text>
       </box>
-      {turns.map((t, i) => (
-        <box key={i} flexDirection="column" marginBottom={1}>
-          {t.role === 'you' ? (
-            <>
-              <text attributes={TextAttributes.BOLD} fg="#00CCFF">› you</text>
-              <text fg="#66BBCC" marginLeft={2}>{t.text}</text>
-            </>
-          ) : (
-            <>
-              <text attributes={TextAttributes.BOLD} fg="#00EE66">◆ buffr</text>
-              <text fg="#E8E8E8" marginLeft={2}>{t.text}</text>
-            </>
-          )}
-        </box>
-      ))}
-      {busy ? (
-        <Spinner />
-      ) : (
+
+      {/* turns — scrollable, grows to fill remaining space */}
+      {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
+      <scrollbox flexGrow={1} scrollY stickyScroll stickyStart="bottom" scrollbarOptions={{ color: '#333333' } as any}>
+        {turns.map((t, i) => (
+          <box key={i} flexDirection="column" marginBottom={1}>
+            {t.role === 'you' ? (
+              <>
+                <text attributes={TextAttributes.BOLD} fg="#00CCFF">› you</text>
+                <text fg="#66BBCC" marginLeft={2}>{t.text}</text>
+              </>
+            ) : (
+              <>
+                <text attributes={TextAttributes.BOLD} fg="#00EE66">◆ buffr</text>
+                <text fg="#E8E8E8" marginLeft={2}>{t.text}</text>
+              </>
+            )}
+          </box>
+        ))}
+        {busy && <Spinner />}
+      </scrollbox>
+
+      {/* input — fixed at bottom */}
+      {!busy && (
         <box
+          flexShrink={0}
           border={true}
           borderStyle="rounded"
           borderColor="#444444"
