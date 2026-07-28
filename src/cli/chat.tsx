@@ -49,8 +49,17 @@ function Chat({ session, onExit }: { session: ChatSession; onExit: () => Promise
       </box>
       {turns.map((t, i) => (
         <box key={i} flexDirection="column" marginBottom={1}>
-          <text attributes={TextAttributes.BOLD} fg={t.role === 'you' ? '#00FFFF' : '#00FF00'}>{t.role}</text>
-          <text>{t.text}</text>
+          {t.role === 'you' ? (
+            <>
+              <text attributes={TextAttributes.BOLD} fg="#00CCFF">› you</text>
+              <text fg="#66BBCC">{t.text}</text>
+            </>
+          ) : (
+            <>
+              <text attributes={TextAttributes.BOLD} fg="#00EE66">◆ buffr</text>
+              <text fg="#E8E8E8">{t.text}</text>
+            </>
+          )}
         </box>
       ))}
       {busy ? (
