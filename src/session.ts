@@ -70,7 +70,18 @@ export async function createChatSession(): Promise<ChatSession> {
 
   const conversationId = await startConversation(pool, cfg.appId);
   const trace = new SupabaseTraceSink({ pool, conversationId });
-  const agent = new RagQueryAgent({ model, tools, profile, trace });
+  const agent = new RagQueryAgent({
+    model,
+    tools,
+    profile,
+    trace,
+    allowedTools: [
+      searchTool.definition.name,
+      rssTool.definition.name,
+      trendsTool.definition.name,
+      amazonTool.definition.name,
+    ],
+  });
 
   return {
     async ask(question: string): Promise<string> {

@@ -27,6 +27,7 @@ export type RagQueryAgentOptions = {
   profile?: string;
   prompt?: string;
   trace?: CapabilityTraceSink;
+  allowedTools?: readonly string[];
 };
 
 export class RagQueryAgent {
@@ -44,7 +45,7 @@ export class RagQueryAgent {
     const allTools = await this.options.tools.listTools();
     const toolSchemas = filterToolsForPolicy(allTools, {
       capabilityId: RAG_QUERY_CAPABILITY_ID,
-      allowedTools: [SEARCH_KNOWLEDGE_BASE_TOOL_NAME],
+      allowedTools: this.options.allowedTools ?? [SEARCH_KNOWLEDGE_BASE_TOOL_NAME],
     });
 
     const { finalText } = await runAgentLoop({
