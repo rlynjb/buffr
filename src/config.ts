@@ -5,6 +5,8 @@ export type Config = {
   ollamaHost: string;
   braveApiKey?: string;
   tavilyApiKey?: string;
+  googleApiKey?: string;
+  googleCx?: string;
 };
 
 /** Pure: env in, config out. The CLI passes process.env; tests pass a fixture. */
@@ -16,5 +18,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): Config {
     ollamaHost: env.OLLAMA_HOST || 'http://localhost:11434',
     braveApiKey: env.BRAVE_API_KEY || undefined,
     tavilyApiKey: env.TAVILY_API_KEY || undefined,
+    googleApiKey: env.GOOGLE_API_KEY || undefined,
+    googleCx: env.GOOGLE_CX || undefined,
   };
 }

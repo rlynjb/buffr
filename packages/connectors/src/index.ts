@@ -9,3 +9,5 @@ export { BraveSearchConnector } from './discovery/brave-search.js';
 export type { BraveSearchParams, BraveSearchData, BraveSearchResult, BraveTransport } from './discovery/brave-search.js';
 export { TavilySearchConnector } from './discovery/tavily-search.js';
 export type { TavilySearchParams, TavilySearchData, TavilySearchResult, TavilyTransport } from './discovery/tavily-search.js';
+export { GoogleSearchConnector } from './discovery/google-search.js';
+export type { GoogleSearchParams, GoogleSearchData, GoogleSearchResult, GoogleSearchTransport } from './discovery/google-search.js';
