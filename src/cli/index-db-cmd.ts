@@ -6,10 +6,11 @@ import { PgVectorStore } from '../pg-vector-store.js';
 import { indexDocumentRow } from '../runtime.js';
 import { DB_SOURCES } from '../db-sources.js';
 
-// Postgres rejects lone UTF-16 surrogates in JSON columns.
-// First alternative keeps valid pairs (high+low); second removes lone surrogates.
+// Strip all UTF-16 surrogates before chunking. The chunker slices at code-unit
+// boundaries, which can split valid surrogate pairs (emoji) into lone surrogates
+// that Postgres rejects in JSON columns (error 22P02).
 function sanitize(s: string): string {
-  return s.replace(/[\uD800-\uDBFF][\uDC00-\uDFFF]|[\uD800-\uDFFF]/g, (m) => (m.length === 2 ? m : ''));
+  return s.replace(/[\uD800-\uDFFF]/g, '');
 }
 
 loadEnv();
