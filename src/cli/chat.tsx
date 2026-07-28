@@ -65,10 +65,18 @@ function Chat({ session, onExit }: { session: ChatSession; onExit: () => Promise
       {busy ? (
         <Spinner />
       ) : (
-        <box>
-          <text fg="#00FFFF">{'> '}</text>
+        <box
+          border={true}
+          borderStyle="rounded"
+          borderColor="#444444"
+          title=" buffr "
+          titleColor="#666666"
+          paddingLeft={1}
+          paddingRight={1}
+          marginTop={1}
+        >
           {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
-          <input placeholder="ask buffr" onSubmit={onSubmit as any} focused />
+          <input placeholder="type your message…" textColor="#CCCCCC" placeholderColor="#555555" onSubmit={onSubmit as any} focused />
         </box>
       )}
     </box>
