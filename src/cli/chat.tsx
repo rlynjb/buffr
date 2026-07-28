@@ -43,7 +43,7 @@ function Chat({ session, onExit }: { session: ChatSession; onExit: () => Promise
   };
 
   return (
-    <box flexDirection="column">
+    <box flexDirection="column" paddingLeft={2} paddingRight={2} paddingTop={1}>
       <box marginBottom={1}>
         <text fg="#888888">buffr chat — one conversation, held in-process. Type /exit to quit.</text>
       </box>
@@ -52,12 +52,12 @@ function Chat({ session, onExit }: { session: ChatSession; onExit: () => Promise
           {t.role === 'you' ? (
             <>
               <text attributes={TextAttributes.BOLD} fg="#00CCFF">› you</text>
-              <text fg="#66BBCC">{t.text}</text>
+              <text fg="#66BBCC" marginLeft={2}>{t.text}</text>
             </>
           ) : (
             <>
               <text attributes={TextAttributes.BOLD} fg="#00EE66">◆ buffr</text>
-              <text fg="#E8E8E8">{t.text}</text>
+              <text fg="#E8E8E8" marginLeft={2}>{t.text}</text>
             </>
           )}
         </box>
@@ -71,8 +71,10 @@ function Chat({ session, onExit }: { session: ChatSession; onExit: () => Promise
           borderColor="#444444"
           title=" buffr "
           titleColor="#666666"
-          paddingLeft={1}
-          paddingRight={1}
+          paddingLeft={2}
+          paddingRight={2}
+          paddingTop={1}
+          paddingBottom={1}
           marginTop={1}
         >
           {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
