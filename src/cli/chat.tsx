@@ -1,5 +1,5 @@
 /** @jsxImportSource @opentui/react */
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { createCliRenderer, TextAttributes } from '@opentui/core';
 import { createRoot } from '@opentui/react';
 import { createChatSession, type ChatSession } from '../session.js';
@@ -7,6 +7,12 @@ import { createChatSession, type ChatSession } from '../session.js';
 type Turn = { role: 'you' | 'buffr'; text: string };
 
 const FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+// Enter = submit, Shift+Enter = newline — merged with textarea defaults by the setter.
+const KEY_BINDINGS = [
+  { name: 'return', shift: false, action: 'submit'  } as const,
+  { name: 'return', shift: true,  action: 'newline' } as const,
+];
 
 function Spinner() {
   const [frame, setFrame] = useState(0);
@@ -20,10 +26,13 @@ function Spinner() {
 function Chat({ session, onExit }: { session: ChatSession; onExit: () => Promise<void> }) {
   const [turns, setTurns] = useState<Turn[]>([]);
   const [busy, setBusy] = useState(false);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const taRef = useRef<any>(null);
 
-  const onSubmit = (value: string): void => {
-    const q = value.trim();
+  const handleSubmit = (): void => {
+    const q = (taRef.current?.plainText as string | undefined)?.trim() ?? '';
     if (busy || !q) return;
+    taRef.current?.setText('');
     if (q === '/exit' || q === '/quit') {
       onExit().catch(err => { console.error(err); process.exit(1); });
       return;
@@ -73,8 +82,15 @@ function Chat({ session, onExit }: { session: ChatSession; onExit: () => Promise
           paddingRight={1}
           marginTop={1}
         >
-          {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
-          <input placeholder="type your message…" textColor="#CCCCCC" placeholderColor="#555555" onSubmit={onSubmit as any} focused />
+          <textarea
+            ref={taRef}
+            placeholder="type your message… (Shift+Enter for new line)"
+            textColor="#CCCCCC"
+            placeholderColor="#555555"
+            keyBindings={KEY_BINDINGS}
+            onSubmit={handleSubmit}
+            focused
+          />
         </box>
       )}
     </box>
