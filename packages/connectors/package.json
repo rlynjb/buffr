@@ -1,0 +1,27 @@
+{
+  "name": "@buffr/connectors",
+  "version": "0.0.1",
+  "type": "module",
+  "main": "./dist/src/index.js",
+  "types": "./dist/src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "import": "./dist/src/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test --test-concurrency=1 dist/test/discovery/*.test.js"
+  },
+  "dependencies": {
+    "@buffr/contracts": "0.0.1",
+    "cheerio": "^1.0.0",
+    "fast-xml-parser": "^4.4.0",
+    "google-trends-api": "^4.9.2"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.4.0"
+  }
+}

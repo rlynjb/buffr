@@ -5,7 +5,7 @@
   "private": true,
   "workspaces": ["packages/*"],
   "scripts": {
-    "build:packages": "npm run build -w @buffr/contracts && npm run build -w @buffr/kernel",
+    "build:packages": "npm run build -w @buffr/contracts && npm run build -w @buffr/kernel && npm run build -w @buffr/connectors",
     "build": "npm run build:packages && tsc -p tsconfig.json",
     "test": "npm run build && node --test --test-concurrency=1 dist/test/*.test.js",
     "test:kernel": "npm run build -w @buffr/kernel && node --test --test-concurrency=1 packages/kernel/dist/test/*.test.js",
