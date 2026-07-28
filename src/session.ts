@@ -4,6 +4,10 @@ import {
   InMemoryToolRegistry, GemmaModelProvider, ContextWindowGuardedProvider, RagQueryAgent,
   createConversationMemory,
 } from '@buffr/kernel';
+import { RssConnector, GoogleTrendsConnector, AmazonReviewsConnector } from '@buffr/connectors';
+import { createFetchRssTool } from './connector-tools/rss-tool.js';
+import { createFetchTrendsTool } from './connector-tools/trends-tool.js';
+import { createFetchReviewsTool } from './connector-tools/amazon-tool.js';
 import { loadConfig } from './config.js';
 import { createPool } from './db.js';
 import { PgVectorStore } from './pg-vector-store.js';
@@ -40,8 +44,20 @@ export async function createChatSession(): Promise<ChatSession> {
   const embedder = new OllamaEmbeddingProvider({ model: 'nomic-embed-text:v1.5', host: cfg.ollamaHost });
   const store = new PgVectorStore({ pool, appId: cfg.appId, dimension: embedder.dimension });
   const pipeline = createRetrievalPipeline({ embedder, store });
-  const tool = createSearchKnowledgeBaseTool(pipeline, { minTopK: 4 });
-  const tools = new InMemoryToolRegistry([tool.definition], { [tool.definition.name]: tool.handler });
+  const searchTool = createSearchKnowledgeBaseTool(pipeline, { minTopK: 4 });
+  const rssTool    = createFetchRssTool(new RssConnector());
+  const trendsTool = createFetchTrendsTool(new GoogleTrendsConnector());
+  const amazonTool = createFetchReviewsTool(new AmazonReviewsConnector());
+
+  const tools = new InMemoryToolRegistry(
+    [searchTool.definition, rssTool.definition, trendsTool.definition, amazonTool.definition],
+    {
+      [searchTool.definition.name]: searchTool.handler,
+      [rssTool.definition.name]:    rssTool.handler,
+      [trendsTool.definition.name]: trendsTool.handler,
+      [amazonTool.definition.name]: amazonTool.handler,
+    },
+  );
 
   const model = new ContextWindowGuardedProvider(new GemmaModelProvider({ host: cfg.ollamaHost }), { maxTokens: 8192 });
   const profile = await loadProfile(pool, cfg.appId);
