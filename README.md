@@ -5,7 +5,9 @@ Self-hosted personal RAG agent. Ask questions about yourself — your work, stac
 ## What it does
 
 - Stores documents about you (work, stack, habits, notes) in a pgvector index
+- Indexes personal data from Supabase (journal entries, tasks, nutrition, workouts, habits, vlogs)
 - Recalls relevant context each turn using semantic search
+- Reaches out live for RSS feeds, Google Trends, and Amazon product reviews when needed
 - Remembers past conversations — surfaces relevant exchanges from previous sessions
 - Traces every agent run to the DB for inspection and improvement
 - Runs evals against retrieval quality so you can measure improvements
@@ -17,7 +19,7 @@ Self-hosted personal RAG agent. Ask questions about yourself — your work, stac
 | LLM | Ollama — Gemma 2 (`gemma2`) |
 | Embeddings | Ollama — `nomic-embed-text:v1.5` |
 | Vector store | Supabase Postgres + pgvector |
-| Agent runtime | `@rlynjb/aptkit-core` |
+| Agent runtime | `@buffr/kernel` |
 | Chat TUI | OpenTUI (`@opentui/react`) — requires Bun |
 | Language | TypeScript / Node.js (ESM) |
 
@@ -79,7 +81,8 @@ Index any `.md` file. Each file becomes a retrievable document. The filename (wi
 | Command | What it does |
 |---------|-------------|
 | `npm run chat` | Open the interactive chat TUI |
-| `npm run index -- <file.md> [more.md...]` | Embed and store documents in the vector index |
+| `npm run index -- <file.md> [more.md...]` | Embed and store markdown documents in the vector index |
+| `npm run index:db` | Index personal data from Supabase (loopd + contrl schemas) |
 | `npm run eval` | Score retrieval precision and recall against `eval/queries.json` |
 | `npm run migrate` | Create or update the DB schema |
 | `npm run build` | Compile TypeScript to `dist/` |
@@ -111,7 +114,7 @@ a TypeScript toolkit for building agents.
 
 ## Where it gets data
 
-Every answer is assembled from three sources at query time:
+Every answer is assembled from indexed knowledge, live connectors, and episodic memory:
 
 ```
 Your question
@@ -122,24 +125,54 @@ Your question
      ▼
  pgvector (Supabase)      ← searches for the closest chunks
      │
-     ├── Document chunks  ← .md files you indexed with `npm run index`
+     ├── Document chunks  ← .md files indexed with `npm run index`
      │                      (work.md, stack.md, notes, etc.)
+     │
+     ├── DB chunks        ← Supabase rows indexed with `npm run index:db`
+     │                      loopd:  journal entries, tasks, nutrition,
+     │                              habits, vlogs
+     │                      contrl: exercises, workout sessions,
+     │                              weekly progress
      │
      └── Memory chunks    ← past Q&A pairs from previous sessions,
                              stored in the same vector table (kind=memory)
                              so relevant exchanges surface automatically
      │
+     ├── RSS connector    ← fetches live feed items when the agent calls
+     │                      fetch_rss (URL, optional limit)
+     │
+     ├── Trends connector ← fetches Google Trends data when the agent calls
+     │                      fetch_trends (keywords, timeframe, geo)
+     │
+     └── Amazon connector ← fetches product reviews when the agent calls
+                             fetch_amazon_reviews (product ID/URL)
+     │
      ▼
  Gemma 2 (Ollama)         ← generates the answer using retrieved chunks
-                             + your profile (me.md from the DB)
+                             + live connector results + your profile
      │
      ▼
  Your answer
 ```
 
-**Documents** are anything you index with `npm run index`. Each file is chunked, embedded, and stored in `agents.chunks` in Postgres. The agent retrieves the top-4 most relevant chunks per turn.
+**Documents** are `.md` files indexed with `npm run index`. Each is chunked, embedded, and stored in `agents.chunks`. The agent retrieves the top-4 most relevant chunks per turn via the `search_knowledge_base` tool.
 
-**Memory** is written automatically after every turn — the question and answer are embedded and stored in the same vector table. Future turns can surface them via the same retrieval tool. You never manage this manually.
+**DB sources** are rows from your Supabase schemas, indexed with `npm run index:db`. Rows are serialized to readable text and stored alongside document chunks — the agent retrieves them the same way.
+
+| Schema | Table | What's indexed |
+|--------|-------|---------------|
+| `loopd` | `entries` | Journal entries (date + text) |
+| `loopd` | `todo_meta` | Tasks with type, stage, and expanded notes |
+| `loopd` | `nutrition` | Food log (name, kcal, date) |
+| `loopd` | `vlogs` | Vlog captions and clip counts |
+| `loopd` | `habits` | Active habits (label, cadence, time of day) |
+| `contrl` | `exercises` | Exercise library (category, level, sets/reps) |
+| `contrl` | `sessions` | Workout sessions (passed/failed, notes) |
+| `contrl` | `week_progress` | Weekly push/pull/squat completion |
+
+**Live connectors** are tools the agent calls at runtime — not pre-indexed. The agent decides when to use them based on the question (e.g. "what's trending in AI this week" triggers `fetch_trends`).
+
+**Memory** is written automatically after every turn — the question and answer are embedded and stored in the same vector table. Future turns surface relevant past exchanges automatically. You never manage this manually.
 
 **Profile** (`agents.profiles`) is a free-form text field loaded fresh each turn and injected into the system prompt. If you have a `me.md` stored in the DB it shapes every answer — tone, context, priorities.
 
