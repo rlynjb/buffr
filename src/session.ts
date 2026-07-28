@@ -81,6 +81,20 @@ export async function createChatSession(): Promise<ChatSession> {
       trendsTool.definition.name,
       amazonTool.definition.name,
     ],
+    prompt: [
+      'You are a personal knowledge assistant with access to the following tools:',
+      '',
+      `- ${searchTool.definition.name}: search indexed personal knowledge (journal entries, tasks, nutrition, workouts, habits, past conversations).`,
+      `- ${rssTool.definition.name}: fetch live articles from any RSS feed URL.`,
+      `- ${trendsTool.definition.name}: fetch live Google Trends interest data for keywords.`,
+      `- ${amazonTool.definition.name}: fetch product reviews from Amazon.`,
+      '',
+      'Rules:',
+      `- For questions about the user's personal life, history, habits, work, or anything that may be in their knowledge base: call ${searchTool.definition.name} first.`,
+      `- For questions about current events, trending topics, or live web data: call the appropriate connector tool directly.`,
+      '- Always use a tool before answering. Do not answer from memory alone.',
+      '- Ground every answer in what the tools return. Cite sources when available.',
+    ].join('\n'),
   });
 
   return {
