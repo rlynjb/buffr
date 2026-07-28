@@ -1,7 +1,7 @@
 /** @jsxImportSource @opentui/react */
 import { useState, useEffect, useRef } from 'react';
 import { createCliRenderer, TextAttributes } from '@opentui/core';
-import { createRoot } from '@opentui/react';
+import { createRoot, useKeyboard } from '@opentui/react';
 import { createChatSession, type ChatSession } from '../session.js';
 
 type Turn = { role: 'you' | 'buffr'; text: string };
@@ -45,19 +45,17 @@ function Chat({ session, onExit }: { session: ChatSession; onExit: () => Promise
     );
   };
 
-  // onKeyDown fires before handleKeyPress so preventDefault() skips the default action.
-  // Plain Enter → submit. Shift+Enter → newline (works in Kitty-protocol terminals).
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const handleKeyDown = (e: any): void => {
+  useKeyboard((e: any) => {
     if (e.name !== 'return' && e.name !== 'kpenter') return;
-    if (e.ctrl || e.meta || e.super || e.hyper) return;
+    if (e.ctrl || e.super || e.hyper) return;
+    if (busy) return;
     e.preventDefault();
-    if (e.shift) {
+    if (e.meta) {
       taRef.current?.newLine();
     } else {
       handleSubmit();
     }
-  };
+  });
 
   return (
     <box flexDirection="column" paddingLeft={2} paddingRight={2} paddingTop={1}>
@@ -92,11 +90,9 @@ function Chat({ session, onExit }: { session: ChatSession; onExit: () => Promise
         >
           <textarea
             ref={taRef}
-            placeholder="type your message… (Shift+Enter for new line)"
+            placeholder="type your message… (Alt+Enter for new line)"
             textColor="#CCCCCC"
             placeholderColor="#555555"
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            onKeyDown={handleKeyDown as any}
             onSubmit={handleSubmit}
             focused
           />
