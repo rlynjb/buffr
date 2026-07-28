@@ -8,18 +8,19 @@ type Turn = { role: 'you' | 'buffr'; text: string };
 
 const FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
-function Spinner() {
+function Spinner({ status }: { status: string }) {
   const [frame, setFrame] = useState(0);
   useEffect(() => {
     const id = setInterval(() => setFrame(f => (f + 1) % FRAMES.length), 80);
     return () => clearInterval(id);
   }, []);
-  return <text fg="#FFFF00">{FRAMES[frame]} thinking…</text>;
+  return <text fg="#FFFF00">{FRAMES[frame]} {status}</text>;
 }
 
 function Chat({ session, onExit }: { session: ChatSession; onExit: () => Promise<void> }) {
   const [turns, setTurns] = useState<Turn[]>([]);
   const [busy, setBusy] = useState(false);
+  const [status, setStatus] = useState('thinking…');
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const taRef = useRef<any>(null);
 
@@ -33,7 +34,8 @@ function Chat({ session, onExit }: { session: ChatSession; onExit: () => Promise
     }
     setTurns(t => [...t, { role: 'you', text: q }]);
     setBusy(true);
-    session.ask(q).then(
+    setStatus('thinking…');
+    session.ask(q, { onStatus: (msg) => setStatus(msg) }).then(
       answer => {
         setTurns(t => [...t, { role: 'buffr', text: answer }]);
         setBusy(false);
@@ -83,7 +85,7 @@ function Chat({ session, onExit }: { session: ChatSession; onExit: () => Promise
             )}
           </box>
         ))}
-        {busy && <Spinner />}
+        {busy && <Spinner status={status} />}
       </scrollbox>
 
       {/* input — fixed at bottom */}

@@ -16,6 +16,7 @@ import { createPool } from './db.js';
 import { PgVectorStore } from './pg-vector-store.js';
 import { loadProfile } from './profile.js';
 import { startConversation, persistMessage, SupabaseTraceSink } from './supabase-trace-sink.js';
+import type { CapabilityTraceSink, CapabilityEvent } from '@buffr/kernel';
 
 /**
  * A long-lived chat session: one warm pg pool and one conversation held across
@@ -33,8 +34,24 @@ import { startConversation, persistMessage, SupabaseTraceSink } from './supabase
  *   question independently). Retrieval-based recall above gives relevance-based memory
  *   without it.
  */
+export type AskOptions = { onStatus?: (msg: string) => void };
+
+const TOOL_LABELS: Record<string, string> = {
+  search_knowledge_base: 'searching knowledge base',
+  fetch_rss_feed:        'fetching RSS feed',
+  web_search_google:     'searching Google',
+  web_search_brave:      'searching Brave',
+  web_search_tavily:     'searching Tavily',
+  fetch_amazon_reviews:  'fetching Amazon reviews',
+  fetch_search_trends:   'fetching search trends',
+};
+
+function toolStatusLabel(toolName: string): string {
+  return TOOL_LABELS[toolName] ?? `calling ${toolName}`;
+}
+
 export type ChatSession = {
-  ask(question: string): Promise<string>;
+  ask(question: string, opts?: AskOptions): Promise<string>;
   close(): Promise<void>;
 };
 
@@ -47,7 +64,7 @@ export async function createChatSession(): Promise<ChatSession> {
   const embedder = new OllamaEmbeddingProvider({ model: 'nomic-embed-text:v1.5', host: cfg.ollamaHost });
   const store = new PgVectorStore({ pool, appId: cfg.appId, dimension: embedder.dimension });
   const pipeline = createRetrievalPipeline({ embedder, store });
-  const searchTool = createSearchKnowledgeBaseTool(pipeline, { minTopK: 4, minScore: 0.5 });
+  const searchTool = createSearchKnowledgeBaseTool(pipeline, { minTopK: 4, minScore: 0.65 });
   const rssTool    = createFetchRssTool(new RssConnector());
   const trendsTool = createFetchTrendsTool(new GoogleTrendsConnector());
   const amazonTool = createFetchReviewsTool(new AmazonReviewsConnector());
@@ -91,7 +108,19 @@ export async function createChatSession(): Promise<ChatSession> {
   const memory = createConversationMemory({ embedder, store });
 
   const conversationId = await startConversation(pool, cfg.appId);
-  const trace = new SupabaseTraceSink({ pool, conversationId });
+  const supabaseTrace = new SupabaseTraceSink({ pool, conversationId });
+
+  // Thin wrapper that intercepts tool_call_start to forward live status to the TUI.
+  // onStatus is swapped per-ask so the same agent instance handles it.
+  let currentOnStatus: ((msg: string) => void) | undefined;
+  const trace: CapabilityTraceSink = {
+    emit(event: CapabilityEvent) {
+      if (event.type === 'tool_call_start' && currentOnStatus) {
+        currentOnStatus(toolStatusLabel(event.toolName));
+      }
+      supabaseTrace.emit(event);
+    },
+  };
   const agent = new RagQueryAgent({
     model,
     tools,
@@ -126,24 +155,26 @@ export async function createChatSession(): Promise<ChatSession> {
         ...(googleTool ? [`- ${googleTool.definition.name}: search the web using Google Custom Search.`] : []),
         '',
         'Tool usage rules (always follow):',
-        `1. ALWAYS call ${searchTool.definition.name} first for any question — personal or general.`,
+        `1. ALWAYS call ${searchTool.definition.name} first for any question.`,
         primaryWebSearch
-          ? `2. If the knowledge base returns no results OR the question is about news, current events, or general facts, ALSO call ${primaryWebSearch.definition.name} to search the live web.`
-          : `2. If the knowledge base returns no results OR the question is about news or current events, ALSO call ${rssTool.definition.name} with a relevant feed URL.`,
+          ? `2. ALWAYS also call ${primaryWebSearch.definition.name} for any question about: companies, people, products, news, current events, or anything that might not be in personal records. Do NOT skip this step even if the knowledge base returned results.`
+          : `2. For news or current events, call ${rssTool.definition.name} with a relevant feed URL.`,
         `3. For product reviews, call ${amazonTool.definition.name}.`,
-        '4. You may call multiple tools in sequence. Synthesize all results into one answer.',
+        '4. Synthesize ALL tool results into one answer. Do not stop after just one tool.',
         '5. Cite sources when available.',
-        '6. If the knowledge base returns zero relevant results, say so — then use web search to answer if available.',
+        '6. If the knowledge base returns zero relevant results (empty results array), say so clearly.',
         '7. NEVER fabricate information. Only use what the tools returned.',
       ].join('\n');
     })(),
   });
 
   return {
-    async ask(question: string): Promise<string> {
+    async ask(question: string, opts?: AskOptions): Promise<string> {
+      currentOnStatus = opts?.onStatus;
       await persistMessage(pool, conversationId, 'user', question);
       const answer = await agent.answer(question);
-      await trace.flush();
+      currentOnStatus = undefined;
+      await supabaseTrace.flush();
       // Best-effort: a memory-write failure must not lose the answer the user has.
       try {
         await memory.remember({ conversationId, question, answer });
