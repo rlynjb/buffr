@@ -8,7 +8,7 @@ export const SEARCH_KNOWLEDGE_BASE_TOOL_NAME = 'search_knowledge_base';
 export type SearchKnowledgeBaseResult = { id: string; score: number; citation: string; meta: Record<string, unknown> };
 export type SearchKnowledgeBaseOutput = { query: string; results: SearchKnowledgeBaseResult[] };
 
-export type SearchKnowledgeBaseToolOptions = { defaultTopK?: number; minTopK?: number };
+export type SearchKnowledgeBaseToolOptions = { defaultTopK?: number; minTopK?: number; minScore?: number };
 
 export function createSearchKnowledgeBaseTool(
   pipeline: RetrievalPipeline,
@@ -16,6 +16,7 @@ export function createSearchKnowledgeBaseTool(
 ): { definition: ToolDefinition; handler: ToolHandler } {
   const defaultTopK = options.defaultTopK ?? 5;
   const minTopK = Math.max(1, options.minTopK ?? 1);
+  const minScore = options.minScore ?? 0;
 
   const definition: ToolDefinition = {
     name: SEARCH_KNOWLEDGE_BASE_TOOL_NAME,
@@ -42,6 +43,7 @@ export function createSearchKnowledgeBaseTool(
     const fetchK = filter ? topK * 4 : topK;
     let hits = await pipeline.query(query, fetchK);
     if (filter) hits = hits.filter((h) => matchesFilter(h, filter)).slice(0, topK);
+    if (minScore > 0) hits = hits.filter((h) => h.score >= minScore);
     return { query, results: hits.map(toResult) };
   };
 

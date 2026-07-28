@@ -44,7 +44,7 @@ export async function createChatSession(): Promise<ChatSession> {
   const embedder = new OllamaEmbeddingProvider({ model: 'nomic-embed-text:v1.5', host: cfg.ollamaHost });
   const store = new PgVectorStore({ pool, appId: cfg.appId, dimension: embedder.dimension });
   const pipeline = createRetrievalPipeline({ embedder, store });
-  const searchTool = createSearchKnowledgeBaseTool(pipeline, { minTopK: 4 });
+  const searchTool = createSearchKnowledgeBaseTool(pipeline, { minTopK: 4, minScore: 0.5 });
   const rssTool    = createFetchRssTool(new RssConnector());
   const trendsTool = createFetchTrendsTool(new GoogleTrendsConnector());
   const amazonTool = createFetchReviewsTool(new AmazonReviewsConnector());
@@ -104,7 +104,7 @@ export async function createChatSession(): Promise<ChatSession> {
       '- You may call multiple tools in sequence before answering.',
       '- Synthesize your final answer from ALL tool results combined.',
       '- Ground every statement in what the tools returned. Cite sources when available.',
-      '- IMPORTANT: If the retrieved content is not relevant to the question, do NOT use it. Say "I don\'t have information about that" instead of fabricating a connection between unrelated data and the question.',
+      '- IMPORTANT: If the knowledge base returns zero results or results with low relevance scores, it means nothing relevant was found. Say "I don\'t have information about that" — do NOT fabricate a connection to unrelated data.',
       '- Do not answer from memory alone. If no tool returns relevant data, say so plainly.',
     ].join('\n'),
   });
