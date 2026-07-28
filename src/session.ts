@@ -104,6 +104,7 @@ export async function createChatSession(): Promise<ChatSession> {
       '- You may call multiple tools in sequence before answering.',
       '- Synthesize your final answer from ALL tool results combined.',
       '- Ground every statement in what the tools returned. Cite sources when available.',
+      '- IMPORTANT: If the retrieved content is not relevant to the question, do NOT use it. Say "I don\'t have information about that" instead of fabricating a connection between unrelated data and the question.',
       '- Do not answer from memory alone. If no tool returns relevant data, say so plainly.',
     ].join('\n'),
   });

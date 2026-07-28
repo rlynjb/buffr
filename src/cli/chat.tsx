@@ -96,6 +96,7 @@ function Chat({ session, onExit }: { session: ChatSession; onExit: () => Promise
           paddingLeft={1}
           paddingRight={1}
           marginTop={1}
+          marginBottom={1}
         >
           <textarea
             ref={taRef}
