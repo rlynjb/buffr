@@ -6,9 +6,10 @@ import { PgVectorStore } from '../pg-vector-store.js';
 import { indexDocumentRow } from '../runtime.js';
 import { DB_SOURCES } from '../db-sources.js';
 
-// Postgres rejects lone UTF-16 surrogates in JSON columns; strip them.
+// Postgres rejects lone UTF-16 surrogates in JSON columns.
+// First alternative keeps valid pairs (high+low); second removes lone surrogates.
 function sanitize(s: string): string {
-  return s.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '');
+  return s.replace(/[\uD800-\uDBFF][\uDC00-\uDFFF]|[\uD800-\uDFFF]/g, (m) => (m.length === 2 ? m : ''));
 }
 
 loadEnv();
