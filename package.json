@@ -17,6 +17,7 @@
   "dependencies": {
     "@buffr/contracts": "0.0.1",
     "@buffr/kernel": "0.0.1",
+    "@buffr/connectors": "0.0.1",
     "@opentui/core": "^0.4.5",
     "@opentui/react": "^0.4.5",
     "dotenv": "^16.4.0",
