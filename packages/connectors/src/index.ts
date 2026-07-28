@@ -5,3 +5,7 @@ export { GoogleTrendsConnector } from './discovery/search-trends.js';
 export type { TrendsParams, TrendResult, TrendPoint, TrendsRequestOpts, TrendsTransport } from './discovery/search-trends.js';
 export { AmazonReviewsConnector } from './discovery/reviews/amazon.js';
 export type { AmazonReviewsParams, AmazonReviewsResult, AmazonReview, AmazonTransport } from './discovery/reviews/amazon.js';
+export { BraveSearchConnector } from './discovery/brave-search.js';
+export type { BraveSearchParams, BraveSearchData, BraveSearchResult, BraveTransport } from './discovery/brave-search.js';
+export { TavilySearchConnector } from './discovery/tavily-search.js';
+export type { TavilySearchParams, TavilySearchData, TavilySearchResult, TavilyTransport } from './discovery/tavily-search.js';
