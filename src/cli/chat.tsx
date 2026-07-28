@@ -19,19 +19,37 @@ function formatStats(s: TurnStats): string {
 
 const FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
-function Spinner({ status }: { status: string }) {
+function Spinner({ status, tokens }: { status: string; tokens: { input: number; output: number } }) {
   const [frame, setFrame] = useState(0);
+  const [elapsedMs, setElapsedMs] = useState(0);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const startRef = useRef<any>(Date.now());
+
   useEffect(() => {
-    const id = setInterval(() => setFrame(f => (f + 1) % FRAMES.length), 80);
+    startRef.current = Date.now();
+    setElapsedMs(0);
+    const id = setInterval(() => {
+      setFrame(f => (f + 1) % FRAMES.length);
+      setElapsedMs(Date.now() - startRef.current);
+    }, 100);
     return () => clearInterval(id);
   }, []);
-  return <text fg="#FFFF00">{FRAMES[frame]} {status}</text>;
+
+  const secs = elapsedMs / 1000;
+  const timeStr = secs >= 60
+    ? `${Math.floor(secs / 60)}m ${Math.round(secs % 60)}s`
+    : `${secs.toFixed(1)}s`;
+  const total = tokens.input + tokens.output;
+  const tokStr = total > 0 ? ` · ${total.toLocaleString()} tok` : '';
+
+  return <text fg="#FFFF00">{FRAMES[frame]} {status} · {timeStr}{tokStr}</text>;
 }
 
 function Chat({ session, onExit }: { session: ChatSession; onExit: () => Promise<void> }) {
   const [turns, setTurns] = useState<Turn[]>([]);
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState('thinking…');
+  const [liveTokens, setLiveTokens] = useState({ input: 0, output: 0 });
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const taRef = useRef<any>(null);
 
@@ -46,9 +64,11 @@ function Chat({ session, onExit }: { session: ChatSession; onExit: () => Promise
     setTurns(t => [...t, { role: 'you', text: q }]);
     setBusy(true);
     setStatus('thinking…');
+    setLiveTokens({ input: 0, output: 0 });
     let capturedStats: TurnStats | undefined;
     session.ask(q, {
       onStatus: (msg) => setStatus(msg),
+      onTokens: (d) => setLiveTokens(t => ({ input: t.input + d.input, output: t.output + d.output })),
       onComplete: (s) => { capturedStats = s; },
     }).then(
       answer => {
@@ -103,7 +123,7 @@ function Chat({ session, onExit }: { session: ChatSession; onExit: () => Promise
             )}
           </box>
         ))}
-        {busy && <Spinner status={status} />}
+        {busy && <Spinner status={status} tokens={liveTokens} />}
       </scrollbox>
 
       {/* input — fixed at bottom */}

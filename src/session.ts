@@ -37,6 +37,7 @@ import type { CapabilityTraceSink, CapabilityEvent } from '@buffr/kernel';
 export type TurnStats = { durationMs: number; inputTokens: number; outputTokens: number };
 export type AskOptions = {
   onStatus?: (msg: string) => void;
+  onTokens?: (delta: { input: number; output: number }) => void;
   onComplete?: (stats: TurnStats) => void;
 };
 
@@ -117,6 +118,7 @@ export async function createChatSession(): Promise<ChatSession> {
   // Thin wrapper that intercepts events to forward live status and accumulate
   // token usage to the TUI. Mutable slots are swapped per-ask.
   let currentOnStatus: ((msg: string) => void) | undefined;
+  let currentOnTokens: ((delta: { input: number; output: number }) => void) | undefined;
   let currentInputTokens = 0;
   let currentOutputTokens = 0;
   const trace: CapabilityTraceSink = {
@@ -125,8 +127,11 @@ export async function createChatSession(): Promise<ChatSession> {
         currentOnStatus(toolStatusLabel(event.toolName));
       }
       if (event.type === 'model_usage') {
-        currentInputTokens  += event.inputTokens  ?? 0;
-        currentOutputTokens += event.outputTokens ?? 0;
+        const deltaIn  = event.inputTokens  ?? 0;
+        const deltaOut = event.outputTokens ?? 0;
+        currentInputTokens  += deltaIn;
+        currentOutputTokens += deltaOut;
+        currentOnTokens?.({ input: deltaIn, output: deltaOut });
       }
       supabaseTrace.emit(event);
     },
@@ -181,12 +186,14 @@ export async function createChatSession(): Promise<ChatSession> {
   return {
     async ask(question: string, opts?: AskOptions): Promise<string> {
       currentOnStatus = opts?.onStatus;
+      currentOnTokens = opts?.onTokens;
       currentInputTokens = 0;
       currentOutputTokens = 0;
       const startMs = Date.now();
       await persistMessage(pool, conversationId, 'user', question);
       const answer = await agent.answer(question);
       currentOnStatus = undefined;
+      currentOnTokens = undefined;
       opts?.onComplete?.({
         durationMs: Date.now() - startMs,
         inputTokens: currentInputTokens,
