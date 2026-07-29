@@ -117,10 +117,20 @@ export interface EvalCase<TInput, TExpected> {
   sourceSnapshotIds?: string[];
 }
 
+export type SourcePolicy = {
+  sourceType: string;
+  priority: number;
+  freshnessRequirement?: 'live' | 'recent' | 'stale' | 'unknown';
+  notes?: string;
+};
+
 export interface DomainPack {
   id: string;
   version: string;
   entities: Record<string, unknown>;
+  scorecards: Record<string, ScorecardDefinition>;
+  dimensions: Record<string, AnalysisDimension[]>;
+  sourcePolicies: SourcePolicy[];
   prompts: Record<string, string>;
   evalDatasets: string[];
 }
