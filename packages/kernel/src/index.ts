@@ -9,3 +9,4 @@ export * from './retrieval/index.js';
 export * from './memory/index.js';
 export * from './evals/index.js';
 export * from './agents/index.js';
+export * from './cache/index.js';
