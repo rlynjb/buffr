@@ -88,6 +88,7 @@ export interface ScorecardDefinition {
 export interface DecisionJournalEntry {
   id: string;
   userId: string;
+  workspaceId: string;
   domain: string;
   subjectType: string;
   subjectId: string;

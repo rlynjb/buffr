@@ -5,7 +5,7 @@
   "private": true,
   "workspaces": ["packages/*"],
   "scripts": {
-    "build:packages": "npm run build -w @buffr/contracts && npm run build -w @buffr/kernel && npm run build -w @buffr/connectors",
+    "build:packages": "npm run build -w @buffr/contracts && npm run build -w @buffr/kernel && npm run build -w @buffr/connectors && npm run build -w @buffr/capabilities",
     "build": "npm run build:packages && tsc -p tsconfig.json",
     "test": "npm run build && node --test --test-concurrency=1 dist/test/*.test.js",
     "test:kernel": "npm run build -w @buffr/kernel && node --test --test-concurrency=1 packages/kernel/dist/test/*.test.js",
@@ -19,6 +19,7 @@
     "@buffr/contracts": "0.0.1",
     "@buffr/kernel": "0.0.1",
     "@buffr/connectors": "0.0.1",
+    "@buffr/capabilities": "0.0.1",
     "@opentui/core": "^0.4.5",
     "@opentui/react": "^0.4.5",
     "dotenv": "^16.4.0",
