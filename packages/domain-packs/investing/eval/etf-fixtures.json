@@ -1,0 +1,28 @@
+[
+  {
+    "description": "Low-cost broad market ETF",
+    "findings": [
+      { "dimensionId": "holdings-quality","score": 80, "confidence": 0.85, "summary": "", "positives": [], "negatives": [], "unknowns": [], "evidenceIds": [] },
+      { "dimensionId": "expense-ratio",   "score": 10, "confidence": 0.95, "summary": "", "positives": [], "negatives": [], "unknowns": [], "evidenceIds": [] },
+      { "dimensionId": "diversification", "score": 90, "confidence": 0.9,  "summary": "", "positives": [], "negatives": [], "unknowns": [], "evidenceIds": [] },
+      { "dimensionId": "liquidity",       "score": 95, "confidence": 0.95, "summary": "", "positives": [], "negatives": [], "unknowns": [], "evidenceIds": [] },
+      { "dimensionId": "tracking-error",  "score": 5,  "confidence": 0.9,  "summary": "", "positives": [], "negatives": [], "unknowns": [], "evidenceIds": [] }
+    ],
+    "evidenceCount": 6,
+    "expectedTotalScore": 88.25,
+    "expectedWarnings": []
+  },
+  {
+    "description": "High-cost thematic ETF",
+    "findings": [
+      { "dimensionId": "holdings-quality","score": 65, "confidence": 0.75, "summary": "", "positives": [], "negatives": [], "unknowns": [], "evidenceIds": [] },
+      { "dimensionId": "expense-ratio",   "score": 85, "confidence": 0.95, "summary": "", "positives": [], "negatives": [], "unknowns": [], "evidenceIds": [] },
+      { "dimensionId": "diversification", "score": 40, "confidence": 0.8,  "summary": "", "positives": [], "negatives": [], "unknowns": [], "evidenceIds": [] },
+      { "dimensionId": "liquidity",       "score": 50, "confidence": 0.8,  "summary": "", "positives": [], "negatives": [], "unknowns": [], "evidenceIds": [] },
+      { "dimensionId": "tracking-error",  "score": 30, "confidence": 0.8,  "summary": "", "positives": [], "negatives": [], "unknowns": [], "evidenceIds": [] }
+    ],
+    "evidenceCount": 5,
+    "expectedTotalScore": 45.75,
+    "expectedWarnings": []
+  }
+]
