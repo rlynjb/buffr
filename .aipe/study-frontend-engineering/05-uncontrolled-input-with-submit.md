@@ -1,54 +1,62 @@
-# Uncontrolled input with submit — OpenTUI's submit-only input model
+# Uncontrolled multiline textarea with keyboard intercept — OpenTUI's ref-API input model
 
-**Industry name(s):** uncontrolled component · uncontrolled input · ref-managed input. **Type:** Industry-standard pattern (uncontrolled vs controlled), project-specific platform: OpenTUI terminal input instead of DOM `<input>`.
+**Industry name(s):** uncontrolled component · uncontrolled input · ref-managed input · keyboard intercept. **Type:** Industry-standard pattern (uncontrolled vs controlled), project-specific: OpenTUI `<textarea ref>` + `useKeyboard` hook over a terminal TTY.
 
 ---
 
 ## Zoom out, then zoom in
 
-The text field where you type your question is an **uncontrolled input** — the widget holds the value internally, React never owns it. That's the opposite of the browser controlled-input pattern you've used for years. Here's where it sits and why the platform swap flips the ownership model.
+The text field where you type your question is an **uncontrolled input** — the widget holds the value internally, React never owns it. The new implementation (2026-07) replaced a single-line `<input onSubmit>` with a **multiline `<textarea ref={taRef}>`** plus a **`useKeyboard` interceptor** that distinguishes Enter (submit) from Alt+Enter (new line). That split is the entire behaviour change; the uncontrolled ownership model is the same.
 
 ```
-  Zoom out — uncontrolled input over the terminal
+  Zoom out — uncontrolled textarea over the terminal
 
   ┌─ Platform (input source) ────────────────────────────┐
   │  raw-mode TTY — keystrokes, char by char              │ ← the platform
   └───────────────────────────┬──────────────────────────┘
                   key events   │
-  ┌─ Widget (<input>, OpenTUI) ▼──────────────────────────┐
-  │  holds the text internally · clears on unmount        │
-  │  fires onSubmit(value: string) on Enter               │ ← buffr uses this
+  ┌─ useKeyboard hook ─────────▼──────────────────────────┐
+  │  intercepts all keys BEFORE widget default handling   │
+  │  Enter (no modifier) → handleSubmit()                 │
+  │  Alt+Enter (e.meta)  → taRef.current.newLine()        │ ← buffr uses this
+  └───────────────────────────┬──────────────────────────┘
+  ┌─ <textarea ref={taRef}> (OpenTUI) ──────────────────▼─┐
+  │  holds text internally · multiline buffer             │
+  │  taRef.current.plainText  → reads the text            │
+  │  taRef.current.setText('') → clears on submit         │
+  │  taRef.current.newLine()  → inserts \n                │
   └───────────────────────────┬──────────────────────────┘
        only submit  │   (no value/onChange handshake)
   ┌─ UI state (React) ─────────▼──────────────────────────┐
-  │  ★ React never holds the text ★                       │ ← we are here
-  │  onSubmit receives value once, at Enter               │
+  │  ★ React never holds the text ★                       │
+  │  handleSubmit reads .plainText once, then .setText('') │
   └───────────────────────────────────────────────────────┘
 ```
 
-**Zoom in:** the concept is the **uncontrolled component** — the widget manages its own text, and React only learns the final value at submit. Buffr's field is `<input placeholder="ask buffr" onSubmit={onSubmit as any} focused />` (`src/cli/chat.tsx:62`). No `value` prop. No `onChange`. The field clears automatically when `busy` unmounts it (ternary at `chat.tsx:56`) and remounts fresh when `busy` becomes `false`. React gets exactly one notification per turn: `onSubmit(value)` on Enter.
+**Zoom in:** the concept is the **uncontrolled component** — the widget manages its own text, and React only reads it at submit. `<textarea ref={taRef}>` holds the buffer. `useKeyboard` intercepts the key that would trigger submit. The ref API (`plainText`, `setText`, `newLine`) is the only surface React uses. No `value` prop. No `onChange`. No `input` useState.
 
 ---
 
 ## The structure pass
 
-One axis: **"who holds the current text?"** In a *controlled* input React holds it; in an *uncontrolled* one the widget holds it. That flip is the whole definition.
+One axis: **"who holds the current text?"** Controlled = React; uncontrolled = the widget.
 
 ```
   Axis — "who holds the current text?" — platform → React
 
   ┌─ raw TTY stdin ────────┐   → holds nothing (just emits keys)
   └───────────┬────────────┘
-  ┌─ <input> widget ▼──────┐   → HOLDS the text (internal widget state)
-  │  (uncontrolled)        │      ← seam: only onSubmit crosses out
-  └───────────┬────────────┘
-  ┌─ React state ▼─────────┐   → holds NOTHING (turns + busy only)
-  └────────────────────────┘
+  ┌─ useKeyboard ──────────▼───┐ → intercepts before widget sees Enter
+  └───────────┬───────────────┘
+  ┌─ <textarea> widget ────▼───┐ → HOLDS the text (internal buffer)
+  │  ref-API: plainText / setText / newLine
+  └───────────┬───────────────┘
+  ┌─ React state ──────────▼───┐ → holds NOTHING about the text
+  │  turns + busy + status + liveTokens only
+  └────────────────────────────┘
 ```
 
-- **Layers:** raw stdin (emits keys) → `<input>` widget (holds + clears) → React (receives only on submit).
-- **Axis (ownership):** the widget is the sole holder. React receives a one-time notification. There is no per-keystroke loop.
-- **The seam:** `onSubmit(value: string)` at `chat.tsx:62`. Above it the widget is opaque; below it React processes the trimmed value, appends a `you` turn, fires `ask()`, etc.
+The seam: `taRef.current.plainText` at submit time. Above the seam the widget is opaque; below it React processes the trimmed value, appends a `you` turn, fires `ask()`.
 
 ---
 
@@ -56,120 +64,119 @@ One axis: **"who holds the current text?"** In a *controlled* input React holds 
 
 ### Move 1 — the mental model
 
-You know the uncontrolled-input pattern from refs: `<input ref={inputRef} />` — you read `inputRef.current.value` only when you need it, rather than syncing every keystroke to state. OpenTUI's `<input>` is the terminal equivalent: no `value`/`onChange` contract at all. The widget owns the buffer; you get the final string at Enter. Clearing is free: unmounting the widget discards its internal state, and remounting gives you a fresh empty field.
+You know the uncontrolled-input pattern from refs: `<input ref={inputRef} />` — you read `inputRef.current.value` only at submit rather than syncing every keystroke to state. OpenTUI's `<textarea>` is the terminal equivalent, with a ref-API surface instead of a DOM node:
 
 ```
-  Controlled vs uncontrolled — the contrast
-
-  Controlled (DOM / was Ink)        Uncontrolled (OpenTUI)
-  ──────────────────────────        ──────────────────────
-  value={x} → widget renders x      widget holds own text
+  Controlled (DOM browser)         Uncontrolled (OpenTUI textarea)
+  ───────────────────────          ──────────────────────────────
+  value={x} → widget renders x      widget holds own buffer
   onChange → setX per keystroke      no onChange callback
-  setX('') to clear on submit        unmount to clear (automatic)
-  React re-renders per keystroke     React notified at submit only
+  setX('') to clear on submit        taRef.current.setText('') to clear
+  React re-renders per keystroke     React reads once, at submit
 ```
 
-The strategy in one sentence: **the widget is a black box that emits one event — the trimmed value at Enter — and React handles it then.**
+The key difference from the old `<input onSubmit>` model: **the widget doesn't fire an event on Enter**. Instead, `useKeyboard` fires first and calls `handleSubmit()` manually. The `<textarea>` never sees the Enter key (it's `e.preventDefault()`'d). That separation is what enables the Alt+Enter split — `useKeyboard` routes the modifier, preventing Enter from inserting a literal newline.
 
 ### Move 2 — the walkthrough
+
+#### The keyboard interceptor
+
+```tsx
+// src/cli/chat.tsx — useKeyboard hook
+useKeyboard((e: any) => {
+  if (e.name !== 'return' && e.name !== 'kpenter') return;  // only intercept Enter
+  if (e.ctrl || e.super || e.hyper) return;                  // pass through Ctrl/Super
+  if (busy) return;                                          // locked during a turn
+  e.preventDefault();                                        // block widget default
+  if (e.meta) {
+    taRef.current?.newLine();   // Alt+Enter → insert newline in textarea
+  } else {
+    handleSubmit();             // bare Enter → submit
+  }
+});
+```
+
+`useKeyboard` runs before the textarea's own key handler. `e.preventDefault()` stops the key from reaching the widget — so Enter never inserts a literal newline; only `newLine()` does (via `e.meta`).
 
 #### The field declaration
 
 ```tsx
-// src/cli/chat.tsx:59–62
-<box>
-  <text fg="#00FFFF">{'> '}</text>
-  <input placeholder="ask buffr" onSubmit={onSubmit as any} focused />
+// src/cli/chat.tsx — the input area
+<box border={true} borderStyle="rounded" borderColor="#444444"
+     paddingLeft={1} paddingRight={1} marginTop={1} marginBottom={1}>
+  <textarea
+    ref={taRef}
+    placeholder="type your message… (Alt+Enter for new line)"
+    textColor="#CCCCCC"
+    placeholderColor="#555555"
+    onSubmit={handleSubmit}
+    focused
+  />
 </box>
 ```
 
-Three attributes, no `value`, no `onChange`:
+No `value` prop. No `onChange`. `ref={taRef}` is the only React hook into the widget. `onSubmit` is present as an OpenTUI fallback but the keyboard interceptor normally fires first.
 
-- `placeholder="ask buffr"` — displayed when the widget is empty.
-- `onSubmit={onSubmit as any}` — fires with the current string when Enter is pressed. The `as any` cast is a TypeScript workaround: `@opentui/react` declares `onSubmit` as an intersection type `((event: SubmitEvent) => void) & ((value: string) => void)` that no single function can satisfy without a cast. At runtime, OpenTUI calls it with the string value — the cast is safe.
-- `focused` — tells OpenTUI this widget should receive keyboard focus immediately on mount.
-
-#### Submit — Enter hands the value to the handler
+#### Submit — reading and clearing via the ref
 
 ```tsx
-// src/cli/chat.tsx:24–43
-const onSubmit = (value: string): void => {
-  const q = value.trim();
+// src/cli/chat.tsx — handleSubmit
+const handleSubmit = (): void => {
+  const q = (taRef.current?.plainText as string | undefined)?.trim() ?? '';
   if (busy || !q) return;
+  taRef.current?.setText('');          // clear the widget buffer
   if (q === '/exit' || q === '/quit') {
     onExit().catch(err => { console.error(err); process.exit(1); });
     return;
   }
   setTurns(t => [...t, { role: 'you', text: q }]);
   setBusy(true);
-  session.ask(q).then(
-    answer => { setTurns(t => [...t, { role: 'buffr', text: answer }]); setBusy(false); },
-    err => { setTurns(t => [...t, { role: 'buffr', text: `error: ${(err as Error).message}` }]); setBusy(false); },
-  );
+  setStatus('thinking…');
+  setLiveTokens({ input: 0, output: 0 });
+  // ... session.ask() with callbacks
 };
 ```
 
-`onSubmit` receives `value` — the full string the user typed. Trim, guard, dispatch. React appends the `you` turn, sets `busy` to `true`. The ternary at `chat.tsx:56` immediately unmounts this `<input>` and mounts `<Spinner />`. When the answer arrives, `busy` goes to `false`, the spinner unmounts, and a **fresh `<input>`** mounts — empty, focused, ready.
-
-#### Clearing — handled by unmount/remount
-
-The old controlled pattern cleared the field with `setInput('')`. Here there is no `input` state to clear. When `busy` becomes `true`, React unmounts the `<input>` entirely — its internal text buffer is garbage-collected. When `busy` returns to `false`, React mounts a new `<input>` starting empty. This is the uncontrolled analogue of clearing: throw the old widget away and start fresh.
-
-```
-  clearing — controlled vs uncontrolled
-
-  Controlled (old Ink):  setInput('') → React owns empty string → re-render
-  Uncontrolled (OpenTUI): setBusy(true) → widget unmounts → widget remounts fresh
-```
-
-### Move 2 variant — the load-bearing skeleton
-
-The irreducible core: **`<input onSubmit focused />` (no value/onChange) + `busy` ternary that unmounts/remounts it + handler that receives value at Enter.**
-
-- Drop **`onSubmit`** → React never learns what the user typed.
-- Drop **`focused`** → the widget doesn't receive keystrokes (nothing to submit).
-- Drop **the `busy` ternary unmount** → the field stays mounted during the turn; OpenTUI may still send keystrokes but `if (busy) return` guards against them; the field's text buffer isn't cleared, so the next turn starts with leftover text.
-- Add **`value` prop** → TypeScript error; OpenTUI's `<input>` has no `value` prop — it's deliberately uncontrolled.
+`taRef.current.plainText` reads the current text. `setText('')` clears it imperatively after reading. This is the ref-API equivalent of `setInput('')` in a controlled model — but React still holds no text state.
 
 ### Move 3 — the principle
 
-Controlled vs uncontrolled is a question of **where the source of truth lives**. Controlled means React owns it — programmable (clear, prefill, validate) at the cost of a per-keystroke loop. Uncontrolled means the widget owns it — zero per-keystroke overhead, but you can only inspect the value at a trigger point (submit, blur). For a terminal chat where the only action is "submit on Enter" and clearing is free via remount, uncontrolled is the right fit. The principle is platform-independent; the right answer flips by use case, not by platform.
+Uncontrolled inputs minimize re-renders by keeping the text buffer outside React. The tradeoff: you can't declaratively set, validate, or observe the text mid-turn. For a submit-only chat field where the only operation on the buffer is "read at submit + clear," that tradeoff is correct. The `useKeyboard` separation is the price of multiline — you give up the widget's built-in submit event, get full control of the Enter key in exchange.
 
 ---
 
 ## Primary diagram
 
-The full uncontrolled loop, from TTY up through OpenTUI's widget and back to React on submit.
-
 ```
-  buffr's uncontrolled input — the complete flow
+  buffr's uncontrolled textarea — the complete flow
 
-  ┌─ Platform: raw-mode TTY ─────────────────────────────────┐
-  │  keystroke 'h' · 'e' · 'l' · … (buffered in widget)      │
-  └───────────────────────────┬──────────────────────────────┘
-                  key events   │
-  ┌─ Widget: <input> (OpenTUI, chat.tsx:62) ─────────────────▼┐
-  │  holds text internally · widget state, not React state    │
-  │  on Enter ── onSubmit(value: string) ──────────────────►  │
-  └───────────────────────────┬──────────────────────────────┘
-    unmount when busy=true     │
-    remount when busy=false    │ onSubmit fires once per Enter
-    (clears buffer for free)   │
-  ┌─ React (chat.tsx:24) ─────▼──────────────────────────────┐
-  │  trim → guard → append you turn → setBusy(true)          │
-  │  → widget unmounts → Spinner mounts                      │
-  │  → ask() resolves → setBusy(false)                       │
-  │  → Spinner unmounts → fresh <input> mounts               │
-  └──────────────────────────────────────────────────────────┘
+  ┌─ Platform: raw-mode TTY ──────────────────────────────────┐
+  │  keystrokes 'h' 'e' 'l' 'l' 'o' '\n' (alt+enter) …      │
+  └──────────────────────────┬────────────────────────────────┘
+  ┌─ useKeyboard hook ────────▼────────────────────────────────┐
+  │  on bare Enter → e.preventDefault() → handleSubmit()      │
+  │  on Alt+Enter  → e.preventDefault() → taRef.newLine()     │
+  │  other keys    → pass through to textarea                  │
+  └──────────────────────────┬────────────────────────────────┘
+  ┌─ <textarea ref={taRef}> ──▼────────────────────────────────┐
+  │  buffer: "hello\nworld"  (holds text, React doesn't)      │
+  │  .plainText → "hello\nworld"   (read at submit)           │
+  │  .setText('')              (cleared after read)           │
+  │  .newLine()                (inserts \n on Alt+Enter)      │
+  └──────────────────────────┬────────────────────────────────┘
+  ┌─ React (handleSubmit) ────▼────────────────────────────────┐
+  │  trim → guard → setText('') → append 'you' turn           │
+  │  setBusy(true) → session.ask() resolves → setBusy(false)  │
+  └────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
 ## Elaborate
 
-This is the paradigm flip from what buffr used before. Previously, Ink's `<TextInput>` was controlled: `value={input}`, `onChange={setInput}`, `setInput('')` on submit — React owned every keystroke. OpenTUI's `<input>` makes the opposite choice: it holds its own buffer, fires once on Enter, clears on unmount. The practical effect is that the `input` state hook is gone entirely — two `useState` hooks instead of three, and the state architecture is simpler. The uncontrolled model is a natural fit for submit-only fields; it would be less natural if you needed to programmatically set or inspect the in-progress text mid-turn, which buffr doesn't.
+The shift from `<input onSubmit>` to `<textarea ref>` + `useKeyboard` was motivated by multiline support. The old `<input>` fired `onSubmit` on Enter automatically; the new `<textarea>` doesn't, so `useKeyboard` intercepts the key first. The result: Enter submits, Alt+Enter inserts a newline, any other modifier passes through. The uncontrolled ownership model is unchanged — React still holds no text state. The ref API (`plainText`, `setText`, `newLine`) is not typed by `@opentui/react`; both `taRef` and `startRef` (inside `<Spinner>`) use `useRef<any>` with an eslint suppression, which means future OpenTUI renames are not caught by the compiler.
 
-Read next: `03-async-ui-with-a-busy-flag.md` (what `onSubmit` triggers and the full busy lifecycle) and `02-hooks-state-in-a-cli.md` (why input isn't a hook here). The raw-mode TTY mechanics are `study-runtime-systems`; the trust boundary (free text → agent) is `study-security`.
+Read next: `03-async-ui-with-a-busy-flag.md` (what `handleSubmit` kicks off and the full busy lifecycle) and `02-hooks-state-in-a-cli.md` (why input isn't a useState hook here). Raw-mode TTY mechanics belong to `study-runtime-systems`; the trust boundary (free text → agent) belongs to `study-security`.
 
 ---
 
@@ -177,35 +184,27 @@ Read next: `03-async-ui-with-a-busy-flag.md` (what `onSubmit` triggers and the f
 
 **Q: "Is this a controlled or uncontrolled input, and how do you know?"**
 
-Uncontrolled — there's no `value` prop and no `onChange`. OpenTUI's `<input>` holds its own text internally and fires `onSubmit(value)` on Enter. The proof: there's no `input` state in `<Chat>` at all — you can't clear it with `setX('')` because React doesn't own it. Clearing happens automatically when `busy` unmounts the widget.
+Uncontrolled — no `value` prop, no `onChange`. `<textarea ref={taRef}>` holds its own buffer. React reads `.plainText` once at submit and clears with `.setText('')`. There is no `input` useState anywhere in `<Chat>`.
 
 ```
-  uncontrolled — the tells
-  no value= prop                → widget owns the text
-  no onChange= callback         → no per-keystroke React update
-  no input useState             → nothing to clear imperatively
-  clearing = unmount + remount  → React's lifecycle does it
+  uncontrolled tells
+  no value= prop              → widget owns the buffer
+  no onChange= callback       → no per-keystroke React update
+  no input useState           → nothing for React to hold
+  setText('') via ref         → imperative clear, not state update
 ```
 
-Anchor: *"No value prop, no onChange, no input state hook. The widget fires once — on Enter — and clears on unmount (chat.tsx:62). That's textbook uncontrolled."*
+**Q: "How does Alt+Enter insert a newline instead of submitting?"**
 
-**Q: "How does the field clear between turns if React doesn't own the value?"**
-
-`setBusy(true)` triggers the ternary at `chat.tsx:56` which unmounts the `<input>` and mounts `<Spinner />`. The widget's internal text buffer is gone. When the answer arrives and `busy` goes back to `false`, a fresh `<input>` mounts — empty, focused. React's unmount/remount lifecycle is the clear mechanism; no explicit reset needed.
-
-```
-  clearing without state ownership
-  busy=true  → <input> unmounts → buffer discarded
-  busy=false → <input> remounts → starts empty, focused
-  (same effect as setInput(''), zero per-keystroke cost)
-```
+`useKeyboard` intercepts all Enter keys before the textarea sees them. It calls `e.preventDefault()` to block the widget's default handling, then checks `e.meta` (true when Alt/Option is held). Alt+Enter calls `taRef.current.newLine()` to insert a literal newline into the buffer; bare Enter calls `handleSubmit()`. The textarea never processes the Enter key itself.
 
 ---
 
 ## See also
 
-- `03-async-ui-with-a-busy-flag.md` — what onSubmit kicks off and the busy lifecycle
+- `03-async-ui-with-a-busy-flag.md` — what handleSubmit kicks off and the busy lifecycle
 - `02-hooks-state-in-a-cli.md` — why input is not a useState hook
 - `01-react-without-the-dom.md` — how the field reconciles to the terminal via OpenTUI
 - `audit.md` lens 7 (browser-platform-and-build), lens 3 (component-architecture)
+- `05-controlled-text-input.md` — the superseded Ink era controlled model (archive)
 - cross-link: `study-runtime-systems` (raw-mode TTY, Bun runtime), `study-security` (untrusted free-text input)

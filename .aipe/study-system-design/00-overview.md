@@ -29,7 +29,7 @@ on the diagram.
           │                 │                   │
           │ builds once     │ run per turn      │ remember per turn
           ▼                 ▼                   ▼
-  ┌─ aptkit-core (library — never edited here) ───────────────────────────┐
+  ┌─ @buffr/kernel (local monorepo package — packages/kernel/, never edited here) ──────────┐
   │  RagQueryAgent.answer()      run-agent-loop, ReAct-style               │
   │    GemmaModelProvider ─ guarded by ContextWindowGuardedProvider(8192)  │
   │    createRetrievalPipeline ─ OllamaEmbeddingProvider + VectorStore     │
@@ -67,13 +67,13 @@ on the diagram.
 |---|---|---|---|
 | `chat.tsx` | OpenTUI, the only interface | screen state (turns, busy, liveTokens); Spinner with elapsed + token count | `session.ask(q, {onStatus, onTokens, onComplete})` |
 | `session.ts` | the orchestrator buffr owns | warm pool, conversation id, tool wiring, mutable-trace slots, `TOOL_LABELS` | aptkit agent, adapters, connectors, memory |
-| `RagQueryAgent` (aptkit) | the agent loop | per-turn reasoning, tool dispatch | model, tools (6), trace |
-| `GemmaModelProvider` (aptkit) | the model port impl | Ollama wire format mapping | Ollama `/api/chat` |
+| `RagQueryAgent` (@buffr/kernel) | the agent loop | per-turn reasoning, tool dispatch | model, tools (6), trace |
+| `GemmaModelProvider` (@buffr/kernel) | the model port impl | Ollama wire format mapping | Ollama `/api/chat` |
 | `PgVectorStore` (buffr) | **adapter** behind `VectorStore` **port** | SQL for upsert + cosine search; `minScore` filter | `agents.chunks` |
 | `SupabaseTraceSink` (buffr) | **adapter** behind `CapabilityTraceSink` **port** | turning events into rows | `agents.messages` |
 | mutable-trace slots (session.ts) | per-ask callback injection | `currentOnStatus`, `currentOnTokens`; fires live TUI updates | `trace.emit()`, `<Spinner>` |
 | Connector tools (buffr) | `DataConnector<P,D>` adapters | RSS fetch, Amazon reviews, Google/Brave/Tavily search | external HTTP APIs |
-| `createConversationMemory` (aptkit) | episodic-memory engine | embed/tag/recall logic | injected `PgVectorStore` |
+| `createConversationMemory` (@buffr/kernel) | episodic-memory engine | embed/tag/recall logic | injected `PgVectorStore` |
 | Postgres `agents` schema | the only durable store | corpus, chunks, trajectories, profiles | `pg` driver |
 | Ollama | local model server | weights + inference | HTTP localhost:11434 |
 | Google CSE / Brave / Tavily | web search APIs (key-gated) | live web index | HTTPS, free-tier quota |
@@ -81,8 +81,14 @@ on the diagram.
 ## The three flows worth knowing (full walks in `audit.md` lens 2)
 
 ```
-  1. INDEX   index-cmd → indexDocumentRow → documents row + pipeline.index
-             → embed chunks → PgVectorStore.upsert → agents.chunks
+  1a. INDEX    index-cmd → indexDocumentRow(sourceType:'markdown')
+              → documents row (source_type='markdown') + pipeline.index
+              → embed chunks → PgVectorStore.upsert → agents.chunks
+
+  1b. INDEX:DB index-db-cmd → DB_SOURCES (8 tables: loopd.entries/todo_meta/
+              nutrition/vlogs/habits; contrl.exercises/sessions/week_progress)
+              → pool.query per source → sanitize() → indexDocumentRow(sourceType:'db')
+              → documents row (source_type='db') + pipeline.index → agents.chunks
 
   2. ASK     chat.tsx → session.ask(q, {onStatus, onTokens, onComplete})
              → set mutable slots → persist user msg

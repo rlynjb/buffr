@@ -79,10 +79,10 @@ The strategy in one sentence: **wrap the await in a flag that gates the render a
 #### The guard — a one-boolean lock
 
 ```tsx
-// src/cli/chat.tsx:15–17
-const onSubmit = async (value: string): Promise<void> => {
-  const q = value.trim();
-  if (busy) return;          // ← refuse: a turn is already in flight
+// src/cli/chat.tsx — handleSubmit
+const handleSubmit = (): void => {
+  const q = (taRef.current?.plainText as string | undefined)?.trim() ?? '';
+  if (busy || !q) return;   // ← refuse: a turn is already in flight, or nothing to submit
 ```
 
 This is the first thing the handler does. Bridge from what you know: it's the same reason you disable a submit button while a form posts — except here the field is hidden during `busy` (the render shows a spinner instead, `chat.tsx:48`), so the guard is the backstop against a queued keypress or a programmatic re-entry. Without it, two fast submits fire two `session.ask()` calls into the *same* conversation, interleaving persistence and trace flushes. The guard reads `busy`; the body below sets it — that read/set pair is the whole lock.
@@ -90,29 +90,38 @@ This is the first thing the handler does. Bridge from what you know: it's the sa
 #### Optimistic-ish: show the user's turn before awaiting
 
 ```tsx
-// src/cli/chat.tsx:24–26
-setInput('');                                       // clear the field immediately
-setTurns((t) => [...t, { role: 'you', text: q }]);  // show YOUR turn now, before the await
-setBusy(true);                                       // enter loading
+// src/cli/chat.tsx — handleSubmit (after guard)
+taRef.current?.setText('');                            // clear the textarea buffer immediately
+setTurns(t => [...t, { role: 'you', text: q }]);       // show YOUR turn now, before the await
+setBusy(true);                                          // enter loading
+setStatus('thinking…');
+setLiveTokens({ input: 0, output: 0 });
 ```
 
 Three synchronous setStates fire before any `await`, so the next render shows: empty field, your question on screen, spinner up. The user's own turn is **optimistic** — it appears without waiting for the backend, because there's nothing to confirm about your own input. The answer is *not* optimistic; it waits for the real result. This split (optimistic for the user echo, pessimistic for the response) is the right call: you can't fake the model's answer.
 
-#### The await and the two outcomes
+#### The async hop and the two outcomes
 
 ```tsx
-// src/cli/chat.tsx:27–35
-try {
-  const answer = await session.ask(q);                          // the async hop
-  setTurns((t) => [...t, { role: 'buffr', text: answer }]);     // success → append answer
-} catch (err) {
-  setTurns((t) => [...t, { role: 'buffr', text: `error: ${(err as Error).message}` }]); // reject → append error
-} finally {
-  setBusy(false);                                                // ALWAYS → leave loading
-}
+// src/cli/chat.tsx — handleSubmit (after optimistic echo)
+let capturedStats: TurnStats | undefined;
+session.ask(q, {
+  onStatus: (msg) => setStatus(msg),
+  onTokens: (d) => setLiveTokens(t => ({ input: t.input + d.input, output: t.output + d.output })),
+  onComplete: (s) => { capturedStats = s; },
+}).then(
+  answer => {
+    setTurns(t => [...t, { role: 'buffr', text: answer, stats: capturedStats }]);
+    setBusy(false);
+  },
+  err => {
+    setTurns(t => [...t, { role: 'buffr', text: `error: ${(err as Error).message}`, stats: capturedStats }]);
+    setBusy(false);
+  },
+);
 ```
 
-Walk it: the handler suspends at `await session.ask(q)` and the render is already showing the spinner. When the promise settles, exactly one of two branches runs — append the answer, or append the stringified error. Then `finally` runs **on both paths**, flipping `busy` back to false, which re-renders the input field. Boundary condition, and the part people get wrong: put `setBusy(false)` at the end of `try` instead of `finally`, and any throw from `ask()` skips it — the spinner spins forever and the UI is wedged. The `finally` is load-bearing precisely because it's the one line that runs whether the await succeeds or blows up.
+Walk it: `session.ask()` is called with three live callbacks — `onStatus`, `onTokens`, `onComplete`. The render is already showing the spinner. When the promise settles, exactly one of two branches runs (`.then` first arg = success, second arg = reject) — append the answer (with optional stats), or append the error. `setBusy(false)` appears in **both** branches. Note this is `.then(onFulfilled, onRejected)` not `try/catch/finally` — the two-argument `.then` is functionally equivalent to `try/catch` without a `finally`. The `setBusy(false)` duplication is intentional: both branches must reset the flag. The `capturedStats` closure is written by `onComplete` (fired at turn end) and read by whichever branch executes — even error turns carry timing data.
 
 #### The render branch reads the flag — and shows live feedback
 

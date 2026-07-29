@@ -12,8 +12,12 @@ buffr's AI features — what's wired
 ┌────────────────────────┬─────────────────────────┬──────────────────────────┐
 │ Feature                │ Pattern used            │ Why this pattern         │
 ├────────────────────────┼─────────────────────────┼──────────────────────────┤
-│ Corpus indexing        │ chunk → embed → upsert  │ one job: make notes      │
-│ (npm run index)        │ (the RAG index path)    │ searchable by meaning    │
+│ Corpus indexing        │ chunk → embed → upsert  │ one job: make markdown   │
+│ (npm run index)        │ (the RAG index path)    │ notes searchable         │
+├────────────────────────┼─────────────────────────┼──────────────────────────┤
+│ DB indexing            │ query → sanitize →      │ personal DB rows (journal│
+│ (npm run index:db)     │ chunk → embed → upsert  │ tasks, health, fitness)  │
+│                        │ DbSource config-object  │ into the same KB         │
 ├────────────────────────┼─────────────────────────┼──────────────────────────┤
 │ Grounded chat answer   │ bounded tool-calling    │ KB + web + RSS + reviews │
 │ (the chat TUI)         │ agent + 6 tools         │ — synthesise all sources │
@@ -47,15 +51,26 @@ Two local models via Ollama: `gemma2:9b` (generation) and `nomic-embed-text:v1.5
 
 ## Feature specs
 
-### 1. Corpus indexing — the RAG index path
+### 1. Corpus indexing — two paths, one shared pipeline
+
+#### 1a. Markdown indexing (`npm run index`)
 
 - **Inputs:** one or more markdown files (`npm run index -- file.md ...`). Typed as `{ id: basename, text, sourcePath }`.
-- **Outputs:** a `agents.documents` row (source of truth) plus N `agents.chunks` rows, each `{ id: "<docId>#<i>", embedding vector(768), content, meta }`.
+- **Outputs:** a `agents.documents` row (`source_type='markdown'`) plus N `agents.chunks` rows, each `{ id: "<docId>#<i>", embedding vector(768), content, meta }`.
 - **Model and provider:** `nomic-embed-text:v1.5` via `OllamaEmbeddingProvider`, 768-dim.
-- **Mechanism:** `src/cli/index-cmd.ts` → `indexDocumentRow` (`src/runtime.ts`) writes the documents row, then `pipeline.index({id,text})`. The pipeline chunks (aptkit's fixed-512-char splitter, 64-char overlap), embeds each chunk, and `PgVectorStore.upsert` writes them in a transaction with `on conflict (id) do update`.
+- **Mechanism:** `src/cli/index-cmd.ts` → `indexDocumentRow` (`src/runtime.ts`) writes the documents row, then `pipeline.index({id,text})`. The pipeline chunks (kernel's fixed-512-char splitter, 64-char overlap), embeds each chunk, and `PgVectorStore.upsert` writes them in a transaction with `on conflict (id) do update`.
 - **Approximate token / compute cost per call:** one embedding call per chunk; embeddings are cheap and local (no dollars). A typical note is a handful of chunks.
-- **Failure modes observed / latent:** dimension mismatch throws loudly (`assertDim`, `assertWiring`, SQL `vector(768)`) — the 768 one-way door. Re-indexing is manual; an edited doc carries stale embeddings until you re-run `npm run index` (no `embedding_stale_at` tracking). Deleted source files leave orphan chunks (no delete handling). See `03-retrieval-and-rag/09-stale-embeddings.md` and `10-incremental-indexing.md`.
+- **Failure modes observed / latent:** dimension mismatch throws loudly (`assertDim`). Re-indexing is manual; an edited doc carries stale embeddings until re-run. Deleted source files leave orphan chunks (no delete handling).
 - **Eval set:** indirectly — retrieval quality over the indexed corpus is measured by `eval/queries.json`.
+
+#### 1b. DB indexing (`npm run index:db`)
+
+- **Inputs:** live Postgres queries defined in `src/db-sources.ts` — 8 tables across two schemas (`loopd`: entries/todo_meta/nutrition/vlogs/habits; `contrl`: exercises/sessions/week_progress). No file paths; rows pulled at run time.
+- **Outputs:** same pipeline as markdown — `agents.documents` rows (`source_type='db'`) + `agents.chunks` with embeddings. The corpus now mixes markdown notes and personal DB data in the same KB.
+- **Model and provider:** same — `nomic-embed-text:v1.5`, 768-dim.
+- **Mechanism:** `src/cli/index-db-cmd.ts` → `pool.query(source.query)` per `DbSource` entry → `sanitize()` (strip UTF-16 surrogates — emoji in journal entries can produce lone surrogates that Postgres JSON rejects) → `indexDocumentRow(..., { sourceType: 'db' })` → same `pipeline.index` path.
+- **Approximate token / compute cost per call:** one embedding per chunk; a large journal entry table may generate many chunks. Row counts unknown at write time.
+- **Failure modes:** `sanitize()` strips surrogates silently; no warning if data is corrupted. The DB queries are hardcoded (`db-sources.ts`); a schema rename breaks them silently at index time.
 
 ### 2. Grounded chat answer — the bounded agent + 6 tools
 

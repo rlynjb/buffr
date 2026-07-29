@@ -35,6 +35,8 @@ table. That overloading is deliberate — it lets memory resurface through the
 same `search_knowledge_base` tool — and it's a real pattern, walked in
 `06-trajectory-tables.md` and `01-vector-column-and-ann-index.md`.
 
+**New column: `documents.source_type`** (`src/runtime.ts:9`). The `indexDocumentRow` function now accepts `sourceType?: string` (default `'markdown'`) and writes it into an `INSERT ... ON CONFLICT DO UPDATE` on `agents.documents`. This distinguishes two corpus populations: markdown files indexed via `npm run index` (`sourceType='markdown'`) and live DB rows indexed via `npm run index:db` (`sourceType='db'`). The `source_type` column is not yet used in retrieval queries — it's a provenance tag, not a filter key. The DB indexing source is `src/db-sources.ts`: 8 tables across `loopd` schema (journal entries, todo tasks, nutrition, vlogs, habits) and `contrl` schema (exercises, workout sessions, week_progress). Each row becomes one `documents` row with `source_type='db'` and its chunks in `agents.chunks`.
+
 → See `README.md` for the diagram; `02-deterministic-chunk-ids.md` for the
 primary key scheme.
 

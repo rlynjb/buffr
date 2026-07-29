@@ -29,6 +29,12 @@ Map every place untrusted input crosses into trusted code.
   │  src/cli/index-cmd.ts │   → embedded → re-enters prompt as tool output
   └───────────────────────┘   trust: AUTHORED by operator, but echoed to LLM
 
+  ┌─ indexed DB rows ─────┐   8 tables queried by `npm run index:db`
+  │  src/db-sources.ts     │   loopd: entries/todo_meta/nutrition/vlogs/habits
+  │  src/cli/index-db-cmd  │   contrl: exercises/sessions/week_progress
+  └───────────────────────┘   sanitize() strips surrogates; then same embedding
+                               path as markdown — re-enters prompt as tool output
+
   ┌─ recalled memory ─────┐   past exchanges, re-embedded (session.ts:64)
   │  @aptkit/memory       │   → re-enters prompt via the SAME search tool
   └───────────────────────┘   trust: model-generated text, recycled as input
@@ -116,6 +122,8 @@ The one place a value is *serialized into text* is the vector literal
 throws on the wrong length. No string path carries attacker-controlled text into a
 query. Deep walk: `01-parameterized-sql-boundary.md`.
 
+**Data sanitization — `sanitize()` at the DB indexing boundary.** `src/cli/index-db-cmd.ts` calls `sanitize(source.toText(row))` before passing text to `indexDocumentRow`. The function strips UTF-16 lone surrogates (`/[\uD800-\uDFFF]/g`) — emoji edge cases in journal entries can produce surrogates that Postgres JSON rejects. This is a **data-integrity measure, not a security measure**: it guards against encoding errors, not injection. Journal entry text still enters the prompt as a tool result after indexing; `sanitize()` does not strip injection payloads embedded in the content itself.
+
 One nuance worth naming: `migrate.ts` runs a whole SQL file as one statement
 (`src/migrate.ts:13`, `client.query(sql)`). That's a developer-authored migration
 script, not user input — acceptable. It would be a flag only if the SQL filename
@@ -201,10 +209,7 @@ Posture is reasonable for the phase.
 
 - **Lockfile present** — `package-lock.json` (35 KB, committed). Installs are
   reproducible.
-- **Surface is small** — runtime deps are `@rlynjb/aptkit-core`, `dotenv`, `ink`
-  (+ two opentui packages), `pg`, `react` (`package.json`). aptkit is first-party
-  (the operator's own toolkit), consumed and never edited here per the project's
-  must-not-change constraint.
+- **Surface is small** — runtime deps are `@buffr/kernel`, `@buffr/connectors`, `@buffr/contracts` (local monorepo packages), `dotenv`, `ink` (+ two opentui packages), `pg`, `react` (`package.json`). The kernel packages are first-party (operator-owned), consumed and never edited from buffr's root per the project's must-not-change constraint on the published API surface.
 - **No postinstall scripts** in this package's `package.json` — nothing runs on
   install from buffr's own manifest.
 - **`not yet exercised`:** no `npm audit` in CI, no automated dependency updates,

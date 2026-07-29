@@ -7,8 +7,7 @@ finding. Where a finding earns a deep walk, it cross-links to the Pass 2
 pattern file instead of restating it.
 
 A note on size before we start: this is a small, young, single-device
-codebase — eight source files, none over 95 lines. Most APOSD red flags
-bite hardest in big multi-team codebases. So expect a lot of honest
+codebase — now a monorepo (`packages/kernel`, `packages/connectors`, `packages/contracts`) plus ~12 root source files (`src/`), with `session.ts` approaching ~200 lines as connectors accumulate. Most APOSD red flags bite hardest in big multi-team codebases. So expect a lot of honest
 "too small to show meaningful X yet" — and expect the praise findings
 to outnumber the problem findings. That's not flattery; the deep-module
 discipline here is genuinely good for the size.
@@ -69,6 +68,8 @@ change the code safely isn't visible from the code. → lens 3 and lens 7.
 **The two hotspots, ranked:**
 1. `config.ts` ↔ the five SQL files — the dead-`schema` leak (lens 3).
 2. `pg-vector-store.ts:44-46,80-84` — the implicit meta contract.
+
+**New additions, low complexity:** `src/db-sources.ts` is a clean config-object array (`DbSource[]`) with no imperative logic — pure data, no methods, easily extended by appending entries. `src/cli/index-db-cmd.ts` adds a `sanitize()` pure helper (strip UTF-16 surrogates before chunking) that is isolated, single-purpose, and easy to test. Both follow the codebase's "behaviour pushed down, configuration pushed up" instinct.
 
 Everything else in the repo is genuinely low-complexity for its size.
 
@@ -387,9 +388,11 @@ it fires. Sorted by severity for buffr.
   Repetition (same code N times)   N/A       too small; no duplicated logic
                                              block beyond the schema literal
 
-  God class / over-large module    N/A       largest file is session.ts
-                                             (~150 lines post-connectors);
-                                             worth watching
+  God class / over-large module    WATCH     session.ts is approaching ~200
+                                             lines as connectors accumulate;
+                                             still one clear responsibility
+                                             (session factory + ask loop)
+                                             but worth monitoring
 
   Temporal coupling via module-    FIRES     currentOnStatus / currentOnTokens
    level mutable state             minor     module-level vars swapped per-ask;

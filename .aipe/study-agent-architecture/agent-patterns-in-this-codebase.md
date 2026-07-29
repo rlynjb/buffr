@@ -78,6 +78,10 @@ The patterns buffr exercises, the shape each instantiates, and why it's the righ
   ├──────────────────────────┼────────────────────────┼─────────────────────────────┤
   │ trajectory persistence   │ full-signal trace       │ replayable trajectory in    │
   │ (supabase-trace-sink)    │ capture                │ agents.messages             │
+  ├──────────────────────────┼────────────────────────┼─────────────────────────────┤
+  │ corpus preparation       │ offline batch pipeline  │ not an agent pattern —      │
+  │ (npm run index:db)       │ (DbSource config-obj   │ deterministic config-driven │
+  │                          │ + sanitize + index)    │ ETL; runs once, not per-ask │
   └──────────────────────────┴────────────────────────┴─────────────────────────────┘
 ```
 

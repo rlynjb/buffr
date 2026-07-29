@@ -10,7 +10,7 @@ You already version-control a `migrations/0003_chunks.sql` file — it's reviewe
   Zoom out — where the prompt-as-code lives
 
   ┌─ App layer (buffr repo) ──────────────────────────────┐
-  │  package.json: "@rlynjb/aptkit-core": "^0.4.1"        │ ← the pin
+  │  package.json: "@buffr/kernel": "0.0.1"  (monorepo)   │ ← the pin
   │  agents.profiles rows  (the only prompt-shaped source │
   │  that lives IN this repo's database)                  │
   └─────────────────────────┬──────────────────────────────┘
@@ -61,7 +61,7 @@ Treat the prompt the way you treat a function: source-controlled, reviewed, depl
 
 ### Move 2 — the walkthrough
 
-**The prompt lives in a pinned dependency.** `BASE_SYSTEM` is a constant in `@rlynjb/aptkit-core`, pinned `^0.4.1`. buffr's must-not-change constraint is explicit: *"aptkit is consumed, never edited here"* (`context.md`). So the canonical system prompt is reviewable and diffable — but only by reading aptkit's source and bumping the version. A prompt change to buffr's grounding behavior is a `npm update` away, not a one-line edit.
+**The prompt lives in a pinned dependency.** `BASE_SYSTEM` is a constant in `@buffr/kernel` (`packages/kernel/src/agents/rag-query-agent.ts`), consumed as a local monorepo package. buffr's must-not-change constraint is explicit: *"aptkit is consumed, never edited here"* (`context.md`). So the canonical system prompt is reviewable and diffable — but only by reading aptkit's source and bumping the version. A prompt change to buffr's grounding behavior is a `npm update` away, not a one-line edit.
 
 **The profile is the prompt-shaped source buffr DOES own.** Profile rows in `agents.profiles` (read by `loadProfile`, `src/profile.ts:4`) carry `updated_at`, and `loadProfile` takes the most recent. That's a crude version history — you can see *when* the personalization text last changed, though not diff two versions in a PR.
 
@@ -134,7 +134,7 @@ Prompts-as-code is the aipe project's entire thesis (markdown templates as versi
 
 **Q: Where do this system's prompts live, and how would you ship a prompt change safely?**
 
-The system prompt lives in a pinned dependency (`@rlynjb/aptkit-core ^0.4.1`), so a behavior change ships as a reviewed dependency bump. The personalization lives in DB rows with `updated_at`. Observability is strong at the trajectory level — every turn's tools, model, and tokens persist — but no prompt-version stamp ties an output back to the prompt that made it.
+The system prompt (`BASE_SYSTEM`) lives in `@buffr/kernel` (a local monorepo package at `packages/kernel/src/agents/rag-query-agent.ts`), so a behavior change ships as a reviewed source edit to that package. The routing rules live in `session.ts:142-182` and are version-controlled directly in buffr's source. The personalization lives in DB rows with `updated_at`. Observability is strong at the trajectory level — every turn's tools, model, and tokens persist — but no prompt-version stamp ties an output back to the prompt that made it.
 
 ```
   pin (^0.4.1) → BASE_SYSTEM → output → trace ✓  but: which prompt? ✗

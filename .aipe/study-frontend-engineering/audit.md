@@ -10,17 +10,17 @@ Calibration note for you: this is a terminal React UI. Treat every browser insti
 
 **Rendering mode:** client-rendered, single-screen, **SPA-equivalent with no router**. There is no SSR, no SSG, no hydration, no React Server Components. The app boots, renders one component tree, and reconciles in place for the life of the process.
 
-**Reconciliation model:** virtual-DOM diffing — the standard React reconciler — but the **host renderer is OpenTUI (`@opentui/react`), not react-dom** (`createRoot(renderer).render(<Chat …/>)`, `src/cli/chat.tsx:72`). React builds and diffs the element tree exactly as it does in a browser; OpenTUI's renderer commits the diff to **terminal cells** via a Zig native core (loaded over `bun:ffi`). Your `<box flexDirection="column">` (`chat.tsx:46`) is flex-laid-out text printed to stdout — not a real `<div>`. React 19.2.8. Runs under **Bun** (OpenTUI requires `bun:ffi`).
+**Reconciliation model:** virtual-DOM diffing — the standard React reconciler — but the **host renderer is OpenTUI (`@opentui/react`), not react-dom** (`createRoot(renderer).render(<Chat …/>)`, `src/cli/chat.tsx`). React builds and diffs the element tree exactly as it does in a browser; OpenTUI's renderer commits the diff to **terminal cells** via a Zig native core (loaded over `bun:ffi`). Your `<box flexDirection="column">` is flex-laid-out text printed to stdout — not a real `<div>`. React 19.2.8. Runs under **Bun** (OpenTUI requires `bun:ffi`).
 
 **Scheduling:** React 19.2.8 (`react@^19.2.8`, `package.json`). No `startTransition`, no Suspense, no concurrent features in use. Every `setState` schedules a reconcile that repaints the terminal frame.
 
-**When work happens:** on mount and on every state update — two update sources: `setTurns`, `setBusy` (`chat.tsx:21–22`). The `turns.map()` (`chat.tsx:50`) re-runs on every render. The input field is **uncontrolled** — no `setInput` per keystroke, no `input` useState. The transcript re-renders on `turns` and `busy` changes only. → full walk in `01-react-without-the-dom.md`. The event-loop mechanics of how the awaited turn yields belong to `study-runtime-systems`.
+**When work happens:** on mount and on every state update — four update sources: `setTurns`, `setBusy`, `setStatus`, `setLiveTokens`. The transcript re-renders on `turns` and `busy` changes; `<Spinner>` re-renders every 100ms during a turn via its own `setInterval`. The `<textarea>` is **uncontrolled** — no `value`/`onChange` per keystroke. → full walk in `01-react-without-the-dom.md`. The event-loop mechanics of how the awaited turn yields belong to `study-runtime-systems`.
 
 ---
 
 ## 2. state-architecture
 
-The client state graph is **four `useState` hooks plus a `useRef` in one component** (`src/cli/chat.tsx`):
+The client state graph is **four `useState` hooks plus two `useRef`s** — `taRef` in `<Chat>`, `startRef` in `<Spinner>`:
 
 | state | type | role | who transitions it |
 |-------|------|------|--------------------|
@@ -28,62 +28,84 @@ The client state graph is **four `useState` hooks plus a `useRef` in one compone
 | `busy` | `boolean` | loading flag, one turn in flight | `setBusy(true)` before the async hop, `setBusy(false)` in both `.then` and `.catch` |
 | `status` | `string` | live spinner label ("searching Google…") | `onStatus` callback from `session.ask()` opts |
 | `liveTokens` | `{input,output}` | live token counter, accumulated during turn | `onTokens` callback from `model_usage` events |
-| `startRef` | `useRef<number>` | spinner start-time (NOT useState — avoids render on capture) | reset at each turn's mount |
+| `taRef` | `useRef<any>` | ref to the `<textarea>` node | used to read `.plainText`, call `.setText('')`, call `.newLine()` |
+| `startRef` | `useRef<any>` (inside `<Spinner>`) | spinner start-time (NOT useState — avoids render on capture) | reset in `Spinner`'s `useEffect` on mount |
 
-Input text is **not in React state** — OpenTUI's `<input>` is uncontrolled: it holds its own text buffer and fires `onSubmit(value)` on Enter. No `onChange`, no `input` useState. Clearing is automatic via unmount/remount (the `busy` ternary at `chat.tsx:56`). → `05-uncontrolled-input-with-submit.md`.
+Input text is **not in React state** — OpenTUI's `<textarea ref={taRef}>` is uncontrolled: it holds its own internal text buffer, `taRef.current.plainText` reads it, `setText('')` clears it, `newLine()` inserts a newline. The previous `<input onSubmit>` (controlled/uncontrolled) has been replaced by a multiline `<textarea>`. → `05-uncontrolled-input-with-submit.md`.
 
-**Local only.** No global store (Redux/Zustand), no Context, no lifted state, no URL/route state, no form library. Source-of-truth for the *conversation itself* lives **below the UI** — the persisted `conversations`/`messages` rows and the in-process `ChatSession` (`src/session.ts:55,60`). The component's `turns` is a **display projection**, not the canonical record; the canonical record is the DB. That split (display state vs server state) is the one genuinely interesting thing in this lens. → `02-hooks-state-in-a-cli.md`. System-level state ownership (warm pool, one conversation across turns) is owned by `study-system-design`.
+**Local only.** No global store (Redux/Zustand), no Context, no lifted state, no URL/route state, no form library. Source-of-truth for the *conversation itself* lives **below the UI** — the persisted `conversations`/`messages` rows and the in-process `ChatSession` (`src/session.ts`). The component's `turns` is a **display projection**, not the canonical record; the canonical record is the DB. → `02-hooks-state-in-a-cli.md`. System-level state ownership (warm pool, one conversation across turns) is owned by `study-system-design`.
 
 ---
 
 ## 3. component-architecture
 
-**One component plus one helper, no composition tree to speak of.** `<Chat>` (`chat.tsx:20`) is the main application component; `<Spinner>` (`chat.tsx:11`) is a custom leaf that owns its own `setInterval` animation. The rest are OpenTUI primitives (`<box>`, `<text>`, `<input>`). No children/slots/render-props/compound/headless patterns — there's nothing to compose yet.
+**One component plus one helper, no composition tree to speak of.** `<Chat>` is the main application component; `<Spinner>` is a custom leaf that owns its own `setInterval` animation and `useRef` start-time. The rest are OpenTUI primitives: `<box>`, `<scrollbox>`, `<text>`, `<textarea>`. No children/slots/render-props/compound/headless patterns — there's nothing to compose yet.
 
-**The boundary that *does* exist is vertical, not within the tree:** the container/presentational seam between `<Chat>` (presentational: renders, owns ephemeral UI state) and `createChatSession` (container: owns data acquisition). `<Chat>` receives `session` as a prop (`chat.tsx:9`) — dependency injection — and never imports pg, the agent, or the embedder. That's the one component-architecture decision worth defending. → `04-session-as-the-data-layer.md`. Module/interface depth behind `ChatSession` is owned by `study-software-design`.
+**New OpenTUI primitives since last audit:**
+- `<scrollbox flexGrow={1} scrollY stickyScroll stickyStart="bottom">` — scrollable transcript container that auto-scrolls to the latest turn. Replaced the plain `<box>` that re-rendered the whole list.
+- `<textarea ref={taRef}>` — multiline text input. Replaced `<input onSubmit>`. The ref API (`plainText`, `setText`, `newLine`) is the uncontrolled interface.
+- `useKeyboard(handler)` hook — intercepts raw keyboard events before OpenTUI's default handling. Used to distinguish Enter (submit) from Alt+Enter (new line) — `e.meta` is truthy for Alt/Option key.
 
-`<Spinner>` now takes two live props: `status` (updated by `onStatus` callbacks during tool calls — e.g. `"searching Brave"`) and `tokens` (accumulated from `onTokens` callbacks from `model_usage` events). It owns its own `useRef(Date.now())` start-time capture and `setInterval(100ms)` elapsed counter. This is a lean real-time component: no props drilling of the whole session, just the two live signals it needs.
+**The boundary that *does* exist is vertical:** `<Chat>` (presentational: renders, owns ephemeral UI state) vs `createChatSession` (container: owns data acquisition). `<Chat>` receives `session` and `onExit` as props — dependency injection — and never imports pg, the agent, or the embedder. → `04-session-as-the-data-layer.md`.
+
+`<Spinner>` takes two live props: `status` (string label) and `tokens` ({input, output}). It owns its own `useRef(Date.now())` start-time and `setInterval(100ms)` elapsed counter. This is a lean real-time component: no props drilling of the whole session, just the two live signals it needs.
 
 ---
 
 ## 4. data-fetching-and-cache
 
-**One fetch path, no cache layer — but now with live callbacks.** Server state crosses into the UI through a single async hop: `session.ask(q, { onStatus, onTokens, onComplete }).then(…).catch(…)`. No react-query, no SWR, no route loaders, no optimistic updates, no cache invalidation, no retry/backoff in the UI. The three callbacks are the side-channel for live progress updates: `onStatus` drives `setStatus` (spinner label), `onTokens` accumulates `setLiveTokens`, `onComplete` captures `TurnStats` (durationMs, inputTokens, outputTokens) for the post-turn footer displayed after `setBusy(false)`. The core contract — one `ask()` awaited for the answer string — is unchanged; the callbacks are additive.
+**One fetch path, no cache layer — live callbacks for progress.** Server state crosses into the UI through a single async hop: `session.ask(q, { onStatus, onTokens, onComplete }).then(…).catch(…)`. No react-query, no SWR, no route loaders, no optimistic updates, no cache invalidation, no retry/backoff in the UI. The three callbacks are the side-channel for live progress: `onStatus` → `setStatus` (spinner label), `onTokens` → `setLiveTokens` (accumulated), `onComplete` → captures `TurnStats` (durationMs, inputTokens, outputTokens) for the per-turn footer displayed after `setBusy(false)`.
 
-What *is* present is the **loading/success/error state machine** hand-rolled around that one call: `setBusy(true)` → `.then` success appends a `buffr` turn / `.catch` appends an error turn / both clear `busy` (`chat.tsx:32–41`). The re-entrancy guard `if (busy || !q) return` (`chat.tsx:26`) is the manual stand-in for what a query library's `isFetching` would gate. → `03-async-ui-with-a-busy-flag.md`.
+The **loading/success/error state machine** is hand-rolled: `setBusy(true)` → `.then` success appends a `buffr` turn / `.catch` appends an error turn / both clear `busy`. The re-entrancy guard `if (busy || !q) return` inside `handleSubmit` is the manual stand-in for what a query library's `isFetching` would gate. → `03-async-ui-with-a-busy-flag.md`.
 
-Optimistic update — *partial*: the user's own turn is appended **before** the async hop resolves (`chat.tsx:31`), so the question shows instantly. The answer is not optimistic; it waits. The wire semantics under `ask()` (Ollama HTTP, pg protocol) belong to `study-networking`; the no-client-cache-because-the-DB-is-the-cache argument belongs to `study-system-design`.
+Optimistic update — *partial*: the user's own turn is appended **before** the async hop resolves, so the question shows instantly. The answer is not optimistic; it waits.
 
 ---
 
 ## 5. routing-and-navigation
 
-`not yet exercised`. One screen, one component, no routes, no navigation, no history, no deep-linking, no code-splitting at a route boundary. The only "navigation" is `/exit`/`/quit` tearing the app down (`chat.tsx:27–30`, `process.exit(0)` after `session.close()`), which is process teardown, not routing.
+`not yet exercised`. One screen, one component, no routes, no navigation, no history, no deep-linking, no code-splitting at a route boundary. The only "navigation" is `/exit`/`/quit` — handled inside `handleSubmit` by calling `onExit()` (which calls `session.close()` then `process.exit(0)`). Process teardown, not routing.
 
 ---
 
 ## 6. styling-and-design-system
 
-`not yet exercised` as a *system*. Styling is **OpenTUI prop-level color only**: `fg="#888888"`/`fg="#00FFFF"`/`fg="#00FF00"`/`fg="#FFFF00"` and `attributes={TextAttributes.BOLD}` (from `@opentui/core`) (`chat.tsx:48,52–53`), and flex layout via `<box flexDirection marginBottom>`. No CSS, no CSS-in-JS, no CSS Modules, no design tokens, no theming, no responsive breakpoints, no animation system beyond the custom `<Spinner>` (braille frames + `setInterval`, `chat.tsx:11–17`). There is nothing to "scale as components grow" because there is one component and a fixed palette.
+`not yet exercised` as a *system*. Styling is **OpenTUI prop-level color and border only**. Current palette:
+
+- Header text: `fg="#888888"` (muted grey)
+- "you" label: `fg="#00CCFF"` bold, body: `fg="#66BBCC"` (cyan tone)
+- "buffr" label: `fg="#00EE66"` bold, body: `fg="#E8E8E8"` (near-white)
+- Stats footer per buffr turn: `fg="#555555"` (dimmed)
+- Spinner: `fg="#FFFF00"` (yellow)
+- Input border: `borderColor="#444444"`, `borderStyle="rounded"`, `border={true}`
+- Scrollbar: `color: '#333333'`
+
+Layout uses `<box flexDirection="column" height="100%" paddingLeft={2} paddingRight={2}>` as the root container. `<scrollbox>` for the transcript. Input sits in a rounded-border `<box>` with `marginTop={1} marginBottom={1}`. No CSS, no CSS-in-JS, no design tokens, no theming, no responsive breakpoints. There is nothing to "scale as components grow" because there is one component and a fixed palette. → `study-performance-engineering` for render measurement.
 
 ---
 
 ## 7. browser-platform-and-build
 
-**Platform APIs:** the platform is the **TTY, not the browser**. No Storage / Worker / ServiceWorker / IndexedDB / WebSocket / EventSource. The one platform primitive in play is **raw-mode stdin**: OpenTUI (via its Zig native core over `bun:ffi`) puts the terminal into raw mode to capture keystrokes and drive `<input onSubmit focused />` (`chat.tsx:62`). That's the terminal analogue of a DOM input's keydown stream — but the model is **uncontrolled** (no value/onChange). → `05-uncontrolled-input-with-submit.md`.
+**Platform APIs:** the platform is the **TTY, not the browser**. No Storage / Worker / ServiceWorker / IndexedDB / WebSocket / EventSource. The platform primitives in play:
+- **`useKeyboard`** (OpenTUI hook) — intercepts raw key events before OpenTUI's input handling. The Enter/Alt+Enter split is implemented here: `e.name === 'return'` + `e.meta` → `newLine()`, else → `handleSubmit()`.
+- **`<textarea ref={taRef}>`** — OpenTUI's multiline text input. The ref API (`plainText`, `setText`, `newLine`) is the uncontrolled surface.
+- **`<scrollbox>`** — OpenTUI's scrollable container; `stickyScroll` + `stickyStart="bottom"` keeps the view pinned to the latest turn.
+- **bun:ffi** — OpenTUI loads its Zig core via Bun's foreign-function interface. This is why `npm run chat` invokes Bun, not Node.
 
-**Build:** `tsc -p tsconfig.json` only, emitting **ESM** (`"type": "module"`; `module: NodeNext`). JSX compiles via `/** @jsxImportSource @opentui/react */` pragma at `chat.tsx:1` (required because `tsconfig.json` has `"types": ["node"]` which blocks automatic type augmentation). The deploy artifact is plain `.js` files under `dist/`. **`npm run chat` runs via Bun** (`bun dist/src/cli/chat.js`) — required because OpenTUI loads its Zig core via `bun:ffi`. All other scripts (`build`, `test`, `index`, `eval`, `migrate`) run via Node. No bundler (Vite/Webpack/esbuild), no tree-shaking, no code-splitting, no polyfills.
+**Build:** Now a **monorepo** (`workspaces: ["packages/*"]`). Build script: `npm run build:packages` (builds `@buffr/contracts`, `@buffr/kernel`, `@buffr/connectors`) then `tsc -p tsconfig.json` for root TypeScript. The chat artifact (`dist/src/cli/chat.js`) is launched by Bun. All other scripts run via Node. JSX compiles via `/** @jsxImportSource @opentui/react */` pragma. No bundler, no tree-shaking, no polyfills. → `05-uncontrolled-input-with-submit.md`.
 
 ---
 
 ## 8. frontend-red-flags-audit
 
-Ranked by user-visible consequence. All grounded; the top one is the only one that would actually surface.
+Ranked by user-visible consequence.
 
-**1. The transcript re-renders on every turn, not every keystroke (improvement over Ink era).** Because the `<input>` is **uncontrolled**, there is no `setInput` per keystroke — `turns.map()` (`chat.tsx:50`) only re-runs when `turns` or `busy` changes (once per turn, not per keypress). *Remaining concern:* the transcript list grows unbounded across a long session. `turns.map()` re-runs on every state update; at hundreds of turns each reconcile re-evaluates the whole list. *The move if it surfaces:* memoize the rendered turns with `React.memo` or extract them into a child. Inferred structurally, not measured — the measurement is `study-performance-engineering`'s.
+**1. `<scrollbox>` re-renders the whole transcript on every turn (improvement: now auto-scrolls).** `<scrollbox stickyScroll stickyStart="bottom">` keeps the latest turn visible automatically — the previous plain `<box>` had no scrolling at all. Remaining concern: the list still grows unbounded; at hundreds of turns each reconcile re-evaluates every turn in the list. The move if it surfaces: `React.memo` per-turn component. Inferred structurally, not measured — measurement belongs to `study-performance-engineering`.
 
-**2. `turns` (display state) can drift from the DB (canonical state).** The transcript is rebuilt fresh each process start from `useState<Turn[]>([])` (`chat.tsx:21`) — it never reads back the persisted `messages`. *Consequence:* the on-screen history is session-local; a crash mid-turn loses the displayed transcript even though the user turn was persisted (`session.ts:62`). This is a deliberate split (display projection vs source of truth), not a bug — but it's the kind of state-can't-be-invalidated risk this lens names. Owned at the system level by `study-system-design`.
+**2. `turns` (display state) can drift from the DB (canonical state).** The transcript is rebuilt fresh each process start from `useState<Turn[]>([])` — it never reads back the persisted `messages`. Consequence: the on-screen history is session-local; a crash mid-turn loses the displayed transcript even though the user turn was persisted. Deliberate split (display projection vs source of truth), not a bug. Owned at the system level by `study-system-design`.
 
-**3. No async-hop cancellation.** `session.ask(q)` (`chat.tsx:33`) can't be cancelled once started — there's no `AbortController`, and the `/exit` path can't interrupt an in-flight turn (the `busy` guard at `chat.tsx:26` blocks new input but the pending async hop runs to completion). *Consequence:* `/exit` during a slow model call waits for the call. Acceptable for a single-user local CLI; would matter the moment a turn could hang. Cancellation mechanics belong to `study-runtime-systems`.
+**3. No async-hop cancellation.** `session.ask(q)` can't be cancelled once started — there's no `AbortController`, and `/exit` via `handleSubmit` can't interrupt an in-flight turn (the `busy` guard blocks new input but the pending async hop runs to completion). Acceptable for a single-user local CLI. Cancellation mechanics belong to `study-runtime-systems`.
 
-**4. Error surface is a string in the transcript.** The `.catch` stringifies `(err as Error).message` into a `buffr` turn (`chat.tsx:39`). *Consequence:* no error type discrimination, no retry affordance — a transient pg blip and a real bug look identical to the user. Fine for a personal tool; thin for anything shared.
+**4. Error surface is a string in the transcript.** The `.catch` stringifies `(err as Error).message` into a buffr turn. No error type discrimination, no retry affordance. Fine for a personal tool.
+
+**5. `taRef` is typed `any`.** Both `taRef` and the `startRef` inside `<Spinner>` are typed `useRef<any>` with `eslint-disable-next-line` suppression. OpenTUI doesn't export a typed element ref interface, so this is a platform limitation, not a design smell — but it means the `.plainText`/`.setText`/`.newLine()` calls are unchecked at compile time. The risk: a future OpenTUI version that renames these methods fails at runtime with no TS error.

@@ -18,10 +18,7 @@ vision is `agent-layer-plan.md`.
 
 - **Language/runtime:** TypeScript, ESM (`"type": "module"`), `module`/`moduleResolution`
   = `NodeNext`. Node ≥ 20.
-- **AI toolkit:** `@rlynjb/aptkit-core` (^0.4.1) — the published aptkit bundle (model
-  provider contract, runtime agent loop, retrieval pipeline, tools, evals, context, and
-  `@aptkit/memory`). The conversation-memory engine (`createConversationMemory`) was
-  extracted *up* from buffr into aptkit and is re-consumed via this bundle.
+- **AI toolkit:** monorepo packages in `packages/` — `@buffr/contracts` (shared types), `@buffr/kernel` (model provider contract, runtime agent loop, retrieval pipeline, tools, evals, context, memory engine), `@buffr/connectors` (DataConnector interface + web search/RSS/Amazon connectors). These replaced `@rlynjb/aptkit-core`. Build order: contracts → kernel → connectors (`npm run build:packages`).
 - **UI:** `@opentui/react` + `@opentui/core` for the chat TUI (OpenTUI — React reconciler over a Zig native renderer). Requires **Bun** as the runtime for the chat command (`npm run chat` invokes `bun dist/src/cli/chat.js`). React 19.2.8. Previously Ink; migrated to OpenTUI because Ink became inactive.
 - **Database:** Postgres + `pgvector` (`pg` / node-postgres, direct connection — no Edge
   Functions this phase). HNSW cosine index.
@@ -32,7 +29,7 @@ vision is `agent-layer-plan.md`.
 
 ## Data model (`agents` schema, `sql/001_agents_schema.sql`)
 
-- `documents` — source-of-truth corpus rows (`id`, `app_id`, content, meta).
+- `documents` — source-of-truth corpus rows (`id`, `app_id`, `source_type` ('markdown'|'db'), `source_path`, content, meta). `source_type` distinguishes markdown-indexed vs DB-indexed rows.
 - `chunks` — `embedding vector(768)`, `document_id` as a **soft link** (the FK is
   deliberately dropped, to preserve `VectorStore` drop-in parity with aptkit's in-memory
   store), HNSW `vector_cosine_ops` index, `app_id` index. Chunk id = `"<docId>#<index>"`.
@@ -56,13 +53,15 @@ vision is `agent-layer-plan.md`.
 - `src/profile.ts` — `loadProfile` from `agents.profiles`.
 - `src/session.ts` — `createChatSession()`: warm pool + one conversation held across turns;
   builds the agent once; per-turn `ask()` persists, runs the agent, and remembers the exchange.
-- `src/cli/chat.tsx` — the OpenTUI interactive chat UI (the interface). Uses `@opentui/react` JSX primitives (`<box>`, `<text>`, `<input>`), a custom `Spinner` component (braille frames + `setInterval`), and `process.exit(0)` on `/exit`/`/quit`. Run via `bun` (OpenTUI uses `bun:ffi` for its Zig core).
-- `src/cli/{index,eval}-cmd.ts` — index corpus / score precision@k (one-shot CLIs).
+- `src/cli/chat.tsx` — the OpenTUI interactive chat UI. Uses `<textarea ref={taRef}>` (multiline input), `<scrollbox stickyScroll>`, `useKeyboard` hook; Enter=submit, Alt+Enter=newline. Role-coloured turns, `formatStats()` per-turn footer. Run via `bun`.
+- `src/cli/{index,eval,index-db}-cmd.ts` — index markdown corpus / score precision@k / index 8 DB tables (one-shot CLIs).
+- `src/db-sources.ts` — `DB_SOURCES: DbSource[]` — 8 tables across `loopd` (entries/todo_meta/nutrition/vlogs/habits) and `contrl` (exercises/sessions/week_progress) schemas. Each entry has `query`, `toId`, `toText`; used by `index-db-cmd`.
+- `packages/` — monorepo: `@buffr/contracts`, `@buffr/kernel`, `@buffr/connectors`.
 - `test/` — mirrors `src/`; `sql/` — migrations; `eval/queries.json` — labeled eval set.
 
 ## Must-not-change constraints
 
-- **aptkit is consumed, never edited here** — buffr only imports `@rlynjb/aptkit-core`.
+- **monorepo packages are consumed, not edited at root** — buffr's root source imports `@buffr/kernel`, `@buffr/connectors`, `@buffr/contracts` from the local `packages/` workspaces; the public API surface of those packages must not change without a build step.
 - **Embedding dimension is 768** everywhere (`vector(768)`); a mismatch must throw, never
   silently truncate.
 - Schema is `agents` in database `reindb`; `app_id` from `AGENT_APP_ID` (default

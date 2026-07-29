@@ -63,6 +63,8 @@ The richest lens — this is where buffr's real I/O patterns live, all of them d
 
 Worth naming: the trace INSERTs are *queued* during the agent run (`emit()` is sync, pushes a promise) and *awaited together* in `flush()` (`src/supabase-trace-sink.ts:87-93`). So they overlap rather than blocking the run serially — a deliberate, decent choice. They still all hit the DB; `flush()`'s `Promise.all` means they race the connection pool.
 
+**`index:db` sequential round-trips.** `src/cli/index-db-cmd.ts` fires 8 sequential `pool.query()` calls — one per `DbSource` in `src/db-sources.ts` (loopd: entries/todo_meta/nutrition/vlogs/habits; contrl: exercises/sessions/week_progress). These are independent reads with no ordering dependency; they could be `Promise.all`'d for parallel execution, but aren't. After each query, `source.toText(row)` is called per row, followed by `sanitize()` and then one embedding call per chunk — all serially. Wall-clock cost for a large corpus: `8 × query_latency + N_rows × chunks_per_row × embed_latency`. No measurement exists; no baseline has been taken. The second bottleneck (after serialized DB calls) is the per-chunk Ollama embed path, same as markdown indexing but with a potentially larger row count.
+
 **Web search I/O (added).** When a web connector tool fires, `session.ts:76-107` routes to a `DataConnector` that makes an outbound HTTP call to Brave/Tavily/Google. These are external-network round-trips: latency is not buffr-controlled and not currently measured as a span. `TOOL_LABELS` in `session.ts:112` maps tool names → human status strings for the TUI spinner, which is the current visibility into which tool is in flight (not a perf number, just a label). Quota exhaustion (Google: 100/day) surfaces as a tool error, not a timeout — adding a per-connector latency trace and a remaining-quota counter is the measurement gap for this tier.
 
 ---
@@ -98,6 +100,8 @@ Ranked by consequence, with the evidence named for each — and for this repo, "
 4. **No caching.** Identical query re-embeds (`src/pg-vector-store.ts:67`). Evidence: no cache layer exists; repeat-rate unmeasured. Helps eval runs more than chat. → `06`.
 
 5. **Serial cross-file indexing.** GPU idle through each file's DB writes (`src/cli/index-cmd.ts:22-26`). Evidence: `for...await` structure; no index-time wall-clock measured. → `02`.
+
+5b. **`index:db` serial round-trips.** 8 sequential `pool.query()` calls for independent tables (`src/cli/index-db-cmd.ts`, `src/db-sources.ts`). No parallelism, no batch. The table reads are independent — `Promise.all` over the 8 sources would remove 7/8 of the query-latency cost. Evidence: `for...of` structure over `DB_SOURCES`; no timing baseline.
 
 6. **Unbounded `flush()` fan-out.** `Promise.all` over all pending writes (`src/supabase-trace-sink.ts:92`). Evidence: ~6 writes today, no bound. A latent red flag, not a current one — only fires if per-turn event count grows large.
 

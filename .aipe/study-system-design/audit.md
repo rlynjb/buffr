@@ -15,8 +15,9 @@ production/scale claims are labelled as inference.
 Three trust/ownership bands, and the load-bearing boundary sits in the middle.
 
 ```
-  buffr code  ──►  aptkit-core (library)  ──►  buffr adapters  ──►  Postgres + Ollama
-  (owns)           (consumed, never edited)    (owns)               (external deps)
+  buffr code  ──►  @buffr/kernel (monorepo pkg)  ──►  buffr adapters  ──►  Postgres + Ollama
+  (owns)           packages/kernel/, consumed          (owns)               (external deps)
+                   never edited at root level
 ```
 
 **Major components and what they own:**
@@ -32,10 +33,7 @@ Three trust/ownership bands, and the load-bearing boundary sits in the middle.
   pure config, pool factory, transactional migration runner.
 
 **Trust boundaries:**
-- **The aptkit boundary** is the one that matters (`session.ts:2-6` imports; nothing in `src/`
-  reaches into aptkit internals). Stated as a hard constraint in `context.md` ("aptkit is
-  consumed, never edited here") and enforced structurally — buffr only implements aptkit's
-  *contracts* (`VectorStore`, `CapabilityTraceSink`, `ModelProvider` via Gemma). → `04-library-as-dependency-boundary.md`.
+- **The @buffr/kernel boundary** is the one that matters (`session.ts` imports from `@buffr/kernel` and `@buffr/connectors`; nothing in `src/` reaches into `packages/` internals directly). The codebase is now a monorepo: `packages/kernel/`, `packages/connectors/`, `packages/contracts/` are local packages consumed at the root. Stated as a hard constraint in `context.md` and enforced structurally — root `src/` only implements kernel's *contracts* (`VectorStore`, `CapabilityTraceSink`, `ModelProvider` via Gemma). → `04-library-as-dependency-boundary.md`.
 - **The single-user trust boundary is by convention, not enforcement.** Every table carries
   `app_id` (`sql/001:6,17,34` etc.) defaulting `'laptop'`, but there is **no RLS** — isolation
   is cooperative. The graduation spec names this exactly: "isolation is by convention only
@@ -75,9 +73,9 @@ the best-effort memory write. The one place work could parallelize — the per-e
 is itself made concurrent by the sink queuing promises and `flush()` awaiting them all at once
 (`supabase-trace-sink.ts:87-93`). → `03-trajectory-capture.md`, `05-long-lived-chat-session.md`.
 
-**The index flow, `index-cmd.ts:22-26` → `runtime.ts:5-18`:** read file → write `documents`
-row → `pipeline.index` chunks+embeds+upserts. Document row first, chunks second — the source-of-
-truth row is the CLI's job, the chunk rows are the store's. → `02-retrieval-pipeline.md`.
+**The markdown index flow, `index-cmd.ts:22-26` → `runtime.ts:5-18`:** read file → write `documents` row (`source_type='markdown'`) → `pipeline.index` chunks+embeds+upserts. → `02-retrieval-pipeline.md`.
+
+**The DB index flow, `index-db-cmd.ts` → `runtime.ts:5-18`:** for each of 8 `DB_SOURCES` entries (`src/db-sources.ts`), run `pool.query(source.query)` against the live Postgres database → `sanitize()` (strip UTF-16 surrogates) → `indexDocumentRow(..., { sourceType: 'db' })` writes `documents` row (`source_type='db'`). Covers `loopd` schema (journal entries, todo tasks, nutrition, vlogs, habits) and `contrl` schema (exercises, workout sessions, week_progress). Both indexers share the same `indexDocumentRow` → `pipeline.index` path; only `sourceType` differs.
 
 **The eval flow, `eval-cmd.ts:24-33`:** for each labeled query, `pipeline.query` → dedupe to
 docIds → `scorePrecisionAtK` / `scoreRecallAtK`. Pure measurement, no agent, no persistence.

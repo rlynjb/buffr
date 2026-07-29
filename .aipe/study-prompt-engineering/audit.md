@@ -16,7 +16,7 @@ Tool calling is **emulated**, not native. Gemma 2 9B has no tool API, so `GemmaM
 
 ## 3. Prompts as code: versioning + observability — PARTIAL (improved)
 
-`BASE_SYSTEM` is still in aptkit (`node_modules/@rlynjb/aptkit-core ^0.4.1`), but buffr now owns a **routing prompt** directly in `session.ts:142-182` — 7 tool-usage rules, the full tool description block, and conditional logic based on configured connectors. This routing prompt is version-controlled in buffr's source: a PR diff shows exactly which rules changed. It's the first prompt buffr controls directly. Observability exists at the trajectory level via `SupabaseTraceSink`. What's still missing: a prompt-version stamp on each output, and a prompt+model-version pairing. → see [03-prompts-as-code.md](03-prompts-as-code.md).
+`BASE_SYSTEM` lives in `@buffr/kernel` (`packages/kernel/src/agents/rag-query-agent.ts`), but buffr now owns a **routing prompt** directly in `session.ts:142-182` — 7 tool-usage rules, the full tool description block, and conditional logic based on configured connectors. This routing prompt is version-controlled in buffr's source: a PR diff shows exactly which rules changed. It's the first prompt buffr controls directly. Observability exists at the trajectory level via `SupabaseTraceSink`. What's still missing: a prompt-version stamp on each output, and a prompt+model-version pairing. → see [03-prompts-as-code.md](03-prompts-as-code.md).
 
 ## 4. Token budgeting + context window — EXERCISED
 

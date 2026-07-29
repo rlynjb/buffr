@@ -48,7 +48,7 @@ Before the mechanics, the skeleton. Three layers, one axis traced across them, t
   One question down the layers: who owns the event's shape?
 
   ┌──────────────────────────────────────────────┐
-  │ agent loop (@rlynjb/aptkit-core)             │  → APTKIT owns it
+  │ agent loop (@buffr/kernel)                   │  → KERNEL owns it
   │   defines the 6 CapabilityEvent variants      │    (typed contract)
   └───────────────────────┬───────────────────────┘
        seam: trace.emit()  │  ═══ the contract boundary ═══

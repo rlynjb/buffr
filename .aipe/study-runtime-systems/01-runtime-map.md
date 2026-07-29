@@ -11,8 +11,15 @@ Before any single mechanism, here's the whole machine. Everything `buffr-laptop`
 ```
   Zoom out — where the runtime map sits
 
-  ┌─ Interface layer ────────────────────────────────────────┐
-  │  npm run chat (OpenTUI · Bun) · npm run migrate/index/eval │
+  ┌─ Build layer ────────────────────────────────────────────┐
+  │  npm run build:packages  → @buffr/contracts → @buffr/kernel  │
+  │                          → @buffr/connectors  (monorepo pkgs) │
+  │  npm run build  → tsc → dist/src/cli/*.js                 │
+  └───────────────────────────┬──────────────────────────────┘
+                              │  must precede any runtime invocation
+  ┌─ Interface layer ─────────▼──────────────────────────────┐
+  │  npm run chat    (OpenTUI · Bun)                           │
+  │  npm run migrate/index/index:db/eval  (Node batch)         │
   └───────────────────────────┬──────────────────────────────┘
                               │  one process each
   ┌─ Runtime layer ───────────▼──────────────────────────────┐
@@ -22,7 +29,8 @@ Before any single mechanism, here's the whole machine. Everything `buffr-laptop`
   └───────────────────────────┬──────────────────────────────┘
                               │  async I/O
   ┌─ Storage / Provider ──────▼──────────────────────────────┐
-  │  Postgres (pgvector)            Ollama (gemma2 / nomic)   │
+  │  Postgres (agents schema)       Ollama (gemma2 / nomic)   │
+  │  Postgres (loopd / contrl)  ← read-only source for index:db │
   └──────────────────────────────────────────────────────────┘
 ```
 

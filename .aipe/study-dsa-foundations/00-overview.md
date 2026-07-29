@@ -11,7 +11,7 @@ in buffr's real files where the repo touches them, honest where it doesn't.
 
 The interesting algorithms in this system live **one layer down** from
 buffr's own source. buffr is a thin persistence + chat shell over
-`@rlynjb/aptkit-core` and Postgres/pgvector. The headline algorithm —
+`@buffr/kernel` (local monorepo package) and Postgres/pgvector. The headline algorithm —
 **approximate nearest-neighbour search** (the HNSW index) over a
 768-dimensional vector space — is *one DDL line plus a C extension*
 (`sql/001_agents_schema.sql:28-29`), not TypeScript you wrote. What buffr's
@@ -33,8 +33,8 @@ in the eval harness (`src/cli/eval-cmd.ts:26-28`). That's the honest footprint.
   │  session.ts           → wires retrieval; no DSA of its own  │
   │  (flat source — almost no hand-written data structures)     │
   └───────────────────────────┬────────────────────────────────┘
-                              │ imports @rlynjb/aptkit-core
-  ┌─ aptkit library layer ────▼────────────────────────────────┐
+                              │ imports @buffr/kernel (monorepo pkg)
+  ┌─ kernel library layer ────▼────────────────────────────────┐
   │  in-memory VectorStore → sort + slice top-k (exact)         │
   │  retrieval pipeline, scoring helpers, memory engine         │
   └───────────────────────────┬────────────────────────────────┘
