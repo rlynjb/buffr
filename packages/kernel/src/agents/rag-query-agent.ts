@@ -6,6 +6,7 @@ import { SEARCH_KNOWLEDGE_BASE_TOOL_NAME } from '../retrieval/search-tool.js';
 import type { CapabilityTraceSink } from '../tracing.js';
 import type { ModelProvider } from '../model-gateway/types.js';
 import type { ToolRegistry } from '../tool-runtime/registry.js';
+import type { PromptRegistry } from '../prompt-registry/index.js';
 
 export const RAG_QUERY_CAPABILITY_ID = 'rag-query-agent';
 
@@ -26,15 +27,33 @@ export type RagQueryAgentOptions = {
   tools: ToolRegistry;
   profile?: string;
   prompt?: string;
+  promptRegistry?: PromptRegistry;
+  promptName?: string;
   trace?: CapabilityTraceSink;
   allowedTools?: readonly string[];
 };
 
 export class RagQueryAgent {
   private readonly system: string;
+  private readonly _promptVersion: string | undefined;
+
+  get promptVersion(): string | undefined {
+    return this._promptVersion;
+  }
 
   constructor(private readonly options: RagQueryAgentOptions) {
-    const template = options.prompt ?? DEFAULT_SYSTEM_TEMPLATE;
+    let template: string;
+    let version: string | undefined;
+
+    if (options.promptRegistry && options.promptName) {
+      const entry = options.promptRegistry.get(options.promptName);
+      template = entry.template;
+      version = entry.version;
+    } else {
+      template = options.prompt ?? DEFAULT_SYSTEM_TEMPLATE;
+    }
+
+    this._promptVersion = version;
     const withProfile = options.profile
       ? injectProfile(template, options.profile, { position: 'start', heading: PROFILE_HEADING })
       : template;

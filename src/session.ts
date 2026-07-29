@@ -2,9 +2,13 @@ import { config as loadEnv } from 'dotenv';
 import {
   OllamaEmbeddingProvider, createRetrievalPipeline, createSearchKnowledgeBaseTool,
   InMemoryToolRegistry, GemmaModelProvider, ContextWindowGuardedProvider, RagQueryAgent,
-  createConversationMemory,
+  createConversationMemory, InMemoryCache, CachedEmbeddingProvider, PromptRegistry,
 } from '@buffr/kernel';
-import { RssConnector, GoogleTrendsConnector, AmazonReviewsConnector, BraveSearchConnector, TavilySearchConnector, GoogleSearchConnector } from '@buffr/connectors';
+import {
+  RssConnector, GoogleTrendsConnector, AmazonReviewsConnector,
+  BraveSearchConnector, TavilySearchConnector, GoogleSearchConnector,
+  CachedConnector,
+} from '@buffr/connectors';
 import { createFetchRssTool } from './connector-tools/rss-tool.js';
 import { createFetchTrendsTool } from './connector-tools/trends-tool.js';
 import { createFetchReviewsTool } from './connector-tools/amazon-tool.js';
@@ -34,7 +38,12 @@ import type { CapabilityTraceSink, CapabilityEvent } from '@buffr/kernel';
  *   question independently). Retrieval-based recall above gives relevance-based memory
  *   without it.
  */
-export type TurnStats = { durationMs: number; inputTokens: number; outputTokens: number };
+export type TurnStats = {
+  durationMs: number;
+  inputTokens: number;
+  outputTokens: number;
+  promptVersion?: string;
+};
 export type AskOptions = {
   onStatus?: (msg: string) => void;
   onTokens?: (delta: { input: number; output: number }) => void;
@@ -60,27 +69,42 @@ export type ChatSession = {
   close(): Promise<void>;
 };
 
+// Bump when the routing prompt rules change so outputs carry the new version.
+const ROUTING_PROMPT_VERSION = '1.0.0';
+
+// 1-hour cache for external connector results.
+const CONNECTOR_CACHE_TTL_MS = 60 * 60 * 1000;
+
 export async function createChatSession(): Promise<ChatSession> {
   loadEnv();
   const cfg = loadConfig(process.env);
   if (!cfg.databaseUrl) throw new Error('DATABASE_URL is not set (see .env)');
 
   const pool = createPool(cfg.databaseUrl);
-  const embedder = new OllamaEmbeddingProvider({ model: 'nomic-embed-text:v1.5', host: cfg.ollamaHost });
+
+  // Embedding cache persists for the session lifetime (no TTL) — same model,
+  // same text → same vector, so stale-embedding risk is zero within a session.
+  const embedCache = new InMemoryCache<string, number[]>();
+  const embedder = new CachedEmbeddingProvider(
+    new OllamaEmbeddingProvider({ model: 'nomic-embed-text:v1.5', host: cfg.ollamaHost }),
+    embedCache,
+  );
+
   const store = new PgVectorStore({ pool, appId: cfg.appId, dimension: embedder.dimension });
   const pipeline = createRetrievalPipeline({ embedder, store });
   const searchTool = createSearchKnowledgeBaseTool(pipeline, { minTopK: 4, minScore: 0.65 });
-  const rssTool    = createFetchRssTool(new RssConnector());
-  const trendsTool = createFetchTrendsTool(new GoogleTrendsConnector());
-  const amazonTool = createFetchReviewsTool(new AmazonReviewsConnector());
+
+  const rssTool    = createFetchRssTool(new CachedConnector(new RssConnector(), new InMemoryCache(), CONNECTOR_CACHE_TTL_MS));
+  const trendsTool = createFetchTrendsTool(new CachedConnector(new GoogleTrendsConnector(), new InMemoryCache(), CONNECTOR_CACHE_TTL_MS));
+  const amazonTool = createFetchReviewsTool(new CachedConnector(new AmazonReviewsConnector(), new InMemoryCache(), CONNECTOR_CACHE_TTL_MS));
   const braveTool  = cfg.braveApiKey
-    ? createBraveSearchTool(new BraveSearchConnector(cfg.braveApiKey))
+    ? createBraveSearchTool(new CachedConnector(new BraveSearchConnector(cfg.braveApiKey), new InMemoryCache(), CONNECTOR_CACHE_TTL_MS))
     : null;
   const tavilyTool = cfg.tavilyApiKey
-    ? createTavilySearchTool(new TavilySearchConnector(cfg.tavilyApiKey))
+    ? createTavilySearchTool(new CachedConnector(new TavilySearchConnector(cfg.tavilyApiKey), new InMemoryCache(), CONNECTOR_CACHE_TTL_MS))
     : null;
   const googleTool = (cfg.googleApiKey && cfg.googleCx)
-    ? createGoogleSearchTool(new GoogleSearchConnector(cfg.googleApiKey, cfg.googleCx))
+    ? createGoogleSearchTool(new CachedConnector(new GoogleSearchConnector(cfg.googleApiKey, cfg.googleCx), new InMemoryCache(), CONNECTOR_CACHE_TTL_MS))
     : null;
 
   const allToolDefs = [
@@ -115,6 +139,39 @@ export async function createChatSession(): Promise<ChatSession> {
   const conversationId = await startConversation(pool, cfg.appId);
   const supabaseTrace = new SupabaseTraceSink({ pool, conversationId });
 
+  // Build routing prompt and register it so each turn carries a promptVersion stamp.
+  const webSearchTools = [tavilyTool, braveTool, googleTool].filter(Boolean);
+  const primaryWebSearch = webSearchTools[0] ?? null;
+  const routingPrompt = [
+    'You are a personal knowledge assistant. For EVERY question, always call tools to gather information before answering — never answer from memory alone.',
+    '',
+    'Available tools:',
+    `- ${searchTool.definition.name}: search indexed personal knowledge (journal entries, tasks, nutrition, workouts, habits, past conversations).`,
+    `- ${rssTool.definition.name}: fetch live articles from an RSS feed. Known-working feeds:`,
+    '    AI/ML news: https://www.artificialintelligence-news.com/feed/',
+    '    AI on HN:   https://hnrss.org/frontpage?tags=ai',
+    '    Tech (TC):  https://techcrunch.com/tag/artificial-intelligence/feed/',
+    '    HN front:   https://hnrss.org/frontpage',
+    `- ${amazonTool.definition.name}: fetch product reviews from Amazon by product URL or ASIN.`,
+    ...(tavilyTool ? [`- ${tavilyTool.definition.name}: search the live web for factual answers, news, and general knowledge.`] : []),
+    ...(braveTool  ? [`- ${braveTool.definition.name}: search the live web for general knowledge and current information.`] : []),
+    ...(googleTool ? [`- ${googleTool.definition.name}: search the web using Google Custom Search.`] : []),
+    '',
+    'Tool usage rules (always follow):',
+    `1. ALWAYS call ${searchTool.definition.name} first for any question.`,
+    primaryWebSearch
+      ? `2. ALWAYS also call ${primaryWebSearch.definition.name} for any question about: companies, people, products, news, current events, or anything that might not be in personal records. Do NOT skip this step even if the knowledge base returned results.`
+      : `2. For news or current events, call ${rssTool.definition.name} with a relevant feed URL.`,
+    `3. For product reviews, call ${amazonTool.definition.name}.`,
+    '4. Synthesize ALL tool results into one answer. Do not stop after just one tool.',
+    '5. Cite sources when available.',
+    '6. If the knowledge base returns zero relevant results (empty results array), say so clearly.',
+    '7. NEVER fabricate information. Only use what the tools returned.',
+  ].join('\n');
+
+  const registry = new PromptRegistry();
+  registry.register('rag-query-agent/routing', ROUTING_PROMPT_VERSION, routingPrompt);
+
   // Thin wrapper that intercepts events to forward live status and accumulate
   // token usage to the TUI. Mutable slots are swapped per-ask.
   let currentOnStatus: ((msg: string) => void) | undefined;
@@ -136,6 +193,7 @@ export async function createChatSession(): Promise<ChatSession> {
       supabaseTrace.emit(event);
     },
   };
+
   const agent = new RagQueryAgent({
     model,
     tools,
@@ -151,36 +209,8 @@ export async function createChatSession(): Promise<ChatSession> {
       ...(tavilyTool ? [tavilyTool.definition.name] : []),
       ...(googleTool ? [googleTool.definition.name] : []),
     ],
-    prompt: ((): string => {
-      const webSearchTools = [tavilyTool, braveTool, googleTool].filter(Boolean);
-      const primaryWebSearch = webSearchTools[0];
-      return [
-        'You are a personal knowledge assistant. For EVERY question, always call tools to gather information before answering — never answer from memory alone.',
-        '',
-        'Available tools:',
-        `- ${searchTool.definition.name}: search indexed personal knowledge (journal entries, tasks, nutrition, workouts, habits, past conversations).`,
-        `- ${rssTool.definition.name}: fetch live articles from an RSS feed. Known-working feeds:`,
-        '    AI/ML news: https://www.artificialintelligence-news.com/feed/',
-        '    AI on HN:   https://hnrss.org/frontpage?tags=ai',
-        '    Tech (TC):  https://techcrunch.com/tag/artificial-intelligence/feed/',
-        '    HN front:   https://hnrss.org/frontpage',
-        `- ${amazonTool.definition.name}: fetch product reviews from Amazon by product URL or ASIN.`,
-        ...(tavilyTool ? [`- ${tavilyTool.definition.name}: search the live web for factual answers, news, and general knowledge.`] : []),
-        ...(braveTool  ? [`- ${braveTool.definition.name}: search the live web for general knowledge and current information.`] : []),
-        ...(googleTool ? [`- ${googleTool.definition.name}: search the web using Google Custom Search.`] : []),
-        '',
-        'Tool usage rules (always follow):',
-        `1. ALWAYS call ${searchTool.definition.name} first for any question.`,
-        primaryWebSearch
-          ? `2. ALWAYS also call ${primaryWebSearch.definition.name} for any question about: companies, people, products, news, current events, or anything that might not be in personal records. Do NOT skip this step even if the knowledge base returned results.`
-          : `2. For news or current events, call ${rssTool.definition.name} with a relevant feed URL.`,
-        `3. For product reviews, call ${amazonTool.definition.name}.`,
-        '4. Synthesize ALL tool results into one answer. Do not stop after just one tool.',
-        '5. Cite sources when available.',
-        '6. If the knowledge base returns zero relevant results (empty results array), say so clearly.',
-        '7. NEVER fabricate information. Only use what the tools returned.',
-      ].join('\n');
-    })(),
+    promptRegistry: registry,
+    promptName: 'rag-query-agent/routing',
   });
 
   return {
@@ -198,6 +228,7 @@ export async function createChatSession(): Promise<ChatSession> {
         durationMs: Date.now() - startMs,
         inputTokens: currentInputTokens,
         outputTokens: currentOutputTokens,
+        promptVersion: agent.promptVersion,
       });
       await supabaseTrace.flush();
       // Best-effort: a memory-write failure must not lose the answer the user has.

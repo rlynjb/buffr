@@ -14,7 +14,8 @@ function formatStats(s: TurnStats): string {
   const tok = s.inputTokens + s.outputTokens > 0
     ? ` · ${s.inputTokens.toLocaleString()} in / ${s.outputTokens.toLocaleString()} out`
     : '';
-  return `${time}${tok}`;
+  const pv = s.promptVersion ? ` · prompt ${s.promptVersion}` : '';
+  return `${time}${tok}${pv}`;
 }
 
 const FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
