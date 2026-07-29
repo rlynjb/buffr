@@ -26,6 +26,8 @@ import { Scorer } from '@buffr/capabilities';
 import type { ScorecardDefinition } from '@buffr/capabilities';
 import { COMPANY_SCORECARD, ETF_SCORECARD } from '@buffr/domain-pack-investing';
 import type { AgentContext } from '@buffr/contracts';
+import { InvestingEngine } from '@buffr/engine-investing';
+import type { InvestingSource, InvestingOutput } from '@buffr/engine-investing';
 
 /**
  * A long-lived chat session: one warm pg pool and one conversation held across
@@ -71,6 +73,7 @@ function toolStatusLabel(toolName: string): string {
 
 export type ChatSession = {
   ask(question: string, opts?: AskOptions): Promise<string>;
+  analyze(ticker: string, entityType: 'company' | 'etf', opts?: AskOptions): Promise<string>;
   evalInvesting(): Promise<string>;
   close(): Promise<void>;
 };
@@ -130,6 +133,40 @@ async function formatEval(
   await runGroup('Company', companyFixtures, COMPANY_SCORECARD);
   await runGroup('ETF', etfFixtures, ETF_SCORECARD);
   lines.push(`${passed}/${total} passed`);
+  return lines.join('\n');
+}
+
+function formatAnalysis(output: InvestingOutput): string {
+  const { summary, detail } = output;
+  const score = summary.totalScore.toFixed(1);
+  const confidence = Math.round(summary.confidence * 100);
+  const entityLabel = summary.entityType === 'etf' ? 'ETF' : 'Company';
+
+  const lines: string[] = [
+    `${summary.ticker} — ${entityLabel}  ·  Score: ${score}/100  ·  Confidence: ${confidence}%`,
+    '',
+    summary.explanation,
+  ];
+
+  if (summary.keyLessons.length > 0) {
+    lines.push('', 'Key lessons:');
+    for (const lesson of summary.keyLessons) lines.push(`• ${lesson}`);
+  }
+
+  if (summary.actionableNext.length > 0) {
+    lines.push('', 'Next steps:');
+    for (const step of summary.actionableNext) lines.push(`• ${step}`);
+  }
+
+  lines.push('', `Sources: ${detail.evidence.length} signals collected`);
+
+  if (summary.confidence < 0.5) {
+    lines.push('⚠ Low confidence — limited evidence collected.');
+  }
+  for (const warning of summary.warnings) {
+    lines.push(`⚠ ${warning}`);
+  }
+
   return lines.join('\n');
 }
 
@@ -193,6 +230,37 @@ export async function createChatSession(): Promise<ChatSession> {
   // document store means memory surfaces via the existing search_knowledge_base
   // tool — memory chunks live with no documents row, which the dropped FK allows.
   const memory = createConversationMemory({ embedder, store });
+
+  const investingSources: InvestingSource[] = [
+    ...(cfg.braveApiKey ? [{
+      connector: new CachedConnector(
+        new BraveSearchConnector(cfg.braveApiKey),
+        new InMemoryCache(),
+        CONNECTOR_CACHE_TTL_MS,
+      ),
+      paramsFor: (ticker: string, entityType: 'company' | 'etf') => ({
+        query: `${ticker} ${entityType} financial analysis earnings`,
+        count: 5,
+      }),
+      optional: true,
+    } satisfies InvestingSource] : []),
+    ...(cfg.tavilyApiKey ? [{
+      connector: new CachedConnector(
+        new TavilySearchConnector(cfg.tavilyApiKey),
+        new InMemoryCache(),
+        CONNECTOR_CACHE_TTL_MS,
+      ),
+      paramsFor: (ticker: string, entityType: 'company' | 'etf') => ({
+        query: `${ticker} ${entityType} investment analysis`,
+        maxResults: 5,
+      }),
+      optional: true,
+    } satisfies InvestingSource] : []),
+  ];
+
+  const investingEngine = investingSources.length > 0
+    ? new InvestingEngine({ model, sources: investingSources, memory })
+    : null;
 
   const conversationId = await startConversation(pool, cfg.appId);
   const supabaseTrace = new SupabaseTraceSink({ pool, conversationId });
@@ -316,6 +384,37 @@ export async function createChatSession(): Promise<ChatSession> {
         ),
       );
       return formatEval(scorer, evalCtx, companyFixtures, etfFixtures);
+    },
+    async analyze(ticker: string, entityType: 'company' | 'etf', opts?: AskOptions): Promise<string> {
+      if (!investingEngine) {
+        return 'No web search connectors configured — set BRAVE_API_KEY or TAVILY_API_KEY in .env';
+      }
+      currentOnStatus = opts?.onStatus;
+      currentOnTokens = opts?.onTokens;
+      currentInputTokens = 0;
+      currentOutputTokens = 0;
+      opts?.onStatus?.('analyzing…');
+      const startMs = Date.now();
+      const agentCtx: AgentContext = {
+        userId: cfg.appId,
+        workspaceId: cfg.appId,
+        traceId: `${ticker}-${Date.now()}`,
+        domain: 'investing',
+        now: new Date().toISOString(),
+        permissions: [],
+      };
+      const result = await investingEngine.run(
+        { ticker, entityType, conversationId },
+        agentCtx,
+      );
+      currentOnStatus = undefined;
+      currentOnTokens = undefined;
+      opts?.onComplete?.({
+        durationMs: Date.now() - startMs,
+        inputTokens: currentInputTokens,
+        outputTokens: currentOutputTokens,
+      });
+      return formatAnalysis(result.data);
     },
     async close(): Promise<void> {
       await pool.end();

@@ -2,7 +2,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { createCliRenderer, TextAttributes } from '@opentui/core';
 import { createRoot, useKeyboard } from '@opentui/react';
-import { createChatSession, type ChatSession, type TurnStats } from '../session.js';
+import { createChatSession, detectEntityType, type ChatSession, type TurnStats } from '../session.js';
 
 type Turn = { role: 'you' | 'buffr'; text: string; stats?: TurnStats };
 
@@ -60,6 +60,36 @@ function Chat({ session, onExit }: { session: ChatSession; onExit: () => Promise
     taRef.current?.setText('');
     if (q === '/exit' || q === '/quit') {
       onExit().catch(err => { console.error(err); process.exit(1); });
+      return;
+    }
+    if (q.startsWith('/investing ')) {
+      const ticker = q.slice('/investing '.length).trim().toUpperCase();
+      if (!ticker) return;
+      const entityType = detectEntityType(ticker);
+      setTurns(t => [...t, { role: 'you', text: q }]);
+      setBusy(true);
+      setStatus('analyzing…');
+      setLiveTokens({ input: 0, output: 0 });
+      let capturedStats: TurnStats | undefined;
+      session.analyze(ticker, entityType, {
+        onStatus: (msg) => setStatus(msg),
+        onTokens: (d) => setLiveTokens(t => ({ input: t.input + d.input, output: t.output + d.output })),
+        onComplete: (s) => { capturedStats = s; },
+      }).then(
+        answer => { setTurns(t => [...t, { role: 'buffr', text: answer, stats: capturedStats }]); setBusy(false); },
+        err    => { setTurns(t => [...t, { role: 'buffr', text: `error: ${(err as Error).message}`, stats: capturedStats }]); setBusy(false); },
+      );
+      return;
+    }
+    if (q === '/eval') {
+      setTurns(t => [...t, { role: 'you', text: q }]);
+      setBusy(true);
+      setStatus('running eval…');
+      setLiveTokens({ input: 0, output: 0 });
+      session.evalInvesting().then(
+        answer => { setTurns(t => [...t, { role: 'buffr', text: answer }]); setBusy(false); },
+        err    => { setTurns(t => [...t, { role: 'buffr', text: `error: ${(err as Error).message}` }]); setBusy(false); },
+      );
       return;
     }
     setTurns(t => [...t, { role: 'you', text: q }]);
