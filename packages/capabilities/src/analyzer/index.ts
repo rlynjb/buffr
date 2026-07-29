@@ -107,7 +107,7 @@ Call submit_analysis with all ${input.dimensions.length} findings now.`;
     const captured: { args: Record<string, unknown> | null } = { args: null };
     const tools: ToolExecutor = {
       async callTool(_name: string, args: Record<string, unknown>) {
-        captured.args = args;
+        if (captured.args === null) { captured.args = args; }
         return { result: { ok: true }, durationMs: 0 };
       },
     };

@@ -116,4 +116,13 @@ describe('Analyzer', () => {
     );
     assert.strictEqual(result.promptVersion, 'analyzer@1.0.0');
   });
+
+  it('sets latencyMs as a non-negative number', async () => {
+    const analyzer = new Analyzer(new AnalyzerStubModel());
+    const result = await analyzer.execute(
+      { subjectDescription: 'ACME Corp', evidence: sampleEvidence, dimensions: sampleDimensions },
+      ctx,
+    );
+    assert.ok(typeof result.latencyMs === 'number' && result.latencyMs >= 0);
+  });
 });

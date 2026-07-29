@@ -91,4 +91,13 @@ describe('Teacher', () => {
     );
     assert.strictEqual(result.traceId, ctx.traceId);
   });
+
+  it('sets latencyMs as a non-negative number', async () => {
+    const teacher = new Teacher(new TeacherStubModel());
+    const result = await teacher.execute(
+      { subjectDescription: 'ACME Corp', findings: sampleFindings, totalScore: 72, confidence: 0.8, warnings: [] },
+      ctx,
+    );
+    assert.ok(typeof result.latencyMs === 'number' && result.latencyMs >= 0);
+  });
 });
