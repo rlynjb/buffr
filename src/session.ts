@@ -21,6 +21,11 @@ import { PgVectorStore } from './pg-vector-store.js';
 import { loadProfile } from './profile.js';
 import { startConversation, persistMessage, SupabaseTraceSink } from './supabase-trace-sink.js';
 import type { CapabilityTraceSink, CapabilityEvent } from '@buffr/kernel';
+import { readFile } from 'node:fs/promises';
+import { Scorer } from '@buffr/capabilities';
+import type { ScorecardDefinition } from '@buffr/capabilities';
+import { COMPANY_SCORECARD, ETF_SCORECARD } from '@buffr/domain-pack-investing';
+import type { AgentContext } from '@buffr/contracts';
 
 /**
  * A long-lived chat session: one warm pg pool and one conversation held across
@@ -66,6 +71,7 @@ function toolStatusLabel(toolName: string): string {
 
 export type ChatSession = {
   ask(question: string, opts?: AskOptions): Promise<string>;
+  evalInvesting(): Promise<string>;
   close(): Promise<void>;
 };
 
@@ -74,6 +80,58 @@ const ROUTING_PROMPT_VERSION = '1.0.0';
 
 // 1-hour cache for external connector results.
 const CONNECTOR_CACHE_TTL_MS = 60 * 60 * 1000;
+
+const ETF_TICKERS = new Set([
+  'VTI', 'SPY', 'QQQ', 'IVV', 'VOO', 'VXUS', 'BND', 'GLD', 'SLV', 'TLT',
+  'AGG', 'LQD', 'EFA', 'EEM', 'VEA', 'VWO', 'VNQ', 'SCHD', 'JEPI', 'ARKK',
+  'XLF', 'XLE', 'XLK', 'XLV', 'SPDW', 'IEMG',
+]);
+
+export function detectEntityType(ticker: string): 'company' | 'etf' {
+  return ETF_TICKERS.has(ticker.toUpperCase()) ? 'etf' : 'company';
+}
+
+type EvalFixture = {
+  description: string;
+  findings: Parameters<Scorer['execute']>[0]['findings'];
+  evidenceCount: number;
+  expectedTotalScore: number;
+};
+
+async function formatEval(
+  scorer: Scorer,
+  evalCtx: AgentContext,
+  companyFixtures: EvalFixture[],
+  etfFixtures: EvalFixture[],
+): Promise<string> {
+  const total = companyFixtures.length + etfFixtures.length;
+  let passed = 0;
+  const lines: string[] = [`Investing eval — ${total} fixtures`, ''];
+
+  async function runGroup(label: string, fixtures: EvalFixture[], scorecard: ScorecardDefinition): Promise<void> {
+    lines.push(`${label} (${fixtures.length}):`);
+    for (const fixture of fixtures) {
+      const result = await scorer.execute(
+        { findings: fixture.findings, scorecard, evidenceCount: fixture.evidenceCount },
+        evalCtx,
+      );
+      const actual = result.data.totalScore;
+      const expected = fixture.expectedTotalScore;
+      const delta = Math.abs(actual - expected);
+      const ok = delta <= 0.01;
+      if (ok) passed++;
+      const mark = ok ? '✔' : '✘';
+      const desc = fixture.description.slice(0, 42).padEnd(42);
+      lines.push(`  ${mark}  ${desc}  expected ${expected.toFixed(2)}  got ${actual.toFixed(2)}  Δ ${delta.toFixed(2)}`);
+    }
+    lines.push('');
+  }
+
+  await runGroup('Company', companyFixtures, COMPANY_SCORECARD);
+  await runGroup('ETF', etfFixtures, ETF_SCORECARD);
+  lines.push(`${passed}/${total} passed`);
+  return lines.join('\n');
+}
 
 export async function createChatSession(): Promise<ChatSession> {
   loadEnv();
@@ -238,6 +296,26 @@ export async function createChatSession(): Promise<ChatSession> {
         // swallow: memory is best-effort, the turn already succeeded
       }
       return answer;
+    },
+    async evalInvesting(): Promise<string> {
+      const scorer = new Scorer();
+      const evalCtx: AgentContext = {
+        userId: cfg.appId, workspaceId: cfg.appId, traceId: 'eval',
+        domain: 'investing', now: new Date().toISOString(), permissions: [],
+      };
+      const companyFixtures: EvalFixture[] = JSON.parse(
+        await readFile(
+          new URL('../../packages/domain-packs/investing/eval/company-fixtures.json', import.meta.url),
+          'utf8',
+        ),
+      );
+      const etfFixtures: EvalFixture[] = JSON.parse(
+        await readFile(
+          new URL('../../packages/domain-packs/investing/eval/etf-fixtures.json', import.meta.url),
+          'utf8',
+        ),
+      );
+      return formatEval(scorer, evalCtx, companyFixtures, etfFixtures);
     },
     async close(): Promise<void> {
       await pool.end();
