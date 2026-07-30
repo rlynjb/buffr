@@ -29,12 +29,16 @@ on the diagram.
           │                 │                   │
           │ builds once     │ run per turn      │ remember per turn
           ▼                 ▼                   ▼
-  ┌─ @buffr/kernel (local monorepo package — packages/kernel/, never edited here) ──────────┐
+  ┌─ @buffr/kernel + Engine/Capability/Domain-pack packages (never edited at root) ─────────┐
   │  RagQueryAgent.answer()      run-agent-loop, ReAct-style               │
   │    GemmaModelProvider ─ guarded by ContextWindowGuardedProvider(8192)  │
   │    createRetrievalPipeline ─ OllamaEmbeddingProvider + VectorStore     │
   │    createSearchKnowledgeBaseTool(minTopK:4, minScore:0.65) ─ tool 1   │
   │    createConversationMemory ─ embed+tag+recall episodic memory engine  │
+  │                                                                        │
+  │  InvestingEngine.run()  (packages/engines/investing/)                  │
+  │    Collector→Analyzer→Scorer→Teacher→Journal (packages/capabilities/)  │
+  │    DIMENSIONS + SCORECARD + PROMPTS (packages/domain-packs/investing/) │
   └───────┬───────────────────────────────────┬──────────────┬────────────┘
           │ store port (VectorStore)           │ trace port   │ uses same store
           ▼                                    ▼              ▼
@@ -78,6 +82,8 @@ on the diagram.
 | Ollama | local model server | weights + inference | HTTP localhost:11434 |
 | Google CSE / Brave / Tavily | web search APIs (key-gated) | live web index | HTTPS, free-tier quota |
 
+**New in the monorepo (added since initial study):** `packages/capabilities/` (five capability classes), `packages/domain-packs/investing/` (dimensions, scorecard, prompts, eval fixtures), `packages/engines/investing/` (`InvestingEngine`). `session.ts` now wires `InvestingEngine` alongside `RagQueryAgent` and exposes `analyze()` and `evalInvesting()` on the session facade. → `07-capability-pipeline.md`, `08-domain-pack-and-engine.md`.
+
 ## The three flows worth knowing (full walks in `audit.md` lens 2)
 
 ```
@@ -104,6 +110,21 @@ on the diagram.
 
   3. EVAL    eval-cmd → pipeline.query per labeled question
              → scorePrecisionAtK / scoreRecallAtK → print the numbers
+
+  4. ANALYZE chat.tsx /investing <TICKER>
+             → session.analyze(ticker, entityType)
+             → InvestingEngine.run():
+                 Collector (concurrent web fetches via Brave/Tavily)
+                 → Analyzer (LLM tool-calling, COMPANY/ETF_DIMENSIONS)
+                 → Scorer   (pure math, COMPANY/ETF_SCORECARD)
+                 → Teacher  (LLM single-shot, 'individual investor')
+             → formatAnalysis() → display as buffr turn
+
+  5. EVAL:INVESTING  chat.tsx /eval
+             → session.evalInvesting()
+             → load company-fixtures.json + etf-fixtures.json
+             → Scorer.execute per fixture → assert |actual-expected| ≤ 0.01
+             → render pass/fail table as buffr turn
 ```
 
 ## What this system is NOT (the deferred body)

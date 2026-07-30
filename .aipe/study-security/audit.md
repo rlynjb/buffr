@@ -209,7 +209,7 @@ Posture is reasonable for the phase.
 
 - **Lockfile present** — `package-lock.json` (35 KB, committed). Installs are
   reproducible.
-- **Surface is small** — runtime deps are `@buffr/kernel`, `@buffr/connectors`, `@buffr/contracts` (local monorepo packages), `dotenv`, `ink` (+ two opentui packages), `pg`, `react` (`package.json`). The kernel packages are first-party (operator-owned), consumed and never edited from buffr's root per the project's must-not-change constraint on the published API surface.
+- **Surface is small** — runtime deps are `@buffr/kernel`, `@buffr/connectors`, `@buffr/contracts`, `@buffr/capabilities`, `@buffr/domain-pack-investing`, `@buffr/engine-investing` (all local monorepo packages), `dotenv`, `ink` (+ two opentui packages), `pg`, `react` (`package.json`). All buffr packages are first-party (operator-owned), consumed and never edited from buffr's root per the project's must-not-change constraint on the published API surface.
 - **No postinstall scripts** in this package's `package.json` — nothing runs on
   install from buffr's own manifest.
 - **`not yet exercised`:** no `npm audit` in CI, no automated dependency updates,

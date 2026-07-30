@@ -82,8 +82,49 @@ The patterns buffr exercises, the shape each instantiates, and why it's the righ
   │ corpus preparation       │ offline batch pipeline  │ not an agent pattern —      │
   │ (npm run index:db)       │ (DbSource config-obj   │ deterministic config-driven │
   │                          │ + sanitize + index)    │ ETL; runs once, not per-ask │
+  ├──────────────────────────┼────────────────────────┼─────────────────────────────┤
+  │ Investing analysis       │ linear capability       │ deterministic ordering:     │
+  │ (InvestingEngine.run())  │ pipeline               │ Collector→Analyzer→Scorer   │
+  │                          │ (Engine<In,Out>)       │ →Teacher — no model decides │
+  │                          │                        │ the next step               │
+  ├──────────────────────────┼────────────────────────┼─────────────────────────────┤
+  │ /investing & /eval       │ pipeline-vs-loop        │ known job → engine pipeline │
+  │ (chat.tsx slash commands)│ dispatch               │ unknown question → ReAct    │
+  │                          │ (command router)       │ loop — right tool each time │
   └──────────────────────────┴────────────────────────┴─────────────────────────────┘
 ```
+
+## The two computation shapes in buffr
+
+buffr now runs two fundamentally different computation shapes under the same chat TUI, dispatched by command prefix in `handleSubmit` (`src/cli/chat.tsx`):
+
+**Shape 1: `ask()` → ReAct loop (the model decides the next step)**
+
+```
+  ask(question) → RagQueryAgent.runAgentLoop()
+                    → model.complete() → model chooses next action
+                    → tool dispatch → observation → model again
+                    → up to maxTurns:6 / maxToolCalls:4
+                    → forced synthesis → return answer string
+```
+
+The model is in control. The same question asked twice may follow different tool paths. The engineer wrote the routing rules; the model follows them (or doesn't).
+
+**Shape 2: `analyze()` → capability pipeline (code decides the next step)**
+
+```
+  analyze(ticker, entityType) → InvestingEngine.run()
+                                  → Collector.execute()    (always first)
+                                  → Analyzer.execute()     (LLM inside, always second)
+                                  → Scorer.execute()       (pure math, always third)
+                                  → Teacher.execute()      (LLM inside, always fourth)
+                                  → optional memory + journal
+                                  → return formatted string
+```
+
+The engineer is in control. The order is fixed in `engine.ts`. Two of the five steps involve LLM calls; three (Collector, Scorer, Journal) are deterministic.
+
+**The caller (`chat.tsx`) doesn't know which shape ran.** Both paths return a string. The dispatch is purely: does the input start with `/investing `? If yes, pipeline. Otherwise, loop. That clean dispatch point is the whole interface. → deep walk in `07-typed-engine-with-capability-pipeline.md`.
 
 ## The control envelope buffr ships with
 
@@ -133,9 +174,10 @@ it recover — is the gap: the signal is recorded, not yet scored.
 - **No MCP.** Tools are wired directly via `InMemoryToolRegistry`. The six current tools are
   all buffr-owned wrappers. See `04-agent-infrastructure/03-tool-calling-and-mcp.md`.
 - **No fan-out parallelism.** Tools are called sequentially (Gemma calls one at a time;
-  the harness awaits each result before the next turn). See `05-production-serving/`.
+  the harness awaits each result before the next turn). See `05-production-serving/`. (Note: `Collector` in the capabilities pipeline *does* run sources concurrently via `Promise.allSettled` — but that parallelism is inside the engine, not in the agent loop.)
 - **No web-search retry / fallback.** If Tavily 429s, that tool call fails and Gemma may
   or may not try Brave next. No circuit-breaker, no automatic fallback across providers.
+- **Not an Engine-first design (yet).** The `Engine<TInput,TOutput>` contract (`@buffr/contracts`) exists and `InvestingEngine` is the first implementation (`packages/engines/investing/src/engine.ts`). The chat agent (`RagQueryAgent`) does not use this interface — it predates it. The engine contract is the planned consolidation point for new capabilities.
 
 ## See also
 

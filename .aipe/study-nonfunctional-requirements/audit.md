@@ -233,7 +233,7 @@ The consolidated checklist, marked against this repo:
 | Observability: silent data loss | **YES** | `sanitize()` strips surrogates with no warning; no log (lens 9) |
 | Observability: cost blind spot | **YES** | web-search API costs untracked; Google 429 observed (lens 9) |
 | Testing: most important code least tested | **YES** | `session.ts` orchestrator has zero tests (study-testing §lens-7) |
-| Testing: green-by-skip CI | **YES** | 7/9 tests skip without DATABASE_URL; no CI provisions Postgres (study-testing §lens-7) |
+| Testing: green-by-skip CI | **IMPROVED but YES** | Suite is 32 tests / 7 files (up from 9/6); 4 new always-run tests added; most DB-gated tests still skip without DATABASE_URL; no CI provisions Postgres (study-testing §lens-7) |
 
 **4 firing (scalability baseline, schema-rename silent fail, no auth/RLS, sanitize silent loss), 2 WATCH/PARTIAL (god-class watch, prompt injection partial), 2 YES in testing (inherited from study-testing).**
 

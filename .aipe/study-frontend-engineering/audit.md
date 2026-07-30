@@ -26,7 +26,7 @@ The client state graph is **four `useState` hooks plus two `useRef`s** — `taRe
 |-------|------|------|--------------------|
 | `turns` | `Turn[]` | the transcript, append-only | `setTurns(t => [...t, …])` on submit and on answer/error |
 | `busy` | `boolean` | loading flag, one turn in flight | `setBusy(true)` before the async hop, `setBusy(false)` in both `.then` and `.catch` |
-| `status` | `string` | live spinner label ("searching Google…") | `onStatus` callback from `session.ask()` opts |
+| `status` | `string` | live spinner label ("searching Google…", "analyzing…", "running eval…") | `onStatus` callback from `session.ask()` or `session.analyze()` opts; `setStatus` called directly for `/eval` |
 | `liveTokens` | `{input,output}` | live token counter, accumulated during turn | `onTokens` callback from `model_usage` events |
 | `taRef` | `useRef<any>` | ref to the `<textarea>` node | used to read `.plainText`, call `.setText('')`, call `.newLine()` |
 | `startRef` | `useRef<any>` (inside `<Spinner>`) | spinner start-time (NOT useState — avoids render on capture) | reset in `Spinner`'s `useEffect` on mount |
@@ -64,7 +64,17 @@ Optimistic update — *partial*: the user's own turn is appended **before** the 
 
 ## 5. routing-and-navigation
 
-`not yet exercised`. One screen, one component, no routes, no navigation, no history, no deep-linking, no code-splitting at a route boundary. The only "navigation" is `/exit`/`/quit` — handled inside `handleSubmit` by calling `onExit()` (which calls `session.close()` then `process.exit(0)`). Process teardown, not routing.
+`not yet exercised`. One screen, one component, no routes, no navigation, no history, no deep-linking, no code-splitting at a route boundary. The "navigation" events are slash commands handled inside `handleSubmit` before the `session.ask()` path:
+
+- `/exit`/`/quit` → calls `onExit()` → `session.close()` → `process.exit(0)`. Process teardown.
+- `/investing <TICKER>` (`chat.tsx:65-83`) — parses ticker, calls `detectEntityType()`, sets `setBusy(true)` + `setStatus('analyzing…')`, calls `session.analyze(ticker, entityType, opts)` via `.then/.catch`. Same async promise-chain pattern as the main `ask()` path — no new render primitives needed.
+- `/eval` (`chat.tsx:84-94`) — sets `setBusy(true)` + `setStatus('running eval…')`, calls `session.evalInvesting()` via `.then/.catch`. Simpler than `/investing` — no `onStatus`/`onTokens` callbacks because `evalInvesting()` is synchronous-equivalent (pure Scorer math, no model calls mid-flight).
+
+**The pattern for slash commands:** all slash commands are intercepted in `handleSubmit` before the `session.ask()` call, each returning early. No changes to the render path are needed for new commands — they compose through the same `setTurns(t => [...t, { role: 'buffr', text: answer }])` / `setBusy(false)` idiom.
+
+**What's new in the state machine for `/investing`:** the `onStatus` callback is wired (Analyzer fires status events during its tool-calling loop), so the spinner label updates live during analysis. The `/eval` command does not wire `onStatus` because `evalInvesting()` runs Scorer locally (no model events).
+
+**Still zero tests on these handlers.** The `/investing` command path has its own error branch (`catch` → renders `error: <message>` as buffr turn) and its own `capturedStats` capture — both untested. → see `study-testing/audit.md`.
 
 ---
 

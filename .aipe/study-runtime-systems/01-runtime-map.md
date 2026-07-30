@@ -13,7 +13,9 @@ Before any single mechanism, here's the whole machine. Everything `buffr-laptop`
 
   ┌─ Build layer ────────────────────────────────────────────┐
   │  npm run build:packages  → @buffr/contracts → @buffr/kernel  │
-  │                          → @buffr/connectors  (monorepo pkgs) │
+  │                          → @buffr/connectors → @buffr/capabilities │
+  │                          → @buffr/domain-pack-investing        │
+  │                          → @buffr/engine-investing (monorepo pkgs) │
   │  npm run build  → tsc → dist/src/cli/*.js                 │
   └───────────────────────────┬──────────────────────────────┘
                               │  must precede any runtime invocation

@@ -7,7 +7,7 @@ finding. Where a finding earns a deep walk, it cross-links to the Pass 2
 pattern file instead of restating it.
 
 A note on size before we start: this is a small, young, single-device
-codebase — now a monorepo (`packages/kernel`, `packages/connectors`, `packages/contracts`) plus ~12 root source files (`src/`), with `session.ts` approaching ~200 lines as connectors accumulate. Most APOSD red flags bite hardest in big multi-team codebases. So expect a lot of honest
+codebase — now a monorepo with six packages (`packages/kernel`, `packages/connectors`, `packages/contracts`, `packages/capabilities`, `packages/domain-packs/investing`, `packages/engines/investing`) plus ~15 root source files (`src/`), with `session.ts` growing past ~400 lines as `analyze()` and `evalInvesting()` join `ask()`. Most APOSD red flags bite hardest in big multi-team codebases. So expect a lot of honest
 "too small to show meaningful X yet" — and expect the praise findings
 to outnumber the problem findings. That's not flattery; the deep-module
 discipline here is genuinely good for the size.
@@ -90,11 +90,7 @@ encoding (`:14-17`), the cosine-distance→similarity-score flip
 A caller — `session.ts:41` — names none of that. **This is the best
 deep module in the repo.** → `01-adapter-behind-a-contract.md`.
 
-**Runner-up — `createChatSession` (`session.ts:34-107`).** Wider job
-(it wires the embedder, store, pipeline, tool, model, profile, memory,
-conversation, trace, up to 7 connector tools, and the agent) behind a 2-method interface:
-`ask(question, opts?)` and `close()` (`session.ts:29-32`). Fourteen constructed
-things, two exposed verbs. Deep — and getting deeper as connectors accumulate. → `05-deep-session-facade.md`.
+**Runner-up — `createChatSession` (`session.ts`).** Wider job (it wires the embedder, store, pipeline, tool, model, profile, memory, conversation, trace, up to 7 connector tools, and the agent, and now also constructs `InvestingEngine`) behind a 3-method interface: `ask(question, opts?)`, `analyze(ticker, entityType, opts?)`, `evalInvesting()`, and `close()`. More constructed things, still a small number of exposed verbs. Deep — and growing. The session facade has grown from `ask()` alone to three distinct computational modes, all hidden behind the same factory. → `05-deep-session-facade.md`. **New design note:** the addition of `analyze()` and `evalInvesting()` is the first sign that `session.ts` may be acquiring multiple responsibilities — it now orchestrates both the ReAct loop path and the engine pipeline path. Still one module, but worth watching.
 
 **New cognitive load — the mutable-trace-slot.** `session.ts:120-138` introduces module-level mutable variables (`currentOnStatus`, `currentOnTokens`, `currentInputTokens`, `currentOutputTokens`) that are swapped on each `ask()` call and reset after. This is not wrong — the pattern works — but it is the first piece of `session.ts` that requires temporal reasoning to understand (you have to know *when* these slots are set to know which turn's callbacks fire). A reader who sees `currentOnStatus` at the top of the module without following its assignment in `ask()` will be confused. The APOSD name for this: a **temporal coupling** embedded in global mutable state. It's the narrowest candidate for a future refactor (e.g., wrapping the trace intercept in a closure per-call rather than module-level variables). Not a problem today; flagged because it's the first non-obvious piece in `session.ts`.
 
@@ -388,11 +384,14 @@ it fires. Sorted by severity for buffr.
   Repetition (same code N times)   N/A       too small; no duplicated logic
                                              block beyond the schema literal
 
-  God class / over-large module    WATCH     session.ts is approaching ~200
-                                             lines as connectors accumulate;
-                                             still one clear responsibility
-                                             (session factory + ask loop)
-                                             but worth monitoring
+  God class / over-large module    WATCH     session.ts has grown to ~400+
+                                             lines and now wires both the
+                                             ReAct loop AND InvestingEngine
+                                             (two distinct computational
+                                             modes). Still one factory
+                                             function, but the boundary
+                                             between "chat session" and
+                                             "investing session" is blurring.
 
   Temporal coupling via module-    FIRES     currentOnStatus / currentOnTokens
    level mutable state             minor     module-level vars swapped per-ask;
@@ -400,6 +399,14 @@ it fires. Sorted by severity for buffr.
                                              → no fix yet; refactor if session
                                                grows a second concurrent caller
 ```
+
+## Discovered patterns (new since initial audit)
+
+Two new patterns emerged with the capabilities + engine additions:
+
+**`capability-as-typed-computation-unit`** — each capability (`Collector`, `Analyzer`, `Scorer`, `Teacher`, `Journal` in `packages/capabilities/src/`) has a single typed input/output contract, is independently instantiable, and is composable in pipelines. No shared mutable state between capabilities. No base class or inheritance — composability comes from explicit wiring. → see `06-capability-as-typed-computation-unit.md`.
+
+**`engine-as-linear-pipeline`** — `InvestingEngine.run()` (`packages/engines/investing/src/engine.ts`) fixes the step order in code: Collector → Analyzer → Scorer → Teacher → Journal. The model does not decide the next step. LLM calls are isolated inside Analyzer and Teacher; the rest is pure or I/O. This is the canonical alternative to the ReAct loop when the steps are known ahead of time.
 
 **The actionable index, ranked across the whole repo:**
 

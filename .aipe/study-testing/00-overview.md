@@ -1,6 +1,6 @@
 # Overview — the testing audit at a glance
 
-`buffr-laptop` has **9 tests across 6 files, all passing** (`npm test` = `tsc` build then `node --test --test-concurrency=1 dist/test/*.test.js`). For a single-device personal project this is a real suite, not decoration — but most of it is *green by skip*: 7 of the 9 tests gate on `DATABASE_URL` and silently skip when it's unset, so a clean checkout with no database reports success while exercising almost nothing.
+`buffr-laptop` has **32 tests across 7 files, 31 passing, 1 skipped** (`npm test` = `tsc` build then `node --test --test-concurrency=1 dist/test/*.test.js`). For a single-device personal project this is a real suite, not decoration — but much of it is *green by skip*: most DB-gated tests skip when `DATABASE_URL` is unset. The 7th file (`test/commands.test.ts`) adds 4 always-run tests covering `detectEntityType` and Scorer fixture accuracy — no DB required.
 
 The verdict: **the test design is sound where it exists** — real integration against Postgres, a deterministic fake embedder, a contract test on the persistence port. The problem isn't quality, it's *coverage*. The orchestration layer that ties the whole agent together is untested.
 
@@ -11,8 +11,10 @@ The verdict: **the test design is sound where it exists** — real integration a
 ```
   buffr-laptop — what has tests, what doesn't
 
-  ┌─ Pure / unit ───────────────────────────────────────────────┐
-  │  src/config.ts          ✓ 2 tests, ALWAYS run (no DB gate)   │
+  ┌─ Pure / unit (ALWAYS run) ──────────────────────────────────┐
+  │  src/config.ts          ✓ 2 tests, no DB gate                 │
+  │  detectEntityType       ✓ 2 tests (test/commands.test.ts)     │ ← new
+  │  Scorer fixture accuracy ✓ 2 tests (test/commands.test.ts)    │ ← new
   └──────────────────────────────────────────────────────────────┘
   ┌─ Integration (DATABASE_URL-gated, SKIP when unset) ──────────┐
   │  src/migrate.ts         ✓ idempotent run-twice                │
@@ -22,8 +24,10 @@ The verdict: **the test design is sound where it exists** — real integration a
   │  src/supabase-trace-sink.ts ✓ all 6 events + ordering         │
   └──────────────────────────────────────────────────────────────┘
   ┌─ UNTESTED — the orchestration + UI layer ───────────────────┐
-  │  ★ src/session.ts       ✗ createChatSession + per-turn ask() │ ← highest leverage
-  │    src/cli/chat.tsx      ✗ OpenTUI UI (busy-guard, /exit, error)  │
+  │  ★ src/session.ts       ✗ createChatSession, ask(), analyze() │ ← highest leverage
+  │                            evalInvesting() — all untested     │
+  │    src/cli/chat.tsx      ✗ OpenTUI UI (busy-guard, /exit,     │
+  │                            /investing, /eval, error)          │
   │    src/db.ts             ✗ trivial Pool factory (low value)   │
   │    src/cli/index-cmd.ts  ✗ thin CLI wrapper                   │
   │    src/cli/eval-cmd.ts   ✗ EVAL script, not a unit test       │ → study-ai-engineering
@@ -75,3 +79,12 @@ The Ink component has real logic that isn't UI fluff: the `if (busy) return` re-
 | 7 | testing-red-flags-audit | 2 of 8 red flags firing (green-by-skip CI; untested orchestration trunk). |
 
 Full walk with `file:line` grounding in **`audit.md`**.
+
+## Pattern files
+
+- `01-env-gated-integration-tests.md` — the DB-gate pattern
+- `02-fake-embedder-injection.md` — deterministic substitute for Ollama
+- `03-contract-parity-test.md` — PgVectorStore upsert-and-rank
+- `04-idempotent-migration-test.md` — run-twice schema test
+- `05-full-signal-trajectory-assertion.md` — trace sink with synthetic events
+- `06-fixture-based-scorer-accuracy.md` — golden-fixture eval for deterministic functions (new)

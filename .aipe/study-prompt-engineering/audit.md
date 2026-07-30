@@ -18,17 +18,27 @@ Tool calling is **emulated**, not native. Gemma 2 9B has no tool API, so `GemmaM
 
 `BASE_SYSTEM` lives in `@buffr/kernel` (`packages/kernel/src/agents/rag-query-agent.ts`), but buffr now owns a **routing prompt** directly in `session.ts:142-182` — 7 tool-usage rules, the full tool description block, and conditional logic based on configured connectors. This routing prompt is version-controlled in buffr's source: a PR diff shows exactly which rules changed. It's the first prompt buffr controls directly. Observability exists at the trajectory level via `SupabaseTraceSink`. What's still missing: a prompt-version stamp on each output, and a prompt+model-version pairing. → see [03-prompts-as-code.md](03-prompts-as-code.md).
 
+**New: prompt-as-data pattern** (`packages/domain-packs/investing/src/prompts.ts`). `INVESTING_PROMPTS` is a `Record<string, string>` keyed by `'analyzer-context'` and `'teacher-context'`. The `'analyzer-context'` value is injected as `instructions[]` into `Analyzer.execute()` at engine runtime. This is the **first prompt-as-data pattern** in the monorepo: prompt text stored with the domain knowledge, not hardcoded in the capability implementation. The Analyzer capability is domain-agnostic; the domain pack provides the prompt tuning. Versioning: the prompt text is in the domain-pack package, version-controlled alongside the dimensions and scorecard it was tuned to match. One-way door: changing `INVESTING_PROMPTS` without updating eval fixtures is safe (the Scorer is downstream of the Analyzer, and fixture inputs are pre-computed `findings`, not raw prompts). → see [03-prompts-as-code.md](03-prompts-as-code.md).
+
 ## 4. Token budgeting + context window — EXERCISED
 
 A hard guard. `ContextWindowGuardedProvider` wraps Gemma with `maxTokens: 8192` (`session.ts:46`), estimates input tokens at ~3 chars/token (`provider-local/dist/src/context-window-guard.js:64`), reserves 768 for output, and **throws** `ContextWindowExceededError` rather than truncating (`:37`). Tool results are capped at 16,000 chars (`runtime/dist/src/run-agent-loop.js:2`). Prefix caching: not exercised (Ollama local, no provider-side prefix cache claimed). Lost-in-the-middle: relevant since the profile sits at the *front* of a possibly long prompt. → see [04-token-budgeting.md](04-token-budgeting.md).
 
-## 5. Eval-driven iteration — PARTIAL (retrieval only)
+## 5. Eval-driven iteration — PARTIAL (retrieval + Scorer; still no generation eval)
 
-There is an eval set (`eval/queries.json`) and a scorer (`src/cli/eval-cmd.ts`) computing P@1 and R@3 — but it scores **retrieval**, not the prompt or the generated answer. The golden set is 3 labeled queries against expected source docs. No regression suite of production prompt failures, no LLM-as-judge over answer quality. So buffr iterates *retrieval* against an eval and iterates the *prompt* by vibes. → see [05-eval-driven-iteration.md](05-eval-driven-iteration.md).
+Two eval surfaces now exist:
+1. **Retrieval eval** (`eval/queries.json` → `src/cli/eval-cmd.ts`): P@1 and R@3 over 3 labeled queries. Covers retrieval, not prompts.
+2. **Scorer accuracy eval** (`packages/domain-packs/investing/eval/*.json` → `test/commands.test.ts` → `/eval` command): asserts that `COMPANY_SCORECARD`/`ETF_SCORECARD` weights produce expected `totalScore` values within ±0.01. This is the first eval that is also a build-gate test. Still does not evaluate prompt quality — Scorer is deterministic math, not LLM output.
 
-## 6. Single-purpose chains — PARTIAL
+The generation-quality gap remains: neither the RAG answer nor the Analyzer/Teacher explanation is evaluated for faithfulness or accuracy. The `RubricJudge` in aptkit is still unwired. → see [05-eval-driven-iteration.md](05-eval-driven-iteration.md).
 
-buffr runs exactly one chain: the RAG query agent (`RagQueryAgent`, one job: answer grounded in the KB). It is single-purpose, which is the good shape — but there is no *pipeline* of composed chains (no classifier → router → handler). The one-job discipline holds; the composition story doesn't exist yet. → see [06-single-purpose-chains.md](06-single-purpose-chains.md).
+## 6. Single-purpose chains — PARTIAL (improved)
+
+buffr now runs two distinct single-purpose computation paths, each with one job:
+1. **RAG query agent** (`RagQueryAgent`): answer grounded in KB + web. One job.
+2. **InvestingEngine pipeline**: analyze a ticker across 5 dimensions and score it. One job. The Analyzer and Teacher inside it are each single-purpose LLM calls.
+
+Neither composes into the other. The dispatch is a slash-command prefix check in `chat.tsx`, not a classifier LLM. The one-job discipline holds for each path; a composed pipeline of paths doesn't exist yet. → see [06-single-purpose-chains.md](06-single-purpose-chains.md).
 
 ## 7. Output mode mismatch — EXERCISED (implicitly)
 
@@ -69,8 +79,9 @@ buffr's agent is a Q&A assistant, not a repeated generative chain, so phrasing c
   2  structured outputs         EXERCISED ★         02
   3  prompts as code            PARTIAL             03
   4  token budgeting            EXERCISED           04
-  5  eval-driven iteration      PARTIAL (retrieval) 05
-  6  single-purpose chains      PARTIAL             06
+  5  eval-driven iteration      PARTIAL (retrieval  05
+                                + Scorer fixtures)
+  6  single-purpose chains      PARTIAL (improved)  06
   7  output mode mismatch       EXERCISED           07
   8  few-shot                   NOT YET             08
   9  chain-of-thought           NOT YET             09

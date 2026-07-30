@@ -4,8 +4,9 @@ Pass 1 of the two-pass audit. Eight lenses, walked in order against the real cod
 names what the repo *actually does* with `file:line` grounding, or says `not yet exercised`
 plainly. Significant findings cross-link to a Pass-2 pattern file for the deep walk.
 
-Evidence base: `src/*` (10 files), `sql/001_agents_schema.sql`, the two design specs under
-`docs/superpowers/specs/`, and `agent-layer-plan.md`. Observed behavior is grounded in code;
+Evidence base: `src/*` (~15 files), `sql/001_agents_schema.sql`, the two design specs under
+`docs/superpowers/specs/`, `agent-layer-plan.md`, and the new packages: `packages/capabilities/`,
+`packages/domain-packs/investing/`, `packages/engines/investing/`. Observed behavior is grounded in code;
 production/scale claims are labelled as inference.
 
 ---
@@ -33,7 +34,7 @@ Three trust/ownership bands, and the load-bearing boundary sits in the middle.
   pure config, pool factory, transactional migration runner.
 
 **Trust boundaries:**
-- **The @buffr/kernel boundary** is the one that matters (`session.ts` imports from `@buffr/kernel` and `@buffr/connectors`; nothing in `src/` reaches into `packages/` internals directly). The codebase is now a monorepo: `packages/kernel/`, `packages/connectors/`, `packages/contracts/` are local packages consumed at the root. Stated as a hard constraint in `context.md` and enforced structurally — root `src/` only implements kernel's *contracts* (`VectorStore`, `CapabilityTraceSink`, `ModelProvider` via Gemma). → `04-library-as-dependency-boundary.md`.
+- **The @buffr/kernel boundary** is the one that matters (`session.ts` imports from `@buffr/kernel`, `@buffr/connectors`, `@buffr/capabilities`, `@buffr/domain-pack-investing`, and `@buffr/engine-investing`; nothing in `src/` reaches into `packages/` internals directly). The codebase is a monorepo: `packages/kernel/`, `packages/connectors/`, `packages/contracts/`, `packages/capabilities/`, `packages/domain-packs/investing/`, `packages/engines/investing/` are all local packages consumed at the root. Stated as a hard constraint in `context.md` and enforced structurally — root `src/` only implements kernel's *contracts* (`VectorStore`, `CapabilityTraceSink`, `ModelProvider` via Gemma). `session.ts` now also wires `InvestingEngine` (in addition to `RagQueryAgent`). → `04-library-as-dependency-boundary.md`.
 - **The single-user trust boundary is by convention, not enforcement.** Every table carries
   `app_id` (`sql/001:6,17,34` etc.) defaulting `'laptop'`, but there is **no RLS** — isolation
   is cooperative. The graduation spec names this exactly: "isolation is by convention only

@@ -2,7 +2,7 @@
 
 Each lens below is one structured read of the `buffr-laptop` suite, grounded in `file:line` or marked `not yet exercised` honestly. When a finding is big enough to earn its own deep walk, the lens cross-links to the Pass 2 pattern file rather than restating it.
 
-Suite snapshot: **9 tests / 6 files / 9 pass.** Runner: `node --test --test-concurrency=1 dist/test/*.test.js` after a `tsc` build (`package.json:7`). 7 of 9 tests gate on `DATABASE_URL` and skip when unset.
+Suite snapshot: **32 tests / 7 files / 31 pass / 1 skipped.** Runner: `node --test --test-concurrency=1 dist/test/*.test.js` after a `tsc` build (`package.json:7`). The 7th file is `test/commands.test.ts` (4 new tests, all always-run — no DB gate). Most DB-gated tests still skip when `DATABASE_URL` is unset.
 
 ---
 
@@ -12,19 +12,23 @@ The coverage map is in `00-overview.md`. The structural finding: **testing went 
 
 What's tested, and it's the right thing per file:
 
-- `loadConfig` (`test/config.test.ts:5-20`) — defaults and overrides, the only test that runs with no database.
+- `loadConfig` (`test/config.test.ts:5-20`) — defaults and overrides, always run (no DB gate).
 - `runMigration` (`test/migrate.test.ts:16-27`) — idempotent schema creation → see `04-idempotent-migration-test.md`.
 - `PgVectorStore` (`test/pg-vector-store.test.ts:30-46`) — upsert-and-rank + dimension guard → see `03-contract-parity-test.md`.
 - `loadProfile` (`test/profile.test.ts:21-25`) — stored content or empty string.
 - `indexDocumentRow` (`test/runtime.test.ts:31-40`) — writes a `documents` row then its chunks, via the fake embedder → see `02-fake-embedder-injection.md`.
 - `SupabaseTraceSink` (`test/supabase-trace-sink.test.ts:23-67`) — all 6 event types + ordering → see `05-full-signal-trajectory-assertion.md`.
+- **`test/commands.test.ts` (NEW)** — 4 tests, all always-run (no DB gate):
+  - `detectEntityType` (`commands.test.ts:15-26`) — pure function, no DB. Asserts `'etf'` for VTI/SPY/QQQ; `'company'` for AAPL/MSFT/NVDA.
+  - Scorer accuracy via company fixtures (`commands.test.ts:29-53`) — loads `packages/domain-packs/investing/eval/company-fixtures.json` via `import.meta.url`, instantiates real `Scorer`, asserts `|actual - expected| ≤ 0.01` per fixture.
+  - Scorer accuracy via ETF fixtures (`commands.test.ts:55-79`) — same pattern with `etf-fixtures.json` and `ETF_SCORECARD`. → see `06-fixture-based-scorer-accuracy.md`.
 
 What isn't, ranked by risk:
 
-- **`src/session.ts` — the orchestrator, zero tests.** `createChatSession()` wires the pool, store, pipeline, tool, model, memory, trace, and up to 7 connector tools (`session.ts:34-107`); `ask()` runs the persist-then-answer-then-flush-then-remember sequence. This is the most complex code in the repo and the least tested. **Red flag firing:** the most important code is the least covered.
+- **`src/session.ts` — the orchestrator, still zero tests.** `createChatSession()` now wires the pool, store, pipeline, tool, model, memory, trace, up to 7 connector tools, and `InvestingEngine`. The facade has grown: `ask()`, `analyze()`, and `evalInvesting()` are all untested. `detectEntityType` IS tested (it's a pure exported function tested in `commands.test.ts:15-26`), but `analyze()` and `evalInvesting()` as session methods are not. **Red flag firing:** the most complex code is the least covered — and it's grown more complex.
 - **Connector tools — zero tests.** The three web search connectors (`web_search_brave`, `web_search_tavily`, `web_search_google`) and the RSS/Amazon/Trends tools (`session.ts:76-107`) have no tests of any kind — no unit test for the `DataConnector` interface, no integration test, no mock HTTP. The `TOOL_LABELS` map and `toolStatusLabel()` helper are untested. When a web connector breaks (wrong API key, response format change), there's no test to catch it.
 - **DB indexing path — zero tests.** `src/db-sources.ts` (`DbSource[]` config + 8 table queries) and `src/cli/index-db-cmd.ts` (including the `sanitize()` surrogate-stripping helper) have no tests. `sanitize()` is a pure function that is trivially unit-testable (input: emoji string with surrogates; expected output: stripped string) but isn't tested. The `DbSource` `toId`/`toText` functions are also pure and testable but untested. A DB schema rename or column addition in `loopd`/`contrl` fails silently at index time with no test catch.
-- **`src/cli/chat.tsx` — the OpenTUI UI, zero tests.** Real branches: the `busy` re-entrancy guard (`chat.tsx:15`), `/exit` close, the error-turn `catch`, the `onStatus`/`onTokens` callback wiring.
+- **`src/cli/chat.tsx` — the OpenTUI UI, zero tests.** Real branches now include: the `busy` re-entrancy guard, `/exit` close, the error-turn `catch`, `/investing <TICKER>` handler (`chat.tsx:65-83`), and `/eval` handler (`chat.tsx:84-94`). The two new slash command handlers each have their own `setBusy` / `setStatus` / `.then/.catch` path — all untested.
 - `src/db.ts` — a 2-line `Pool` factory; too thin to earn a test.
 - `src/cli/index-cmd.ts` — a thin file-reading CLI over the tested `indexDocumentRow`.
 - `src/cli/eval-cmd.ts` — **not a unit test at all.** It's the eval/reporting script (precision@k, recall@k over `eval/queries.json`, `eval-cmd.ts:22-33`). It prints, never asserts → that's the *eval* half of the seam, cross-linked to `study-ai-engineering`.
@@ -154,7 +158,7 @@ The consolidated checklist, marked against this repo.
 | Tests require a specific run order | no | Each file owns its `beforeEach` cleanup (lens 4). |
 | Zero tests on error/exception branches | **PARTIAL** | Dimension-mismatch tested; swallowed `catch` and rollback paths not (lens 5). |
 | AI feature with no test at the deterministic boundary | no | Trace-sink boundary tested with synthetic events (lens 6). |
-| Green-by-skip: suite passes while testing almost nothing | **YES** | 7/9 tests skip without `DATABASE_URL`; no CI provisions a DB (lens 1, `00-overview` gap 3). |
+| Green-by-skip: suite passes while testing almost nothing | **IMPROVED but still YES** | New always-run tests in `commands.test.ts` add 4 always-passing tests; most DB-gated tests still skip without `DATABASE_URL`. 5 always-run tests now exist vs. 1 before. No CI provisions a DB. (lens 1, `00-overview` gap 3). |
 
 **2 firing, 1 partial.** The two real ones are the same story from two sides: the orchestration trunk is untested, and the integration tests that *do* exist don't run in CI. Both are fixable without rearchitecting anything — one test file for `session.ts` with injected fakes, and one CI job with a pgvector service container.
 

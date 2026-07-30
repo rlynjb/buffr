@@ -44,6 +44,17 @@ buffr's AI features — what's wired
 │ Trajectory capture +   │ full-signal trace sink  │ every step replayable;   │
 │ live TUI callbacks     │ + per-ask onStatus/     │ real-time status + token │
 │ (SupabaseTraceSink)    │   onTokens/onComplete   │ count shown live in chat │
+├────────────────────────┼─────────────────────────┼──────────────────────────┤
+│ Capabilities pipeline  │ Collector→Analyzer→     │ structured multi-step    │
+│ (@buffr/capabilities)  │ Scorer→Teacher→Journal  │ analysis outside the     │
+│                        │ (Engine pattern)        │ agent loop               │
+├────────────────────────┼─────────────────────────┼──────────────────────────┤
+│ Investing analysis     │ InvestingEngine.run()   │ chat command /investing  │
+│ (/investing <TICKER>)  │ (Engine<In,Out>)        │ delegates to the engine  │
+├────────────────────────┼─────────────────────────┼──────────────────────────┤
+│ Investing eval         │ Scorer against fixtures  │ /eval command verifies   │
+│ (/eval)                │ (pure math, no LLM)     │ scorecard accuracy       │
+│                        │                         │ offline                  │
 └────────────────────────┴─────────────────────────┴──────────────────────────┘
 ```
 
@@ -127,6 +138,34 @@ Two local models via Ollama: `gemma2:9b` (generation) and `nomic-embed-text:v1.5
 - **Mechanism:** `SupabaseTraceSink` (`src/supabase-trace-sink.ts`) handles durable writes. Wrapped by a **mutable-trace-slot** in `session.ts:120-138`: before each `ask()`, `currentOnStatus` and `currentOnTokens` slots are set to the caller's callbacks; `trace.emit()` fires both the slot (live TUI) and the sink (Postgres); slots are cleared after the agent returns. The `TOOL_LABELS` map (`session.ts:44-52`) translates tool names → human strings. Real-time elapsed time is tracked in `<Spinner>` via `useRef(Date.now())` (`src/cli/chat.tsx:26-36`), independent of the callback path.
 - **Failure modes / honest gaps:** capture is replay-*ready* but aptkit's replay runner is **unwired**; no dashboard; `tokens_used` is a lossy sum — no dollar conversion for cloud APIs yet (web-search API costs are untracked). The mutable slots are **not thread-safe**: a hypothetical second concurrent `ask()` call would overwrite them. Single-user single-call assumption makes this safe today. See `05-evals-and-observability/04-llm-observability.md`.
 
+### 8. Capabilities pipeline — structured multi-step analysis
+
+- **Inputs:** ticker, entityType (`'company'` or `'etf'`), evidence collected from web sources.
+- **Outputs:** `totalScore`, `confidence`, `explanation`, `keyLessons`, `actionableNext` — wrapped in `AgentResult<InvestingOutput>`.
+- **Pattern:** `Collector → Analyzer (LLM) → Scorer (pure math) → Teacher (LLM)` — wired in `packages/engines/investing/src/engine.ts`.
+- **Key design call:** each capability is independently instantiable and testable; LLM calls are isolated to exactly two stages (Analyzer and Teacher); Scorer is deterministic math — no model dependency.
+- **Capability source:** `@buffr/capabilities` (`packages/capabilities/src/`); domain data: `@buffr/domain-pack-investing` (`packages/domain-packs/investing/src/`).
+- **Failure modes:** if `evidence.length === 0` (Collector found nothing), the engine short-circuits and returns confidence=0 with no LLM calls (`engine.ts:48-69`).
+- **Eval set:** Scorer accuracy is covered by `test/commands.test.ts:28-79` (fixture-based, no LLM). Analyzer + Teacher quality: not evaluated.
+
+### 9. /investing <TICKER> command
+
+- **Inputs:** user types `/investing AAPL` or `/investing VTI` in chat.
+- **ETF detection:** `detectEntityType()` exported from `src/session.ts` — a `Set` of 26 known ETF tickers; default is `'company'` for anything not in the Set.
+- **Outputs:** formatted analysis string displayed as buffr turn in TUI; the same `onStatus`/`onTokens`/`onComplete` callback wiring as `session.ask()`.
+- **Mechanism:** `src/cli/chat.tsx:65-83` intercepts the command before `session.ask()`, calls `session.analyze(ticker, entityType, opts)` which calls `investingEngine.run()` (`session.ts:388-406`). InvestingEngine is constructed once per session in `createChatSession()`.
+- **Fallback:** when no web search connectors are configured (`BRAVE_API_KEY` / `TAVILY_API_KEY` both absent), `investingEngine` is `null` and `session.analyze()` returns a "No web search connectors configured" message without running the pipeline.
+- **Failure modes:** same as Feature 8 (zero-evidence short-circuit). Error is caught in `chat.tsx` and rendered as an error turn.
+
+### 10. /eval command — offline scorer accuracy
+
+- **Inputs:** no user input beyond `/eval`.
+- **Outputs:** a table of pass/fail per fixture, with expected/actual/delta.
+- **Mechanism:** `session.evalInvesting()` loads `packages/domain-packs/investing/eval/company-fixtures.json` and `etf-fixtures.json` via `new URL(..., import.meta.url)` (`session.ts:376-386`). Runs a `Scorer` instance against each fixture's `findings` + scorecard, asserts `|actual - expected| ≤ 0.01`.
+- **Pattern:** pure-computation eval with fixture files — no LLM, no web, no DB. The same fixture load-and-assert runs in `test/commands.test.ts:28-79` as a proper test assertion; `evalInvesting()` renders the same check as a human-readable table in the TUI.
+- **Failure modes:** none observed. Scorer is deterministic; fixture JSON is checked into the monorepo.
+- **What it does not cover:** whether the LLM-generated explanation is grounded in the evidence (faithfulness) — that is not evaluated here.
+
 ## What's captured but not yet exercised
 
 The honest ledger — these are the strongest project-exercise targets:
@@ -136,10 +175,11 @@ The honest ledger — these are the strongest project-exercise targets:
 - **Reranking, hybrid/keyword search, query rewriting/HyDE, GraphRAG.** None present — pure single-stage dense retrieval over the raw question, post-filtered by `minScore:0.65`.
 - **Web search eval.** The three web search connectors are functional but not evaluated — no golden set, no latency baseline, no accuracy measurement.
 - **Streaming.** `stream: false`; the chat shows a spinner + live token count, not streaming tokens.
-- **Caching.** No prompt, semantic, or exact-match cache. Web search results are not cached either.
+- **Caching.** No prompt, semantic, or exact-match cache in the RAG/agent path. `CachedConnector` is used for investing web sources (wrapping Brave/Tavily connectors in `InvestingEngine`), so those results are cached within a session run — but the broader agent loop and embeddings remain uncached.
 - **Chunking-strategy tuning.** Fixed 512-char windows, never tuned against the eval set.
 - **Heuristic-before-LLM, model routing.** The agent always calls the LLM; one model.
 - **Web-search retry / quota handling.** Google 429 (quota exhausted) is visible to the agent as a tool error; no retry, no fallback to the next provider.
+- **Investing faithfulness eval.** The `/eval` command scores Scorer accuracy against fixtures; it does not evaluate whether the LLM-generated explanation (from Analyzer + Teacher) is grounded in the evidence. That faithfulness gap is the same unwired `RubricJudge` gap noted for the main chat agent.
 
 ## See also
 
