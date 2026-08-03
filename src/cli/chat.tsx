@@ -84,16 +84,17 @@ function Chat({ session, onExit }: { session: ChatSession; onExit: () => Promise
     if (q.startsWith('/research ')) {
       const topic = q.slice('/research '.length).trim();
       if (!topic) return;
-      setTurns(t => [...t, { role: 'you', text: q }]);
+      setTurns(t => [...t, { role: 'you', text: q }, { role: 'buffr', text: '' }]);
       setBusy(true); setStatus('researching…'); setLiveTokens({ input: 0, output: 0 });
       let capturedStats: TurnStats | undefined;
       session.research(topic, {
         onStatus: (msg) => setStatus(msg),
         onTokens: (d) => setLiveTokens(t => ({ input: t.input + d.input, output: t.output + d.output })),
         onComplete: (s) => { capturedStats = s; },
+        onPartial: (text) => setTurns(t => { const c = [...t]; c[c.length - 1] = { role: 'buffr', text }; return c; }),
       }).then(
-        answer => { setTurns(t => [...t, { role: 'buffr', text: answer, stats: capturedStats }]); setBusy(false); },
-        err    => { setTurns(t => [...t, { role: 'buffr', text: `error: ${(err as Error).message}`, stats: capturedStats }]); setBusy(false); },
+        answer => { setTurns(t => { const c = [...t]; c[c.length - 1] = { role: 'buffr', text: answer, stats: capturedStats }; return c; }); setBusy(false); },
+        err    => { setTurns(t => { const c = [...t]; c[c.length - 1] = { role: 'buffr', text: `error: ${(err as Error).message}` }; return c; }); setBusy(false); },
       );
       return;
     }

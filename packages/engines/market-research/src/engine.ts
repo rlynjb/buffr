@@ -43,6 +43,7 @@ export class MarketResearchEngine implements Engine<MarketResearchInput, MarketR
 
   async run(input: MarketResearchInput, context: AgentContext): Promise<AgentResult<MarketResearchOutput>> {
     const status = input.onStatus ?? (() => {});
+    const partial = input.onPartial ?? (() => {});
 
     // Step 1 — build collector sources
     const collectorSources = this.sources.map(s => ({
@@ -52,7 +53,7 @@ export class MarketResearchEngine implements Engine<MarketResearchInput, MarketR
     }));
 
     // Step 2 — Collector
-    const sourceNames = collectorSources.map(s => MarketResearchEngine.friendlyName(s.connector.id)).join(', ');
+    const sourceNames = collectorSources.map(s => MarketResearchEngine.friendlyName(s.connector.id)).join(' · ');
     status(`fetching ${sourceNames}…`);
     const collectorResult = await this.collector.execute({ sources: collectorSources }, context);
     const { evidence, failed } = collectorResult.data;
@@ -81,6 +82,7 @@ export class MarketResearchEngine implements Engine<MarketResearchInput, MarketR
     }
 
     // Step 4 — Analyzer
+    partial(`Collected ${evidence.length} result${evidence.length !== 1 ? 's' : ''} from ${sourceNames}\n\nAnalyzing…`);
     status(`analyzing ${evidence.length} results…`);
     const analyzerResult = await this.analyzer.execute(
       {
@@ -93,6 +95,10 @@ export class MarketResearchEngine implements Engine<MarketResearchInput, MarketR
     );
 
     // Step 5 — Scorer
+    const findingsText = analyzerResult.data.findings.map(f =>
+      `  ${f.dimensionId.padEnd(18)} ${String(Math.round(f.score)).padStart(3)}/100  ${f.summary}`
+    ).join('\n');
+    partial(`Collected ${evidence.length} result${evidence.length !== 1 ? 's' : ''} from ${sourceNames}\n\nFindings:\n${findingsText}\n\nScoring…`);
     status('scoring…');
     const scorerResult = await this.scorer.execute(
       {
@@ -104,6 +110,7 @@ export class MarketResearchEngine implements Engine<MarketResearchInput, MarketR
     );
 
     // Step 6 — Teacher
+    partial(`Collected ${evidence.length} result${evidence.length !== 1 ? 's' : ''} from ${sourceNames}\n\nFindings:\n${findingsText}\n\nScore: ${Math.round(scorerResult.data.totalScore)}/100 · Confidence: ${Math.round(scorerResult.data.confidence * 100)}%\n\nSummarizing…`);
     status('summarizing…');
     const allWarnings = [...collectorResult.warnings, ...scorerResult.data.warnings];
     const teacherResult = await this.teacher.execute(

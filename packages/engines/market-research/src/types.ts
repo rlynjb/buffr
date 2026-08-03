@@ -19,6 +19,7 @@ export type MarketResearchInput = {
   topic: string;
   conversationId?: string;
   onStatus?: (msg: string) => void;
+  onPartial?: (text: string) => void;
 };
 
 export type MarketResearchOutput = {

@@ -58,6 +58,7 @@ export type AskOptions = {
   onStatus?: (msg: string) => void;
   onTokens?: (delta: { input: number; output: number }) => void;
   onComplete?: (stats: TurnStats) => void;
+  onPartial?: (text: string) => void;
 };
 
 const TOOL_LABELS: Record<string, string> = {
@@ -526,7 +527,7 @@ export async function createChatSession(): Promise<ChatSession> {
         now: new Date().toISOString(),
         permissions: [],
       };
-      const result = await researchEngine.run({ topic, conversationId, onStatus: opts?.onStatus }, agentCtx);
+      const result = await researchEngine.run({ topic, conversationId, onStatus: opts?.onStatus, onPartial: opts?.onPartial }, agentCtx);
       currentOnStatus = undefined;
       currentOnTokens = undefined;
       opts?.onComplete?.({
