@@ -12,3 +12,5 @@ export { TavilySearchConnector } from './discovery/tavily-search.js';
 export type { TavilySearchParams, TavilySearchData, TavilySearchResult, TavilyTransport } from './discovery/tavily-search.js';
 export { GoogleSearchConnector } from './discovery/google-search.js';
 export type { GoogleSearchParams, GoogleSearchData, GoogleSearchResult, GoogleSearchTransport } from './discovery/google-search.js';
+export { RedditSearchConnector } from './discovery/reddit-search.js';
+export type { RedditSearchParams, RedditSearchData, RedditPost, RedditTransport } from './discovery/reddit-search.js';

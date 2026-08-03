@@ -7,7 +7,7 @@ import {
 import {
   RssConnector, GoogleTrendsConnector, AmazonReviewsConnector,
   BraveSearchConnector, TavilySearchConnector, GoogleSearchConnector,
-  CachedConnector,
+  RedditSearchConnector, CachedConnector,
 } from '@buffr/connectors';
 import { createFetchRssTool } from './connector-tools/rss-tool.js';
 import { createFetchTrendsTool } from './connector-tools/trends-tool.js';
@@ -372,6 +372,20 @@ export async function createChatSession(): Promise<ChatSession> {
       }),
       optional: true,
     } satisfies MarketResearchSource] : []),
+    {
+      connector: new CachedConnector(
+        new RedditSearchConnector(),
+        new InMemoryCache(),
+        CONNECTOR_CACHE_TTL_MS,
+      ),
+      paramsFor: (topic: string) => ({
+        query: `${topic} problems frustrations help advice`,
+        subreddits: ['Etsy', 'etsysellers', 'shopify', 'entrepreneur', 'smallbusiness', 'digitalproducts'],
+        limit: 10,
+        sort: 'relevance' as const,
+      }),
+      optional: true,
+    } satisfies MarketResearchSource,
   ];
   const researchEngine = new MarketResearchEngine({ model, sources: researchSources, memory });
 
