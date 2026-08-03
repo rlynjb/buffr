@@ -360,6 +360,18 @@ export async function createChatSession(): Promise<ChatSession> {
       }),
       optional: true,
     } satisfies MarketResearchSource] : []),
+    ...(cfg.googleApiKey && cfg.googleCx ? [{
+      connector: new CachedConnector(
+        new GoogleSearchConnector(cfg.googleApiKey, cfg.googleCx),
+        new InMemoryCache(),
+        CONNECTOR_CACHE_TTL_MS,
+      ),
+      paramsFor: (topic: string) => ({
+        query: `${topic} problems complaints frustrations sellers buyers`,
+        count: 5,
+      }),
+      optional: true,
+    } satisfies MarketResearchSource] : []),
   ];
   const researchEngine = new MarketResearchEngine({ model, sources: researchSources, memory });
 
