@@ -9,8 +9,10 @@ type Turn = { role: 'you' | 'buffr'; text: string; stats?: TurnStats };
 type ProgressStep = {
   id: string;
   label: string;
+  kind: 'engine' | 'connector' | 'stage';
   state: 'running' | 'done' | 'failed' | 'skipped';
   detail?: string;
+  model?: string;
 };
 
 function formatStats(s: TurnStats): string {
@@ -58,6 +60,11 @@ function ProgressPanel({ status, tokens, steps }: {
     <box flexDirection="column">
       <text fg="#FFFF00">{FRAMES[frame]} {status} · {timeStr}{tokStr}</text>
       {steps.map((step, i) => {
+        if (step.kind === 'engine') {
+          return (
+            <text key={i} fg="#888888" marginLeft={2}>◆ {step.label}</text>
+          );
+        }
         const icon =
           step.state === 'running' ? FRAMES[frame]
           : step.state === 'done'    ? '✓'
@@ -68,9 +75,12 @@ function ProgressPanel({ status, tokens, steps }: {
           : step.state === 'done'    ? '#00EE66'
           : step.state === 'failed'  ? '#FF5555'
           : '#555555';
+        const modelTag = step.model
+          ? ` · ${step.model.charAt(0).toUpperCase() + step.model.slice(1)}`
+          : '';
         const detail = step.detail ? ` · ${step.detail}` : '';
         return (
-          <text key={i} fg={color} marginLeft={2}>{icon} {step.label}{detail}</text>
+          <text key={i} fg={color} marginLeft={4}>⎿ {step.label}{modelTag}{detail}</text>
         );
       })}
     </box>
@@ -155,8 +165,10 @@ function Chat({ session, onExit }: { session: ChatSession; onExit: () => Promise
         onComplete: (s) => { capturedStats = s; },
         onPartial: (text) => setTurns(t => { const c = [...t]; c[c.length - 1] = { role: 'buffr', text }; return c; }),
         onProgress: (event: ProgressEvent) => {
-          if (event.type === 'connector-start') {
-            setProgressSteps(s => [...s, { id: event.id, label: event.label, state: 'running' }]);
+          if (event.type === 'engine-start') {
+            setProgressSteps(s => [...s, { id: '__engine__', label: event.label, kind: 'engine', state: 'running' }]);
+          } else if (event.type === 'connector-start') {
+            setProgressSteps(s => [...s, { id: event.id, label: event.label, kind: 'connector', state: 'running' }]);
           } else if (event.type === 'connector-done') {
             setProgressSteps(s => s.map(step => step.id === event.id
               ? { ...step, state: 'done', detail: event.count > 0 ? `${event.count} result${event.count !== 1 ? 's' : ''}` : undefined }
@@ -166,7 +178,7 @@ function Chat({ session, onExit }: { session: ChatSession; onExit: () => Promise
               ? { ...step, state: event.optional ? 'skipped' : 'failed' }
               : step));
           } else if (event.type === 'stage-start') {
-            setProgressSteps(s => [...s, { id: event.id, label: event.label, state: 'running' }]);
+            setProgressSteps(s => [...s, { id: event.id, label: event.label, kind: 'stage', state: 'running', model: event.model }]);
           } else if (event.type === 'stage-done') {
             setProgressSteps(s => s.map(step => step.id === event.id
               ? { ...step, state: 'done', detail: event.detail !== 'done' ? event.detail : undefined }

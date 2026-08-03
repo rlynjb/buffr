@@ -18,6 +18,7 @@ export class MarketResearchEngine implements Engine<MarketResearchInput, MarketR
   private readonly teacher: Teacher;
   private readonly sources: MarketResearchSource[];
   private readonly memory?: ConversationMemory;
+  private readonly modelId: string;
 
   constructor(opts: MarketResearchEngineOptions) {
     this.collector = new Collector();
@@ -26,6 +27,7 @@ export class MarketResearchEngine implements Engine<MarketResearchInput, MarketR
     this.teacher = new Teacher(opts.model);
     this.sources = opts.sources;
     this.memory = opts.memory;
+    this.modelId = opts.model.id;
   }
 
   private static friendlyName(connectorId: string): string {
@@ -45,6 +47,8 @@ export class MarketResearchEngine implements Engine<MarketResearchInput, MarketR
     const status = input.onStatus ?? (() => {});
     const partial = input.onPartial ?? (() => {});
     const progress = input.onProgress;
+
+    progress?.({ type: 'engine-start', label: 'Market Research Engine' });
 
     // Step 1 — build collector sources
     const collectorSources = this.sources.map(s => ({
@@ -97,7 +101,7 @@ export class MarketResearchEngine implements Engine<MarketResearchInput, MarketR
     // Step 4 — Analyzer
     partial(`Collected ${evidence.length} result${evidence.length !== 1 ? 's' : ''} from ${sourceNames}\n\nAnalyzing…`);
     status(`analyzing ${evidence.length} results…`);
-    progress?.({ type: 'stage-start', id: 'analyzer', label: 'Analyzer' });
+    progress?.({ type: 'stage-start', id: 'analyzer', label: 'Analyzer', model: this.modelId });
     const analyzerResult = await this.analyzer.execute(
       {
         subjectDescription: input.topic,
@@ -131,7 +135,7 @@ export class MarketResearchEngine implements Engine<MarketResearchInput, MarketR
     // Step 6 — Teacher
     partial(`Collected ${evidence.length} result${evidence.length !== 1 ? 's' : ''} from ${sourceNames}\n\nFindings:\n${findingsText}\n\nScore: ${Math.round(scorerResult.data.totalScore)}/100 · Confidence: ${Math.round(scorerResult.data.confidence * 100)}%\n\nSummarizing…`);
     status('summarizing…');
-    progress?.({ type: 'stage-start', id: 'teacher', label: 'Teacher' });
+    progress?.({ type: 'stage-start', id: 'teacher', label: 'Teacher', model: this.modelId });
     const allWarnings = [...collectorResult.warnings, ...scorerResult.data.warnings];
     const teacherResult = await this.teacher.execute(
       {

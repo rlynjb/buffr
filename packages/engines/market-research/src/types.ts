@@ -16,10 +16,11 @@ export type MarketResearchEngineOptions = {
 };
 
 export type ProgressEvent =
+  | { type: 'engine-start'; label: string }
   | { type: 'connector-start'; id: string; label: string }
   | { type: 'connector-done';  id: string; label: string; count: number }
   | { type: 'connector-failed'; id: string; label: string; optional: boolean }
-  | { type: 'stage-start'; id: string; label: string }
+  | { type: 'stage-start'; id: string; label: string; model?: string }
   | { type: 'stage-done';  id: string; detail: string };
 
 export type MarketResearchInput = {
