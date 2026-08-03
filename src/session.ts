@@ -517,7 +517,6 @@ export async function createChatSession(): Promise<ChatSession> {
       currentOnTokens = opts?.onTokens;
       currentInputTokens = 0;
       currentOutputTokens = 0;
-      opts?.onStatus?.('researching…');
       const startMs = Date.now();
       const agentCtx: AgentContext = {
         userId: cfg.appId,
@@ -527,7 +526,7 @@ export async function createChatSession(): Promise<ChatSession> {
         now: new Date().toISOString(),
         permissions: [],
       };
-      const result = await researchEngine.run({ topic, conversationId }, agentCtx);
+      const result = await researchEngine.run({ topic, conversationId, onStatus: opts?.onStatus }, agentCtx);
       currentOnStatus = undefined;
       currentOnTokens = undefined;
       opts?.onComplete?.({

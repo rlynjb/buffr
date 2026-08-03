@@ -18,6 +18,7 @@ export type MarketResearchEngineOptions = {
 export type MarketResearchInput = {
   topic: string;
   conversationId?: string;
+  onStatus?: (msg: string) => void;
 };
 
 export type MarketResearchOutput = {

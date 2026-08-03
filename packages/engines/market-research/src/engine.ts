@@ -28,7 +28,22 @@ export class MarketResearchEngine implements Engine<MarketResearchInput, MarketR
     this.memory = opts.memory;
   }
 
+  private static friendlyName(connectorId: string): string {
+    const map: Record<string, string> = {
+      'discovery.google-trends': 'Google Trends',
+      'discovery.google-search': 'Google Search',
+      'discovery.reddit-search': 'Reddit',
+      'discovery.brave-search': 'Brave Search',
+      'discovery.tavily-search': 'Tavily',
+    };
+    // strip CachedConnector wrapper id prefix if present
+    const base = connectorId.replace(/^cached:/, '');
+    return map[base] ?? connectorId;
+  }
+
   async run(input: MarketResearchInput, context: AgentContext): Promise<AgentResult<MarketResearchOutput>> {
+    const status = input.onStatus ?? (() => {});
+
     // Step 1 — build collector sources
     const collectorSources = this.sources.map(s => ({
       connector: s.connector,
@@ -37,6 +52,8 @@ export class MarketResearchEngine implements Engine<MarketResearchInput, MarketR
     }));
 
     // Step 2 — Collector
+    const sourceNames = collectorSources.map(s => MarketResearchEngine.friendlyName(s.connector.id)).join(', ');
+    status(`fetching ${sourceNames}…`);
     const collectorResult = await this.collector.execute({ sources: collectorSources }, context);
     const { evidence, failed } = collectorResult.data;
 
@@ -64,6 +81,7 @@ export class MarketResearchEngine implements Engine<MarketResearchInput, MarketR
     }
 
     // Step 4 — Analyzer
+    status(`analyzing ${evidence.length} results…`);
     const analyzerResult = await this.analyzer.execute(
       {
         subjectDescription: input.topic,
@@ -75,6 +93,7 @@ export class MarketResearchEngine implements Engine<MarketResearchInput, MarketR
     );
 
     // Step 5 — Scorer
+    status('scoring…');
     const scorerResult = await this.scorer.execute(
       {
         findings: analyzerResult.data.findings,
@@ -85,6 +104,7 @@ export class MarketResearchEngine implements Engine<MarketResearchInput, MarketR
     );
 
     // Step 6 — Teacher
+    status('summarizing…');
     const allWarnings = [...collectorResult.warnings, ...scorerResult.data.warnings];
     const teacherResult = await this.teacher.execute(
       {
