@@ -114,6 +114,7 @@ export class MarketResearchEngine implements Engine<MarketResearchInput, MarketR
         confidence: scorerResult.data.confidence,
         warnings: allWarnings,
         audience: 'solo creator building digital products and Shopify apps',
+        instructions: [MARKET_RESEARCH_PROMPTS['teacher-context']],
       },
       context,
     );

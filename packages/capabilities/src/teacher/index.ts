@@ -10,6 +10,7 @@ export type TeacherInput = {
   confidence: number;
   warnings: string[];
   audience?: string;
+  instructions?: string[];
 };
 
 export type TeacherOutput = {
@@ -57,16 +58,20 @@ export class Teacher implements Capability<TeacherInput, TeacherOutput> {
 
     const system = `You are a clear, concise educator. Explain analysis results in plain language for a ${audience} audience. Call submit_explanation exactly once.`;
 
+    const instructionSection = input.instructions?.length
+      ? `\n\nAdditional context:\n${input.instructions.join('\n')}`
+      : '';
+
     const userPrompt = `Subject: ${input.subjectDescription}
 Overall score: ${Math.round(input.totalScore)}/100 (confidence: ${Math.round(input.confidence * 100)}%)${warningSection}
 
 Findings by dimension:
-${findingsSummary}
+${findingsSummary}${instructionSection}
 
 Produce:
 - explanation: 2–4 paragraphs summarising what this score means for the subject and why
-- keyLessons: 3–5 memorable bullet-point takeaways
-- actionableNext: concrete next steps for the reader
+- keyLessons: list the specific problems and frustrations found in the evidence (3–5 items)
+- actionableNext: concrete product or solution ideas that address those problems (3–5 items)
 
 Call submit_explanation now.`;
 
