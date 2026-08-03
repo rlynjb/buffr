@@ -2,9 +2,16 @@
 import { useState, useEffect, useRef } from 'react';
 import { createCliRenderer, TextAttributes } from '@opentui/core';
 import { createRoot, useKeyboard } from '@opentui/react';
-import { createChatSession, detectEntityType, type ChatSession, type TurnStats } from '../session.js';
+import { createChatSession, detectEntityType, type ChatSession, type TurnStats, type ProgressEvent } from '../session.js';
 
 type Turn = { role: 'you' | 'buffr'; text: string; stats?: TurnStats };
+
+type ProgressStep = {
+  id: string;
+  label: string;
+  state: 'running' | 'done' | 'failed' | 'skipped';
+  detail?: string;
+};
 
 function formatStats(s: TurnStats): string {
   const secs = s.durationMs / 1000;
@@ -20,7 +27,11 @@ function formatStats(s: TurnStats): string {
 
 const FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
-function Spinner({ status, tokens }: { status: string; tokens: { input: number; output: number } }) {
+function ProgressPanel({ status, tokens, steps }: {
+  status: string;
+  tokens: { input: number; output: number };
+  steps: ProgressStep[];
+}) {
   const [frame, setFrame] = useState(0);
   const [elapsedMs, setElapsedMs] = useState(0);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -43,7 +54,27 @@ function Spinner({ status, tokens }: { status: string; tokens: { input: number; 
   const total = tokens.input + tokens.output;
   const tokStr = total > 0 ? ` · ${total.toLocaleString()} tok` : '';
 
-  return <text fg="#FFFF00">{FRAMES[frame]} {status} · {timeStr}{tokStr}</text>;
+  return (
+    <box flexDirection="column">
+      <text fg="#FFFF00">{FRAMES[frame]} {status} · {timeStr}{tokStr}</text>
+      {steps.map((step, i) => {
+        const icon =
+          step.state === 'running' ? FRAMES[frame]
+          : step.state === 'done'    ? '✓'
+          : step.state === 'failed'  ? '✗'
+          : '⊘';
+        const color =
+          step.state === 'running' ? '#FFFF00'
+          : step.state === 'done'    ? '#00EE66'
+          : step.state === 'failed'  ? '#FF5555'
+          : '#555555';
+        const detail = step.detail ? ` · ${step.detail}` : '';
+        return (
+          <text key={i} fg={color} marginLeft={2}>{icon} {step.label}{detail}</text>
+        );
+      })}
+    </box>
+  );
 }
 
 function Chat({ session, onExit }: { session: ChatSession; onExit: () => Promise<void> }) {
@@ -51,6 +82,7 @@ function Chat({ session, onExit }: { session: ChatSession; onExit: () => Promise
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState('thinking…');
   const [liveTokens, setLiveTokens] = useState({ input: 0, output: 0 });
+  const [progressSteps, setProgressSteps] = useState<ProgressStep[]>([]);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const taRef = useRef<any>(null);
 
@@ -114,6 +146,7 @@ function Chat({ session, onExit }: { session: ChatSession; onExit: () => Promise
       const topic = q.slice('/research '.length).trim();
       if (!topic) return;
       setTurns(t => [...t, { role: 'you', text: q }, { role: 'buffr', text: '' }]);
+      setProgressSteps([]);
       setBusy(true); setStatus('researching…'); setLiveTokens({ input: 0, output: 0 });
       let capturedStats: TurnStats | undefined;
       session.research(topic, {
@@ -121,6 +154,25 @@ function Chat({ session, onExit }: { session: ChatSession; onExit: () => Promise
         onTokens: (d) => setLiveTokens(t => ({ input: t.input + d.input, output: t.output + d.output })),
         onComplete: (s) => { capturedStats = s; },
         onPartial: (text) => setTurns(t => { const c = [...t]; c[c.length - 1] = { role: 'buffr', text }; return c; }),
+        onProgress: (event: ProgressEvent) => {
+          if (event.type === 'connector-start') {
+            setProgressSteps(s => [...s, { id: event.id, label: event.label, state: 'running' }]);
+          } else if (event.type === 'connector-done') {
+            setProgressSteps(s => s.map(step => step.id === event.id
+              ? { ...step, state: 'done', detail: event.count > 0 ? `${event.count} result${event.count !== 1 ? 's' : ''}` : undefined }
+              : step));
+          } else if (event.type === 'connector-failed') {
+            setProgressSteps(s => s.map(step => step.id === event.id
+              ? { ...step, state: event.optional ? 'skipped' : 'failed' }
+              : step));
+          } else if (event.type === 'stage-start') {
+            setProgressSteps(s => [...s, { id: event.id, label: event.label, state: 'running' }]);
+          } else if (event.type === 'stage-done') {
+            setProgressSteps(s => s.map(step => step.id === event.id
+              ? { ...step, state: 'done', detail: event.detail !== 'done' ? event.detail : undefined }
+              : step));
+          }
+        },
       }).then(
         answer => { setTurns(t => { const c = [...t]; c[c.length - 1] = { ...c[c.length - 1], text: c[c.length - 1].text + '\n\n' + answer, stats: capturedStats }; return c; }); setBusy(false); },
         err    => { setTurns(t => { const c = [...t]; c[c.length - 1] = { ...c[c.length - 1], text: c[c.length - 1].text + `\n\nerror: ${(err as Error).message}` }; return c; }); setBusy(false); },
@@ -216,7 +268,7 @@ function Chat({ session, onExit }: { session: ChatSession; onExit: () => Promise
             )}
           </box>
         ))}
-        {busy && <Spinner status={status} tokens={liveTokens} />}
+        {busy && <ProgressPanel status={status} tokens={liveTokens} steps={progressSteps} />}
       </scrollbox>
 
       {/* input — fixed at bottom */}

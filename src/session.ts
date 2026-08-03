@@ -29,7 +29,7 @@ import type { AgentContext } from '@buffr/contracts';
 import { InvestingEngine } from '@buffr/engine-investing';
 import type { InvestingSource, InvestingOutput } from '@buffr/engine-investing';
 import { MarketResearchEngine } from '@buffr/engine-market-research';
-import type { MarketResearchSource, MarketResearchOutput } from '@buffr/engine-market-research';
+import type { MarketResearchSource, MarketResearchOutput, ProgressEvent } from '@buffr/engine-market-research';
 import { MARKET_RESEARCH_SCORECARD } from '@buffr/domain-pack-market-research';
 
 /**
@@ -59,7 +59,10 @@ export type AskOptions = {
   onTokens?: (delta: { input: number; output: number }) => void;
   onComplete?: (stats: TurnStats) => void;
   onPartial?: (text: string) => void;
+  onProgress?: (event: ProgressEvent) => void;
 };
+
+export type { ProgressEvent };
 
 const TOOL_LABELS: Record<string, string> = {
   search_knowledge_base: 'searching knowledge base',
@@ -528,7 +531,7 @@ export async function createChatSession(): Promise<ChatSession> {
         now: new Date().toISOString(),
         permissions: [],
       };
-      const result = await researchEngine.run({ topic, conversationId, onStatus: opts?.onStatus, onPartial: opts?.onPartial }, agentCtx);
+      const result = await researchEngine.run({ topic, conversationId, onStatus: opts?.onStatus, onPartial: opts?.onPartial, onProgress: opts?.onProgress }, agentCtx);
       currentOnStatus = undefined;
       currentOnTokens = undefined;
       opts?.onComplete?.({

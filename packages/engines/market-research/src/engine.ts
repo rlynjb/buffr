@@ -44,6 +44,7 @@ export class MarketResearchEngine implements Engine<MarketResearchInput, MarketR
   async run(input: MarketResearchInput, context: AgentContext): Promise<AgentResult<MarketResearchOutput>> {
     const status = input.onStatus ?? (() => {});
     const partial = input.onPartial ?? (() => {});
+    const progress = input.onProgress;
 
     // Step 1 — build collector sources
     const collectorSources = this.sources.map(s => ({
@@ -55,7 +56,19 @@ export class MarketResearchEngine implements Engine<MarketResearchInput, MarketR
     // Step 2 — Collector
     const sourceNames = collectorSources.map(s => MarketResearchEngine.friendlyName(s.connector.id)).join(' · ');
     status(`fetching ${sourceNames}…`);
-    const collectorResult = await this.collector.execute({ sources: collectorSources }, context);
+    const collectorResult = await this.collector.execute({
+      sources: collectorSources,
+      onEvent: progress ? (e) => {
+        const label = MarketResearchEngine.friendlyName(e.sourceId);
+        if (e.type === 'start') {
+          progress({ type: 'connector-start', id: e.sourceId, label });
+        } else if (e.type === 'done') {
+          progress({ type: 'connector-done', id: e.sourceId, label, count: e.count });
+        } else {
+          progress({ type: 'connector-failed', id: e.sourceId, label, optional: e.optional });
+        }
+      } : undefined,
+    }, context);
     const { evidence, failed } = collectorResult.data;
 
     // Step 3 — short-circuit if no evidence
@@ -84,6 +97,7 @@ export class MarketResearchEngine implements Engine<MarketResearchInput, MarketR
     // Step 4 — Analyzer
     partial(`Collected ${evidence.length} result${evidence.length !== 1 ? 's' : ''} from ${sourceNames}\n\nAnalyzing…`);
     status(`analyzing ${evidence.length} results…`);
+    progress?.({ type: 'stage-start', id: 'analyzer', label: 'Analyzer' });
     const analyzerResult = await this.analyzer.execute(
       {
         subjectDescription: input.topic,
@@ -94,12 +108,15 @@ export class MarketResearchEngine implements Engine<MarketResearchInput, MarketR
       context,
     );
 
+    progress?.({ type: 'stage-done', id: 'analyzer', detail: `${analyzerResult.data.findings.length} findings` });
+
     // Step 5 — Scorer
     const findingsText = analyzerResult.data.findings.map(f =>
       `  ${f.dimensionId.padEnd(18)} ${String(Math.round(f.score)).padStart(3)}/100  ${f.summary}`
     ).join('\n');
     partial(`Collected ${evidence.length} result${evidence.length !== 1 ? 's' : ''} from ${sourceNames}\n\nFindings:\n${findingsText}\n\nScoring…`);
     status('scoring…');
+    progress?.({ type: 'stage-start', id: 'scorer', label: 'Scorer' });
     const scorerResult = await this.scorer.execute(
       {
         findings: analyzerResult.data.findings,
@@ -109,9 +126,12 @@ export class MarketResearchEngine implements Engine<MarketResearchInput, MarketR
       context,
     );
 
+    progress?.({ type: 'stage-done', id: 'scorer', detail: `${Math.round(scorerResult.data.totalScore)}/100` });
+
     // Step 6 — Teacher
     partial(`Collected ${evidence.length} result${evidence.length !== 1 ? 's' : ''} from ${sourceNames}\n\nFindings:\n${findingsText}\n\nScore: ${Math.round(scorerResult.data.totalScore)}/100 · Confidence: ${Math.round(scorerResult.data.confidence * 100)}%\n\nSummarizing…`);
     status('summarizing…');
+    progress?.({ type: 'stage-start', id: 'teacher', label: 'Teacher' });
     const allWarnings = [...collectorResult.warnings, ...scorerResult.data.warnings];
     const teacherResult = await this.teacher.execute(
       {
@@ -125,6 +145,8 @@ export class MarketResearchEngine implements Engine<MarketResearchInput, MarketR
       },
       context,
     );
+
+    progress?.({ type: 'stage-done', id: 'teacher', detail: 'done' });
 
     // Step 7 — Memory write (opt-in)
     if (this.memory && input.conversationId) {

@@ -7,8 +7,14 @@ export type CollectorSource<P> = {
   optional?: boolean;
 };
 
+export type CollectorEvent =
+  | { type: 'start'; sourceId: string }
+  | { type: 'done'; sourceId: string; count: number }
+  | { type: 'failed'; sourceId: string; reason: string; optional: boolean };
+
 export type CollectorInput = {
   sources: CollectorSource<unknown>[];
+  onEvent?: (event: CollectorEvent) => void;
 };
 
 export type CollectorOutput = {
@@ -21,27 +27,29 @@ export class Collector implements Capability<CollectorInput, CollectorOutput> {
   readonly version = '1.0.0';
 
   async execute(input: CollectorInput, context: AgentContext): Promise<AgentResult<CollectorOutput>> {
-    const results = await Promise.allSettled(
-      input.sources.map(source => source.connector.fetch(source.params)),
-    );
-
+    const onEvent = input.onEvent;
     const evidence: Evidence[] = [];
     const failed: Array<{ sourceId: string; reason: string }> = [];
     const warnings: string[] = [];
 
-    for (let i = 0; i < results.length; i++) {
-      const settled = results[i];
-      const source = input.sources[i];
-      if (settled.status === 'fulfilled') {
-        evidence.push(...settled.value.toEvidence());
-      } else {
-        const reason = settled.reason instanceof Error ? settled.reason.message : String(settled.reason);
-        failed.push({ sourceId: source.connector.id, reason });
-        if (!(source.optional ?? false)) {
-          warnings.push(`Required source '${source.connector.id}' failed: ${reason}`);
+    await Promise.all(
+      input.sources.map(async (source) => {
+        onEvent?.({ type: 'start', sourceId: source.connector.id });
+        try {
+          const result = await source.connector.fetch(source.params);
+          const evs = result.toEvidence();
+          evidence.push(...evs);
+          onEvent?.({ type: 'done', sourceId: source.connector.id, count: evs.length });
+        } catch (err) {
+          const reason = err instanceof Error ? err.message : String(err);
+          failed.push({ sourceId: source.connector.id, reason });
+          onEvent?.({ type: 'failed', sourceId: source.connector.id, reason, optional: source.optional ?? false });
+          if (!(source.optional ?? false)) {
+            warnings.push(`Required source '${source.connector.id}' failed: ${reason}`);
+          }
         }
-      }
-    }
+      }),
+    );
 
     return {
       data: { evidence, failed },

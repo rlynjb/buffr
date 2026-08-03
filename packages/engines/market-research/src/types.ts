@@ -15,11 +15,19 @@ export type MarketResearchEngineOptions = {
   memory?: ConversationMemory;
 };
 
+export type ProgressEvent =
+  | { type: 'connector-start'; id: string; label: string }
+  | { type: 'connector-done';  id: string; label: string; count: number }
+  | { type: 'connector-failed'; id: string; label: string; optional: boolean }
+  | { type: 'stage-start'; id: string; label: string }
+  | { type: 'stage-done';  id: string; detail: string };
+
 export type MarketResearchInput = {
   topic: string;
   conversationId?: string;
   onStatus?: (msg: string) => void;
   onPartial?: (text: string) => void;
+  onProgress?: (event: ProgressEvent) => void;
 };
 
 export type MarketResearchOutput = {
