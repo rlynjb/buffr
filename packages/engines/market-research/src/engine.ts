@@ -131,16 +131,27 @@ export class MarketResearchEngine implements Engine<MarketResearchInput, MarketR
       });
     }
 
-    // Step 8 — assemble result
+    // Step 8 — assemble result, fall back to Analyzer findings if Teacher arrays are empty
+    const keyProblems = teacherResult.data.keyLessons.length > 0
+      ? teacherResult.data.keyLessons
+      : analyzerResult.data.findings.flatMap(f => f.negatives).filter(Boolean).slice(0, 5);
+
+    const productAngles = teacherResult.data.actionableNext.length > 0
+      ? teacherResult.data.actionableNext
+      : analyzerResult.data.findings.flatMap(f => f.positives).filter(Boolean).slice(0, 5);
+
+    const explanation = teacherResult.data.explanation.trim() ||
+      analyzerResult.data.findings.map(f => `${f.dimensionId}: ${f.summary}`).join(' ');
+
     return {
       data: {
         summary: {
           topic: input.topic,
           totalScore: scorerResult.data.totalScore,
           confidence: scorerResult.data.confidence,
-          explanation: teacherResult.data.explanation,
-          keyProblems: teacherResult.data.keyLessons,
-          productAngles: teacherResult.data.actionableNext,
+          explanation,
+          keyProblems,
+          productAngles,
           warnings: allWarnings,
         },
         detail: {
