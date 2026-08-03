@@ -214,6 +214,11 @@ function Chat({ session, onExit }: { session: ChatSession; onExit: () => Promise
 const session = await createChatSession();
 const renderer = await createCliRenderer({ exitOnCtrlC: false });
 
+process.on('SIGINT', () => {
+  session.close().finally(() => process.exit(0));
+  setTimeout(() => process.exit(0), 3000).unref();
+});
+
 createRoot(renderer).render(
   <Chat
     session={session}

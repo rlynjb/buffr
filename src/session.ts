@@ -583,7 +583,10 @@ export async function createChatSession(): Promise<ChatSession> {
       return formatAnalysis(result.data);
     },
     async close(): Promise<void> {
-      await pool.end();
+      await Promise.race([
+        pool.end(),
+        new Promise<void>(resolve => setTimeout(resolve, 2000)),
+      ]);
     },
   };
 }
