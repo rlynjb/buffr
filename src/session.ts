@@ -176,32 +176,30 @@ function formatAnalysis(output: InvestingOutput): string {
 }
 
 function formatResearch(output: MarketResearchOutput): string {
-  const { summary, detail } = output;
+  const { summary } = output;
   const confidence = Math.round(summary.confidence * 100);
   const lines: string[] = [
-    `Topic: ${summary.topic}  ·  Score: ${summary.totalScore.toFixed(1)}/100  ·  Confidence: ${confidence}%`,
+    `Market Research: ${summary.topic}`,
+    '',
+    `Score: ${summary.totalScore.toFixed(0)}/100 · Confidence: ${confidence}%`,
     '',
     summary.explanation,
     '',
-    'Top problems:',
+    'Problems people face:',
   ];
 
-  summary.keyProblems.forEach((problem, i) => {
+  for (const problem of summary.keyProblems) {
     lines.push(`• ${problem}`);
-    const angle = summary.productAngles[i];
-    if (angle) lines.push(`  → ${angle}`);
-  });
-
-  if (summary.confidence < 0.5) {
-    lines.push('', '⚠ Low confidence — limited evidence collected.');
-  }
-  for (const warning of summary.warnings) {
-    lines.push(`⚠ ${warning}`);
   }
 
-  const sourceTypes = [...new Set(detail.evidence.map(e => e.sourceType))];
-  lines.push('');
-  lines.push(`Sources: ${detail.evidence.length} signals collected (${sourceTypes.join(' · ')})`);
+  lines.push('', 'Product opportunities:');
+  for (const angle of summary.productAngles) {
+    lines.push(`• ${angle}`);
+  }
+
+  if (summary.warnings.length > 0) {
+    lines.push('', `Warnings: ${summary.warnings.join(', ')}`);
+  }
 
   return lines.join('\n');
 }
@@ -337,7 +335,6 @@ export async function createChatSession(): Promise<ChatSession> {
     {
       connector: new CachedConnector(new GoogleTrendsConnector(), new InMemoryCache(), CONNECTOR_CACHE_TTL_MS),
       paramsFor: (topic: string) => ({ keywords: [topic], timeframe: 'now 7-d' }),
-      optional: true,
     },
     ...(cfg.braveApiKey ? [{
       connector: new CachedConnector(
