@@ -93,8 +93,8 @@ function Chat({ session, onExit }: { session: ChatSession; onExit: () => Promise
         onComplete: (s) => { capturedStats = s; },
         onPartial: (text) => setTurns(t => { const c = [...t]; c[c.length - 1] = { role: 'buffr', text }; return c; }),
       }).then(
-        answer => { setTurns(t => { const c = [...t]; c[c.length - 1] = { role: 'buffr', text: answer, stats: capturedStats }; return c; }); setBusy(false); },
-        err    => { setTurns(t => { const c = [...t]; c[c.length - 1] = { role: 'buffr', text: `error: ${(err as Error).message}` }; return c; }); setBusy(false); },
+        answer => { setTurns(t => { const c = [...t]; c[c.length - 1] = { ...c[c.length - 1], text: c[c.length - 1].text + '\n\n' + answer, stats: capturedStats }; return c; }); setBusy(false); },
+        err    => { setTurns(t => { const c = [...t]; c[c.length - 1] = { ...c[c.length - 1], text: c[c.length - 1].text + `\n\nerror: ${(err as Error).message}` }; return c; }); setBusy(false); },
       );
       return;
     }
