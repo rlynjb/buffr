@@ -28,6 +28,9 @@ import { COMPANY_SCORECARD, ETF_SCORECARD } from '@buffr/domain-pack-investing';
 import type { AgentContext } from '@buffr/contracts';
 import { InvestingEngine } from '@buffr/engine-investing';
 import type { InvestingSource, InvestingOutput } from '@buffr/engine-investing';
+import { MarketResearchEngine } from '@buffr/engine-market-research';
+import type { MarketResearchSource, MarketResearchOutput } from '@buffr/engine-market-research';
+import { MARKET_RESEARCH_SCORECARD } from '@buffr/domain-pack-market-research';
 
 /**
  * A long-lived chat session: one warm pg pool and one conversation held across
@@ -75,6 +78,8 @@ export type ChatSession = {
   ask(question: string, opts?: AskOptions): Promise<string>;
   analyze(ticker: string, entityType: 'company' | 'etf', opts?: AskOptions): Promise<string>;
   evalInvesting(): Promise<string>;
+  research(topic: string, opts?: AskOptions): Promise<string>;
+  evalResearch(): Promise<string>;
   close(): Promise<void>;
 };
 
@@ -170,6 +175,72 @@ function formatAnalysis(output: InvestingOutput): string {
   return lines.join('\n');
 }
 
+function formatResearch(output: MarketResearchOutput): string {
+  const { summary, detail } = output;
+  const confidence = Math.round(summary.confidence * 100);
+  const lines: string[] = [
+    `Topic: ${summary.topic}  ·  Score: ${summary.totalScore.toFixed(1)}/100  ·  Confidence: ${confidence}%`,
+    '',
+    summary.explanation,
+    '',
+    'Top problems:',
+  ];
+
+  summary.keyProblems.forEach((problem, i) => {
+    lines.push(`• ${problem}`);
+    const angle = summary.productAngles[i];
+    if (angle) lines.push(`  → ${angle}`);
+  });
+
+  if (summary.confidence < 0.5) {
+    lines.push('', '⚠ Low confidence — limited evidence collected.');
+  }
+  for (const warning of summary.warnings) {
+    lines.push(`⚠ ${warning}`);
+  }
+
+  const sourceTypes = [...new Set(detail.evidence.map(e => e.sourceType))];
+  lines.push('');
+  lines.push(`Sources: ${detail.evidence.length} signals collected (${sourceTypes.join(' · ')})`);
+
+  return lines.join('\n');
+}
+
+type ResearchEvalFixture = {
+  description: string;
+  findings: Parameters<Scorer['execute']>[0]['findings'];
+  evidenceCount: number;
+  expectedTotalScore: number;
+};
+
+async function formatResearchEval(
+  scorer: Scorer,
+  evalCtx: AgentContext,
+  fixtures: ResearchEvalFixture[],
+): Promise<string> {
+  let passed = 0;
+  const lines: string[] = [`Market research eval — ${fixtures.length} fixtures`, ''];
+
+  for (const fixture of fixtures) {
+    const result = await scorer.execute(
+      { findings: fixture.findings, scorecard: MARKET_RESEARCH_SCORECARD, evidenceCount: fixture.evidenceCount },
+      evalCtx,
+    );
+    const actual = result.data.totalScore;
+    const expected = fixture.expectedTotalScore;
+    const delta = Math.abs(actual - expected);
+    const ok = delta <= 0.01;
+    if (ok) passed++;
+    const mark = ok ? '✔' : '✘';
+    const desc = fixture.description.slice(0, 42).padEnd(42);
+    lines.push(`  ${mark}  ${desc}  expected ${expected.toFixed(2)}  got ${actual.toFixed(2)}  Δ ${delta.toFixed(2)}`);
+  }
+
+  lines.push('');
+  lines.push(`${passed}/${fixtures.length} passed`);
+  return lines.join('\n');
+}
+
 export async function createChatSession(): Promise<ChatSession> {
   loadEnv();
   const cfg = loadConfig(process.env);
@@ -261,6 +332,39 @@ export async function createChatSession(): Promise<ChatSession> {
   const investingEngine = investingSources.length > 0
     ? new InvestingEngine({ model, sources: investingSources, memory })
     : null;
+
+  const researchSources: MarketResearchSource[] = [
+    {
+      connector: new CachedConnector(new GoogleTrendsConnector(), new InMemoryCache(), CONNECTOR_CACHE_TTL_MS),
+      paramsFor: (topic: string) => ({ keywords: [topic], timeframe: 'now 7-d' }),
+      optional: true,
+    },
+    ...(cfg.braveApiKey ? [{
+      connector: new CachedConnector(
+        new BraveSearchConnector(cfg.braveApiKey),
+        new InMemoryCache(),
+        CONNECTOR_CACHE_TTL_MS,
+      ),
+      paramsFor: (topic: string) => ({
+        query: `${topic} problems complaints frustrations reddit forum`,
+        count: 5,
+      }),
+      optional: true,
+    } satisfies MarketResearchSource] : []),
+    ...(cfg.tavilyApiKey ? [{
+      connector: new CachedConnector(
+        new TavilySearchConnector(cfg.tavilyApiKey),
+        new InMemoryCache(),
+        CONNECTOR_CACHE_TTL_MS,
+      ),
+      paramsFor: (topic: string) => ({
+        query: `${topic} issues pain points problems complaints`,
+        maxResults: 5,
+      }),
+      optional: true,
+    } satisfies MarketResearchSource] : []),
+  ];
+  const researchEngine = new MarketResearchEngine({ model, sources: researchSources, memory });
 
   const conversationId = await startConversation(pool, cfg.appId);
   const supabaseTrace = new SupabaseTraceSink({ pool, conversationId });
@@ -384,6 +488,45 @@ export async function createChatSession(): Promise<ChatSession> {
         ),
       );
       return formatEval(scorer, evalCtx, companyFixtures, etfFixtures);
+    },
+    async research(topic: string, opts?: AskOptions): Promise<string> {
+      currentOnStatus = opts?.onStatus;
+      currentOnTokens = opts?.onTokens;
+      currentInputTokens = 0;
+      currentOutputTokens = 0;
+      opts?.onStatus?.('researching…');
+      const startMs = Date.now();
+      const agentCtx: AgentContext = {
+        userId: cfg.appId,
+        workspaceId: cfg.appId,
+        traceId: `research-${topic}-${Date.now()}`,
+        domain: 'market-research',
+        now: new Date().toISOString(),
+        permissions: [],
+      };
+      const result = await researchEngine.run({ topic, conversationId }, agentCtx);
+      currentOnStatus = undefined;
+      currentOnTokens = undefined;
+      opts?.onComplete?.({
+        durationMs: Date.now() - startMs,
+        inputTokens: currentInputTokens,
+        outputTokens: currentOutputTokens,
+      });
+      return formatResearch(result.data);
+    },
+    async evalResearch(): Promise<string> {
+      const scorer = new Scorer();
+      const evalCtx: AgentContext = {
+        userId: cfg.appId, workspaceId: cfg.appId, traceId: 'eval-research',
+        domain: 'market-research', now: new Date().toISOString(), permissions: [],
+      };
+      const fixtures: ResearchEvalFixture[] = JSON.parse(
+        await readFile(
+          new URL('../../packages/domain-packs/market-research/eval/fixtures.json', import.meta.url),
+          'utf8',
+        ),
+      );
+      return formatResearchEval(scorer, evalCtx, fixtures);
     },
     async analyze(ticker: string, entityType: 'company' | 'etf', opts?: AskOptions): Promise<string> {
       if (!investingEngine) {

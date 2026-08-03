@@ -81,15 +81,43 @@ function Chat({ session, onExit }: { session: ChatSession; onExit: () => Promise
       );
       return;
     }
-    if (q === '/eval') {
+    if (q.startsWith('/research ')) {
+      const topic = q.slice('/research '.length).trim();
+      if (!topic) return;
       setTurns(t => [...t, { role: 'you', text: q }]);
-      setBusy(true);
-      setStatus('running eval…');
-      setLiveTokens({ input: 0, output: 0 });
+      setBusy(true); setStatus('researching…'); setLiveTokens({ input: 0, output: 0 });
+      let capturedStats: TurnStats | undefined;
+      session.research(topic, {
+        onStatus: (msg) => setStatus(msg),
+        onTokens: (d) => setLiveTokens(t => ({ input: t.input + d.input, output: t.output + d.output })),
+        onComplete: (s) => { capturedStats = s; },
+      }).then(
+        answer => { setTurns(t => [...t, { role: 'buffr', text: answer, stats: capturedStats }]); setBusy(false); },
+        err    => { setTurns(t => [...t, { role: 'buffr', text: `error: ${(err as Error).message}`, stats: capturedStats }]); setBusy(false); },
+      );
+      return;
+    }
+    if (q === '/eval investing') {
+      setTurns(t => [...t, { role: 'you', text: q }]);
+      setBusy(true); setStatus('running eval…'); setLiveTokens({ input: 0, output: 0 });
       session.evalInvesting().then(
         answer => { setTurns(t => [...t, { role: 'buffr', text: answer }]); setBusy(false); },
         err    => { setTurns(t => [...t, { role: 'buffr', text: `error: ${(err as Error).message}` }]); setBusy(false); },
       );
+      return;
+    }
+    if (q === '/eval research') {
+      setTurns(t => [...t, { role: 'you', text: q }]);
+      setBusy(true); setStatus('running eval…'); setLiveTokens({ input: 0, output: 0 });
+      session.evalResearch().then(
+        answer => { setTurns(t => [...t, { role: 'buffr', text: answer }]); setBusy(false); },
+        err    => { setTurns(t => [...t, { role: 'buffr', text: `error: ${(err as Error).message}` }]); setBusy(false); },
+      );
+      return;
+    }
+    if (q === '/eval') {
+      setTurns(t => [...t, { role: 'you', text: q }]);
+      setTurns(t => [...t, { role: 'buffr', text: 'Usage: /eval investing | /eval research' }]);
       return;
     }
     setTurns(t => [...t, { role: 'you', text: q }]);
