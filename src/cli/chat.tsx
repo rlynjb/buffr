@@ -142,6 +142,10 @@ function Chat({ session, onExit }: { session: ChatSession; onExit: () => Promise
   };
 
   useKeyboard((e: any) => {
+    if (e.ctrl && e.name === 'c') {
+      onExit().catch(() => process.exit(1));
+      return;
+    }
     if (e.name !== 'return' && e.name !== 'kpenter') return;
     if (e.ctrl || e.super || e.hyper) return;
     if (busy) return;
@@ -214,17 +218,13 @@ function Chat({ session, onExit }: { session: ChatSession; onExit: () => Promise
 const session = await createChatSession();
 const renderer = await createCliRenderer({ exitOnCtrlC: false });
 
-process.on('SIGINT', () => {
-  session.close().finally(() => process.exit(0));
-  setTimeout(() => process.exit(0), 3000).unref();
-});
+const forceExit = () => { setTimeout(() => process.exit(0), 1500).unref(); session.close().finally(() => process.exit(0)); };
+
+process.on('SIGINT', forceExit);
 
 createRoot(renderer).render(
   <Chat
     session={session}
-    onExit={async () => {
-      await session.close();
-      process.exit(0);
-    }}
+    onExit={async () => { forceExit(); }}
   />,
 );

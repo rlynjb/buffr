@@ -585,7 +585,7 @@ export async function createChatSession(): Promise<ChatSession> {
     async close(): Promise<void> {
       await Promise.race([
         pool.end(),
-        new Promise<void>(resolve => setTimeout(resolve, 2000)),
+        new Promise<void>(resolve => setTimeout(resolve, 1000)),
       ]);
     },
   };
