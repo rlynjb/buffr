@@ -1,13 +1,139 @@
+import { Collector, Analyzer, Scorer, Teacher } from '@buffr/capabilities';
 import type { Engine, AgentContext, AgentResult } from '@buffr/contracts';
-import type { MarketResearchInput, MarketResearchOutput, MarketResearchEngineOptions } from './types.js';
+import type { ConversationMemory } from '@buffr/kernel';
+import {
+  MARKET_RESEARCH_DIMENSIONS,
+  MARKET_RESEARCH_SCORECARD,
+  MARKET_RESEARCH_PROMPTS,
+} from '@buffr/domain-pack-market-research';
+import type { MarketResearchInput, MarketResearchOutput, MarketResearchSource, MarketResearchEngineOptions } from './types.js';
 
 export class MarketResearchEngine implements Engine<MarketResearchInput, MarketResearchOutput> {
   readonly id = 'market-research-engine';
   readonly version = '1.0.0';
 
-  constructor(_opts: MarketResearchEngineOptions) {}
+  private readonly collector: Collector;
+  private readonly analyzer: Analyzer;
+  private readonly scorer: Scorer;
+  private readonly teacher: Teacher;
+  private readonly sources: MarketResearchSource[];
+  private readonly memory?: ConversationMemory;
 
-  async run(_input: MarketResearchInput, _context: AgentContext): Promise<AgentResult<MarketResearchOutput>> {
-    throw new Error('not implemented');
+  constructor(opts: MarketResearchEngineOptions) {
+    this.collector = new Collector();
+    this.analyzer = new Analyzer(opts.model);
+    this.scorer = new Scorer();
+    this.teacher = new Teacher(opts.model);
+    this.sources = opts.sources;
+    this.memory = opts.memory;
+  }
+
+  async run(input: MarketResearchInput, context: AgentContext): Promise<AgentResult<MarketResearchOutput>> {
+    // Step 1 — build collector sources
+    const collectorSources = this.sources.map(s => ({
+      connector: s.connector,
+      params: s.paramsFor(input.topic),
+      optional: s.optional ?? false,
+    }));
+
+    // Step 2 — Collector
+    const collectorResult = await this.collector.execute({ sources: collectorSources }, context);
+    const { evidence, failed } = collectorResult.data;
+
+    // Step 3 — short-circuit if no evidence
+    if (evidence.length === 0) {
+      return {
+        data: {
+          summary: {
+            topic: input.topic,
+            totalScore: 0,
+            confidence: 0,
+            explanation: 'No evidence could be collected.',
+            keyProblems: [],
+            productAngles: [],
+            warnings: collectorResult.warnings,
+          },
+          detail: { findings: [], metrics: [], evidence: [], failed },
+        },
+        confidence: 0,
+        evidence: [],
+        assumptions: [],
+        warnings: collectorResult.warnings,
+        traceId: context.traceId,
+      };
+    }
+
+    // Step 4 — Analyzer
+    const analyzerResult = await this.analyzer.execute(
+      {
+        subjectDescription: input.topic,
+        evidence,
+        dimensions: MARKET_RESEARCH_DIMENSIONS,
+        instructions: [MARKET_RESEARCH_PROMPTS['analyzer-context']],
+      },
+      context,
+    );
+
+    // Step 5 — Scorer
+    const scorerResult = await this.scorer.execute(
+      {
+        findings: analyzerResult.data.findings,
+        scorecard: MARKET_RESEARCH_SCORECARD,
+        evidenceCount: evidence.length,
+      },
+      context,
+    );
+
+    // Step 6 — Teacher
+    const allWarnings = [...collectorResult.warnings, ...scorerResult.data.warnings];
+    const teacherResult = await this.teacher.execute(
+      {
+        subjectDescription: input.topic,
+        findings: analyzerResult.data.findings,
+        totalScore: scorerResult.data.totalScore,
+        confidence: scorerResult.data.confidence,
+        warnings: allWarnings,
+        audience: 'solo creator building digital products and Shopify apps',
+      },
+      context,
+    );
+
+    // Step 7 — Memory write (opt-in)
+    if (this.memory && input.conversationId) {
+      const memoryAnswer =
+        `${teacherResult.data.explanation}\n\n` +
+        `Top problems: ${teacherResult.data.keyLessons.join('; ')}`;
+      await this.memory.remember({
+        conversationId: input.conversationId,
+        question: `Research market: ${input.topic}`,
+        answer: memoryAnswer,
+      });
+    }
+
+    // Step 8 — assemble result
+    return {
+      data: {
+        summary: {
+          topic: input.topic,
+          totalScore: scorerResult.data.totalScore,
+          confidence: scorerResult.data.confidence,
+          explanation: teacherResult.data.explanation,
+          keyProblems: teacherResult.data.keyLessons,
+          productAngles: teacherResult.data.actionableNext,
+          warnings: allWarnings,
+        },
+        detail: {
+          findings: analyzerResult.data.findings,
+          metrics: scorerResult.data.metrics,
+          evidence,
+          failed,
+        },
+      },
+      confidence: scorerResult.data.confidence,
+      evidence,
+      assumptions: analyzerResult.data.findings.flatMap(f => f.unknowns),
+      warnings: allWarnings,
+      traceId: context.traceId,
+    };
   }
 }
