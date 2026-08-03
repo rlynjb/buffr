@@ -70,6 +70,9 @@ async function defaultTrendsCall(opts: TrendsRequestOpts): Promise<TrendResult[]
     startTime,
     endTime,
   });
+  if (typeof raw === 'string' && raw.trimStart().startsWith('<')) {
+    throw new Error('Google Trends returned an HTML page — likely rate-limited or blocked');
+  }
   const parsed = JSON.parse(raw) as RawTimelineData;
   const timeline = parsed.default.timelineData;
 

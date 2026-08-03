@@ -336,7 +336,8 @@ export async function createChatSession(): Promise<ChatSession> {
     {
       connector: new CachedConnector(new GoogleTrendsConnector(), new InMemoryCache(), CONNECTOR_CACHE_TTL_MS),
       paramsFor: (topic: string) => ({ keywords: [topic], timeframe: 'now 7-d' }),
-    },
+      optional: true,
+    } satisfies MarketResearchSource,
     ...(cfg.braveApiKey ? [{
       connector: new CachedConnector(
         new BraveSearchConnector(cfg.braveApiKey),

@@ -62,6 +62,35 @@ function Chat({ session, onExit }: { session: ChatSession; onExit: () => Promise
       onExit().catch(err => { console.error(err); process.exit(1); });
       return;
     }
+    if (q === '/help') {
+      setTurns(t => [...t, { role: 'you', text: q }, { role: 'buffr', text: [
+        'Available commands:',
+        '',
+        '/research <topic>',
+        '  Market research — finds trending problems and product opportunities.',
+        '  Example: /research digital planners for students',
+        '',
+        '/investing <ticker>',
+        '  Analyze a stock or ETF across momentum, fundamentals, and sentiment.',
+        '  Example: /investing AAPL',
+        '  Example: /investing VTI',
+        '',
+        '/eval research',
+        '  Run the market research scorer against built-in fixtures (3 cases).',
+        '',
+        '/eval investing',
+        '  Run the investing scorer against built-in fixtures (company + ETF).',
+        '',
+        '<anything else>',
+        '  Chat — ask buffr a general question using your knowledge base.',
+        '  Example: What did I learn about Shopify last week?',
+        '',
+        '/exit  or  /quit',
+        '  Close the session.',
+        '',
+      ].join('\n') }]);
+      return;
+    }
     if (q.startsWith('/investing ')) {
       const ticker = q.slice('/investing '.length).trim().toUpperCase();
       if (!ticker) return;
