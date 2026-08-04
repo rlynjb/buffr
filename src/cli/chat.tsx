@@ -166,19 +166,26 @@ function Chat({ session, onExit, initialDueCount }: { session: ChatSession; onEx
       progressStepsRef.current = [];
       setProgressSteps([]);
       setBusy(true);
-      activeFlow.controller.submit(q).then(result => {
-        const steps = progressStepsRef.current.map(s => s.state === 'running' ? { ...s, state: 'done' as const } : s);
-        setTurns(t => [
-          ...t,
-          ...result.messages.map((text, i) => ({
-            role: 'buffr' as const,
-            text,
-            ...(i === 0 && steps.length > 0 ? { progressSteps: steps } : {}),
-          })),
-        ]);
-        setBusy(false);
-        if (result.step === 'done') setActiveFlow(null);
-      });
+      activeFlow.controller.submit(q).then(
+        result => {
+          const steps = progressStepsRef.current.map(s => s.state === 'running' ? { ...s, state: 'done' as const } : s);
+          setTurns(t => [
+            ...t,
+            ...result.messages.map((text, i) => ({
+              role: 'buffr' as const,
+              text,
+              ...(i === 0 && steps.length > 0 ? { progressSteps: steps } : {}),
+            })),
+          ]);
+          setBusy(false);
+          if (result.step === 'done') setActiveFlow(null);
+        },
+        err => {
+          setTurns(t => [...t, { role: 'buffr', text: `error: ${(err as Error).message}` }]);
+          setBusy(false);
+          setActiveFlow(null);
+        },
+      );
       return;
     }
 
@@ -284,19 +291,26 @@ function Chat({ session, onExit, initialDueCount }: { session: ChatSession; onEx
           }
         },
       });
-      controller.start().then(result => {
-        const steps = progressStepsRef.current.map(s => s.state === 'running' ? { ...s, state: 'done' as const } : s);
-        setTurns(t => [
-          ...t,
-          ...result.messages.map((text, i) => ({
-            role: 'buffr' as const,
-            text,
-            ...(i === 0 && steps.length > 0 ? { progressSteps: steps } : {}),
-          })),
-        ]);
-        setBusy(false);
-        if (result.step === 'done') setActiveFlow(null); else setActiveFlow({ kind: 'research', controller });
-      });
+      controller.start().then(
+        result => {
+          const steps = progressStepsRef.current.map(s => s.state === 'running' ? { ...s, state: 'done' as const } : s);
+          setTurns(t => [
+            ...t,
+            ...result.messages.map((text, i) => ({
+              role: 'buffr' as const,
+              text,
+              ...(i === 0 && steps.length > 0 ? { progressSteps: steps } : {}),
+            })),
+          ]);
+          setBusy(false);
+          if (result.step === 'done') setActiveFlow(null); else setActiveFlow({ kind: 'research', controller });
+        },
+        err => {
+          setTurns(t => [...t, { role: 'buffr', text: `error: ${(err as Error).message}` }]);
+          setBusy(false);
+          setActiveFlow(null);
+        },
+      );
       return;
     }
     if (q === '/eval investing') {
@@ -326,11 +340,18 @@ function Chat({ session, onExit, initialDueCount }: { session: ChatSession; onEx
       setTurns(t => [...t, { role: 'you', text: q }]);
       setBusy(true);
       const controller = createReviewFlow(session);
-      controller.start().then(result => {
-        setTurns(t => [...t, ...result.messages.map(text => ({ role: 'buffr' as const, text }))]);
-        setBusy(false);
-        if (result.step !== 'done') setActiveFlow({ kind: 'review', controller });
-      });
+      controller.start().then(
+        result => {
+          setTurns(t => [...t, ...result.messages.map(text => ({ role: 'buffr' as const, text }))]);
+          setBusy(false);
+          if (result.step !== 'done') setActiveFlow({ kind: 'review', controller });
+        },
+        err => {
+          setTurns(t => [...t, { role: 'buffr', text: `error: ${(err as Error).message}` }]);
+          setBusy(false);
+          setActiveFlow(null);
+        },
+      );
       return;
     }
     setTurns(t => [...t, { role: 'you', text: q }]);
