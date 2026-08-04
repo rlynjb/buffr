@@ -134,15 +134,19 @@ function Chat({ session, onExit }: { session: ChatSession; onExit: () => Promise
       return;
     }
     if (q === '/help') {
+      const connectors = session.connectorStatus();
       setTurns(t => [...t, { role: 'you', text: q }, { role: 'buffr', text: [
         'Available commands:',
         '',
         '/research <topic>',
         '  Market research — finds trending problems and product opportunities.',
+        `  Connectors: ${connectors.research.join(', ')}`,
         '  Example: /research digital planners for students',
+        '  Run /research with no topic to see trending suggestions.',
         '',
         '/investing <ticker>',
         '  Analyze a stock or ETF across momentum, fundamentals, and sentiment.',
+        `  Connectors: ${connectors.investing.join(', ')}`,
         '  Example: /investing AAPL',
         '  Example: /investing VTI',
         '',
@@ -154,6 +158,8 @@ function Chat({ session, onExit }: { session: ChatSession; onExit: () => Promise
         '',
         '<anything else>',
         '  Chat — ask buffr a general question using your knowledge base.',
+        `  Knowledge base: ${connectors.chatKnowledgeBase}`,
+        `  Connectors: ${connectors.chat.join(', ')}`,
         '  Example: What did I learn about Shopify last week?',
         '',
         '/exit  or  /quit',
@@ -181,9 +187,17 @@ function Chat({ session, onExit }: { session: ChatSession; onExit: () => Promise
       );
       return;
     }
-    if (q.startsWith('/research ')) {
-      const topic = q.slice('/research '.length).trim();
-      if (!topic) return;
+    if (q === '/research' || q.startsWith('/research ')) {
+      const topic = q === '/research' ? '' : q.slice('/research '.length).trim();
+      if (!topic) {
+        setTurns(t => [...t, { role: 'you', text: q }]);
+        setBusy(true); setStatus('finding trending topics…');
+        session.suggestResearchTopics().then(
+          text => { setTurns(t => [...t, { role: 'buffr', text }]); setBusy(false); },
+          err  => { setTurns(t => [...t, { role: 'buffr', text: `error: ${(err as Error).message}` }]); setBusy(false); },
+        );
+        return;
+      }
       setTurns(t => [...t, { role: 'you', text: q }, { role: 'buffr', text: '' }]);
       progressStepsRef.current = [];
       setProgressSteps([]);

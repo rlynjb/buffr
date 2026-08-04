@@ -21,7 +21,7 @@ import { PgVectorStore } from './pg-vector-store.js';
 import { loadProfile } from './profile.js';
 import { startConversation, persistMessage, SupabaseTraceSink } from './supabase-trace-sink.js';
 import type { CapabilityTraceSink, CapabilityEvent } from '@buffr/kernel';
-import { readFile } from 'node:fs/promises';
+import { readFile, readdir } from 'node:fs/promises';
 import { Scorer } from '@buffr/capabilities';
 import type { ScorecardDefinition } from '@buffr/capabilities';
 import { COMPANY_SCORECARD, ETF_SCORECARD } from '@buffr/domain-pack-investing';
@@ -31,6 +31,7 @@ import type { InvestingSource, InvestingOutput } from '@buffr/engine-investing';
 import { MarketResearchEngine } from '@buffr/engine-market-research';
 import type { MarketResearchSource, MarketResearchOutput, ProgressEvent } from '@buffr/engine-market-research';
 import { MARKET_RESEARCH_SCORECARD } from '@buffr/domain-pack-market-research';
+import { DB_SOURCES } from './db-sources.js';
 
 /**
  * A long-lived chat session: one warm pg pool and one conversation held across
@@ -78,12 +79,23 @@ function toolStatusLabel(toolName: string): string {
   return TOOL_LABELS[toolName] ?? `calling ${toolName}`;
 }
 
+export type ConnectorStatus = {
+  chat: string[];
+  // Not an external connector — buffr's own indexed store. Kept separate
+  // since it's queried in-process, not fetched live like the rest.
+  chatKnowledgeBase: string;
+  research: string[];
+  investing: string[];
+};
+
 export type ChatSession = {
   ask(question: string, opts?: AskOptions): Promise<string>;
   analyze(ticker: string, entityType: 'company' | 'etf', opts?: AskOptions): Promise<string>;
   evalInvesting(): Promise<string>;
   research(topic: string, opts?: AskOptions): Promise<string>;
   evalResearch(): Promise<string>;
+  suggestResearchTopics(): Promise<string>;
+  connectorStatus(): ConnectorStatus;
   close(): Promise<void>;
 };
 
@@ -92,6 +104,145 @@ const ROUTING_PROMPT_VERSION = '1.0.0';
 
 // 1-hour cache for external connector results.
 const CONNECTOR_CACHE_TTL_MS = 60 * 60 * 1000;
+
+// Describes what's actually indexed into agents.chunks (queried by
+// search_knowledge_base), read live so it can't drift from reality:
+// - knowledge/*.md — files ingested via `npm run index`
+// - DB_SOURCES — rows re-indexed via `npm run index:db`, grouped by schema
+async function describeKnowledgeBase(appId: string): Promise<string> {
+  let files: string[] = [];
+  try {
+    const entries = await readdir(new URL('../knowledge/', import.meta.url));
+    files = entries.filter(f => f.endsWith('.md')).sort();
+  } catch {
+    // knowledge/ folder not present in this environment — omit that part
+  }
+
+  const bySchema = new Map<string, string[]>();
+  for (const source of DB_SOURCES) {
+    const tables = bySchema.get(source.schema) ?? [];
+    tables.push(source.table);
+    bySchema.set(source.schema, tables);
+  }
+  const schemaParts = [...bySchema.entries()].map(([schema, tables]) => `${schema} (${tables.join(', ')})`);
+
+  const indexedFrom = [
+    files.length > 0 ? `knowledge/ folder (${files.join(', ')})` : null,
+    ...schemaParts,
+  ].filter((s): s is string => s !== null);
+
+  return `Postgres + pgvector — schema: agents.chunks, app: ${appId}` +
+    (indexedFrom.length > 0 ? ` — indexed from: ${indexedFrom.join('; ')}` : '');
+}
+
+// Communities /research draws evidence from — also used to suggest topics
+// when the user runs /research with no topic.
+const RESEARCH_SUBREDDITS = ['Etsy', 'etsysellers', 'shopify', 'entrepreneur', 'smallbusiness', 'digitalproducts'];
+
+// Communities /investing draws sentiment evidence from.
+const INVESTING_SUBREDDITS = ['stocks', 'investing', 'wallstreetbets', 'StockMarket'];
+
+// Google News RSS search — unauthenticated, no API key, no daily quota. Used
+// as a free news source for /investing (and could be reused elsewhere).
+function googleNewsRssUrl(query: string): string {
+  const url = new URL('https://news.google.com/rss/search');
+  url.searchParams.set('q', query);
+  url.searchParams.set('hl', 'en-US');
+  url.searchParams.set('gl', 'US');
+  url.searchParams.set('ceid', 'US:en');
+  return url.toString();
+}
+
+// Trending-topic suggestions are refreshed at most this often.
+const TOPIC_SUGGESTION_CACHE_TTL_MS = 15 * 60 * 1000;
+
+type TopicSuggestion = { title: string; source: string; detail?: string };
+
+// Reddit blocks a lot of unauthenticated / datacenter traffic outright (bare
+// 403, no matter the User-Agent) — this is best-effort and expected to fail
+// often. suggestResearchTopics() falls back past it when it does.
+async function fetchTrendingRedditTopics(limit = 6): Promise<TopicSuggestion[]> {
+  const url = new URL(`https://www.reddit.com/r/${RESEARCH_SUBREDDITS.join('+')}/hot.json`);
+  url.searchParams.set('limit', String(limit * 3));
+
+  const res = await fetch(url.toString(), { headers: { 'User-Agent': 'buffr-research-bot/1.0' } });
+  if (!res.ok) throw new Error(`Reddit hot listing HTTP ${res.status}`);
+
+  const json = await res.json() as Record<string, unknown>;
+  const listing = json['data'] as { children?: unknown[] } | undefined;
+  const raw = listing?.children ?? [];
+
+  return raw
+    .map((child) => {
+      const d = ((child as Record<string, unknown>)['data'] ?? {}) as Record<string, unknown>;
+      return {
+        title: String(d['title'] ?? ''),
+        subreddit: String(d['subreddit'] ?? ''),
+        score: Number(d['score'] ?? 0),
+        stickied: Boolean(d['stickied']),
+      };
+    })
+    .filter(p => !p.stickied && p.title.length > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit)
+    .map(p => ({ title: p.title, source: `r/${p.subreddit}`, detail: `${p.score} upvotes` }));
+}
+
+type WebSearchConnector = { fetch(params: { query: string; count?: number; maxResults?: number }): Promise<{ data: { results: Array<{ title: string; url: string }> } }> };
+
+// Falls back to whichever web-search API the user already has configured
+// (same priority order as researchSources) when Reddit is unreachable.
+async function fetchTrendingTopicsViaSearch(
+  connectors: { brave: WebSearchConnector | null; tavily: WebSearchConnector | null; google: WebSearchConnector | null },
+): Promise<{ topics: TopicSuggestion[]; sourceLabel: string } | null> {
+  const query = 'trending digital product ideas Etsy Shopify sellers this week';
+  const attempts: Array<[WebSearchConnector | null, string, { query: string; count?: number; maxResults?: number }]> = [
+    [connectors.brave, 'Brave Search', { query, count: 6 }],
+    [connectors.tavily, 'Tavily', { query, maxResults: 6 }],
+    [connectors.google, 'Google Search', { query, count: 6 }],
+  ];
+  for (const [connector, label, params] of attempts) {
+    if (!connector) continue;
+    try {
+      const result = await connector.fetch(params);
+      const topics = result.data.results
+        .filter(r => r.title.length > 0)
+        .map(r => ({ title: r.title, source: new URL(r.url).hostname.replace(/^www\./, '') }));
+      if (topics.length > 0) return { topics, sourceLabel: label };
+    } catch {
+      // try the next configured provider
+    }
+  }
+  return null;
+}
+
+// Last resort when Reddit is blocked and no web-search API is configured —
+// evergreen starter topics rather than nothing at all.
+const FALLBACK_TOPIC_SUGGESTIONS: TopicSuggestion[] = [
+  { title: 'digital planners for ADHD professionals' },
+  { title: 'Etsy printable wedding templates' },
+  { title: 'Shopify subscription box for pet owners' },
+  { title: 'Notion templates for freelancers' },
+  { title: 'AI-generated coloring books for kids' },
+].map(t => ({ ...t, source: 'starter idea' }));
+
+function formatTopicSuggestions(topics: TopicSuggestion[], headline: string): string {
+  if (topics.length === 0) {
+    return 'Usage: /research <topic>\n\nCouldn\'t fetch trending topics right now — try again shortly, or just give /research a topic directly.';
+  }
+  const lines = [
+    'Usage: /research <topic>',
+    '',
+    headline,
+    '',
+  ];
+  topics.forEach((t, i) => {
+    const meta = [t.source, t.detail].filter(Boolean).join(' · ');
+    lines.push(`${i + 1}. ${t.title}${meta ? ` (${meta})` : ''}`);
+  });
+  lines.push('', 'Try: /research ' + topics[0].title);
+  return lines.join('\n');
+}
 
 const ETF_TICKERS = new Set([
   'VTI', 'SPY', 'QQQ', 'IVV', 'VOO', 'VXUS', 'BND', 'GLD', 'SLV', 'TLT',
@@ -304,31 +455,64 @@ export async function createChatSession(): Promise<ChatSession> {
   // tool — memory chunks live with no documents row, which the dropped FK allows.
   const memory = createConversationMemory({ embedder, store });
 
+  // Hoisted so investingSources, researchSources, and suggestResearchTopics()
+  // all share one connector instance (and its cache) per provider, instead of
+  // each spinning up its own.
+  const braveConnector = cfg.braveApiKey
+    ? new CachedConnector(new BraveSearchConnector(cfg.braveApiKey), new InMemoryCache(), CONNECTOR_CACHE_TTL_MS)
+    : null;
+  const tavilyConnector = cfg.tavilyApiKey
+    ? new CachedConnector(new TavilySearchConnector(cfg.tavilyApiKey), new InMemoryCache(), CONNECTOR_CACHE_TTL_MS)
+    : null;
+  const googleConnector = (cfg.googleApiKey && cfg.googleCx)
+    ? new CachedConnector(new GoogleSearchConnector(cfg.googleApiKey, cfg.googleCx), new InMemoryCache(), CONNECTOR_CACHE_TTL_MS)
+    : null;
+  const redditConnector = new CachedConnector(new RedditSearchConnector(), new InMemoryCache(), CONNECTOR_CACHE_TTL_MS);
+  const rssConnector = new CachedConnector(new RssConnector(), new InMemoryCache(), CONNECTOR_CACHE_TTL_MS);
+
   const investingSources: InvestingSource[] = [
-    ...(cfg.braveApiKey ? [{
-      connector: new CachedConnector(
-        new BraveSearchConnector(cfg.braveApiKey),
-        new InMemoryCache(),
-        CONNECTOR_CACHE_TTL_MS,
-      ),
+    ...(braveConnector ? [{
+      connector: braveConnector,
       paramsFor: (ticker: string, entityType: 'company' | 'etf') => ({
         query: `${ticker} ${entityType} financial analysis earnings`,
         count: 5,
       }),
       optional: true,
     } satisfies InvestingSource] : []),
-    ...(cfg.tavilyApiKey ? [{
-      connector: new CachedConnector(
-        new TavilySearchConnector(cfg.tavilyApiKey),
-        new InMemoryCache(),
-        CONNECTOR_CACHE_TTL_MS,
-      ),
+    ...(tavilyConnector ? [{
+      connector: tavilyConnector,
       paramsFor: (ticker: string, entityType: 'company' | 'etf') => ({
         query: `${ticker} ${entityType} investment analysis`,
         maxResults: 5,
       }),
       optional: true,
     } satisfies InvestingSource] : []),
+    ...(googleConnector ? [{
+      connector: googleConnector,
+      paramsFor: (ticker: string, entityType: 'company' | 'etf') => ({
+        query: `${ticker} ${entityType} financial analysis earnings`,
+        count: 5,
+      }),
+      optional: true,
+    } satisfies InvestingSource] : []),
+    {
+      connector: redditConnector,
+      paramsFor: (ticker: string, entityType: 'company' | 'etf') => ({
+        query: `${ticker} ${entityType}`,
+        subreddits: INVESTING_SUBREDDITS,
+        limit: 10,
+        sort: 'relevance' as const,
+      }),
+      optional: true,
+    } satisfies InvestingSource,
+    {
+      connector: rssConnector,
+      paramsFor: (ticker: string, entityType: 'company' | 'etf') => ({
+        url: googleNewsRssUrl(`${ticker} ${entityType} stock`),
+        limit: 8,
+      }),
+      optional: true,
+    } satisfies InvestingSource,
   ];
 
   const investingEngine = investingSources.length > 0
@@ -341,36 +525,24 @@ export async function createChatSession(): Promise<ChatSession> {
       paramsFor: (topic: string) => ({ keywords: [topic], timeframe: 'now 7-d' }),
       optional: true,
     } satisfies MarketResearchSource,
-    ...(cfg.braveApiKey ? [{
-      connector: new CachedConnector(
-        new BraveSearchConnector(cfg.braveApiKey),
-        new InMemoryCache(),
-        CONNECTOR_CACHE_TTL_MS,
-      ),
+    ...(braveConnector ? [{
+      connector: braveConnector,
       paramsFor: (topic: string) => ({
         query: `${topic} problems complaints frustrations reddit forum`,
         count: 5,
       }),
       optional: true,
     } satisfies MarketResearchSource] : []),
-    ...(cfg.tavilyApiKey ? [{
-      connector: new CachedConnector(
-        new TavilySearchConnector(cfg.tavilyApiKey),
-        new InMemoryCache(),
-        CONNECTOR_CACHE_TTL_MS,
-      ),
+    ...(tavilyConnector ? [{
+      connector: tavilyConnector,
       paramsFor: (topic: string) => ({
         query: `${topic} issues pain points problems complaints`,
         maxResults: 5,
       }),
       optional: true,
     } satisfies MarketResearchSource] : []),
-    ...(cfg.googleApiKey && cfg.googleCx ? [{
-      connector: new CachedConnector(
-        new GoogleSearchConnector(cfg.googleApiKey, cfg.googleCx),
-        new InMemoryCache(),
-        CONNECTOR_CACHE_TTL_MS,
-      ),
+    ...(googleConnector ? [{
+      connector: googleConnector,
       paramsFor: (topic: string) => ({
         query: `${topic} problems complaints frustrations sellers buyers`,
         count: 5,
@@ -378,14 +550,10 @@ export async function createChatSession(): Promise<ChatSession> {
       optional: true,
     } satisfies MarketResearchSource] : []),
     {
-      connector: new CachedConnector(
-        new RedditSearchConnector(),
-        new InMemoryCache(),
-        CONNECTOR_CACHE_TTL_MS,
-      ),
+      connector: redditConnector,
       paramsFor: (topic: string) => ({
         query: `${topic} problems frustrations help advice`,
-        subreddits: ['Etsy', 'etsysellers', 'shopify', 'entrepreneur', 'smallbusiness', 'digitalproducts'],
+        subreddits: RESEARCH_SUBREDDITS,
         limit: 10,
         sort: 'relevance' as const,
       }),
@@ -430,6 +598,8 @@ export async function createChatSession(): Promise<ChatSession> {
   const registry = new PromptRegistry();
   registry.register('rag-query-agent/routing', ROUTING_PROMPT_VERSION, routingPrompt);
 
+  let topicSuggestionCache: { at: number; topics: TopicSuggestion[]; headline: string } | null = null;
+
   // Thin wrapper that intercepts events to forward live status and accumulate
   // token usage to the TUI. Mutable slots are swapped per-ask.
   let currentOnStatus: ((msg: string) => void) | undefined;
@@ -470,6 +640,31 @@ export async function createChatSession(): Promise<ChatSession> {
     promptRegistry: registry,
     promptName: 'rag-query-agent/routing',
   });
+
+  const connectors: ConnectorStatus = {
+    chat: [
+      'RSS feeds',
+      'Amazon reviews',
+      ...(braveConnector  ? ['Brave Search']  : []),
+      ...(tavilyConnector ? ['Tavily']        : []),
+      ...(googleConnector ? ['Google Search'] : []),
+    ],
+    chatKnowledgeBase: await describeKnowledgeBase(cfg.appId),
+    research: [
+      'Google Trends',
+      ...(braveConnector  ? ['Brave Search']  : []),
+      ...(tavilyConnector ? ['Tavily']        : []),
+      ...(googleConnector ? ['Google Search'] : []),
+      'Reddit',
+    ],
+    investing: [
+      ...(braveConnector  ? ['Brave Search']  : []),
+      ...(tavilyConnector ? ['Tavily']        : []),
+      ...(googleConnector ? ['Google Search'] : []),
+      'Reddit',
+      'Google News RSS',
+    ],
+  };
 
   return {
     async ask(question: string, opts?: AskOptions): Promise<string> {
@@ -555,6 +750,37 @@ export async function createChatSession(): Promise<ChatSession> {
       );
       return formatResearchEval(scorer, evalCtx, fixtures);
     },
+    async suggestResearchTopics(): Promise<string> {
+      const isFresh = topicSuggestionCache && (Date.now() - topicSuggestionCache.at) < TOPIC_SUGGESTION_CACHE_TTL_MS;
+      if (isFresh) return formatTopicSuggestions(topicSuggestionCache!.topics, topicSuggestionCache!.headline);
+
+      // 1. Reddit hot listing — free, no API key, but frequently 403s outright.
+      try {
+        const topics = await fetchTrendingRedditTopics();
+        if (topics.length > 0) {
+          const headline = 'Trending in r/Etsy, r/shopify, r/entrepreneur & friends right now:';
+          topicSuggestionCache = { at: Date.now(), topics, headline };
+          return formatTopicSuggestions(topics, headline);
+        }
+      } catch {
+        // fall through to web search
+      }
+
+      // 2. Whichever web-search API is already configured for /research.
+      const viaSearch = await fetchTrendingTopicsViaSearch({ brave: braveConnector, tavily: tavilyConnector, google: googleConnector });
+      if (viaSearch) {
+        const headline = `Trending topics via ${viaSearch.sourceLabel} right now:`;
+        topicSuggestionCache = { at: Date.now(), topics: viaSearch.topics, headline };
+        return formatTopicSuggestions(viaSearch.topics, headline);
+      }
+
+      // 3. Nothing reachable — evergreen starter ideas rather than a dead end.
+      // Not cached: worth retrying live sources next time.
+      return formatTopicSuggestions(
+        FALLBACK_TOPIC_SUGGESTIONS,
+        'Live sources are unavailable right now — a few starter ideas instead:',
+      );
+    },
     async analyze(ticker: string, entityType: 'company' | 'etf', opts?: AskOptions): Promise<string> {
       if (!investingEngine) {
         return 'No web search connectors configured — set BRAVE_API_KEY or TAVILY_API_KEY in .env';
@@ -585,6 +811,9 @@ export async function createChatSession(): Promise<ChatSession> {
         outputTokens: currentOutputTokens,
       });
       return formatAnalysis(result.data);
+    },
+    connectorStatus(): ConnectorStatus {
+      return connectors;
     },
     async close(): Promise<void> {
       await Promise.race([
