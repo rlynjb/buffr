@@ -1812,11 +1812,12 @@ git commit -m "feat(session): wire PgJournalStore; replace research() with resea
 
 **Files:**
 - Create: `src/cli/research-flow.ts`
+- Create: `src/cli/parse-review-date.ts` (shared with `review-flow.ts`, Task 8 — the "N days or an ISO date" parser used by both the decision review-date capture and the `/review` snooze-date capture; kept in its own file so Task 8 doesn't duplicate it)
 - Test: `test/research-flow.test.ts`
 
 **Interfaces:**
 - Consumes: `ChatSession.researchCollect`/`researchEvaluate`/`saveHypothesis`/`saveDecision` (Task 6); `CollectedResearch`/`ResearchPrediction`/`MarketResearchOutput` from `@buffr/engine-market-research`.
-- Produces: `createResearchFlow(session, topic, callbacks): ResearchFlow`, `ResearchFlow` (`{ start(); submit(input) }`), `ResearchFlowResult`, `ResearchFlowStep`, `ResearchFlowCallbacks` — consumed by `chat.tsx` (Task 9).
+- Produces: `createResearchFlow(session, topic, callbacks): ResearchFlow`, `ResearchFlow` (`{ start(); submit(input) }`), `ResearchFlowResult`, `ResearchFlowStep`, `ResearchFlowCallbacks`, `parseDayCountOrDate(input: string): string | null` — consumed by `chat.tsx` (Task 9) and by `review-flow.ts` (Task 8, which imports `parseDayCountOrDate` from `./parse-review-date.js` rather than redefining it).
 
 This is a pure TypeScript module with no `@opentui`/React dependency, so it's fully unit-testable against a stub `ChatSession`.
 
@@ -2022,13 +2023,39 @@ describe('research-flow — track as decision', () => {
 Run: `npm test`
 Expected: FAIL — `Cannot find module '../src/cli/research-flow.js'`
 
-- [ ] **Step 3: Write `research-flow.ts`**
+- [ ] **Step 3: Write `parse-review-date.ts` and `research-flow.ts`**
+
+Create `src/cli/parse-review-date.ts`:
+
+```typescript
+/**
+ * Parses "<N>" (a positive integer — days from now) or a future ISO date
+ * string into a future ISO timestamp. Returns null if unparseable or not
+ * in the future. Shared by research-flow.ts (decision review-date capture)
+ * and review-flow.ts (snooze-date capture) — one parser, one set of rules.
+ */
+export function parseDayCountOrDate(input: string): string | null {
+  const trimmed = input.trim();
+  const asInt = Number(trimmed);
+  if (Number.isInteger(asInt) && asInt > 0) {
+    const d = new Date();
+    d.setDate(d.getDate() + asInt);
+    return d.toISOString();
+  }
+  const asDate = new Date(trimmed);
+  if (!Number.isNaN(asDate.getTime()) && asDate.getTime() > Date.now()) {
+    return asDate.toISOString();
+  }
+  return null;
+}
+```
 
 Create `src/cli/research-flow.ts`:
 
 ```typescript
 import type { ChatSession, ResearchEvaluateCallbacks } from '../session.js';
 import type { CollectedResearch, ResearchPrediction, MarketResearchOutput } from '@buffr/engine-market-research';
+import { parseDayCountOrDate } from './parse-review-date.js';
 
 const VALID_DIMENSIONS = ['frequency', 'trend-velocity', 'specificity', 'monetizability'] as const;
 type Dimension = typeof VALID_DIMENSIONS[number];
@@ -2096,21 +2123,6 @@ function formatReveal(output: MarketResearchOutput): string {
 }
 
 const PROMOTE_PROMPT = 'discard / hypothesis / decision — what do you want to do with this?';
-
-function parseDayCountOrDate(input: string): string | null {
-  const trimmed = input.trim();
-  const asInt = Number(trimmed);
-  if (Number.isInteger(asInt) && asInt > 0) {
-    const d = new Date();
-    d.setDate(d.getDate() + asInt);
-    return d.toISOString();
-  }
-  const asDate = new Date(trimmed);
-  if (!Number.isNaN(asDate.getTime()) && asDate.getTime() > Date.now()) {
-    return asDate.toISOString();
-  }
-  return null;
-}
 
 export function createResearchFlow(session: ChatSession, topic: string, callbacks: ResearchFlowCallbacks): ResearchFlow {
   let step: ResearchFlowStep = 'prediction';
@@ -2211,7 +2223,7 @@ Expected: PASS — all `research-flow.test.ts` tests, plus everything from prior
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/cli/research-flow.ts test/research-flow.test.ts
+git add src/cli/research-flow.ts src/cli/parse-review-date.ts test/research-flow.test.ts
 git commit -m "feat(cli): add research-flow — interactive predict/reveal/promote loop"
 ```
 
@@ -2224,7 +2236,7 @@ git commit -m "feat(cli): add research-flow — interactive predict/reveal/promo
 - Test: `test/review-flow.test.ts`
 
 **Interfaces:**
-- Consumes: `ChatSession.listDueReviews`/`snoozeReview`/`resolveReview` (Task 6); `JournalEntry`/`Disposition` from `@buffr/kernel`.
+- Consumes: `ChatSession.listDueReviews`/`snoozeReview`/`resolveReview` (Task 6); `JournalEntry`/`Disposition` from `@buffr/kernel`; `parseDayCountOrDate` from `./parse-review-date.js` (Task 7 — do not redefine it here, import it).
 - Produces: `createReviewFlow(session): ReviewFlow`, `ReviewFlow` (`{ start(); submit(input) }`), `ReviewFlowResult`, `ReviewFlowStep` — consumed by `chat.tsx` (Task 9).
 
 - [ ] **Step 1: Write the failing test**
@@ -2392,6 +2404,7 @@ Create `src/cli/review-flow.ts`:
 ```typescript
 import type { ChatSession } from '../session.js';
 import type { JournalEntry, Disposition } from '@buffr/kernel';
+import { parseDayCountOrDate } from './parse-review-date.js';
 
 export type ReviewFlowStep = 'action' | 'snooze-date' | 'disposition' | 'note' | 'done';
 
@@ -2414,21 +2427,6 @@ function formatEntry(entry: JournalEntry): string {
 }
 
 const ACTION_PROMPT = 'keep / snooze / resolve — what do you want to do?';
-
-function parseDayCountOrDate(input: string): string | null {
-  const trimmed = input.trim();
-  const asInt = Number(trimmed);
-  if (Number.isInteger(asInt) && asInt > 0) {
-    const d = new Date();
-    d.setDate(d.getDate() + asInt);
-    return d.toISOString();
-  }
-  const asDate = new Date(trimmed);
-  if (!Number.isNaN(asDate.getTime()) && asDate.getTime() > Date.now()) {
-    return asDate.toISOString();
-  }
-  return null;
-}
 
 function parseDisposition(input: string): Disposition | null {
   const v = input.trim().toLowerCase();
