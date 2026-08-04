@@ -196,4 +196,14 @@ describe('MarketResearchEngine.evaluate()', () => {
     assert.strictEqual(result.data.comparison.dimensionMatched, false);
     assert.strictEqual(result.data.comparison.actualDimension, 'frequency');
   });
+
+  it('zero findings: does not throw, produces a degenerate comparison instead of crashing', async () => {
+    const engine = makeEngine([]);
+    const { data: collected } = await engine.collect({ topic: 'shopify returns management' }, ctx);
+    const result = await engine.evaluate(collected, PREDICTION, {}, ctx);
+
+    assert.strictEqual(result.data.comparison.dimensionMatched, false);
+    assert.strictEqual(result.data.comparison.actualDimension, 'unknown');
+    assert.strictEqual(result.data.detail.findings.length, 0);
+  });
 });

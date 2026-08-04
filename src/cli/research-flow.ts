@@ -36,6 +36,7 @@ function formatDigest(topic: string, collected: CollectedResearch): string {
 
 const PREDICTION_PROMPT =
   'Before buffr scores this: what\'s your read?\n\n' +
+  'The opportunity score (0-100) reflects how strong a problem this is to build a product around.\n' +
   'Reply with: <expected score 0-100> <strongest dimension> <confidence 0-100>\n' +
   'Dimensions: frequency, trend-velocity, specificity, monetizability\n' +
   'Example: 72 frequency 60';

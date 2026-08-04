@@ -153,7 +153,8 @@ function Chat({ session, onExit, initialDueCount }: { session: ChatSession; onEx
 
   const handleSubmit = (): void => {
     const q = (taRef.current?.plainText as string | undefined)?.trim() ?? '';
-    if (busy || !q) return;
+    if (busy) return;
+    if (!activeFlow && !q) return;
     taRef.current?.setText('');
 
     if (activeFlow) {
@@ -457,7 +458,7 @@ function Chat({ session, onExit, initialDueCount }: { session: ChatSession; onEx
 }
 
 const session = await createChatSession();
-const initialDueCount = await session.dueReviewCount();
+const initialDueCount = await session.dueReviewCount().catch(() => 0);
 const renderer = await createCliRenderer({ exitOnCtrlC: false });
 
 const forceExit = () => { setTimeout(() => process.exit(0), 1500).unref(); session.close().finally(() => process.exit(0)); };

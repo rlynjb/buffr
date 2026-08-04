@@ -36,7 +36,14 @@ export class InMemoryJournalStore implements JournalStore {
 
   async listDue(userId: string, workspaceId: string, now: string): Promise<JournalEntry[]> {
     for (const e of this.entries.values()) {
-      if (e.kind === 'decision' && e.status === 'open' && e.reviewAt && e.reviewAt <= now) {
+      if (
+        e.userId === userId &&
+        e.workspaceId === workspaceId &&
+        e.kind === 'decision' &&
+        e.status === 'open' &&
+        e.reviewAt &&
+        e.reviewAt <= now
+      ) {
         e.status = 'review-due';
       }
     }

@@ -193,16 +193,18 @@ export class MarketResearchEngine {
     const explanation = teacherResult.data.explanation.trim() ||
       analyzerResult.data.findings.map(f => `${f.dimensionId}: ${f.summary}`).join(' ');
 
-    const strongestFinding = analyzerResult.data.findings.reduce(
-      (max, f) => (f.score > max.score ? f : max),
-      analyzerResult.data.findings[0]!,
-    );
+    // Mirrors the keyProblems/productAngles/explanation fallback pattern
+    // above: when the analyzer returns zero findings, degrade gracefully
+    // instead of crashing on an undefined "strongest" finding.
+    const strongestFinding = analyzerResult.data.findings.length > 0
+      ? analyzerResult.data.findings.reduce((max, f) => (f.score > max.score ? f : max))
+      : null;
     const comparison: PredictionComparison = {
       prediction,
       actualScore: scorerResult.data.totalScore,
-      actualDimension: strongestFinding.dimensionId,
+      actualDimension: strongestFinding?.dimensionId ?? 'unknown',
       scoreGap: scorerResult.data.totalScore - prediction.expectedScore,
-      dimensionMatched: strongestFinding.dimensionId === prediction.expectedDimension,
+      dimensionMatched: strongestFinding !== null && strongestFinding.dimensionId === prediction.expectedDimension,
     };
 
     return {

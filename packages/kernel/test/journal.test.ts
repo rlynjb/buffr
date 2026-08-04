@@ -73,6 +73,23 @@ describe('InMemoryJournalStore', () => {
     assert.strictEqual(due.length, 0);
   });
 
+  it('listDue does not transition another user\'s/workspace\'s entries to review-due as a side effect', async () => {
+    const store = new InMemoryJournalStore();
+    await store.create({ ...DECISION, reviewAt: FUTURE }, NOW);
+
+    // A listDue() call scoped to a *different* user/workspace, but with a
+    // "now" past the entry's reviewAt, must not flip this entry's status —
+    // even though the entry itself matches on reviewAt <= now.
+    const VERY_FUTURE = '2026-10-01T00:00:00.000Z';
+    await store.listDue('someone-else', 'different-workspace', VERY_FUTURE);
+
+    // The real owner queries with a "now" still before reviewAt — correctly
+    // not due yet. If the unrelated call above had leaked a status mutation,
+    // this would incorrectly return the entry anyway.
+    const notYetDue = await store.listDue('u1', 'w1', NOW);
+    assert.strictEqual(notYetDue.length, 0, 'entry must not have been prematurely transitioned to review-due by an unrelated listDue() call');
+  });
+
   it('snooze resets status to open with a new reviewAt', async () => {
     const store = new InMemoryJournalStore();
     const created = await store.create(DECISION, NOW);
