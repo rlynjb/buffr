@@ -11,3 +11,4 @@ export * from './evals/index.js';
 export * from './agents/index.js';
 export * from './cache/index.js';
 export * from './prompt-registry/index.js';
+export * from './journal/index.js';
