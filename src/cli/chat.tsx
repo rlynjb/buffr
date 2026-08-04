@@ -3,6 +3,8 @@ import { useState, useEffect, useRef } from 'react';
 import { createCliRenderer, TextAttributes } from '@opentui/core';
 import { createRoot, useKeyboard } from '@opentui/react';
 import { createChatSession, detectEntityType, type ChatSession, type TurnStats, type ProgressEvent } from '../session.js';
+import { createResearchFlow, type ResearchFlow } from './research-flow.js';
+import { createReviewFlow, type ReviewFlow } from './review-flow.js';
 
 type Turn = { role: 'you' | 'buffr'; text: string; stats?: TurnStats; progressSteps?: ProgressStep[]; helpLines?: string[] };
 
@@ -116,9 +118,18 @@ function ProgressPanel({ status, tokens, steps }: {
   );
 }
 
-function Chat({ session, onExit }: { session: ChatSession; onExit: () => Promise<void> }) {
-  const [turns, setTurns] = useState<Turn[]>([]);
+function Chat({ session, onExit, initialDueCount }: { session: ChatSession; onExit: () => Promise<void>; initialDueCount: number }) {
+  const [turns, setTurns] = useState<Turn[]>(
+    initialDueCount > 0
+      ? [{ role: 'buffr', text: `${initialDueCount} decision${initialDueCount === 1 ? '' : 's'} due for review. Run /review when ready.` }]
+      : [],
+  );
   const [busy, setBusy] = useState(false);
+  const [activeFlow, setActiveFlow] = useState<
+    | { kind: 'research'; controller: ResearchFlow }
+    | { kind: 'review'; controller: ReviewFlow }
+    | null
+  >(null);
   const [status, setStatus] = useState('thinking…');
   const [liveTokens, setLiveTokens] = useState({ input: 0, output: 0 });
   const [progressSteps, setProgressSteps] = useState<ProgressStep[]>([]);
@@ -144,6 +155,33 @@ function Chat({ session, onExit }: { session: ChatSession; onExit: () => Promise
     const q = (taRef.current?.plainText as string | undefined)?.trim() ?? '';
     if (busy || !q) return;
     taRef.current?.setText('');
+
+    if (activeFlow) {
+      if (q.toLowerCase() === '/cancel') {
+        setTurns(t => [...t, { role: 'you', text: q }, { role: 'buffr', text: 'Cancelled.' }]);
+        setActiveFlow(null);
+        return;
+      }
+      setTurns(t => [...t, { role: 'you', text: q }]);
+      progressStepsRef.current = [];
+      setProgressSteps([]);
+      setBusy(true);
+      activeFlow.controller.submit(q).then(result => {
+        const steps = progressStepsRef.current.map(s => s.state === 'running' ? { ...s, state: 'done' as const } : s);
+        setTurns(t => [
+          ...t,
+          ...result.messages.map((text, i) => ({
+            role: 'buffr' as const,
+            text,
+            ...(i === 0 && steps.length > 0 ? { progressSteps: steps } : {}),
+          })),
+        ]);
+        setBusy(false);
+        if (result.step === 'done') setActiveFlow(null);
+      });
+      return;
+    }
+
     if (q === '/exit' || q === '/quit') {
       onExit().catch(err => { console.error(err); process.exit(1); });
       return;
@@ -154,10 +192,11 @@ function Chat({ session, onExit }: { session: ChatSession; onExit: () => Promise
         'Available commands:',
         '',
         '/research <topic>',
-        '  Market research — finds trending problems and product opportunities.',
+        '  Market research — predict the score first, then see buffr\'s read and the gap.',
         `  Connectors: ${connectors.research.join(', ')}`,
         '  Example: /research digital planners for students',
         '  Run /research with no topic to see trending suggestions.',
+        '  Type /cancel at any point during the loop to bail out without saving.',
         '',
         '/investing <ticker>',
         '  Analyze a stock or ETF across momentum, fundamentals, and sentiment.',
@@ -176,6 +215,9 @@ function Chat({ session, onExit }: { session: ChatSession; onExit: () => Promise
         `  Knowledge base: ${connectors.chatKnowledgeBase}`,
         `  Connectors: ${connectors.chat.join(', ')}`,
         '  Example: What did I learn about Shopify last week?',
+        '',
+        '/review',
+        '  Review decisions that are due — keep open, snooze, or resolve each one.',
         '',
         '/exit  or  /quit',
         '  Close the session.',
@@ -213,16 +255,13 @@ function Chat({ session, onExit }: { session: ChatSession; onExit: () => Promise
         );
         return;
       }
-      setTurns(t => [...t, { role: 'you', text: q }, { role: 'buffr', text: '' }]);
+      setTurns(t => [...t, { role: 'you', text: q }]);
       progressStepsRef.current = [];
       setProgressSteps([]);
       setBusy(true); setStatus('researching…'); setLiveTokens({ input: 0, output: 0 });
-      let capturedStats: TurnStats | undefined;
-      session.research(topic, {
+      const controller = createResearchFlow(session, topic, {
         onStatus: (msg) => setStatus(msg),
         onTokens: (d) => setLiveTokens(t => ({ input: t.input + d.input, output: t.output + d.output })),
-        onComplete: (s) => { capturedStats = s; },
-        onPartial: (text) => setTurns(t => { const c = [...t]; c[c.length - 1] = { role: 'buffr', text }; return c; }),
         onProgress: (event: ProgressEvent) => {
           if (event.type === 'engine-start') {
             updateProgressSteps(s => [...s, { id: '__engine__', label: event.label, kind: 'engine', state: 'running' }]);
@@ -244,18 +283,20 @@ function Chat({ session, onExit }: { session: ChatSession; onExit: () => Promise
               : step));
           }
         },
-      }).then(
-        answer => {
-          const finalSteps = progressStepsRef.current.map(s => s.state === 'running' ? { ...s, state: 'done' as const } : s);
-          setTurns(t => { const c = [...t]; c[c.length - 1] = { ...c[c.length - 1], text: c[c.length - 1].text + '\n\n' + answer, stats: capturedStats, progressSteps: finalSteps }; return c; });
-          setBusy(false);
-        },
-        err => {
-          const finalSteps = progressStepsRef.current.map(s => s.state === 'running' ? { ...s, state: 'failed' as const } : s);
-          setTurns(t => { const c = [...t]; c[c.length - 1] = { ...c[c.length - 1], text: c[c.length - 1].text + `\n\nerror: ${(err as Error).message}`, progressSteps: finalSteps }; return c; });
-          setBusy(false);
-        },
-      );
+      });
+      controller.start().then(result => {
+        const steps = progressStepsRef.current.map(s => s.state === 'running' ? { ...s, state: 'done' as const } : s);
+        setTurns(t => [
+          ...t,
+          ...result.messages.map((text, i) => ({
+            role: 'buffr' as const,
+            text,
+            ...(i === 0 && steps.length > 0 ? { progressSteps: steps } : {}),
+          })),
+        ]);
+        setBusy(false);
+        if (result.step === 'done') setActiveFlow(null); else setActiveFlow({ kind: 'research', controller });
+      });
       return;
     }
     if (q === '/eval investing') {
@@ -279,6 +320,17 @@ function Chat({ session, onExit }: { session: ChatSession; onExit: () => Promise
     if (q === '/eval') {
       setTurns(t => [...t, { role: 'you', text: q }]);
       setTurns(t => [...t, { role: 'buffr', text: 'Usage: /eval investing | /eval research' }]);
+      return;
+    }
+    if (q === '/review') {
+      setTurns(t => [...t, { role: 'you', text: q }]);
+      setBusy(true);
+      const controller = createReviewFlow(session);
+      controller.start().then(result => {
+        setTurns(t => [...t, ...result.messages.map(text => ({ role: 'buffr' as const, text }))]);
+        setBusy(false);
+        if (result.step !== 'done') setActiveFlow({ kind: 'review', controller });
+      });
       return;
     }
     setTurns(t => [...t, { role: 'you', text: q }]);
@@ -384,6 +436,7 @@ function Chat({ session, onExit }: { session: ChatSession; onExit: () => Promise
 }
 
 const session = await createChatSession();
+const initialDueCount = await session.dueReviewCount();
 const renderer = await createCliRenderer({ exitOnCtrlC: false });
 
 const forceExit = () => { setTimeout(() => process.exit(0), 1500).unref(); session.close().finally(() => process.exit(0)); };
@@ -394,5 +447,6 @@ createRoot(renderer).render(
   <Chat
     session={session}
     onExit={async () => { forceExit(); }}
+    initialDueCount={initialDueCount}
   />,
 );
