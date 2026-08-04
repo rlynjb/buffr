@@ -29,7 +29,9 @@ import type { AgentContext } from '@buffr/contracts';
 import { InvestingEngine } from '@buffr/engine-investing';
 import type { InvestingSource, InvestingOutput } from '@buffr/engine-investing';
 import { MarketResearchEngine } from '@buffr/engine-market-research';
-import type { MarketResearchSource, MarketResearchOutput, ProgressEvent } from '@buffr/engine-market-research';
+import type { MarketResearchSource, MarketResearchOutput, ProgressEvent, CollectedResearch, ResearchPrediction } from '@buffr/engine-market-research';
+import { PgJournalStore } from './pg-journal-store.js';
+import type { JournalEntry, Disposition } from '@buffr/kernel';
 import { MARKET_RESEARCH_SCORECARD } from '@buffr/domain-pack-market-research';
 import { DB_SOURCES } from './db-sources.js';
 
@@ -88,14 +90,38 @@ export type ConnectorStatus = {
   investing: string[];
 };
 
+export type ResearchCallbacks = {
+  onStatus?: (msg: string) => void;
+  onProgress?: (event: ProgressEvent) => void;
+};
+
+export type ResearchEvaluateCallbacks = ResearchCallbacks & {
+  onTokens?: (delta: { input: number; output: number }) => void;
+};
+
 export type ChatSession = {
   ask(question: string, opts?: AskOptions): Promise<string>;
   analyze(ticker: string, entityType: 'company' | 'etf', opts?: AskOptions): Promise<string>;
   evalInvesting(): Promise<string>;
-  research(topic: string, opts?: AskOptions): Promise<string>;
   evalResearch(): Promise<string>;
   suggestResearchTopics(): Promise<string>;
   connectorStatus(): ConnectorStatus;
+  researchCollect(topic: string, opts?: ResearchCallbacks): Promise<{ collected: CollectedResearch }>;
+  researchEvaluate(collected: CollectedResearch, prediction: ResearchPrediction, opts?: ResearchEvaluateCallbacks): Promise<{ output: MarketResearchOutput }>;
+  saveHypothesis(input: { topic: string; evidenceIds: string[] }): Promise<void>;
+  saveDecision(input: {
+    topic: string;
+    evidenceIds: string[];
+    stake: string;
+    resolutionCondition: string;
+    reviewAt: string;
+    prediction: ResearchPrediction;
+    assessment: { score: number; confidence: number };
+  }): Promise<void>;
+  dueReviewCount(): Promise<number>;
+  listDueReviews(): Promise<JournalEntry[]>;
+  snoozeReview(id: string, reviewAt: string): Promise<void>;
+  resolveReview(id: string, disposition: Disposition, note: string): Promise<void>;
   close(): Promise<void>;
 };
 
@@ -330,35 +356,6 @@ function formatAnalysis(output: InvestingOutput): string {
   return lines.join('\n');
 }
 
-function formatResearch(output: MarketResearchOutput): string {
-  const { summary } = output;
-  const confidence = Math.round(summary.confidence * 100);
-  const lines: string[] = [
-    `Market Research: ${summary.topic}`,
-    '',
-    `Score: ${summary.totalScore.toFixed(0)}/100 · Confidence: ${confidence}%`,
-    '',
-    summary.explanation,
-    '',
-    'Problems people face:',
-  ];
-
-  for (const problem of summary.keyProblems) {
-    lines.push(`• ${problem}`);
-  }
-
-  lines.push('', 'Product opportunities:');
-  for (const angle of summary.productAngles) {
-    lines.push(`• ${angle}`);
-  }
-
-  if (summary.warnings.length > 0) {
-    lines.push('', `Warnings: ${summary.warnings.join(', ')}`);
-  }
-
-  return lines.join('\n');
-}
-
 type ResearchEvalFixture = {
   description: string;
   findings: Parameters<Scorer['execute']>[0]['findings'];
@@ -410,6 +407,7 @@ export async function createChatSession(): Promise<ChatSession> {
   );
 
   const store = new PgVectorStore({ pool, appId: cfg.appId, dimension: embedder.dimension });
+  const journalStore = new PgJournalStore({ pool, appId: cfg.appId });
   const pipeline = createRetrievalPipeline({ embedder, store });
   const searchTool = createSearchKnowledgeBaseTool(pipeline, { minTopK: 4, minScore: 0.65 });
 
@@ -712,29 +710,89 @@ export async function createChatSession(): Promise<ChatSession> {
       );
       return formatEval(scorer, evalCtx, companyFixtures, etfFixtures);
     },
-    async research(topic: string, opts?: AskOptions): Promise<string> {
+    async researchCollect(topic: string, opts?: ResearchCallbacks): Promise<{ collected: CollectedResearch }> {
       currentOnStatus = opts?.onStatus;
-      currentOnTokens = opts?.onTokens;
-      currentInputTokens = 0;
-      currentOutputTokens = 0;
-      const startMs = Date.now();
       const agentCtx: AgentContext = {
         userId: cfg.appId,
         workspaceId: cfg.appId,
-        traceId: `research-${topic}-${Date.now()}`,
+        traceId: `research-collect-${topic}-${Date.now()}`,
         domain: 'market-research',
         now: new Date().toISOString(),
         permissions: [],
       };
-      const result = await researchEngine.run({ topic, conversationId, onStatus: opts?.onStatus, onPartial: opts?.onPartial, onProgress: opts?.onProgress }, agentCtx);
+      const result = await researchEngine.collect({ topic, conversationId, onStatus: opts?.onStatus, onProgress: opts?.onProgress }, agentCtx);
+      currentOnStatus = undefined;
+      return { collected: result.data };
+    },
+    async researchEvaluate(collected: CollectedResearch, prediction: ResearchPrediction, opts?: ResearchEvaluateCallbacks): Promise<{ output: MarketResearchOutput }> {
+      currentOnStatus = opts?.onStatus;
+      currentOnTokens = opts?.onTokens;
+      currentInputTokens = 0;
+      currentOutputTokens = 0;
+      const agentCtx: AgentContext = {
+        userId: cfg.appId,
+        workspaceId: cfg.appId,
+        traceId: `research-evaluate-${collected.topic}-${Date.now()}`,
+        domain: 'market-research',
+        now: new Date().toISOString(),
+        permissions: [],
+      };
+      const result = await researchEngine.evaluate(collected, prediction, { onStatus: opts?.onStatus, onProgress: opts?.onProgress }, agentCtx);
       currentOnStatus = undefined;
       currentOnTokens = undefined;
-      opts?.onComplete?.({
-        durationMs: Date.now() - startMs,
-        inputTokens: currentInputTokens,
-        outputTokens: currentOutputTokens,
-      });
-      return formatResearch(result.data);
+      return { output: result.data };
+    },
+    async saveHypothesis(input: { topic: string; evidenceIds: string[] }): Promise<void> {
+      const now = new Date().toISOString();
+      await journalStore.create({
+        kind: 'hypothesis',
+        userId: cfg.appId,
+        workspaceId: cfg.appId,
+        domain: 'market-research',
+        subjectType: 'research-topic',
+        subjectId: input.topic,
+        claim: input.topic,
+        evidenceIds: input.evidenceIds,
+      }, now);
+    },
+    async saveDecision(input: {
+      topic: string;
+      evidenceIds: string[];
+      stake: string;
+      resolutionCondition: string;
+      reviewAt: string;
+      prediction: ResearchPrediction;
+      assessment: { score: number; confidence: number };
+    }): Promise<void> {
+      const now = new Date().toISOString();
+      await journalStore.create({
+        kind: 'decision',
+        userId: cfg.appId,
+        workspaceId: cfg.appId,
+        domain: 'market-research',
+        subjectType: 'research-topic',
+        subjectId: input.topic,
+        claim: input.topic,
+        evidenceIds: input.evidenceIds,
+        stake: input.stake,
+        resolutionCondition: input.resolutionCondition,
+        reviewAt: input.reviewAt,
+        prediction: input.prediction,
+        assessment: input.assessment,
+      }, now);
+    },
+    async dueReviewCount(): Promise<number> {
+      const due = await journalStore.listDue(cfg.appId, cfg.appId, new Date().toISOString());
+      return due.length;
+    },
+    async listDueReviews(): Promise<JournalEntry[]> {
+      return journalStore.listDue(cfg.appId, cfg.appId, new Date().toISOString());
+    },
+    async snoozeReview(id: string, reviewAt: string): Promise<void> {
+      await journalStore.snooze(id, reviewAt);
+    },
+    async resolveReview(id: string, disposition: Disposition, note: string): Promise<void> {
+      await journalStore.resolve(id, disposition, note, new Date().toISOString());
     },
     async evalResearch(): Promise<string> {
       const scorer = new Scorer();
