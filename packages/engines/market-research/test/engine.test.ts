@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { MarketResearchEngine } from '../src/engine.js';
-import type { MarketResearchEngineOptions, MarketResearchInput } from '../src/types.js';
+import type { MarketResearchEngineOptions, MarketResearchCollectInput, ResearchPrediction } from '../src/types.js';
 import type { AgentContext, Evidence } from '@buffr/contracts';
 import type { DataConnector, ConnectorResult } from '@buffr/connectors';
 import type { ModelProvider, ModelRequest, ModelResponse, ConversationMemory, MemoryTurn } from '@buffr/kernel';
@@ -52,6 +52,8 @@ class StubModel implements ModelProvider {
             explanation: 'Test explanation.',
             keyLessons: ['Problem A', 'Problem B'],
             actionableNext: ['App idea A', 'App idea B'],
+            principle: 'Test principle.',
+            reflectionQuestion: 'Test reflection question?',
           },
         }],
       };
@@ -86,17 +88,77 @@ function makeEngine(findings: AnalysisFinding[], extra: Partial<MarketResearchEn
   });
 }
 
-describe('MarketResearchEngine', () => {
-  it('topic happy path: score > 0, keyProblems set, 4 findings', async () => {
+const PREDICTION: ResearchPrediction = { expectedScore: 60, expectedDimension: 'frequency', confidence: 0.5 };
+
+describe('MarketResearchEngine.collect()', () => {
+  it('gathers evidence and builds a digest', async () => {
     const engine = makeEngine(RESEARCH_FINDINGS);
-    const input: MarketResearchInput = { topic: 'shopify returns management' };
-    const result = await engine.run(input, ctx);
+    const input: MarketResearchCollectInput = { topic: 'shopify returns management' };
+    const result = await engine.collect(input, ctx);
+
+    assert.strictEqual(result.data.topic, 'shopify returns management');
+    assert.strictEqual(result.data.evidence.length, 2);
+    assert.strictEqual(result.data.digest.totalCount, 2);
+    assert.strictEqual(result.data.digest.sources.length, 1);
+    assert.strictEqual(result.data.digest.sources[0]?.count, 2);
+    assert.deepStrictEqual(result.data.digest.sources[0]?.titles, ['Trend data', 'Forum post']);
+  });
+});
+
+describe('MarketResearchEngine.collect() — safe digest', () => {
+  const FORBIDDEN_KEYS = ['summary', 'positives', 'negatives', 'unknowns', 'score', 'confidence', 'sentiment', 'relevance', 'findings', 'explanation'];
+
+  function walkKeys(value: unknown, found: Set<string>): void {
+    if (Array.isArray(value)) {
+      for (const item of value) walkKeys(item, found);
+    } else if (value !== null && typeof value === 'object') {
+      for (const [key, v] of Object.entries(value as Record<string, unknown>)) {
+        found.add(key);
+        walkKeys(v, found);
+      }
+    }
+  }
+
+  it('digest contains only count/source/titles — no analysis fields', async () => {
+    const engine = makeEngine(RESEARCH_FINDINGS);
+    const result = await engine.collect({ topic: 'shopify returns management' }, ctx);
+
+    const keys = new Set<string>();
+    walkKeys(result.data.digest, keys);
+
+    for (const forbidden of FORBIDDEN_KEYS) {
+      assert.ok(!keys.has(forbidden), `digest leaked analysis field: ${forbidden}`);
+    }
+    assert.deepStrictEqual([...keys].sort(), ['count', 'source', 'sources', 'titles', 'totalCount'].sort());
+  });
+
+  it('titles are plain strings', async () => {
+    const engine = makeEngine(RESEARCH_FINDINGS);
+    const result = await engine.collect({ topic: 'shopify returns management' }, ctx);
+    for (const source of result.data.digest.sources) {
+      for (const title of source.titles) {
+        assert.strictEqual(typeof title, 'string');
+      }
+    }
+  });
+});
+
+describe('MarketResearchEngine.evaluate()', () => {
+  it('topic happy path: score > 0, keyProblems set, 4 findings, comparison computed', async () => {
+    const engine = makeEngine(RESEARCH_FINDINGS);
+    const { data: collected } = await engine.collect({ topic: 'shopify returns management' }, ctx);
+    const result = await engine.evaluate(collected, PREDICTION, {}, ctx);
 
     assert.ok(result.data.summary.totalScore > 0, 'totalScore should be > 0');
     assert.strictEqual(result.data.summary.explanation, 'Test explanation.');
     assert.deepStrictEqual(result.data.summary.keyProblems, ['Problem A', 'Problem B']);
     assert.deepStrictEqual(result.data.summary.productAngles, ['App idea A', 'App idea B']);
+    assert.strictEqual(result.data.summary.principle, 'Test principle.');
+    assert.strictEqual(result.data.summary.reflectionQuestion, 'Test reflection question?');
     assert.strictEqual(result.data.detail.findings.length, 4);
+    assert.strictEqual(result.data.comparison.actualDimension, 'frequency');
+    assert.strictEqual(result.data.comparison.dimensionMatched, true);
+    assert.ok(Math.abs(result.data.comparison.scoreGap - (result.data.comparison.actualScore - 60)) < 0.001);
   });
 
   it('memory write: remember() called once with correct conversationId and explanation in answer', async () => {
@@ -114,8 +176,8 @@ describe('MarketResearchEngine', () => {
     };
 
     const engine = makeEngine(RESEARCH_FINDINGS, { memory: stubMemory });
-    const input: MarketResearchInput = { topic: 'etsy printables', conversationId: 'conv-1' };
-    await engine.run(input, ctx);
+    const { data: collected } = await engine.collect({ topic: 'etsy printables', conversationId: 'conv-1' }, ctx);
+    await engine.evaluate(collected, PREDICTION, {}, ctx);
 
     assert.strictEqual(rememberCalled, 1, 'remember should be called exactly once');
     assert.strictEqual(capturedTurn?.conversationId, 'conv-1');
@@ -123,5 +185,15 @@ describe('MarketResearchEngine', () => {
       typeof capturedTurn?.answer === 'string' && capturedTurn.answer.includes('Test explanation.'),
       `answer should contain 'Test explanation.', got: ${capturedTurn?.answer}`,
     );
+  });
+
+  it('dimension mismatch: comparison reflects a wrong guess', async () => {
+    const engine = makeEngine(RESEARCH_FINDINGS);
+    const { data: collected } = await engine.collect({ topic: 'shopify returns management' }, ctx);
+    const wrongPrediction: ResearchPrediction = { expectedScore: 90, expectedDimension: 'monetizability', confidence: 0.9 };
+    const result = await engine.evaluate(collected, wrongPrediction, {}, ctx);
+
+    assert.strictEqual(result.data.comparison.dimensionMatched, false);
+    assert.strictEqual(result.data.comparison.actualDimension, 'frequency');
   });
 });

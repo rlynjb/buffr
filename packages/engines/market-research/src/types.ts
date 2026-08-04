@@ -23,12 +23,58 @@ export type ProgressEvent =
   | { type: 'stage-start'; id: string; label: string; model?: string }
   | { type: 'stage-done';  id: string; detail: string };
 
-export type MarketResearchInput = {
+export type MarketResearchCollectInput = {
   topic: string;
   conversationId?: string;
   onStatus?: (msg: string) => void;
+  onProgress?: (event: ProgressEvent) => void;
+};
+
+export type MarketResearchEvaluateOptions = {
+  onStatus?: (msg: string) => void;
   onPartial?: (text: string) => void;
   onProgress?: (event: ProgressEvent) => void;
+};
+
+export type EvidenceDigestSource = {
+  source: string;
+  count: number;
+  titles: string[];
+};
+
+export type EvidenceDigest = {
+  totalCount: number;
+  sources: EvidenceDigestSource[];
+};
+
+/**
+ * Result of collect(). Contains only evidence + a safe digest — no
+ * interpretation. evaluate() assumes evidence.length > 0 (the caller checks
+ * digest.totalCount before prompting for a prediction and calling evaluate()).
+ */
+export type CollectedResearch = {
+  topic: string;
+  conversationId?: string;
+  evidence: Evidence[];
+  failed: Array<{ sourceId: string; reason: string }>;
+  digest: EvidenceDigest;
+  warnings: string[];
+};
+
+export type ResearchDimensionId = 'frequency' | 'trend-velocity' | 'specificity' | 'monetizability';
+
+export type ResearchPrediction = {
+  expectedScore: number;
+  expectedDimension: ResearchDimensionId;
+  confidence: number;
+};
+
+export type PredictionComparison = {
+  prediction: ResearchPrediction;
+  actualScore: number;
+  actualDimension: string;
+  scoreGap: number;
+  dimensionMatched: boolean;
 };
 
 export type MarketResearchOutput = {
@@ -40,6 +86,8 @@ export type MarketResearchOutput = {
     keyProblems: string[];
     productAngles: string[];
     warnings: string[];
+    principle: string;
+    reflectionQuestion: string;
   };
   detail: {
     findings: AnalysisFinding[];
@@ -47,4 +95,5 @@ export type MarketResearchOutput = {
     evidence: Evidence[];
     failed: Array<{ sourceId: string; reason: string }>;
   };
+  comparison: PredictionComparison;
 };

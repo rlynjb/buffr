@@ -1,14 +1,18 @@
 import { Collector, Analyzer, Scorer, Teacher } from '@buffr/capabilities';
-import type { Engine, AgentContext, AgentResult } from '@buffr/contracts';
+import type { AgentContext, AgentResult, Evidence } from '@buffr/contracts';
 import type { ConversationMemory } from '@buffr/kernel';
 import {
   MARKET_RESEARCH_DIMENSIONS,
   MARKET_RESEARCH_SCORECARD,
   MARKET_RESEARCH_PROMPTS,
 } from '@buffr/domain-pack-market-research';
-import type { MarketResearchInput, MarketResearchOutput, MarketResearchSource, MarketResearchEngineOptions } from './types.js';
+import type {
+  MarketResearchCollectInput, MarketResearchEvaluateOptions, MarketResearchOutput,
+  MarketResearchSource, MarketResearchEngineOptions, CollectedResearch, EvidenceDigest,
+  EvidenceDigestSource, ResearchPrediction, PredictionComparison,
+} from './types.js';
 
-export class MarketResearchEngine implements Engine<MarketResearchInput, MarketResearchOutput> {
+export class MarketResearchEngine {
   readonly id = 'market-research-engine';
   readonly version = '1.0.0';
 
@@ -43,103 +47,125 @@ export class MarketResearchEngine implements Engine<MarketResearchInput, MarketR
     return map[base] ?? connectorId;
   }
 
-  async run(input: MarketResearchInput, context: AgentContext): Promise<AgentResult<MarketResearchOutput>> {
+  /**
+   * Gathers evidence and returns a safe digest (count, source, titles only —
+   * no findings, scores, or synthesized text). Runs each source through the
+   * (unchanged) Collector separately so the digest can be grouped by source
+   * while keeping full cross-source parallelism.
+   */
+  async collect(input: MarketResearchCollectInput, context: AgentContext): Promise<AgentResult<CollectedResearch>> {
     const status = input.onStatus ?? (() => {});
-    const partial = input.onPartial ?? (() => {});
     const progress = input.onProgress;
 
     progress?.({ type: 'engine-start', label: 'Market Research Engine' });
 
-    // Step 1 — build collector sources
     const collectorSources = this.sources.map(s => ({
       connector: s.connector,
       params: s.paramsFor(input.topic),
       optional: s.optional ?? false,
     }));
 
-    // Step 2 — Collector
     const sourceNames = collectorSources.map(s => MarketResearchEngine.friendlyName(s.connector.id)).join(' · ');
     status(`fetching ${sourceNames}…`);
-    const collectorResult = await this.collector.execute({
-      sources: collectorSources,
-      onEvent: progress ? (e) => {
-        const label = MarketResearchEngine.friendlyName(e.sourceId);
-        if (e.type === 'start') {
-          progress({ type: 'connector-start', id: e.sourceId, label });
-        } else if (e.type === 'done') {
-          progress({ type: 'connector-done', id: e.sourceId, label, count: e.count });
-        } else {
-          progress({ type: 'connector-failed', id: e.sourceId, label, optional: e.optional });
-        }
-      } : undefined,
-    }, context);
-    const { evidence, failed } = collectorResult.data;
 
-    // Step 3 — short-circuit if no evidence
-    if (evidence.length === 0) {
-      return {
-        data: {
-          summary: {
-            topic: input.topic,
-            totalScore: 0,
-            confidence: 0,
-            explanation: 'No evidence could be collected.',
-            keyProblems: [],
-            productAngles: [],
-            warnings: collectorResult.warnings,
-          },
-          detail: { findings: [], metrics: [], evidence: [], failed },
-        },
-        confidence: 0,
-        evidence: [],
-        assumptions: [],
-        warnings: collectorResult.warnings,
-        traceId: context.traceId,
-      };
-    }
+    const allEvidence: Evidence[] = [];
+    const allFailed: Array<{ sourceId: string; reason: string }> = [];
+    const allWarnings: string[] = [];
+    const digestSources: EvidenceDigestSource[] = [];
 
-    // Step 4 — Analyzer
-    partial(`Collected ${evidence.length} result${evidence.length !== 1 ? 's' : ''} from ${sourceNames}\n\nAnalyzing…`);
+    await Promise.all(collectorSources.map(async (source) => {
+      const label = MarketResearchEngine.friendlyName(source.connector.id);
+      const result = await this.collector.execute({
+        sources: [source],
+        onEvent: progress ? (e) => {
+          if (e.type === 'start') {
+            progress({ type: 'connector-start', id: e.sourceId, label });
+          } else if (e.type === 'done') {
+            progress({ type: 'connector-done', id: e.sourceId, label, count: e.count });
+          } else {
+            progress({ type: 'connector-failed', id: e.sourceId, label, optional: e.optional });
+          }
+        } : undefined,
+      }, context);
+
+      const { evidence, failed } = result.data;
+      allEvidence.push(...evidence);
+      allFailed.push(...failed);
+      allWarnings.push(...result.warnings);
+      if (evidence.length > 0) {
+        digestSources.push({ source: label, count: evidence.length, titles: evidence.map(e => e.title ?? e.sourceId) });
+      }
+    }));
+
+    const digest: EvidenceDigest = { totalCount: allEvidence.length, sources: digestSources };
+
+    return {
+      data: {
+        topic: input.topic,
+        conversationId: input.conversationId,
+        evidence: allEvidence,
+        failed: allFailed,
+        digest,
+        warnings: allWarnings,
+      },
+      confidence: 1,
+      evidence: allEvidence,
+      assumptions: [],
+      warnings: allWarnings,
+      traceId: context.traceId,
+    };
+  }
+
+  /**
+   * Runs Analyzer -> Scorer -> Teacher and computes the prediction
+   * comparison in code (never asks the model to invent the gap). Assumes
+   * collected.evidence.length > 0 — the caller must check
+   * collected.digest.totalCount before calling this.
+   */
+  async evaluate(
+    collected: CollectedResearch,
+    prediction: ResearchPrediction,
+    opts: MarketResearchEvaluateOptions,
+    context: AgentContext,
+  ): Promise<AgentResult<MarketResearchOutput>> {
+    const partial = opts.onPartial ?? (() => {});
+    const status = opts.onStatus ?? (() => {});
+    const progress = opts.onProgress;
+    const { evidence, failed, topic, conversationId } = collected;
+
+    partial('Analyzing…');
     status(`analyzing ${evidence.length} results…`);
     progress?.({ type: 'stage-start', id: 'analyzer', label: 'Analyzer', model: this.modelId });
     const analyzerResult = await this.analyzer.execute(
       {
-        subjectDescription: input.topic,
+        subjectDescription: topic,
         evidence,
         dimensions: MARKET_RESEARCH_DIMENSIONS,
         instructions: [MARKET_RESEARCH_PROMPTS['analyzer-context']],
       },
       context,
     );
-
     progress?.({ type: 'stage-done', id: 'analyzer', detail: `${analyzerResult.data.findings.length} findings` });
 
-    // Step 5 — Scorer
     const findingsText = analyzerResult.data.findings.map(f =>
       `  ${f.dimensionId.padEnd(18)} ${String(Math.round(f.score)).padStart(3)}/100  ${f.summary}`
     ).join('\n');
-    partial(`Collected ${evidence.length} result${evidence.length !== 1 ? 's' : ''} from ${sourceNames}\n\nFindings:\n${findingsText}\n\nScoring…`);
+    partial(`Findings:\n${findingsText}\n\nScoring…`);
     status('scoring…');
     progress?.({ type: 'stage-start', id: 'scorer', label: 'Scorer' });
     const scorerResult = await this.scorer.execute(
-      {
-        findings: analyzerResult.data.findings,
-        scorecard: MARKET_RESEARCH_SCORECARD,
-        evidenceCount: evidence.length,
-      },
+      { findings: analyzerResult.data.findings, scorecard: MARKET_RESEARCH_SCORECARD, evidenceCount: evidence.length },
       context,
     );
-
     progress?.({ type: 'stage-done', id: 'scorer', detail: `${Math.round(scorerResult.data.totalScore)}/100` });
 
-    // Step 6 — Teacher
-    partial(`Collected ${evidence.length} result${evidence.length !== 1 ? 's' : ''} from ${sourceNames}\n\nFindings:\n${findingsText}\n\nScore: ${Math.round(scorerResult.data.totalScore)}/100 · Confidence: ${Math.round(scorerResult.data.confidence * 100)}%\n\nSummarizing…`);
+    partial(`Findings:\n${findingsText}\n\nScore: ${Math.round(scorerResult.data.totalScore)}/100 · Confidence: ${Math.round(scorerResult.data.confidence * 100)}%\n\nSummarizing…`);
     status('summarizing…');
     progress?.({ type: 'stage-start', id: 'teacher', label: 'Teacher', model: this.modelId });
-    const allWarnings = [...collectorResult.warnings, ...scorerResult.data.warnings];
+    const allWarnings = [...collected.warnings, ...scorerResult.data.warnings];
     const teacherResult = await this.teacher.execute(
       {
-        subjectDescription: input.topic,
+        subjectDescription: topic,
         findings: analyzerResult.data.findings,
         totalScore: scorerResult.data.totalScore,
         confidence: scorerResult.data.confidence,
@@ -149,22 +175,13 @@ export class MarketResearchEngine implements Engine<MarketResearchInput, MarketR
       },
       context,
     );
-
     progress?.({ type: 'stage-done', id: 'teacher', detail: 'done' });
 
-    // Step 7 — Memory write (opt-in)
-    if (this.memory && input.conversationId) {
-      const memoryAnswer =
-        `${teacherResult.data.explanation}\n\n` +
-        `Top problems: ${teacherResult.data.keyLessons.join('; ')}`;
-      await this.memory.remember({
-        conversationId: input.conversationId,
-        question: `Research market: ${input.topic}`,
-        answer: memoryAnswer,
-      });
+    if (this.memory && conversationId) {
+      const memoryAnswer = `${teacherResult.data.explanation}\n\nTop problems: ${teacherResult.data.keyLessons.join('; ')}`;
+      await this.memory.remember({ conversationId, question: `Research market: ${topic}`, answer: memoryAnswer });
     }
 
-    // Step 8 — assemble result, fall back to Analyzer findings if Teacher arrays are empty
     const keyProblems = teacherResult.data.keyLessons.length > 0
       ? teacherResult.data.keyLessons
       : analyzerResult.data.findings.flatMap(f => f.negatives).filter(Boolean).slice(0, 5);
@@ -176,16 +193,30 @@ export class MarketResearchEngine implements Engine<MarketResearchInput, MarketR
     const explanation = teacherResult.data.explanation.trim() ||
       analyzerResult.data.findings.map(f => `${f.dimensionId}: ${f.summary}`).join(' ');
 
+    const strongestFinding = analyzerResult.data.findings.reduce(
+      (max, f) => (f.score > max.score ? f : max),
+      analyzerResult.data.findings[0]!,
+    );
+    const comparison: PredictionComparison = {
+      prediction,
+      actualScore: scorerResult.data.totalScore,
+      actualDimension: strongestFinding.dimensionId,
+      scoreGap: scorerResult.data.totalScore - prediction.expectedScore,
+      dimensionMatched: strongestFinding.dimensionId === prediction.expectedDimension,
+    };
+
     return {
       data: {
         summary: {
-          topic: input.topic,
+          topic,
           totalScore: scorerResult.data.totalScore,
           confidence: scorerResult.data.confidence,
           explanation,
           keyProblems,
           productAngles,
           warnings: allWarnings,
+          principle: teacherResult.data.principle,
+          reflectionQuestion: teacherResult.data.reflectionQuestion,
         },
         detail: {
           findings: analyzerResult.data.findings,
@@ -193,6 +224,7 @@ export class MarketResearchEngine implements Engine<MarketResearchInput, MarketR
           evidence,
           failed,
         },
+        comparison,
       },
       confidence: scorerResult.data.confidence,
       evidence,
