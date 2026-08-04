@@ -17,21 +17,33 @@ export type TeacherOutput = {
   explanation: string;
   keyLessons: string[];
   actionableNext: string[];
+  principle: string;
+  reflectionQuestion: string;
 };
 
 const SUBMIT_EXPLANATION_TOOL: ModelTool = {
   name: 'submit_explanation',
-  description: 'Submit the plain-language explanation, key lessons, and actionable next steps.',
+  description: 'Submit the plain-language explanation, key lessons, actionable next steps, one transferable principle, and one reflection question.',
   inputSchema: {
     type: 'object',
-    required: ['explanation', 'keyLessons', 'actionableNext'],
+    required: ['explanation', 'keyLessons', 'actionableNext', 'principle', 'reflectionQuestion'],
     properties: {
       explanation: { type: 'string', description: '2–4 paragraph plain-language summary' },
       keyLessons: { type: 'array', items: { type: 'string' }, description: '3–5 bullet takeaways' },
       actionableNext: { type: 'array', items: { type: 'string' }, description: 'concrete next steps' },
+      principle: { type: 'string', description: 'one transferable, general principle this result illustrates — something the user could apply to a different subject' },
+      reflectionQuestion: { type: 'string', description: 'one question that would help the user decide whether this is worth validating further' },
     },
   },
 };
+
+function fallbackPrinciple(findings: AnalysisFinding[]): string {
+  if (findings.length === 0) return 'No dimension stood out clearly — treat this result as low-signal.';
+  const strongest = findings.reduce((max, f) => (f.score > max.score ? f : max), findings[0]!);
+  return `${strongest.dimensionId} was the strongest signal (${Math.round(strongest.score)}/100) — ${strongest.summary}`;
+}
+
+const FALLBACK_REFLECTION_QUESTION = 'What additional evidence would make this worth validating?';
 
 export class Teacher implements Capability<TeacherInput, TeacherOutput> {
   readonly name = 'teacher';
@@ -72,6 +84,8 @@ Produce:
 - explanation: 2–4 paragraphs summarising what this score means for the subject and why
 - keyLessons: list the specific problems and frustrations found in the evidence (3–5 items)
 - actionableNext: concrete product or solution ideas that address those problems (3–5 items)
+- principle: one transferable, general principle this result illustrates
+- reflectionQuestion: one question that would help decide whether this is worth validating further
 
 Call submit_explanation now.`;
 
@@ -95,10 +109,19 @@ Call submit_explanation now.`;
 
     const latencyMs = Math.round(performance.now() - start);
     const args = captured.args ?? {};
+    const principle = typeof args.principle === 'string' && args.principle.trim().length > 0
+      ? args.principle
+      : fallbackPrinciple(input.findings);
+    const reflectionQuestion = typeof args.reflectionQuestion === 'string' && args.reflectionQuestion.trim().length > 0
+      ? args.reflectionQuestion
+      : FALLBACK_REFLECTION_QUESTION;
+
     const output: TeacherOutput = {
       explanation: (args.explanation as string) ?? '',
       keyLessons: (args.keyLessons as string[]) ?? [],
       actionableNext: (args.actionableNext as string[]) ?? [],
+      principle,
+      reflectionQuestion,
     };
 
     return {

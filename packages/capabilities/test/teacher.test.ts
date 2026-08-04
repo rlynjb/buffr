@@ -101,3 +101,51 @@ describe('Teacher', () => {
     assert.ok(typeof result.latencyMs === 'number' && result.latencyMs >= 0);
   });
 });
+
+describe('Teacher — principle and reflection question', () => {
+  it('falls back to a derived principle and canned reflection question when the model omits them', async () => {
+    const teacher = new Teacher(new TeacherStubModel());
+    const result = await teacher.execute(
+      { subjectDescription: 'ACME Corp', findings: sampleFindings, totalScore: 72, confidence: 0.8, warnings: [] },
+      ctx,
+    );
+    assert.ok(result.data.principle.length > 0);
+    assert.ok(
+      result.data.principle.includes('profitability'),
+      `expected fallback principle to reference the strongest dimension, got: ${result.data.principle}`,
+    );
+    assert.strictEqual(result.data.reflectionQuestion, 'What additional evidence would make this worth validating?');
+  });
+
+  it('uses the model-supplied principle and reflection question when present', async () => {
+    class ModelWithPrinciple implements ModelProvider {
+      readonly id = 'teacher-stub-with-principle';
+      private callCount = 0;
+      async complete(_req: ModelRequest): Promise<ModelResponse> {
+        this.callCount++;
+        if (this.callCount === 1) {
+          return {
+            content: [{
+              type: 'tool_use',
+              id: 'call_1',
+              name: 'submit_explanation',
+              input: {
+                ...prebuiltExplanation,
+                principle: 'Strong margins compound when capex is strategic, not defensive.',
+                reflectionQuestion: 'Would this margin hold if capex growth slowed?',
+              },
+            }],
+          };
+        }
+        return { content: [{ type: 'text', text: 'done' }] };
+      }
+    }
+    const teacher = new Teacher(new ModelWithPrinciple());
+    const result = await teacher.execute(
+      { subjectDescription: 'ACME Corp', findings: sampleFindings, totalScore: 72, confidence: 0.8, warnings: [] },
+      ctx,
+    );
+    assert.strictEqual(result.data.principle, 'Strong margins compound when capex is strategic, not defensive.');
+    assert.strictEqual(result.data.reflectionQuestion, 'Would this margin hold if capex growth slowed?');
+  });
+});
