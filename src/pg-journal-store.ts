@@ -101,16 +101,16 @@ export class PgJournalStore implements JournalStore {
 
   async snooze(id: string, reviewAt: string): Promise<JournalEntry> {
     const { rows } = await this.pool.query(
-      `update agents.decisions set status = 'open', review_at = $2 where id = $1 returning *`,
-      [id, reviewAt],
+      `update agents.decisions set status = 'open', review_at = $3 where id = $1 and app_id = $2 returning *`,
+      [id, this.appId, reviewAt],
     );
     return rowToEntry(rows[0]);
   }
 
   async resolve(id: string, disposition: Disposition, note: string, now: string): Promise<JournalEntry> {
     const { rows } = await this.pool.query(
-      `update agents.decisions set status = 'resolved', disposition = $2, note = $3, resolved_at = $4 where id = $1 returning *`,
-      [id, disposition, note, now],
+      `update agents.decisions set status = 'resolved', disposition = $3, note = $4, resolved_at = $5 where id = $1 and app_id = $2 returning *`,
+      [id, this.appId, disposition, note, now],
     );
     return rowToEntry(rows[0]);
   }
