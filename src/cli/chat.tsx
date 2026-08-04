@@ -4,7 +4,7 @@ import { createCliRenderer, TextAttributes } from '@opentui/core';
 import { createRoot, useKeyboard } from '@opentui/react';
 import { createChatSession, detectEntityType, type ChatSession, type TurnStats, type ProgressEvent } from '../session.js';
 
-type Turn = { role: 'you' | 'buffr'; text: string; stats?: TurnStats; progressSteps?: ProgressStep[] };
+type Turn = { role: 'you' | 'buffr'; text: string; stats?: TurnStats; progressSteps?: ProgressStep[]; helpLines?: string[] };
 
 type ProgressStep = {
   id: string;
@@ -25,6 +25,21 @@ function formatStats(s: TurnStats): string {
     : '';
   const pv = s.promptVersion ? ` · prompt ${s.promptVersion}` : '';
   return `${time}${tok}${pv}`;
+}
+
+const HELP_LABEL_RE = /^( {2})(Connectors|Example|Knowledge base):(.*)$/;
+const HELP_COMMAND_RE = /^(\/|<)/;
+
+function HelpLine({ line }: { line: string }) {
+  if (HELP_COMMAND_RE.test(line)) return <text fg="#888888" marginLeft={2}>{line}</text>;
+  const m = HELP_LABEL_RE.exec(line);
+  if (!m) return <text fg="#E8E8E8" marginLeft={2}>{line || ' '}</text>;
+  const [, indent, label, rest] = m;
+  return (
+    <text fg="#E8E8E8" marginLeft={2}>
+      {indent}<span fg="#888888">{label}:</span>{rest}
+    </text>
+  );
 }
 
 const FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
@@ -135,7 +150,7 @@ function Chat({ session, onExit }: { session: ChatSession; onExit: () => Promise
     }
     if (q === '/help') {
       const connectors = session.connectorStatus();
-      setTurns(t => [...t, { role: 'you', text: q }, { role: 'buffr', text: [
+      const helpLines = [
         'Available commands:',
         '',
         '/research <topic>',
@@ -164,8 +179,8 @@ function Chat({ session, onExit }: { session: ChatSession; onExit: () => Promise
         '',
         '/exit  or  /quit',
         '  Close the session.',
-        '',
-      ].join('\n') }]);
+      ];
+      setTurns(t => [...t, { role: 'you', text: q }, { role: 'buffr', text: '', helpLines }]);
       return;
     }
     if (q.startsWith('/investing ')) {
@@ -327,7 +342,11 @@ function Chat({ session, onExit }: { session: ChatSession; onExit: () => Promise
                 {t.progressSteps && t.progressSteps.length > 0 && (
                   <StepList steps={t.progressSteps} />
                 )}
-                <text fg="#E8E8E8" marginLeft={2}>{t.text}</text>
+                {t.helpLines ? (
+                  t.helpLines.map((line, li) => <HelpLine key={li} line={line} />)
+                ) : (
+                  <text fg="#E8E8E8" marginLeft={2}>{t.text}</text>
+                )}
                 {t.stats && (
                   <text fg="#555555" marginLeft={2}>{formatStats(t.stats)}</text>
                 )}
