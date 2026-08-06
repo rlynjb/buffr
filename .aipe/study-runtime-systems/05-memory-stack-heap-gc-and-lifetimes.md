@@ -96,19 +96,35 @@ return {
 };
 ```
 
-Everything those closures reference stays reachable for the session's life. This is a *fixed* footprint — it doesn't grow per turn. The `profile` string (loaded once at `src/session.ts:47`) is the only sizeable captured value, and it's bounded by the profile document. Good: building once and capturing is exactly why turns are cheap. The memory cost is paid once, up front.
+Everything those closures reference stays reachable for the session's life. This is a *fixed* footprint — it doesn't grow per turn. The `profile` string (loaded once) is the only sizeable captured value, and it's bounded by the profile document. Good: building once and capturing is exactly why turns are cheap. The memory cost is paid once, up front. The session's own closure now also captures a `journalStore` (`PgJournalStore`, `src/session.ts:410`) — same fixed-footprint shape, one more reference, no new lifetime story.
 
-**`turns[]` — the one structure that grows without bound.** Every turn appends two entries (the user line, the buffr line) and never removes any (`src/cli/chat.tsx:25,29`):
+**A second instance of the same closure-as-state pattern, at a shorter lifespan.** `createResearchFlow(session, topic, callbacks)` and `createReviewFlow(session)` (`src/cli/research-flow.ts`, `src/cli/review-flow.ts`) are the same "function returns functions that close over mutable locals" shape as `createChatSession` — just scoped to one multi-step exchange instead of the whole process:
 
 ```ts
-// src/cli/chat.tsx:11, 25, 29 — append-only, never trimmed
-const [turns, setTurns] = useState<Turn[]>([]);
-// ...
-setTurns((t) => [...t, { role: 'you', text: q }]);      // grows
-setTurns((t) => [...t, { role: 'buffr', text: answer }]); // grows
+// src/cli/research-flow.ts:73-80 — a shorter-lived sibling of the session closure
+export function createResearchFlow(session, topic, callbacks): ResearchFlow {
+  let step: ResearchFlowStep = 'prediction';   // mutated across every submit()
+  let collected: CollectedResearch | null = null;
+  let output: MarketResearchOutput | null = null;
+  let prediction: ResearchPrediction | null = null;
+  // ...
+  return { async start() { ... }, async submit(input) { ... } };  // both close over the lets above
+}
 ```
 
-For a personal single-device agent this is fine — a human types maybe dozens of turns before quitting, each a few hundred bytes, and `/exit` frees the whole array. But it *is* an unbounded accumulation: a session left running for days, or one fed programmatically, would grow `turns[]` linearly forever. There's no cap, no windowing, no virtualization. Honest verdict: right call for the use case, and the first thing you'd change if the session ran unattended. (Note: this is *display* history only — it does **not** feed the model. The agent treats each question independently per `src/session.ts:24-27`; conversational recall rides retrieval, not `turns[]`.)
+Same reachability story as the session closure: `step`/`collected`/`prediction`/etc. get heap-promoted the moment `start`/`submit` capture them, and they stay alive exactly as long as something holds the returned `{ start, submit }` object — here, `activeFlow.controller` in the React component's state (`chat.tsx`). The lifetime is shorter and the root is different (component state, not a module-level `session` const), but the mechanism — locals surviving their enclosing function call because a returned closure references them — is identical. Worth naming once and recognizing twice: this repo now has two closures playing the same "build state, hand back functions that mutate it across awaits" role at two different altitudes (whole-process vs. one flow).
+
+**`turns[]` — the one structure that grows without bound, and it grows a little faster now.** Every turn appends at least two entries (the user line, the buffr line) and never removes any (`setTurns(t => [...t, ...])`, throughout `handleSubmit` in `src/cli/chat.tsx`):
+
+```ts
+// src/cli/chat.tsx — append-only, never trimmed
+const [turns, setTurns] = useState<Turn[]>([]);
+// ...
+setTurns(t => [...t, { role: 'you', text: q }]);      // grows
+setTurns(t => [...t, { role: 'buffr', text: answer }]); // grows
+```
+
+For a personal single-device agent this is fine — a human types maybe dozens of turns before quitting, each a few hundred bytes, and `/exit` frees the whole array. But it *is* an unbounded accumulation: a session left running for days, or one fed programmatically, would grow `turns[]` linearly forever. There's no cap, no windowing, no virtualization. Honest verdict: right call for the use case, and the first thing you'd change if the session ran unattended. Two things are new since the last pass: entries can now carry a `progressSteps` array (the `/research` progress panel's step list gets attached to the first message of a result — `chat.tsx`'s `Turn` type grew a `progressSteps?: ProgressStep[]` field), so a research-heavy session accumulates somewhat more per turn than a plain-chat one; and the `/research`/`/review` flows themselves add extra turns per exchange (each `submit()` step is its own `you`/`buffr` pair) rather than one pair per user question. Neither changes the verdict — still unbounded, still fine at human scale — but both make the growth curve steeper than it was. (Note: this is still *display* history only — it does **not** feed the model. The agent treats each question independently; conversational recall rides retrieval, not `turns[]`.)
 
 ```
   turns[] growth — execution trace over a session
@@ -123,21 +139,22 @@ For a personal single-device agent this is fine — a human types maybe dozens o
 
 **Per-query garbage — collected almost immediately.** Each `search` builds a `rows[]` from Postgres, maps it to `hits[]` with reshaped `meta` (`src/pg-vector-store.ts:80-85`), and serializes vectors to text literals (`toVectorLiteral`, `src/pg-vector-store.ts:15-17`). A query embedding is a 768-element `number[]` — roughly 6KB as floats, plus its string literal form. All of it becomes unreachable when `search` returns, so V8's young-generation collector (the cheap, frequent "scavenge") reclaims it fast. This is the dominant allocation pattern in the hot path and it's exactly what generational GC is built for: lots of short-lived objects, swept cheaply.
 
-**The stack — call depth is shallow.** The deepest synchronous chain here is a handful of frames (`onSubmit` → `ask` → `persistMessage`). No recursion in the repo's own code, so no stack-overflow risk. Async chains don't grow the stack — each `await` unwinds the current frame and schedules a continuation, so even a long turn never deepens the call stack. (Contrast your reincodes DSA work: `bfs_traversal` and the recursive BST `delete` *do* build real stack depth — that's the place stack lifetime matters; here it doesn't.)
+**The stack — call depth is shallow.** The deepest synchronous chain here is a handful of frames (`handleSubmit` → `ask` → `persistMessage`, or `handleSubmit` → `controller.submit` → a journal-store call for the two flows). No recursion in the repo's own code, so no stack-overflow risk. Async chains don't grow the stack — each `await` unwinds the current frame and schedules a continuation, so even a long turn never deepens the call stack. (Contrast your reincodes DSA work: `bfs_traversal` and the recursive BST `delete` *do* build real stack depth — that's the place stack lifetime matters; here it doesn't.)
 
 ### Move 2 variant — the load-bearing skeleton of "what stays alive"
 
-The kernel of the repo's memory behavior — three reachability roots:
+The kernel of the repo's memory behavior — four reachability roots (a new one since the last pass):
 
-1. **The session closure** (root: the `session` const in `chat.tsx:62`). *Drop the reference* (e.g. `session = null` after `close`) and the pool, agent, and profile become collectable. This is the intended long-lived footprint.
-2. **`turns[]`** (root: the React component's state, held by the render tree). *This is the only growing root.* What breaks if you forget it grows: a never-exiting session climbs in memory forever.
-3. **Per-turn buffers** (no lasting root). *These have no root after their function returns* — which is exactly why they're collected promptly. The absence of a root is the feature.
+1. **The session closure** (root: the `session` const at `src/cli/chat.tsx:461`). *Drop the reference* (e.g. `session = null` after `close`) and the pool, agent, journal store, and profile become collectable. This is the intended long-lived footprint.
+2. **`turns[]`** (root: the React component's state, held by the render tree). *This is the only growing root that lives for the whole session.* What breaks if you forget it grows: a never-exiting session climbs in memory forever.
+3. **A flow closure** (root: `activeFlow.controller`, also React component state — new since the last pass). *This one's transient by design*: it's rooted only while `activeFlow !== null`, and `setActiveFlow(null)` (on `/cancel` or `result.step === 'done'`) drops the reference, making `step`/`collected`/`prediction`/etc. collectable. Unlike `turns[]`, this root doesn't accumulate — it's created and dropped once per `/research` or `/review` invocation.
+4. **Per-turn buffers** (no lasting root). *These have no root after their function returns* — which is exactly why they're collected promptly. The absence of a root is the feature.
 
 Optional hardening, not present: a max-length cap on `turns[]`, or message virtualization. Not needed at human-session scale; named so you know where it would go.
 
 ### Move 3 — the principle
 
-In a GC'd runtime, "memory management" reduces to **reachability**: an object lives exactly as long as a root can reach it, and dies when it can't. So you don't hunt for `free()` calls — you hunt for *roots that grow*. Here there's exactly one (`turns[]`), and it's bounded in practice by a human session. Everything else is either a fixed-size closure (paid once) or short-lived garbage (swept cheaply by the young generation). Find the growing roots and you've found every memory problem a managed runtime can have.
+In a GC'd runtime, "memory management" reduces to **reachability**: an object lives exactly as long as a root can reach it, and dies when it can't. So you don't hunt for `free()` calls — you hunt for *roots that grow*. Here there's exactly one (`turns[]`), and it's bounded in practice by a human session. Everything else is either a fixed-size closure (paid once, whether it lives for the whole process like the session or for one flow like `createResearchFlow`), a transient closure dropped cleanly at the end of its scope (the flow controllers), or short-lived garbage (swept cheaply by the young generation). Find the growing roots and you've found every memory problem a managed runtime can have.
 
 ---
 
@@ -182,23 +199,24 @@ The closure-as-long-lived-state pattern is the same one behind `useState`, behin
 
 **Q: "Where does this program accumulate memory, and what frees it?"**
 
-> One structure grows: `turns[]`, the chat history, appends two entries per turn and is only freed when the user `/exit`s. Everything else is either a fixed-size closure built once in `createChatSession` — the pool, agent, profile, captured and held for the session — or short-lived per-query garbage (the row buffers, the 768-float vectors) that goes unreachable when the function returns and gets swept by V8's young generation. There's no manual freeing; it's all reachability. The honest gap: `turns[]` is unbounded, fine for a human session, wrong for an unattended one.
+> One structure grows for the life of the process: `turns[]`, the chat history, appends per turn and is only freed when the process exits. Everything else is either a fixed-size closure built once — `createChatSession`'s pool, agent, journal store, profile — or a transient closure scoped to one `/research`/`/review` invocation (`createResearchFlow`/`createReviewFlow`, rooted only while `activeFlow` is set, dropped cleanly when the flow finishes), or short-lived per-query garbage that goes unreachable when the function returns and gets swept by the young generation. There's no manual freeing; it's all reachability. The honest gap: `turns[]` is unbounded, fine for a human session, wrong for an unattended one — and it grows a bit faster now that flow steps and progress-panel data attach to some entries.
 
 ```
   the answer in one sketch — find the growing root
 
-  fixed:   session closure (pool, agent, profile)  ── paid once
-  growing: turns[] ── +2/turn, freed at /exit       ── the one to watch
-  garbage: rows[], hits[], vectors ── GC'd per query ── young-gen sweep
+  fixed:     session closure (pool, agent, journal, profile)  ── paid once
+  growing:   turns[] ── +2/turn (more with flows) ── freed at exit
+  transient: flow closure (step, collected, prediction) ── dropped per flow
+  garbage:   rows[], hits[], vectors ── GC'd per query ── young-gen sweep
 ```
 
-**Anchor:** "The only growing root is `turns[]` at `src/cli/chat.tsx:11`; the session closure at `src/session.ts:39-57` is fixed and captured once — that's the warm-pool win."
+**Anchor:** "The only growing root is `turns[]`, held by the chat component's state; the session closure (`src/session.ts:394-882`, built once in `createChatSession`) and the flow closures (`createResearchFlow`/`createReviewFlow`) are both fixed-or-transient — captured once, never accumulating. `turns[]` is still the one to watch."
 
 ---
 
 ## See also
 
 - `01-runtime-map.md` — the resources the closure captures
-- `02-processes-threads-and-tasks.md` — why the closure is built once per process
+- `02-processes-threads-and-tasks.md` — why the session closure is built once per process, and the flow closures once per `/research`/`/review` invocation
 - `04-shared-state-races-and-synchronization.md` — the immutable updates that keep `turns[]` safe
 - `07-backpressure-bounded-work-and-cancellation.md` — where a `turns[]` cap would live

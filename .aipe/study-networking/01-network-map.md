@@ -1,36 +1,43 @@
 # 01 · Network Map
 
-> The on-the-wire path (the two outbound clients) — Project-specific
+> The on-the-wire path (three boundary shapes, one of them a fan-out) — Project-specific
 > · Industry standard: *system network topology / dataflow map*
 
 ## Zoom out, then zoom in
 
 Before any protocol detail, here's the whole forest. buffr-laptop is a single
-Node process that talks to exactly two things: a database and a model server.
-There is no third hop, no fan-out, no inbound traffic. The map *is* the
-architecture.
+Node process that talks to three kinds of thing: a database, a local model
+server, and — only while `/research` or `/investing` runs — a concurrent
+fan-out to up to six real internet APIs. There is still no inbound traffic.
+The map *is* the architecture.
 
 ```
   Zoom out — where the network boundaries live
 
-  ┌─ Process layer ─────────────────────────────────────────────┐
-  │  one Node ESM process (npm run chat)                         │
-  │  OpenTUI ── session.ask() ── RagQueryAgent                   │
-  └───────┬──────────────────┬──────────────────────────────────┘
-          │ ★ BOUNDARY 1 ★   │ ★ BOUNDARY 2 ★   ★ BOUNDARY 3 ★
-          │ pg-wire/:5432    │ HTTP/:11434      HTTPS/internet
-          ▼                  ▼                      ▼
-  ┌─ Storage ────────┐ ┌─ Provider ────────┐ ┌─ Cloud APIs ────────┐
-  │ Postgres+pgvector│ │ Ollama (gemma2)   │ │ Brave / Tavily /    │
-  └──────────────────┘ └───────────────────┘ │ Google Custom Search│
-                                              └─────────────────────┘
-                                              (optional; key-present activates)
+  ┌─ Process layer ───────────────────────────────────────────────────┐
+  │  one Node ESM process (npm run chat)                               │
+  │  OpenTUI ── session.ask() / researchCollect() ── RagQueryAgent     │
+  └───────┬──────────────────┬──────────────────────┬─────────────────┘
+          │ ★ BOUNDARY 1 ★   │ ★ BOUNDARY 2 ★        │ ★ BOUNDARY 3 ★
+          │ pg-wire/:5432    │ HTTP/:11434           │ HTTPS/internet (× up to 6)
+          ▼                  ▼                       ▼
+  ┌─ Storage ────────┐ ┌─ Provider ────────┐ ┌─ External APIs ──────────────┐
+  │ Postgres+pgvector│ │ Ollama (gemma2)   │ │ Reddit · RSS feed (always on)│
+  └──────────────────┘ └───────────────────┘ │ Brave/Tavily/Google/Trends   │
+                                              │ (optional; key-present       │
+                                              │  activates Brave/Tavily/     │
+                                              │  Google — Reddit/RSS/Trends  │
+                                              │  need no key)                │
+                                              └───────────────────────────────┘
 ```
 
 Zoom in: a "network map" is just the answer to *which sockets open, in which
-direction, carrying what.* For buffr there are two, both **outbound** (buffr is
-always the client, never the server). The whole rest of this guide is these two
-arrows examined under different lights.
+direction, carrying what.* For buffr there are three boundary **shapes**, all
+**outbound** (buffr is always the client, never the server): one warm database
+pool, one fixed pair of loopback HTTP calls, and — new since the last pass — a
+concurrent fan-out to real internet hosts that only fires while `/research` or
+`/investing` is running. The whole rest of this guide is these arrows examined
+under different lights.
 
 ## Structure pass
 
@@ -42,7 +49,7 @@ the Process band is in-memory function calls.
 that one question constant:
 
 ```
-  axis = "who opens the socket?"  — traced across both boundaries
+  axis = "who opens the socket?"  — traced across all three boundaries
 
   ┌─ Process ──┐  boundary 1  ┌─ Storage ──┐
   │ buffr      │ ════════════►│ Postgres   │   buffr dials out
@@ -52,20 +59,33 @@ that one question constant:
   │ buffr      │ ════════════►│ Ollama     │   buffr dials out
   │ (client)   │  HTTP POST   │ (listens)  │   → buffr initiates
   └────────────┘              └────────────┘
+  ┌─ Process ──┐  boundary 3  ┌─ External ─┐
+  │ buffr      │ ════════════►│ Reddit,    │   buffr dials out, N at once
+  │ (client)   │  HTTPS × N   │ Google, …  │   → buffr initiates every fetch
+  └────────────┘  (parallel)  └────────────┘
 
-  the answer never flips: buffr is the client on BOTH boundaries.
+  the answer never flips: buffr is the client on ALL THREE boundaries.
   nothing ever dials IN to buffr → no inbound server.
 ```
 
-**Seams.** Two load-bearing seams, both where the axis "who owns the bytes"
+**Seams.** Three load-bearing seams, each where the axis "who owns the bytes"
 flips from buffr's heap to a wire format:
 
 - **Seam 1 — the pg-wire boundary.** Inside the process, a chunk is a JS object.
   Across the seam it's libpq protocol frames over TCP. The contract: SQL text +
   bound parameters out, result rows back. Owned by the connection pool (`pg.Pool`).
-- **Seam 2 — the HTTP boundary.** Inside the process, a prompt is a string.
-  Across the seam it's a JSON body in an HTTP/1.1 POST. The contract: `{model,
-  messages}` out, `{message}` back. Owned by aptkit's transport, not buffr.
+- **Seam 2 — the HTTP boundary (loopback).** Inside the process, a prompt is a
+  string. Across the seam it's a JSON body in an HTTP/1.1 POST. The contract:
+  `{model, messages}` out, `{message}` back. Owned by aptkit's transport, not
+  buffr.
+- **Seam 3 — the connector boundary (real internet).** Inside the process, a
+  query is `{ query, limit, subreddits }` or similar. Across the seam it's a
+  connector-specific HTTPS request — a Reddit `search.json` GET, a Google
+  Custom Search GET, a Tavily POST, an HTML page scrape for Amazon. The
+  contract is `DataConnector<P, D>.fetch(params, opts) → ConnectorResult<D>`
+  (`packages/connectors/src/contracts.ts:3-5`) — and unlike seam 2, buffr's
+  **own** `@buffr/connectors` package owns every `fetch()` call on this seam,
+  not a third-party library.
 
 ## How it works
 
@@ -73,29 +93,33 @@ flips from buffr's heap to a wire format:
 
 You already know the shape: a `fetch()` from a React component has a loading,
 success, and error state, and the network call is the only part that leaves your
-process. buffr is that, twice — once to a database (over a binary protocol) and
-once to a model server (over HTTP). The "map" is just both calls drawn at once,
+process. buffr is that, but the third arm is now a **fan-out** — a single
+`Promise.all` that fires several `fetch()`s at once instead of one, the same
+way `Promise.all([fetch(a), fetch(b), fetch(c)])` looks in any frontend
+data-fetching code you've written. The "map" is all three arms drawn at once,
 with the in-process orchestration that fires them in the middle.
 
 ```
-  Pattern — one process, three outbound clients (a "client tee")
+  Pattern — one process, three outbound arms (the third is a fan-out)
 
-                    ┌──────────────────┐
-        question ──►│  session.ask()   │
-                    └───┬──────────┬────────────────┐
-            pg-wire     │          │     HTTP        │ HTTPS
-        ┌───────────────┘          └──────────┐      └──────────────────┐
-        ▼                                      ▼                         ▼
-   [ Postgres ]                          [ Ollama ]              [ Brave/Tavily/Google ]
-   retrieval rows, trace writes,    generation + embedding       web search results
-   profile, memory                  (chat + embed endpoints)     (optional, key-gated)
+                    ┌──────────────────────────┐
+        question ──►│  session.ask() /          │
+                    │  MarketResearchEngine     │
+                    └───┬──────────┬─────────────┴──────────────────┐
+            pg-wire     │          │ HTTP                            │ HTTPS × N (Promise.all)
+        ┌───────────────┘          └──────────┐      ┌───────────────┴───────────────┐
+        ▼                                      ▼      ▼        ▼        ▼        ▼   ▼
+   [ Postgres ]                          [ Ollama ] [Reddit][Google][Brave][Tavily][RSS][Trends]
+   retrieval rows, trace writes,    generation + embedding    all fired concurrently,
+   profile, memory, decisions       (chat + embed endpoints)  each wrapped in try/catch
+                                                               (Collector.execute)
 ```
 
 ### Move 2 — the walkthrough
 
 **The fan-out point is `session.ask()`.** One user turn triggers *both*
 outbound paths in sequence. Here's the real code that tees the two clients
-(`src/session.ts:60-71`):
+(`src/session.ts:674-690`):
 
 ```ts
 async ask(question: string): Promise<string> {
@@ -118,7 +142,7 @@ trajectory (boundary 1). `memory.remember` embeds again (boundary 2) and upserts
 
 **Every boundary-1 hop reuses the same warm pool.** None of these calls opens a
 new TCP connection. They all `pool.connect()` or `pool.query()` against the pool
-created once at `src/session.ts:39`. That's the difference between this and the
+created once at `src/session.ts:399`. That's the difference between this and the
 old one-shot `ask` CLI, which opened and closed a connection per invocation. Here
 is the layers-and-hops view of a single turn:
 
@@ -143,18 +167,50 @@ is the layers-and-hops view of a single turn:
 The numbers are the rough order within a turn; the point is that one keystroke
 in the OpenTUI input drives roughly seven wire crossings, split across two protocols.
 
-### Move 3 — the principle
+**`/research` and `/investing` add a third arm: a genuine concurrent fan-out.**
+`session.researchCollect()` builds one `MarketResearchSource[]` array — Google
+Trends, Brave, Tavily, Google Search, Reddit, each with its own `paramsFor`
+(`src/session.ts:520-561`) — then hands it to `MarketResearchEngine.collect()`
+(`packages/engines/market-research/src/engine.ts:56-117`), which fires every
+source through `Promise.all` (line 76). `/investing` does the same with a
+slightly different source list (`InvestingEngine.run()`,
+`packages/engines/investing/src/engine.ts:39-45`), but calls
+`Collector.execute` once over the whole array instead of once per source — a
+cosmetic difference (one call site groups results for a live progress digest,
+the other doesn't) that doesn't change the underlying concurrency: every
+connector fires at the same moment, none blocks another from *starting*.
+
+```
+  Layers-and-hops — one /research turn, connector fan-out
+
+  ┌─ Process ──────────────┐
+  │ MarketResearchEngine   │
+  │   .collect()           │
+  └──┬──────────────────────┘
+     │ Promise.all — all hops fire AT ONCE, not in sequence
+     │
+     │ hop A: GET reddit.com/search.json         ──► ┌─ Reddit ────┐
+     │ hop B: GET googleapis.com/customsearch/v1 ──► │ Google      │
+     │ hop C: GET api.search.brave.com/…/search  ──► │ Brave       │
+     │ hop D: POST api.tavily.com/search         ──► │ Tavily      │
+     │ hop E: (google-trends-api → trends server)──► │ Trends      │
+     ▼
+  each hop: try/catch inside Collector.execute — a rejection here
+  becomes a `failed[]` entry, NOT a crash of the other hops
+```
 
 A network map is the cheapest high-leverage artifact you can draw for any
 system: it tells you every place the system can fail for reasons outside its own
-code, and every place a security boundary lives. buffr's map is small — two
-outbound clients — and that smallness is itself the design. A single-device
-brain earns its simplicity by refusing to be a server.
+code, and every place a security boundary lives. buffr's map stayed small on
+two of its three arms — the pool and the loopback model call are exactly as
+contained as before — but the third arm now reaches the open internet, N hosts
+at once. Naming that fan-out precisely (what fires together, what one failure
+does to the rest) is this update's job.
 
 ## Primary diagram
 
-The full recap — both boundaries, the protocols, the direction, the absence of
-anything inbound.
+The full recap — all three boundaries, the protocols, the direction, the
+absence of anything inbound.
 
 ```
   buffr-laptop — complete network map
@@ -169,24 +225,35 @@ anything inbound.
      fetch() lives in aptkit defaultHttpTransport
      buffr supplies host string only, src/config.ts:14
      POST /api/chat (gemma2:9b), POST /api/embed (nomic-embed-text)
+
+  outbound boundary 3 ── HTTPS / TCP :443 × up to 6, concurrent (Promise.all)
+     fetch() calls live in buffr's OWN @buffr/connectors package
+     fired by Collector.execute during /research and /investing only
+     reddit.com · googleapis.com · api.search.brave.com · api.tavily.com
+     amazon.com · an RSS feed host · google-trends-api's trends server
+     each wrapped in a CachedConnector (1h TTL); no timeout, no AbortSignal
 ```
 
 ## Elaborate
 
-The "one process, two clients" shape is the canonical local-first topology: keep
-all data and all compute reachable without leaving the box, so the only "network"
-is loopback or a same-LAN database. It comes from the same instinct as your
-contrl project (no network in the hot path) — except buffr does have two hops,
-both kept as close as possible. The interesting future question is whether
-boundary 1 (Postgres) ever moves off-device; the moment it does, sslmode and
-connection latency stop being theoretical.
+The "one process, N clients, zero inbound" shape is still the canonical
+local-first topology: keep all data and all compute reachable without leaving
+the box, so the only "network" that matters day-to-day is loopback or a
+same-LAN database. The connector fan-out is the one deliberate exception — the
+whole point of `/research` and `/investing` is to reach *outside* the box for
+evidence, so this arm is supposed to touch the open internet. It comes from
+the same instinct as your contrl project (no network in the hot path) for the
+core loop, with an explicit, bounded escape hatch for the research engines.
+The interesting future question is still whether boundary 1 (Postgres) ever
+moves off-device; the moment it does, sslmode and connection latency stop
+being theoretical.
 
 ## Interview defense
 
-**Q: Walk me through every network call one chat turn makes.**
+**Q: Walk me through every network call one plain chat turn makes.**
 
 ```
-  one turn = ~7 wire crossings, 2 protocols
+  one turn = ~7 wire crossings, 2 protocols (boundaries 1 and 2 only)
 
   pg-wire:  INSERT user · SELECT vector · INSERT trace · upsert memory
   HTTP:     embed query · chat completion · embed memory
@@ -196,14 +263,26 @@ Answer: "One turn tees into two outbound clients. The pg-wire path borrows from
 a single warm pool — user-message insert, the vector `SELECT`, the trace flush,
 the memory upsert. The HTTP path hits Ollama three times — embed the query,
 generate the answer, embed the exchange for memory. Nothing inbound; buffr is the
-client on both boundaries." Anchor: `src/session.ts:60-71`.
+client on both boundaries." Anchor: `src/session.ts:674-690`.
+
+**Q: What changes during `/research` or `/investing`?**
+
+Answer: "A third arm opens: `MarketResearchEngine.collect()` or
+`InvestingEngine.run()` fires every configured connector — Reddit, RSS, and
+whichever of Brave/Tavily/Google/Trends have API keys — through one
+`Promise.all`. They all leave at once, not in sequence, each hitting a
+different real internet host over HTTPS. It's the same 'client tee' idea as a
+plain turn, just with N HTTP arms instead of one." Anchor:
+`packages/engines/market-research/src/engine.ts:76`.
 
 **Q: Where can this map fail for reasons outside buffr's code?**
 
-Answer: "Either boundary. Postgres unreachable → `pool.connect()` rejects.
-Ollama down → `fetch` rejects with a connection error. Both surface as a thrown
-error caught in the OpenTUI UI (`src/cli/chat.tsx:39`) — no retry, no fallback."
-Anchor: the two seams in the structure pass.
+Answer: "Any of the three boundaries. Postgres unreachable → `pool.connect()`
+rejects. Ollama down → `fetch` rejects with a connection error. A connector
+down → its promise rejects and lands in `failed[]`, but a connector that just
+*hangs* (no reject, no resolve) blocks the whole `Promise.all` forever, since
+nothing threads an `AbortSignal` in. All three surface with no retry." Anchor:
+the three seams in the structure pass.
 
 ## See also
 

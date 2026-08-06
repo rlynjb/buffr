@@ -11,7 +11,7 @@ table — here the tenant discriminator (`app_id`). **Type:** Industry standard
 You know the shared-table multi-tenancy pattern: instead of a database per
 customer, one set of tables with a `tenant_id` column on every row, and every
 query filters by it. This file is about that column (`app_id`) present on all
-five tables — and the honest fact that the *enforcement* half of the pattern
+six tables — and the honest fact that the *enforcement* half of the pattern
 (Row-Level Security) isn't wired up yet. The shape is here; the guard is not.
 
 ```
@@ -102,12 +102,14 @@ without it, "never forget the filter" is a code-review discipline.
 
 ### Move 2 — the walkthrough
 
-**The column is on every table, with a default.** Each of the five tables
-declares `app_id text not null default 'laptop'`
+**The column is on every table, with a default.** Each of the original five
+tables declares `app_id text not null default 'laptop'`
 (`sql/001_agents_schema.sql:6,19,34,54` and the messages table inherits the
-tenant via its conversation). `not null` means a row can't escape having a
-tenant; the `'laptop'` default means single-device writes don't have to specify
-it. That's the shape done correctly — no row is untenanted.
+tenant via its conversation); `agents.decisions` declares the identical
+column (`sql/002_decision_journal.sql:3`). `not null` means a row can't
+escape having a tenant; the `'laptop'` default means single-device writes
+don't have to specify it. That's the shape done correctly — no row is
+untenanted, on any of the six tables.
 
 **Reads filter on it — in app code.** The vector search puts the filter in the
 SQL itself:
@@ -167,6 +169,37 @@ tenant or a network boundary appears.
   → multi-tenant: these two gaps become a security boundary
 ```
 
+**A second worked example — `agents.decisions` ships a richer identity
+shape, still unenforced the same way.** The newer decision-journal table
+(`sql/002_decision_journal.sql`, landed in `699e77b`) carries `app_id` exactly
+like the other five tables (`text not null default 'laptop'`, indexed —
+`decisions_app_id` and as the lead column of `decisions_status_review`), but
+it also adds `user_id text not null` and `workspace_id text not null`
+alongside it — a finer-grained identity than any other table in the schema
+has. Today all three collapse to one value: `PgJournalStore` reads `app_id`
+from its constructor default, and every call site passes `cfg.appId` for
+*both* `userId` and `workspaceId` (`session.ts:749-750`, `771-772`, and
+`dueReviewCount`/`listDueReviews` at `:783-786`):
+
+```ts
+// src/session.ts:749-750 (saveHypothesis) — same shape at :771-772 (saveDecision)
+userId: cfg.appId,
+workspaceId: cfg.appId,
+```
+
+So right now `app_id === user_id === workspace_id` on every row — three
+columns, one real value. That's the same "shape ahead of need" move this
+file already teaches for `app_id` alone, just one layer richer: the schema
+already has room for multiple users sharing one app instance
+(`user_id` would differ) and multiple workspaces per user (`workspace_id`
+would differ), neither of which this single-device tool needs yet. Every
+write path threads all three consistently (`PgJournalStore.create`,
+`listDue`, `snooze`, `resolve` all scope by `app_id` at minimum,
+`pg-journal-store.ts:68-116`), which is what makes shipping the extra
+columns now, unused, a legitimate bet rather than premature abstraction —
+the discipline that keeps `app_id` alone safe (§ above) is the same
+discipline keeping three collapsed identity columns safe.
+
 ### Move 2.5 — current state vs future state
 
 This pattern is built-but-half-active: the shape ships, the enforcement is
@@ -222,9 +255,10 @@ deliberate phase and a latent vulnerability.
   └───────────────────────────────┬────────────────────────────┘
                                   │
   ┌─ agents schema ───────────────▼────────────────────────────┐
-  │  documents · chunks · conversations · messages · profiles   │
+  │  documents · chunks · conversations · messages · profiles ·  │
+  │  decisions (+ user_id, workspace_id, both = app_id today)   │
   │    each: app_id text not null default 'laptop'              │
-  │    chunks_app_id index (001:30)                             │
+  │    chunks_app_id (001:30) · decisions_app_id (002:26) index │
   │  ✗ NO Row-Level Security  ── DB does not enforce isolation  │
   └─────────────────────────────────────────────────────────────┘
 ```
@@ -253,10 +287,11 @@ enforcement is a named gap, not an oversight.
 
 **Q: Every table has `app_id` but there's no RLS. Is that a bug?**
 No — it's a phase decision, and I'd say so plainly. The discriminator-column
-shape is shipped: `app_id not null default 'laptop'` on all five tables, indexed
-on `chunks`. The enforcement (RLS) isn't, because there's one tenant on a
-single device — app code adds `where app_id = $` on every query consistently
-(`pg-vector-store.ts:73`). The honest caveat: the database isn't guaranteeing
+shape is shipped: `app_id not null default 'laptop'` on all six tables, indexed
+on `chunks` and `decisions`. The enforcement (RLS) isn't, because there's one
+tenant on a single device — app code adds `where app_id = $` on every query
+consistently (`pg-vector-store.ts:73`, `pg-journal-store.ts:68-116`). The
+honest caveat: the database isn't guaranteeing
 isolation, and `app_id` is config-supplied, not token-derived. With a second
 tenant those two become a real boundary, and the fix is RLS plus an auth→`app_id`
 mapping — a bolt-on, because the column shape was forward-compatible from day
@@ -285,5 +320,7 @@ the load-bearing insight.
 - `03-soft-link-no-fk.md` — the sibling "shape present, enforcement dropped" call
 - `01-vector-column-and-ann-index.md` — why the HNSW index is global, not per-tenant
 - `06-trajectory-tables.md` — `app_id` on conversations
+- `08-lazy-status-transition.md` — the other "shape shipped, proactive half
+  deferred" decision on `agents.decisions`
 - `audit.md` §7 + "not yet exercised" — the RLS gap, marked honestly
 - **study-security** — `app_id` as a trust boundary, the full security treatment

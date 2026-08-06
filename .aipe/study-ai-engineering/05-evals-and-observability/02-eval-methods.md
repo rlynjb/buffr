@@ -31,11 +31,13 @@ ONE AXIS — rigidity ↑ vs. flexibility ↓                buffr?
   rubric (coded) ──► scored checklist, programmatic     ✗
   LLM-as-judge ────► model scores against a rubric      ✗ (→ 03)
   pairwise ────────► judge picks A or B                 ✗
-  human ───────────► a person reads and rates           ✗
+  human ───────────► a person reads and rates           ◐ partial — see below
         ▲
         │ reproducible & cheap                semantic & costly
         └──────────────────────────────────────────────►
 ```
+
+The `◐` on the human rung is new and needs a caveat up front, before Move 1: buffr's `/research` command now has a real human-in-the-loop step (`research-flow.ts` — see the dedicated section after Move 3), but it is **not** the classic "human rates the output" eval this rung usually means. Classic human eval asks a person to *judge quality after seeing the output*. buffr's version asks the person to *commit to a prediction before seeing the output*, then compares the two in code. Same rung of the ladder in the loose sense ("a person is involved"), different question being answered — worth naming precisely rather than just ticking the box.
 
 The seam: buffr measures **retrieval** (did the right document come back?), which is an *identity* question — `work.md` either appeared in the top-k or it didn't. Identity is exactly what exact-match does perfectly. The moment you ask a *meaning* question — "is this answer faithful to the chunks?" — exact-match is useless and you must climb to the judge rung (that's `03`). buffr asks the identity question and stops.
 
@@ -59,12 +61,12 @@ You know this shape from classification metrics. The only twist for *retrieval* 
 
 ### Move 2 — buffr's exact-match oracle, in code
 
-buffr's method is two pure functions from aptkit, called once each per query. No model, no randomness, no network — the oracle is arithmetic.
+buffr's method is two pure functions from `@buffr/kernel`, called once each per query. No model, no randomness, no network — the oracle is arithmetic.
 
 **The numerator: distinct hits in the top-k.** This is the shared engine of both scorers. Bridging from set operations you know: it's `retrieved.slice(0,k)` intersected with `relevant`, counted as a set so duplicates collapse.
 
 ```
-aptkit evals/precision-at-k.ts:27 — countDistinctHits
+packages/kernel/src/evals/precision-at-k.ts:27 — countDistinctHits
   const topK = retrievedIds.slice(0, k);        ← only the first k count
   const seen = new Set<string>();
   for (id of topK) if (relevantIds.has(id)) seen.add(id);   ← Set ⇒ distinct
@@ -117,14 +119,51 @@ buffr stops at exact-match. The higher rungs aren't wired — and one of them is
  rubric     ✗                    coded checklist (cites present? refused?)
  LLM-judge  ✗  ← THE GAP         FAITHFULNESS: is the answer grounded? → 03
  pairwise   ✗                    "is config A's answer better than B's?"
- human      ✗                    ground-truth for everything above
+ human      ◐  DIFFERENT AXIS    ground-truth quality rating — still ✗
+                                  CALIBRATION of a human forecast — ◐ new, see below
 ```
 
-The skipped rung that matters is **LLM-as-judge**. Exact-match on docIds proves the *right chunks were retrieved*; it says nothing about whether the *answer* used them. An answer can retrieve `work.md` perfectly (P@1 = 1.00) and then hallucinate a job the document never mentions. buffr cannot currently detect that — measuring it requires the judge rung, which `03` covers, and the tool to do it (`RubricJudge`) already exists in aptkit but is unwired.
+The skipped rung that matters is **LLM-as-judge**. Exact-match on docIds proves the *right chunks were retrieved*; it says nothing about whether the *answer* used them. An answer can retrieve `work.md` perfectly (P@1 = 1.00) and then hallucinate a job the document never mentions. buffr cannot currently detect that — measuring it requires the judge rung, which `03` covers, and the tool to do it (`RubricJudge`) already exists in `@buffr/kernel` (`packages/kernel/src/evals/rubric-judge.ts`) but is unwired.
 
 ### Move 3 — the principle
 
 **Pick the cheapest oracle that can see the failure you care about.** Don't climb the ladder for prestige — climb it only when the rung below is *blind* to your failure mode. buffr's failure mode for *retrieval* is "wrong document came back," which exact-match sees perfectly, so buffr correctly stays on the bottom rung for that question. Its failure mode for *generation* is "answer drifted off the chunks," which exact-match is blind to — so for *that* question, staying on the bottom rung isn't frugality, it's not measuring at all.
+
+### Move 3.5 — a new oracle shape: the "human" rung as calibration, not quality rating
+
+The eval methods above all answer one family of question: *given an output, is it good?* buffr's `/research` command (`src/cli/research-flow.ts`, wired through `session.researchCollect`/`researchEvaluate` at `src/session.ts:713-744`) introduces a genuinely different oracle shape, and it's worth being precise about why it doesn't just slot into the "human" rung as originally drawn.
+
+```
+TWO DIFFERENT QUESTIONS THE "HUMAN" WORD CAN MEAN
+  classic human eval    │ show a person the OUTPUT, ask "is this good?"      │ rates the SYSTEM
+  buffr's predict-reveal│ ask a person to COMMIT to a guess, THEN show them  │ rates the HUMAN
+                         │ the system's answer and the gap, computed in code │ (against the system)
+```
+
+The mechanism: `MarketResearchEngine.run()` was split into `collect()` and `evaluate()` (`packages/engines/market-research/src/engine.ts:56-237`) specifically to open a pause point between "evidence gathered" and "engine has an opinion." `collect()` returns a **safe digest** — source names, counts, titles only, no findings or scores (`engine.ts:50-55` doc comment) — so the human genuinely cannot infer the engine's score from what they're shown. `research-flow.ts` then forces a structured commitment (`PREDICTION_PROMPT`, lines 37-42: `<score 0-100> <dimension> <confidence 0-100>`), rejecting anything that doesn't parse (`parsePrediction`, lines 44-54), before `evaluate()` is ever called. Once the human has committed, `evaluate()` runs Analyzer→Scorer→Teacher and the engine computes `PredictionComparison` **in code** (`engine.ts:202-208`):
+
+```ts
+// packages/engines/market-research/src/engine.ts:202-208
+const comparison: PredictionComparison = {
+  prediction,
+  actualScore: scorerResult.data.totalScore,
+  actualDimension: strongestFinding?.dimensionId ?? 'unknown',
+  scoreGap: scorerResult.data.totalScore - prediction.expectedScore,
+  dimensionMatched: strongestFinding !== null && strongestFinding.dimensionId === prediction.expectedDimension,
+};
+```
+
+Note what's absent: no LLM is asked to judge the gap, invent a verdict, or grade the human. `scoreGap` is subtraction; `dimensionMatched` is `===`. The oracle here is exact-match again — the novelty isn't a new *method*, it's a new *input* to the method: a human forecast instead of a golden-set label.
+
+```
+WHERE THIS SITS ON THE EXISTING LADDER — it's not a new rung, it's a new axis
+  exact-match  compares SYSTEM output  vs. GOLDEN label      (this file's main subject)
+  predict-reveal  compares HUMAN forecast  vs. SYSTEM output    (new — orthogonal, same "===" oracle)
+```
+
+**Why this still isn't a faithfulness eval, and doesn't close the `03` gap.** The comparison tells you whether the *human's* forecast was well-calibrated against the engine's score — it says nothing about whether the engine's score, or Teacher's explanation, is *itself* grounded in the evidence. A confidently wrong Analyzer/Scorer/Teacher chain would still produce a `scoreGap` number; the human would just be comparing themselves against a number that could be bad. The unwired `RubricJudge` (`03`) is still the only thing that would check the engine's own output against the evidence — this pattern checks the human against the engine, one level up.
+
+**Why it's still worth naming as a real eval-method advance.** The predict-then-reveal loop is the first place in buffr where a human's belief is captured, timestamped, and compared to a system output *before* the system's answer could bias them — that's the textbook structure of a **calibration exercise** (the same shape as a forecaster's Brier-score training loop), not a spot-check. And it doesn't stop at the reveal: a promoted decision (`session.saveDecision`, `session.ts:758-783`) is written to `agents.decisions` and later resolved via `/review` (`src/cli/review-flow.ts`) against what *actually happened* — so the full chain is predict → reveal → commit → resolve, three comparison points (human vs. engine, then both vs. reality) where most eval setups have one (system vs. golden label). See `ai-features-in-this-codebase.md` features 11-12 for the full mechanism and the honest gap (no aggregate calibration report exists yet — the per-decision data is captured, the rollup isn't built).
 
 ## Primary diagram
 
@@ -133,15 +172,16 @@ The full method ladder, buffr's position, and the one rung that's a real gap.
 ```
                       THE EVAL METHOD LADDER (buffr)
    cost/flexibility
-      ▲   human ─────────── ✗  ground truth
+      ▲   human ─────────── ◐  ground truth: ✗ · CALIBRATION (predict-then-reveal): new
       │   pairwise ──────── ✗  A vs B preference
       │   LLM-as-judge ──── ✗  FAITHFULNESS (the gap → 03; RubricJudge unwired)
       │   rubric (coded) ── ✗  scored checklist
       │   fuzzy-match ───── ✗  overlap / threshold
-      │   exact-match ───── ★  precision@k / recall@k    ← BUFFR
+      │   exact-match ───── ★  precision@k / recall@k    ← BUFFR (retrieval eval)
       └──────────────────────────────────────────────────────►
                                                    reproducibility/cheapness
-   ★ src/cli/eval-cmd.ts:27-28 → aptkit precision-at-k.ts (pure, deterministic)
+   ★ src/cli/eval-cmd.ts:27-28 → @buffr/kernel precision-at-k.ts (pure, deterministic)
+   ◐ research-flow.ts + engine.ts:202-208 → also exact-match, but human-forecast vs. engine
    measures RETRIEVAL identity ·  does NOT measure generation faithfulness
 ```
 
@@ -200,4 +240,6 @@ Because the cheapest oracle that can see my failure wins, and for *retrieval* th
 - **`01-eval-set-types.md`** — the corpus these methods score; the not-well-formed guard handles empty-`relevant` adversarial rows.
 - **`03-llm-as-judge-bias.md`** — the next rung up, and why faithfulness needs it; the unwired `RubricJudge`.
 - **`../03-retrieval-and-rag/11-rag.md`** — the pipeline these scorers run against, end to end.
+- **`../01-llm-foundations/04-structured-outputs.md`** — Teacher's `principle`/`reflectionQuestion` output, which the predict-then-reveal reveal step (Move 3.5) displays to the human.
+- **`../ai-features-in-this-codebase.md`** — features 11-12: the full predict-then-reveal mechanism and the decision journal that resolves it against reality.
 - **`study-testing/`** — assertions and oracles; precision@k is a fuzzy assertion over a fixture.

@@ -81,7 +81,7 @@ lesson of this repo's DSA story.
    scoring loop is linear, not quadratic. → `02`.
 
 5. **The whole memory feature reuses vector search — no new structure.**
-   `createConversationMemory` (`src/session.ts:53`) writes episodic memory
+   `createConversationMemory` (`src/session.ts:454`) writes episodic memory
    into the *same* chunks table, recalled through the *same* ANN search. One
    data structure, two product features. → `05`, `02`.
 

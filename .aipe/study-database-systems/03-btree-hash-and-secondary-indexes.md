@@ -148,6 +148,60 @@ narrow much when 100% of rows match. **Consequence:** the planner will likely ig
 filtering on a column where every row is identical buys nothing. The index earns its
 place only if a second `app_id` ever shows up.
 
+**The `decisions` composite index — the counterexample done right.** Contrast
+`chunks_app_id` above with the index the decision journal added. Two B-trees exist
+on `agents.decisions`:
+
+```sql
+-- sql/002_decision_journal.sql:26-27
+create index if not exists decisions_app_id on agents.decisions (app_id);
+create index if not exists decisions_status_review
+  on agents.decisions (app_id, user_id, workspace_id, status, review_at);
+```
+
+The composite index is a textbook multi-column B-tree: **equality columns first,
+one range/order-by column last.** Compare it against the two queries `listDue`
+actually runs (`pg-journal-store.ts:86-98`):
+
+```sql
+-- the UPDATE: equality on 4 columns, range on the 5th — matches the index exactly
+where app_id = $1 and user_id = $2 and workspace_id = $3
+  and kind = 'decision' and status = 'open' and review_at <= $4
+
+-- the SELECT: equality on 4 columns, ORDER BY the 5th — the index is already
+-- sorted that way, so this needs no separate sort step
+where app_id = $1 and user_id = $2 and workspace_id = $3 and status = 'review-due'
+order by review_at asc
+```
+
+```
+  decisions_status_review — a B-tree shaped for its query
+
+  index key:  (app_id, user_id, workspace_id, status, review_at)
+               └──────── equality prefix ────────┘  └─ range / order-by ─┘
+
+  the UPDATE's WHERE:   app_id=X  user_id=Y  workspace_id=Z  status='open'  review_at<=now
+                        ✓ prefix match          ✓ prefix match             ✓ range on tail
+  the SELECT's ORDER BY: review_at asc  →  already the index's native leaf order,
+                                            no separate Sort node needed
+```
+
+That's the opposite lesson from `chunks_app_id`: this index earns its keep because
+every leading column is genuinely selective (a real `user_id`/`workspace_id`, not a
+constant) and the trailing column matches both the range filter *and* the sort — one
+index serves two different query shapes with no extra sort operator.
+
+**The redundant one — `decisions_app_id`.** `decisions_app_id` indexes `(app_id)`
+alone. Any query that could use it — an equality lookup on `app_id` — can *also* use
+`decisions_status_review`, because a leading-column prefix of a composite B-tree is
+just as usable as a single-column index on that column (file `04` covers the general
+rule: the planner can use any *left prefix* of a composite index). `decisions_app_id`
+is a strict prefix of `decisions_status_review`, so it never wins a plan the bigger
+index couldn't also serve — it only adds a second B-tree to maintain on every insert,
+update, and vacuum. **Consequence:** it's a small, harmless-today write-amplification
+tax (every `insert`/`update` on `decisions` now maintains two B-trees for the same
+leading column), not a correctness bug. The fix is a one-line `drop index`.
+
 **The ANN index (HNSW) — approximate nearest neighbour, the star.** This is the
 index that makes RAG fast, and the one with the trap.
 
@@ -230,7 +284,10 @@ are a *different* bet: you trade exactness for sub-linear search, and you take o
 new failure mode that doesn't exist for B-trees — the operator and the opclass must
 agree, and the engine won't tell you if they don't. The discipline that protects you
 is `EXPLAIN`: an index you can't prove the planner is using is an index you don't
-have.
+have. And composite-index design is a bet of its own: `decisions_status_review`
+shows the payoff of shaping the key to the *actual* WHERE/ORDER BY, while
+`chunks_app_id` and `decisions_app_id` show the two ways a single-column index earns
+nothing — no selectivity, or fully subsumed by a wider index that already covers it.
 
 ---
 
@@ -314,14 +371,29 @@ on a single-device app. The planner won't use an index that can't narrow the res
 so it leans on the vector index alone. The `app_id` index only earns its keep when a
 second `app_id` exists." Anchor: *an index on a constant column buys nothing.*
 
+**Q: "What's a well-designed composite index look like in this repo?"**
+
+Answer: "`decisions_status_review` — `(app_id, user_id, workspace_id, status,
+review_at)`. It puts the four equality filters first and the range/order-by column
+last, which is the standard rule for multi-column B-trees. It serves both of
+`listDue`'s queries: the `UPDATE`'s `review_at <= now` range scan, and the
+`SELECT`'s `order by review_at asc`, which needs no separate sort because the index
+is already ordered that way. The counter-example sitting right next to it,
+`decisions_app_id`, is a single-column index on the *same leading column* — it's a
+strict prefix of the composite index, so the planner never needs it; it just doubles
+the write cost of every insert and update on the table." Anchor: *a composite index
+shaped to the query beats a pile of single-column indexes on the same columns.*
+
 ---
 
 ## See also
 
 - `02-records-pages-and-storage-layout.md` — HNSW keeps its own vector copy; the heap
-  fetch for `content`; the dead-index-entry churn on update.
+  fetch for `content`; the dead-index-entry churn on update; the `decisions` narrow-row
+  storage pattern.
 - `04-query-planning-and-execution.md` — how the planner *uses* (or skips) these
-  indexes, and the EXPLAIN discipline that proves it.
+  indexes, and the EXPLAIN discipline that proves it; left-prefix usability of
+  composite indexes.
 - `06-locks-mvcc-and-concurrency-control.md` — why every update re-inserts the HNSW
   entry.
 - `study-performance-engineering` — HNSW `m` / `ef_search` recall-vs-latency tuning.

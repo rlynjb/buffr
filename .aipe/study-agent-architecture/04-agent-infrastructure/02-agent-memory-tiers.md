@@ -259,6 +259,15 @@ Cross-ref `study-ai-engineering` for the two-layer agent-memory split mechanics 
 canonical/retrieved layering) — this file covers only the agent-architecture tiering and buffr's
 honest threading gap.
 
+**A fourth kind exists outside this three-tier model.** `packages/kernel/src/journal/contracts.ts`'s
+`JournalStore` persists each `/research` prediction and buffr's own assessment as a row in
+`agents.decisions`, queried later by `/review` — not by embedding similarity, but by explicit
+`status` and `reviewAt`. Call it **decision memory**: it doesn't fit working (it outlives the call),
+episodic (it isn't recalled by relevance), or long-term (it isn't retrieved through
+`search_knowledge_base` at all). It's a structured record store, not a vector store, and nothing
+today reads it back into a future prediction — the record is written, not yet mined. Full treatment
+in `../09-predict-then-reveal-calibration-loop.md`.
+
 ## Interview defense
 
 **Q: "Does your agent remember the conversation?"**
@@ -295,3 +304,4 @@ answer() treats each question independently.*
 - `study-ai-engineering` → the two-layer agent-memory split mechanics.
 - `../01-reasoning-patterns/02-agent-loop-skeleton.md` — working memory is the loop's messages
   array.
+- `../09-predict-then-reveal-calibration-loop.md` — decision memory, the fourth kind, in full.

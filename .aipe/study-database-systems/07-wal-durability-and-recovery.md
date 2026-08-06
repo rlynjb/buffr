@@ -164,12 +164,97 @@ That's the subtle point: durability did its job perfectly. It durably persisted 
 inconsistent state, because the inconsistency was baked in at the transaction
 boundary, above the WAL. Durability can't save you from an atom that's the wrong size.
 
-**Migrations are WAL-protected too.** `runMigration` (`migrate.ts:8-20`) wraps the
-whole schema script in one `begin`/`commit`. Postgres supports transactional DDL, so
-the WAL makes the *entire migration* atomic and durable: either the whole
-`001_agents_schema.sql` applied and survives a crash, or none of it did. A crash
-mid-migration leaves the schema untouched, not half-built. That's a real strength worth
-naming — many databases can't do transactional DDL.
+**Migrations are WAL-protected too — per file, not per run.** `runMigration`
+(`migrate.ts:10-22`) wraps *one* SQL file in `begin`/`commit`. Postgres supports
+transactional DDL, so the WAL makes that *one file* atomic and durable: either
+everything in it applied and survives a crash, or none of it did. That's a real
+strength worth naming — many databases can't do transactional DDL.
+
+What changed is what sits above `runMigration`. The CLI used to call it once,
+directly, on a single hardcoded file. It now calls `runAllMigrations`
+(`migrate.ts:25-30`), which loops a list of files and calls `runMigration` once per
+file:
+
+```ts
+// src/migrate.ts:7, 25-30
+const MIGRATION_FILES = ['001_agents_schema.sql', '002_decision_journal.sql'];
+
+export async function runAllMigrations(pool: pg.Pool): Promise<void> {
+  for (const file of MIGRATION_FILES) {
+    const sql = await readFile(new URL(`../../sql/${file}`, import.meta.url), 'utf8');
+    await runMigration(pool, sql);   // ← its OWN begin/commit, every iteration
+  }
+}
+```
+
+Three things worth naming precisely about this loop, because each is a real
+migration-runner design decision, not incidental:
+
+**Ordering — an explicit array, not a directory listing.** `MIGRATION_FILES` is a
+hardcoded, hand-ordered array in source, not `fs.readdir('sql/')` sorted
+alphabetically. That's a deliberate tradeoff: ordering is *guaranteed* (no relying
+on filesystem sort order, which breaks the moment you hit `010_foo.sql` after
+`002_bar.sql` on a locale-sensitive sort, or on a directory that also holds
+non-migration files), but it's also a **footgun by omission** — add
+`003_something.sql` to `sql/` and forget to add it to the array, and
+`runAllMigrations` silently never runs it. No error, no warning; the file just sits
+there unapplied. The fix, if this list grows past a couple of entries, is to
+generate the array from the directory (`fs.readdir` + sort + assert the naming
+convention) so "add a file" and "the file gets applied" can't drift apart.
+
+**Atomicity — per file, not across the run.** This is the direct answer to "is
+migrating still atomic": no, not as a whole. `runAllMigrations` opens and closes a
+*separate* transaction per file — there's no outer `begin` wrapping the loop. If
+`002_decision_journal.sql` fails (a syntax error, a permissions issue, a conflicting
+object), `001_agents_schema.sql` has already committed and is durable; the schema is
+left in a state where `documents`/`chunks`/`conversations`/`messages`/`profiles`
+exist but `decisions` does not. That's the same "atom boundary doesn't match the
+intent boundary" shape file `05` names for `indexDocumentRow` — the intent is "bring
+the schema up to date," and it's now N transactions, not one.
+
+**Why that gap doesn't matter in practice — idempotency substitutes for
+atomicity.** Here's the mitigation, and it's a real, working one: every statement in
+both migration files is written to be safely re-runnable. `sql/001_agents_schema.sql`
+and `sql/002_decision_journal.sql` use `create table if not exists` and `create
+index if not exists` throughout (`sql/002_decision_journal.sql:1,26,27`) — never a
+bare `create table`. That means `runAllMigrations` can be called again after a
+partial failure, from the top, and the files that already applied are safe no-ops;
+only the failed (or not-yet-reached) file does real work. `test/migrate.test.ts:15-17`
+proves exactly this property — it calls `runAllMigrations(pool)` twice in a row and
+asserts no error, then checks every expected table exists:
+
+```ts
+// test/migrate.test.ts:15-17
+await runAllMigrations(pool);
+await runAllMigrations(pool); // idempotent — runs twice without error
+```
+
+```
+  partial failure, then idempotent retry — what actually happens
+
+  run 1:  runMigration(001) ──commit──►  ok       runMigration(002) ──✗ fails
+                                                    (002's tables NOT created)
+  run 2:  runMigration(001) ──"if not exists"──► no-op, already there
+          runMigration(002) ──retries the real work──► ok, now committed
+
+  the WHOLE RUN isn't one atom — but every file is individually safe to replay,
+  so retrying the whole sequence is equivalent to resuming where it left off
+```
+
+**The general lesson, stated plainly:** you don't need one giant transaction to get
+an effectively-atomic multi-step migration — you need *either* one transaction around
+the whole sequence *or* every step to be idempotent so a from-the-top retry
+converges to the same end state regardless of where the previous attempt died.
+buffr picked the second, and it's a defensible choice for a sequential, append-only
+migration list: it's simpler than threading one transaction through file reads
+that happen between statements, and DDL statements like `create index concurrently`
+(not used here, but a common reason to *avoid* wrapping migrations in one
+transaction) sometimes can't run inside a transaction at all. The cost is that a
+genuinely non-idempotent migration (a `data backfill` `UPDATE`, say) would break this
+guarantee silently — nothing in `runAllMigrations` enforces idempotency, it's a
+convention the two files so far happen to follow. `study-testing`'s
+`04-idempotent-migration-test.md` owns verifying that convention holds; this file
+owns *why* it's the thing that makes the missing outer transaction safe.
 
 **Where buffr's durability story ends — local recovery only.** Here's the honest edge.
 WAL gives you *crash recovery* for free: kill the process, restart, Postgres replays
@@ -198,8 +283,12 @@ still exists, so re-index from scratch." For a single-device personal RAG corpus
 that's a defensible call — the documents are reproducible from their source files
 (`source_path`, `documents.source_path`) — but it's a *choice*, and it's invisible. The
 moment the corpus contains anything not reproducible from source (the conversation
-trajectories in `messages`, the episodic memory chunks), that gap becomes real data
-loss with no restore path.
+trajectories in `messages`, the episodic memory chunks, and now the decision journal
+in `agents.decisions`), that gap becomes real data loss with no restore path. The
+decision journal is a sharper case than the conversation history: a lost `decisions`
+row isn't just missing context, it's a *user prediction and its outcome* — the entire
+point of `/research`'s predict-then-reveal loop and `/review`'s resolution tracking.
+There's no source document to re-index it back from; it only ever existed as a row.
 
 ### Move 3 — the principle
 
@@ -290,12 +379,40 @@ That's the gap that turns real the moment the database holds anything you can't
 regenerate." Anchor: *WAL = crash recovery for free; PITR and backups are a separate,
 unconfigured rung.*
 
+**Q: "Is applying `sql/001_agents_schema.sql` and `sql/002_decision_journal.sql`
+still one atomic migration?"**
+
+```
+  runAllMigrations — per-file atoms, no outer transaction
+
+  runMigration(001)  [ begin → 001's DDL → commit ]   ← one atom, durable
+  runMigration(002)  [ begin → 002's DDL → commit ]   ← a SECOND, separate atom
+
+  fail inside 002 → 001 stays committed, durable, unaffected
+  no rollback of 001 — there's no transaction wrapping the pair
+```
+
+Answer: "No — that changed when the runner started walking multiple files.
+`runMigration` still wraps *one file* in `begin`/`commit`, so each file is
+individually atomic and WAL-durable. But `runAllMigrations` calls it once per file
+in a loop with no transaction around the loop itself, so a failure partway through
+leaves the earlier files committed and the later ones not. What makes that safe in
+practice, not a real risk, is that every statement in both files is `if not exists`
+— idempotent. Re-running `runAllMigrations` from the top after a partial failure is
+a no-op for whatever already applied and only does real work on what didn't. It's
+retry-safety substituting for one big transaction, not atomicity across the whole
+run." Anchor: *per-file atomic, not per-run atomic — and idempotency is what makes
+that gap survivable.*
+
 ---
 
 ## See also
 
 - `05-transactions-isolation-and-anomalies.md` — the commit record is the atomic flip;
-  the cross-transaction anomaly durably preserves the inconsistency.
+  the cross-transaction anomaly durably preserves the inconsistency; `runAllMigrations`
+  as a third instance of the same intent-vs-atom mismatch.
 - `02-records-pages-and-storage-layout.md` — dirty heap pages, checkpoints, vacuum.
 - `08-replication-and-read-consistency.md` — replicating the WAL to a standby (absent).
+- `study-testing` (`04-idempotent-migration-test.md`) — the test-side verification that
+  `runAllMigrations` really is safe to re-run.
 - `study-system-design` — the backup-strategy decision (re-index vs PITR vs replica).

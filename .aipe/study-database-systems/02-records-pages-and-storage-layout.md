@@ -206,6 +206,74 @@ catches up, and every dead tuple's HNSW index entry has to be re-inserted too
 (file `03`). The table and the index both bloat. This is the storage-layer cost of
 the convenient `on conflict do update`.
 
+**A second worked example — `decisions`, the narrow-row pattern.** `chunks` is the
+wide-row story: one big TOASTed column dominates the layout. `agents.decisions`
+(`sql/002_decision_journal.sql:1-25`) is the opposite shape, and it's worth walking
+because the storage lesson is different, not just the table.
+
+```sql
+-- sql/002_decision_journal.sql:1-25 (columns only)
+create table if not exists agents.decisions (
+  id uuid primary key default gen_random_uuid(),
+  ...
+  status text not null default 'open' check (status in (...)),  -- ← lifecycle column
+  stake text,                       -- ┐
+  resolution_condition text,        -- │ all NULL until promote()
+  review_at timestamptz,            -- │ writes them (research-flow.ts:147-155)
+  predicted_score numeric,          -- │
+  predicted_dimension text,         -- │ every decision-kind row gets these
+  predicted_confidence numeric,     -- │ filled together, at insert time —
+  assessed_score numeric,           -- │ NOT staggered (see note below)
+  assessed_confidence numeric,      -- ┘
+  disposition text check (...),     -- ┐ NULL until resolve() (review-flow.ts) —
+  note text,                        -- │ the true "filled in later" columns
+  resolved_at timestamptz           -- ┘
+);
+```
+
+No column here is wide enough to force TOAST — `numeric`, `text` short fields,
+`timestamptz` are all small and stay inline on the heap page. So the seam this table
+exercises is a different one: **NULL storage, not overflow storage.** Postgres
+tracks nullability with a per-tuple *null bitmap* (one bit per column) rather than
+storing anything for a NULL value — a `hypothesis`-kind row, which never gets
+`stake`/`predicted_score`/`assessed_score`/etc., pays roughly one bit per unset
+column, not zero-length placeholder bytes. That's the opposite of `chunks`, where
+every row pays the TOAST cost because the vector column is *never* absent.
+
+One correction to a plausible-sounding assumption: it's tempting to read
+`predicted_score` / `assessed_score` as "written at two different times" — predict,
+then assess later. The code doesn't do that. `research-flow.ts:147-155` calls
+`session.saveDecision(...)` with **both** `prediction` and `assessment` already in
+hand — the predict step captured the user's guess, the reveal step already ran the
+engine's score, and *promote* writes both into one `insert` (`pg-journal-store.ts:68-84`).
+The columns that genuinely get written in a second, later `UPDATE` are `disposition`,
+`note`, and `resolved_at` — set only when `/review`'s `resolve()` runs
+(`review-flow.ts:106` → `pg-journal-store.ts:110-116`), which can be days after the
+insert. **Consequence for storage:** the insert lands one full-width tuple (12 of 15
+columns populated for a decision-kind row); the later `resolve()` UPDATE writes a
+*new* tuple version with 3 more columns filled and marks the insert's version dead —
+the same dead-tuple mechanic as `chunks`' upsert (file `06`), just triggered by a
+status transition instead of a re-index.
+
+```
+  decisions row lifecycle — two writes, one dead tuple in between
+
+  insert (promote):  [ status=open, stake, predicted_*, assessed_* ]  ← v1, live
+                                    │
+                      listDue flips status → 'review-due' (another UPDATE, v2)
+                                    │
+  resolve():          [ ...v1 cols..., status=resolved, disposition, note ]  ← v3, live
+                                    ▲
+                      v1 and v2 now dead — same MVCC churn as chunks, smaller rows
+```
+
+The status column (`open → review-due → resolved`, or back to `open` via `snooze`)
+is the load-bearing design choice: it's what lets one narrow table represent an
+entire workflow without a separate state-machine table, at the cost of an UPDATE
+(and a dead tuple) per transition. `study-data-modeling` owns whether that
+denormalization is the right shape; this file just notes the storage bill it
+runs up.
+
 ### Move 3 — the principle
 
 Storage layout is a cost model, not trivia. The two facts that pay rent: **(1)** the
@@ -287,12 +355,27 @@ you double live+dead tuples plus their HNSW entries until autovacuum reclaims th
 The table and index bloat." Anchor: *updates leave dead tuples; upsert-heavy means
 vacuum-heavy.*
 
+**Q: "Does `agents.decisions` pay the same TOAST cost as `chunks`?"**
+
+Answer: "No — its columns are all small scalars, nothing forces TOAST. The storage
+story there is NULL bitmaps, not overflow: a `hypothesis`-kind row that never sets
+`stake`/`predicted_score`/etc. pays about one bit per unset column, not padded
+bytes. What it *does* share with `chunks` is the dead-tuple mechanic — `resolve()`
+UPDATEs the row days after insert, so every resolved decision is two tuple versions,
+same MVCC cost as an upsert, just triggered by a status transition instead of a
+re-index." Anchor: *narrow nullable rows and wide TOASTed rows hit different storage
+seams, but the same UPDATE-leaves-a-dead-tuple rule.*
+
 ---
 
 ## See also
 
-- `03-btree-hash-and-secondary-indexes.md` — the HNSW index keeps its own vector copy.
+- `03-btree-hash-and-secondary-indexes.md` — the HNSW index keeps its own vector copy;
+  the `decisions_status_review` composite index over the same table.
+- `05-transactions-isolation-and-anomalies.md` — `PgJournalStore.listDue`'s unwrapped
+  update+select, a second instance of the intent-vs-atom mismatch.
 - `06-locks-mvcc-and-concurrency-control.md` — why an UPDATE writes a new tuple.
 - `07-wal-durability-and-recovery.md` — vacuum, checkpoints, and the WAL.
-- `study-data-modeling` — the column-type and soft-link *shape* choices.
+- `study-data-modeling` — the column-type and soft-link *shape* choices; the
+  `decisions` status-lifecycle design.
 - `study-performance-engineering` — `fillfactor`, TOAST thresholds, vacuum tuning.

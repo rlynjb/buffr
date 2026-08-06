@@ -1,8 +1,8 @@
-# No Caching — an identical query re-embeds every time
+# No Caching (RAG Path) — an identical query re-embeds every time
 
 **Industry name(s):** result caching / memoization; embedding cache. **Type:** Industry standard.
 
-There is no cache anywhere in buffr's retrieval path. Ask the same question twice — or re-run the eval set unchanged — and you pay the full embedding roundtrip and HNSW search both times. This is an *absent* mechanism; the file teaches the shape of the cache that isn't there and when it would start to matter.
+**Scope correction:** an earlier pass of this guide claimed there was no caching *anywhere* in buffr, including web search. That's no longer accurate — every external connector (Google, Reddit, RSS, Trends, Brave, Tavily) is wrapped in a TTL cache; see `08-connector-result-caching.md` for that mechanism. This file is narrowed to what's still true: the **RAG retrieval path** — embed → HNSW search — has no cache. Ask the same question twice, or re-run the eval set unchanged, and you pay the full embedding roundtrip and HNSW search both times. This is an *absent* mechanism; the file teaches the shape of the cache that isn't there and when it would start to matter — and, now, why this one is a harder problem than the connector cache that *does* exist.
 
 ## Zoom out, then zoom in
 
@@ -94,9 +94,9 @@ Run the eval set today, tweak the HNSW `ef_search`, run it again to compare — 
 
 **What a cache would cost you back.** Caching isn't free — name the trade honestly. An embedding cache needs invalidation when the model changes (key on model name, which `PgVectorStore` already tracks at `src/pg-vector-store.ts:28`). A query-*result* cache needs invalidation when the corpus changes — index a new doc and a cached hit list goes stale. That second one is the harder trade, which is exactly why the embedding cache (pure, model-keyed, no corpus dependency) is the one to reach for first.
 
-**The web API latency tier (added with connector tools).** Web search tools (`web_search_brave`, `web_search_tavily`, `web_search_google`) add a third uncached path: external HTTP to cloud APIs with no response memoization. Asking about "OpenAI GPT-4o" twice in the same session makes two outbound search API calls — no dedup, no TTL cache. At typical web API latency (200-800ms), a multi-tool turn that triggers search AND knowledge-base lookup adds that roundtrip to the already-dominant generation time. This isn't abstracted behind the embedding cache discussion — it's a separate I/O leg, and it's the only one in the system with per-request quota (Brave: 2k/month, Tavily: 1k/month, Google: 100/day).
+**Correction — the web/connector tier is NOT this uncached path.** An earlier pass of this guide claimed web search tools had "no dedup, no TTL cache." That was wrong: every connector reachable from chat tools or the `/research`/`/investing` engines — Brave, Tavily, Google Search, Reddit, RSS, Google Trends — is wrapped in `CachedConnector`, a TTL cache-aside decorator with a 1-hour default, shared across engines within a session. Asking about the same topic twice inside that window costs zero outbound calls the second time. See `08-connector-result-caching.md` for the full mechanism — it's real, and it's the reason the quota numbers below (Brave: 2k/month, Tavily: 1k/month, Google: 100/day) are less exposed than they look at first glance. What's still true: it's a fresh cache per process start (session-scoped, in-memory, no persistence), so the *first* ask of a session always pays full latency, and a corpus/topic change within the TTL window still serves a stale cached result — the tradeoff that file names explicitly.
 
-**Does it matter at laptop scale?** For chat, barely — a single user rarely asks the exact same string twice in a row, so the chat hit-rate is low and unmeasured. For eval, yes — re-running the labeled set is the one workload with a *guaranteed* 100% repeat rate, and that's where an embedding cache earns the most. Web search is a one-off per question by nature; caching it would require TTL logic and topic-change invalidation, making it the harder problem (same as result cache). The honest verdict: caching helps the *eval* loop more than it helps chat, and web-API result caching is the last priority because the quota is generous for single-user and the staleness problem is real.
+**Does it matter at laptop scale?** For the RAG path specifically — still the finding this file owns — barely, for chat: a single user rarely asks the exact same string twice in a row, so the chat hit-rate is low and unmeasured. For eval, yes — re-running the labeled set is the one workload with a *guaranteed* 100% repeat rate, and that's where an embedding cache earns the most. The connector tier no longer belongs in this "what's missing" list at all — it has its own file now, and its own, easier invalidation story (time-based only, not corpus-dependent).
 
 ### Move 3 — the principle
 
@@ -125,15 +125,15 @@ A cache is a bet that inputs repeat. buffr makes no such bet, which is defensibl
 
 ## Elaborate
 
-Caching is the most over-applied performance pattern — added reflexively, often before there's a measured hit rate to justify it. buffr's *absence* of caching is arguably the correct default for a single-user chat app: you don't pay the invalidation complexity for a hit rate you haven't measured. The place that flips the calculus is the eval harness, where repeat rate is 100% by construction. So the disciplined move isn't "add a cache" — it's "measure the chat repeat rate, and meanwhile add an embedding cache scoped to the eval runner where the win is certain."
+Caching is the most over-applied performance pattern — added reflexively, often before there's a measured hit rate to justify it. buffr's *absence* of caching on the RAG path is arguably the correct default for a single-user chat app: you don't pay the invalidation complexity for a hit rate you haven't measured. The place that flips the calculus is the eval harness, where repeat rate is 100% by construction. The connector tier is a useful contrast case for *why* that cache shipped and this one hasn't: connector results don't need corpus-aware invalidation (`08-connector-result-caching.md`), so it was the cheap win to take first. A vector-search result cache is a strictly harder problem — it needs to invalidate every time `PgVectorStore.upsert` writes a new chunk — which is exactly why it's still absent while the easier one exists.
 
-For the embedding model whose output would be cached and why it's deterministic, see **`study-ai-engineering`**. For the HTTP roundtrip a cache would eliminate, see **`study-networking`**. For the eval harness this would most help, see **`study-testing`** (the eval seam). This file owns the *caching-tradeoff* read.
+For the embedding model whose output would be cached and why it's deterministic, see **`study-ai-engineering`**. For the HTTP roundtrip an embedding cache would eliminate, see **`study-networking`**. For the eval harness this would most help, see **`study-testing`** (the eval seam). This file owns the *caching-tradeoff* read for the retrieval path specifically.
 
 ## Interview defense
 
 **Q: Do you cache anything in your retrieval path?**
 
-> No — and that's a deliberate default for single-user chat. The same query embeds and searches from scratch every time. There's no embedding cache and no result cache. For chat that's fine: one user rarely repeats the exact string, so the hit rate would be low and I haven't measured it. Where it actually bites is the eval harness — re-running the labeled set to compare, say, two `ef_search` settings re-embeds every query both runs even though only the index changed.
+> Not on the RAG side — the same query embeds and searches from scratch every time, no embedding cache and no result cache. For chat that's fine: one user rarely repeats the exact string, so the hit rate would be low and I haven't measured it. Where it actually bites is the eval harness — re-running the labeled set to compare, say, two `ef_search` settings re-embeds every query both runs even though only the index changed. Worth being precise here: the *connector* tier — Google, Reddit, Trends, and friends — does have a TTL cache. That one's a separate, easier problem because it doesn't need to invalidate on anything buffr writes.
 
 ```
   same query twice → embed + search twice (no interception)
@@ -142,15 +142,16 @@ For the embedding model whose output would be cached and why it's deterministic,
 
 **Q: If you added one, what and where?**
 
-> An embedding cache keyed on `(model, string)`, scoped to the eval runner first. It's a pure function — same model, same string, same vector — so no corpus-change invalidation, just bust it when the model name changes, which the store already tracks. I'd avoid a query-*result* cache initially because that one goes stale every time I index a doc, and that invalidation is the harder, more bug-prone trade. Start with the safe pure-function cache where the repeat rate is 100%.
+> An embedding cache keyed on `(model, string)`, scoped to the eval runner first. It's a pure function — same model, same string, same vector — so no corpus-change invalidation, just bust it when the model name changes, which the store already tracks. I'd avoid a query-*result* cache initially because that one goes stale every time I index a doc, and that invalidation is the harder, more bug-prone trade — the same reason the connector cache I already shipped was the easy one and this is the one still on the list.
 
 > Anchor: `src/pg-vector-store.ts:67` (re-embeds + re-searches), `src/cli/eval-cmd.ts:24-31` (the guaranteed-repeat loop).
 
 ## See also
 
 - `00-overview.md` — finding #5
-- `audit.md` — lens 6 (caching), lens 8 (red flags #4)
+- `audit.md` — lens 6 (caching), lens 8 (red flags)
 - `01-hnsw-approximate-search.md` — the search a result cache would skip
 - `02-embedding-roundtrip.md` — the embed an embedding cache would skip
+- `08-connector-result-caching.md` — the cache that DOES exist, and why its invalidation story is easier than this one
 - **`study-ai-engineering`** — the deterministic embedding model
 - **`study-testing`** — the eval harness where caching pays most

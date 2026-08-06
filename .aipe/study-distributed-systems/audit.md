@@ -6,20 +6,24 @@ distributed-systems spec. Each names what buffr-laptop *actually does* with
 lens becomes relevant.
 
 The headline you should expect before reading: **most of this is `not yet
-exercised`, and that's correct.** buffr-laptop is one process with two remote
-dependencies. The coordination questions that distributed systems exist to
-answer mostly don't arise until a second writer appears — which is deferred
-design (see `03`).
+exercised`, and that's correct.** buffr-laptop is one process with remote
+dependencies — Postgres, Ollama, and (new this cycle) a concurrent fan-out to
+up to five web-search APIs. The coordination questions that distributed
+systems exist to answer mostly don't arise until a second writer appears —
+which is deferred design (see `03`) — with one live exception: lens 1/2/9
+below, where the concurrent fan-out already raises a real (if low-stakes)
+partial-failure question today.
 
 ---
 
 ## 1. Distributed system map — nodes, boundaries, messages, ownership, failure domains
 
-**Present, and now expanded.** Nodes: one Node process (the client), one Postgres (`reindb`/`agents`), one Ollama box, up to three cloud web APIs (Brave Search, Tavily, Google Custom Search — active when their API keys are present in `.env`), and two additional Postgres schemas as **read-only external data sources** (`loopd` and `contrl` — queried by `npm run index:db`). Boundaries: `client → Postgres` over a pool (`src/db.ts:4`), `client → Ollama` over HTTP (aptkit-owned; buffr passes `cfg.ollamaHost`), `client → web API` over HTTPS (`session.ts:76-107`, `DataConnector.fetch()`), and `client → loopd/contrl schemas` (8 tables, `src/db-sources.ts`) as a **batch read path** (`npm run index:db` only — not in the chat hot path). Ownership: the single process owns all control flow; the remotes only answer. Failure domains: now six (adding the loopd/contrl schema source). The `index:db` path fires 8 sequential `pool.query()` calls across two schemas — all read-only, no cross-schema transaction, failures are independent. A chat `ask()` may sequentially touch Postgres (INSERT), Ollama (embed), Postgres (SELECT), Ollama (generate), web API (search), and Postgres again (trace flush). No two remotes are touched in parallel (sequential waterfall), so failure domains are independent but the failure *surface* is larger than it was.
+**Present, and now expanded — including the first real concurrency.** Nodes: one Node process (the client), one Postgres (`reindb`/`agents`, now also home to `agents.decisions` — the decision journal, written through the same `pg.Pool` via `PgJournalStore`, `src/pg-journal-store.ts`), one Ollama box, up to five cloud web-search APIs (Google Trends, Brave Search, Tavily, Google Custom Search, Reddit — active/optional per API key presence in `.env`), and two additional Postgres schemas as **read-only external data sources** (`loopd` and `contrl` — queried by `npm run index:db`). Boundaries: `client → Postgres` over a pool (`src/db.ts:4`), `client → Ollama` over HTTP (aptkit-owned; buffr passes `cfg.ollamaHost`), `client → web API` over HTTPS (`DataConnector.fetch()`), and `client → loopd/contrl schemas` (8 tables, `src/db-sources.ts`) as a **batch read path** (`npm run index:db` only — not in the chat hot path). Ownership: the single process owns all control flow; the remotes only answer. Failure domains: still six kinds of remote, but the failure *shape* changed for two of them: **`/research` and `/investing` now touch up to five web-search remotes CONCURRENTLY**, not sequentially — `Collector.execute()` (`packages/capabilities/src/collector/index.ts:35`) fans out `Promise.all` across every configured source. A plain chat `ask()` still touches Postgres/Ollama sequentially (INSERT → embed → SELECT → generate → trace flush), but a `/research` turn is: Postgres (INSERT) → **five concurrent web APIs** → Ollama (analyze/score/summarize) → Postgres (trace flush). This is the first place in the repo where more than one remote is genuinely in flight at once → **`04-scatter-gather-connector-fanout.md`**, a deep walk on its own.
 
-→ The full map and the ranked findings live in `00-overview.md`. The only
-boundary deep enough to warrant its own walk is `client → Postgres` →
-**`01-app-to-postgres-boundary.md`**.
+→ The full map and the ranked findings live in `00-overview.md`. The two
+boundaries deep enough to warrant their own walk are `client → Postgres` →
+**`01-app-to-postgres-boundary.md`** and the concurrent web-search fan-out →
+**`04-scatter-gather-connector-fanout.md`**.
 
 ## 2. Partial failure, timeouts, and retries
 
@@ -31,12 +35,25 @@ boundary deep enough to warrant its own walk is `client → Postgres` →
   than a buffr-imposed deadline. There is **no timeout the repo controls** on
   the database path.
 - **Nothing retries.** `ask()` calls `persistMessage` → `agent.answer` →
-  `trace.flush` straight through; a thrown error propagates to the CLI. There is no backoff, no jitter, no retry budget. Web search connectors are the same — a Google 429 (quota exhausted, hit during development) propagates as a tool error to Gemma with no retry or fallback to another connector.
-- The one explicit failure-classification choice: the memory write is wrapped
-  `try/catch` and swallowed (`src/session.ts:65-69`) — a memory-write failure
-  must not lose the answer the user already has. That's a deliberate
-  best-effort classification of one specific operation, named in the code
-  comment.
+  `trace.flush` straight through; a thrown error propagates to the CLI. There is no backoff, no jitter, no retry budget. Web search connectors are the same — a Google 429 (quota exhausted, hit during development) propagates as a caught error inside `Collector.execute` with no retry or fallback to another connector (it degrades to "one of five sources failed," not a tool error surfaced to Gemma — see below).
+- The one explicit failure-classification choice for single-remote calls: the
+  memory write is wrapped `try/catch` and swallowed (`src/session.ts:65-69`) —
+  a memory-write failure must not lose the answer the user already has. That's
+  a deliberate best-effort classification of one specific operation, named in
+  the code comment.
+- **A second, more structured failure-classification mechanism now exists for
+  the concurrent web-search fan-out.** `Collector.execute`
+  (`packages/capabilities/src/collector/index.ts:38-50`) wraps each source's
+  `connector.fetch()` in its own `try/catch`, so one source's throw can't
+  reject the others already in flight; each failure is classified `optional`
+  or not (`index.ts:47-49`) to decide whether it earns a `warnings` entry.
+  Every source currently configured in `src/session.ts` (all 10, across both
+  engines) is `optional: true`, so the "required source failed" warning path
+  is live code that's never actually exercised today. Still thin in one way
+  this repo shares with the Postgres pool: **no per-source deadline** —
+  `connector.fetch()` is called with no `AbortSignal`/timeout
+  (`index.ts:39`), so a hung external service stalls the whole gather rather
+  than failing fast. → full walk in **`04-scatter-gather-connector-fanout.md`**.
 
 When does this need to change? The day the database call crosses a real
 network under load (the deferred HTTP/Edge-Function phase). Then an unbounded
@@ -60,6 +77,16 @@ one device, fail-fast-and-surface is the right call — see the honest note in
   (`src/session.ts:27-36`). Replaying the same user turn would write a second
   row. There's no idempotency key on the request path because **nothing
   retries** (lens 2), so there's no duplicate to deduplicate.
+- **`PgJournalStore.create` (new, `src/pg-journal-store.ts:50-84`) is the same
+  story, one level further.** It's a plain `INSERT` with a server-generated
+  `id` (`gen_random_uuid()` default, `sql/002_decision_journal.sql:2`) and no
+  `ON CONFLICT` clause at all — there's no natural key to collide on, so the
+  question of upsert-vs-duplicate doesn't even arise the way it does for
+  `documents`/`chunks`. If a user resubmitted the same `/research … decision`
+  promotion twice, they'd get two `agents.decisions` rows. That's fine today
+  for the identical reason `persistMessage` is fine: the research-flow state
+  machine (`src/cli/research-flow.ts`) never retries a `saveDecision` call on
+  its own, so there's no duplicate to guard against yet.
 - **Delivery semantics: at-most-once, by omission.** No retry → each turn is
   attempted once; on failure it surfaces and is not re-sent. There is no
   at-least-once machinery (no queue, no ack/redelivery) and therefore no need
@@ -148,6 +175,17 @@ compensate. The migration runner *does* use a transaction
 (`src/migrate.ts`, per `context.md`), but that's datastore-local DDL atomicity
 → `study-database-systems`, not a distributed saga.
 
+**A second instance of the same shape, new this cycle:**
+`PgJournalStore.listDue` (`src/pg-journal-store.ts:86-100`) runs an `UPDATE`
+(flip due decisions from `open` to `review-due`) followed by a separate
+`SELECT` of exactly that status — two independent statements, not one
+transaction. On one process this is harmless (nothing else can write between
+the two calls), but it's the same "sequence of independent writes, not
+atomic, acceptable because there's only one writer" tradeoff as the `ask()`
+turn above, now with a read-modify-read shape instead of write-write.
+Neither needs a transaction today for the same reason: single writer, no
+concurrent mutator to race.
+
 ## 9. Distributed-systems red flags — ranked
 
 Ranked by consequence *for the system as it actually is today* (one device),
@@ -162,16 +200,23 @@ device phase wakes them up.
 | 4 | Per-turn writes aren't one transaction — partial-failure can half-write a trajectory | low (best-effort by design) | `src/session.ts:61-67` | durability/audit of trajectories becomes load-bearing |
 | 5 | `app_id` isolation is convention-only (no RLS) | none today (one writer) → high multi-tenant | design spec lines 191-195; `context.md` "No RLS this phase" | app #2 / phone writes the shared schema |
 | 6 | No request-level idempotency key (duplicate turn → duplicate row) | none today (no retries) | `src/session.ts:27-36` (plain INSERT) | retries are added (network path) |
+| 7 | Concurrent web-search fan-out has no per-source deadline — one hung connector stalls the whole `/research`/`/investing` gather | low-to-medium today (a live user is waiting on the turn) | `packages/capabilities/src/collector/index.ts:39` (no `signal`/timeout passed to `connector.fetch()`) | any of the 5 web APIs starts hanging instead of erroring |
 
 Findings 2 and 5 are the two that the deferred two-brain design has to solve
 *before* it ships — they're the load-bearing prerequisites, not afterthoughts.
 Both are projected forward in `03-deferred-two-brain-shared-memory.md`.
+Finding 7 is the newest addition this cycle and, unlike 2/3/4/5/6, it doesn't
+wait on a future multi-device phase — it's already live today, just
+low-probability, since `/research` and `/investing` are the only paths that
+touch more than one remote at once.
 
 ## See also
 
-- `00-overview.md` — the map and the ranked top-3.
+- `00-overview.md` — the map and the ranked top findings.
 - `01-app-to-postgres-boundary.md` — lens 1/2 deep walk.
 - `02-trace-sink-write-buffering.md` — lens 6/7 deep walk.
 - `03-deferred-two-brain-shared-memory.md` — DESIGN-NOT-CODE; lens 4/5/7 future.
+- `04-scatter-gather-connector-fanout.md` — lens 1/2/9 deep walk; the
+  concurrent web-search fan-out and its missing per-source deadline.
 - `study-database-systems` — transactions, isolation, the HNSW index, durability
   (the datastore-local half that this audit deliberately doesn't re-teach).

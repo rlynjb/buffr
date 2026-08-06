@@ -10,9 +10,10 @@ neighboring foundation guides (see the bottom of this file).
 ## What this repo is, in one sentence
 
 A long-lived terminal chat agent (`npm run chat`) that runs **stock Gemma 2 locally**,
-retrieves over **Postgres + pgvector**, and persists every conversation as a replayable
-trajectory — built as the *body* on top of `@rlynjb/aptkit-core` (consumed as a library,
-never edited here).
+retrieves over **Postgres + pgvector**, persists every conversation as a replayable
+trajectory, and now also hosts two domain-pack-driven research engines (`/investing`,
+`/research`) plus a decision-journal loop (`/review`) — built as the *body* on top of
+`@buffr/kernel` and its sibling monorepo packages (consumed as libraries, never edited here).
 
 ## Reading order
 
@@ -20,7 +21,7 @@ never edited here).
   1. 00-overview.md   ← start here. one diagram, the whole system, every box labelled.
   2. audit.md         ← the 8-lens system-design audit. what each lens found, or
                         `not yet exercised`. read it second to know the shape.
-  3. 01..06           ← the discovered patterns. each is a full concept file —
+  3. 01..09           ← the discovered patterns. each is a full concept file —
                         zoom out → structure pass → how it works → interview defense.
 ```
 
@@ -39,14 +40,24 @@ before opening anything.
                                      (engine extracted UP, store injected DOWN).
   05-long-lived-chat-session.md      one warm pool, one conversation, agent built once.
   06-profile-injection-as-context.md me.md profile row → system prompt; "your" assistant.
+  07-capability-pipeline.md          five typed stages (Collector→Analyzer→Scorer→Teacher→
+                                     Journal), LLM calls isolated to exactly two.
+  08-domain-pack-and-engine.md       DomainPack + Engine composition; two engine call shapes
+                                     (single-call InvestingEngine vs two-phase
+                                     collect()/evaluate() MarketResearchEngine).
+  09-predict-then-reveal-loop.md     the /research → /review system flow: blind prediction,
+                                     code-computed reveal, promote to a tracked decision,
+                                     durable review via the JournalStore port.
 ```
 
 ## Where the seams are (one-line map)
 
 ```
-  app code  ──contract──►  aptkit-core  ──adapter──►  buffr's PgVectorStore / TraceSink
-  (chat.tsx)  (the boundary you  (run-agent-loop,   (the implementations buffr owns)
-               never cross)       retrieval, memory)
+  app code  ──contract──►  @buffr/kernel + engines/capabilities/domain-packs  ──adapter──►
+  (chat.tsx,   (the boundary you        (run-agent-loop, retrieval, memory,      buffr's
+   cli flows)   never cross)             capability pipeline, domain packs)      PgVectorStore /
+                                                                                   TraceSink /
+                                                                                   JournalStore
                                        │
                                        ▼
                               Postgres + pgvector (reindb, schema `agents`)

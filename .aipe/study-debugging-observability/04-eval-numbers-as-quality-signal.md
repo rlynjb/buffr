@@ -80,33 +80,33 @@ The diagram is the mechanism: per query you get two numbers, you mean them acros
 
 #### Move 2 — the step-by-step walkthrough
 
-**Load the frozen ground truth.** The labeled set is read once (`src/cli/eval-cmd.ts:19-20`):
+**Load the frozen ground truth.** The labeled set is read once (`src/cli/eval-cmd.ts:21-22`):
 
 ```
-  src/cli/eval-cmd.ts:19   const queries: { query: string; relevant: string[] }[] =
-  :20     JSON.parse(await readFile(new URL('../../../eval/queries.json', …), 'utf8'));
+  src/cli/eval-cmd.ts:21   const queries: { query: string; relevant: string[] }[] =
+  :22     JSON.parse(await readFile(new URL('../../../eval/queries.json', …), 'utf8'));
 ```
 
 Each entry is a query plus the doc ids a human deemed relevant. This file *is* the source of truth — the whole eval is only as honest as these labels. The boundary condition: if `relevant` is stale (a doc was re-indexed under a new id), the scores drop for a reason that has nothing to do with retrieval quality. The ground truth has to track the corpus.
 
-**Run the thing under test and score it.** The loop queries the pipeline at K=3, dedups to doc ids, and scores (`src/cli/eval-cmd.ts:22-30`):
+**Run the thing under test and score it.** The loop queries the pipeline at K=3, dedups to doc ids, and scores (`src/cli/eval-cmd.ts:26-33`):
 
 ```
-  src/cli/eval-cmd.ts:24   for (const { query, relevant } of queries) {
-  :25     const hits = await pipeline.query(query, K);
-  :26     const docs = [...new Set(hits.map((h) => String(h.meta.docId)))];
-  :27     const p = scorePrecisionAtK(docs, new Set(relevant), 1).score;   // P@1
-  :28     const r = scoreRecallAtK(docs, new Set(relevant), K).score;       // R@3
-  :29     p1 += p; rk += r;
+  src/cli/eval-cmd.ts:26   for (const { query, relevant } of queries) {
+  :27     const hits = await pipeline.query(query, K);
+  :28     const docs = [...new Set(hits.map((h) => String(h.meta.docId)))];
+  :29     const p = scorePrecisionAtK(docs, new Set(relevant), 1).score;   // P@1
+  :30     const r = scoreRecallAtK(docs, new Set(relevant), K).score;       // R@3
+  :31     p1 += p; rk += r;
 ```
 
-Read the two metric choices. `scorePrecisionAtK(…, 1)` measures *only the top hit* — for a RAG agent that synthesizes from the first chunk, "is rank 1 relevant?" is the metric that matters most. `scoreRecallAtK(…, K)` at K=3 measures coverage — did the relevant docs make the shortlist the agent actually sees? The dedup on `docId` (`:26`) is load-bearing: multiple chunks from one doc collapse to one, so the metric is per-*document*, matching how `relevant` is labeled.
+Read the two metric choices. `scorePrecisionAtK(…, 1)` measures *only the top hit* — for a RAG agent that synthesizes from the first chunk, "is rank 1 relevant?" is the metric that matters most. `scoreRecallAtK(…, K)` at K=3 measures coverage — did the relevant docs make the shortlist the agent actually sees? The dedup on `docId` (`:28`) is load-bearing: multiple chunks from one doc collapse to one, so the metric is per-*document*, matching how `relevant` is labeled.
 
-**Print and aggregate — where the signal dies.** Per-query and mean both go to stdout (`src/cli/eval-cmd.ts:31-33`):
+**Print and aggregate — where the signal dies.** Per-query and mean both go to stdout (`src/cli/eval-cmd.ts:33-35`):
 
 ```
-  src/cli/eval-cmd.ts:31   process.stdout.write(`${query.padEnd(44)} P@1 ${p.toFixed(2)} …\n`);
-  :33   process.stdout.write(`\nmean P@1 …  mean R@3 …\n`);
+  src/cli/eval-cmd.ts:33   process.stdout.write(`${query.padEnd(44)} P@1 ${p.toFixed(2)} …\n`);
+  :35   process.stdout.write(`\nmean P@1 …  mean R@3 …\n`);
 ```
 
 The boundary condition is the whole gap: this is the *only* place the number exists. Nothing writes the run to a table, so there's no baseline to diff against. You compare "is retrieval worse than last week" by eyeballing two terminal windows. → this is `03-stdout-as-only-log.md` applied to the one metric that matters most.
@@ -116,9 +116,9 @@ The boundary condition is the whole gap: this is the *only* place the number exi
 The kernel of an offline eval, named by what breaks without each part:
 
 1. **A frozen labeled set** — the answer key. Drop it and there's no ground truth; the scores measure nothing. (`eval/queries.json`)
-2. **A deterministic run of the thing under test** — `pipeline.query()` over the same corpus. If the corpus shifts between runs, score deltas conflate "model changed" with "data changed." (`eval-cmd.ts:25`)
-3. **Ranking metrics that match how the output is used** — `P@1` because the agent leans on the top hit; `R@3` because it sees the top 3. Pick the wrong k and you measure a quality the agent never experiences. (`:27-28`)
-4. **An aggregate** — the mean, the single number you actually track. (`:33`)
+2. **A deterministic run of the thing under test** — `pipeline.query()` over the same corpus. If the corpus shifts between runs, score deltas conflate "model changed" with "data changed." (`eval-cmd.ts:27`)
+3. **Ranking metrics that match how the output is used** — `P@1` because the agent leans on the top hit; `R@3` because it sees the top 3. Pick the wrong k and you measure a quality the agent never experiences. (`:29-30`)
+4. **An aggregate** — the mean, the single number you actually track. (`:35`)
 
 What's *missing*, and is the observability gap: **a stored run with a timestamp**. Without it there's no trend, no regression alert, no before/after. The metrics are present and correct; the *observability* — storage, trend, threshold — is absent. That absence is exactly why this is a debugging-observability finding and not just a testing one.
 
@@ -172,7 +172,7 @@ The takeaway: buffr already did the *hard* part (a real labeled set, the right m
 
 These metrics come from information retrieval, decades older than RAG. `P@k` and `R@k` are the canonical way to score a ranked result list against relevance judgments — the same math behind search-engine quality scoring. buffr applies them to the RAG retrieval step, which is exactly right: RAG *is* retrieval-then-generate, and the retrieval half is a ranking problem with a measurable answer key.
 
-The choice of `P@1` specifically is worth defending: for a generation agent that grounds its answer in the retrieved chunks, the rank-1 hit disproportionately shapes the output, so "is the top hit relevant" is the highest-signal single number. `R@3` complements it — precision alone could hide that you're missing half the relevant docs. The pair is a deliberate, sound choice (`eval-cmd.ts:27-28`).
+The choice of `P@1` specifically is worth defending: for a generation agent that grounds its answer in the retrieved chunks, the rank-1 hit disproportionately shapes the output, so "is the top hit relevant" is the highest-signal single number. `R@3` complements it — precision alone could hide that you're missing half the relevant docs. The pair is a deliberate, sound choice (`eval-cmd.ts:29-30`).
 
 Where it connects: `study-testing` treats this CLI as a regression guard (does a change drop the score below a bar). This guide treats the same numbers as a *signal to observe over time*. The seam between the two guides is `eval/queries.json` — testing owns the labels' correctness; observability owns whether anyone's watching the trend.
 
@@ -190,11 +190,11 @@ Where it connects: `study-testing` treats this CLI as a regression guard (does a
                    FIX: store {ts, meanP1, meanR3} → diff vs last-good
 ```
 
-Today, by hand: `npm run eval` scores a labeled set and prints `P@1` / `R@3` (`eval-cmd.ts:27-33`). `P@1` is the right headline because the agent leans on the top hit. Would I catch a regression? Not reliably — the number isn't stored, so there's no baseline to diff (`:31`). The fix is small and additive: persist each run with a timestamp and alert on a drop. **Anchor:** the print-and-forget at `eval-cmd.ts:33` — a measurement, not yet an instrument.
+Today, by hand: `npm run eval` scores a labeled set and prints `P@1` / `R@3` (`eval-cmd.ts:29-35`). `P@1` is the right headline because the agent leans on the top hit. Would I catch a regression? Not reliably — the number isn't stored, so there's no baseline to diff (`:33`). The fix is small and additive: persist each run with a timestamp and alert on a drop. **Anchor:** the print-and-forget at `eval-cmd.ts:35` — a measurement, not yet an instrument.
 
 **Q: Why `P@1` and not `P@3`?**
 
-Because the agent's answer is grounded most in the rank-1 chunk, so the top hit's relevance is the highest-signal number; `R@3` covers whether the relevant set made the shortlist the agent actually sees. Matching the metric's k to how the output is consumed is the load-bearing call. **Anchor:** `scorePrecisionAtK(docs, …, 1)` vs `scoreRecallAtK(docs, …, K)` at `eval-cmd.ts:27-28`.
+Because the agent's answer is grounded most in the rank-1 chunk, so the top hit's relevance is the highest-signal number; `R@3` covers whether the relevant set made the shortlist the agent actually sees. Matching the metric's k to how the output is consumed is the load-bearing call. **Anchor:** `scorePrecisionAtK(docs, …, 1)` vs `scoreRecallAtK(docs, …, K)` at `eval-cmd.ts:29-30`.
 
 ## See also
 

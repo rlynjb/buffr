@@ -140,11 +140,42 @@ A contract test is insurance on a substitution. The value isn't "PgVectorStore w
 
 ---
 
+## A second instance — JournalStore, and where the shape diverges
+
+The `VectorStore` case above is a **one-sided** contract test: only the Postgres adapter is tested in this repo, against a reference implementation that lives upstream in aptkit. buffr grew a second candidate for this pattern — `JournalStore` (`packages/kernel/src/journal/contracts.ts`) — and this one is **two-sided**: both `InMemoryJournalStore` (`packages/kernel/src/journal/in-memory-journal-store.ts`) and `PgJournalStore` (`src/pg-journal-store.ts`, backing `agents.decisions`) are implemented *and tested* inside this repo, in `packages/kernel/test/journal.test.ts` (8 tests, always-run) and `test/pg-journal-store.test.ts` (5 tests, `DATABASE_URL`-gated) respectively.
+
+That's the scenario the Elaborate note above called out as hypothetical — "if buffr ever grew a second store, the honest move would be to extract these assertions into a shared suite run against both." It happened, and the honest move was **not** taken: the two test files hand-duplicate the same `HYPOTHESIS`/`DECISION` fixture literals (`journal.test.ts:10-27`, `pg-journal-store.test.ts:23-40` — same shape, copy-pasted, not imported from one place) and write parallel-but-independent `describe` blocks against each store, rather than one parameterized suite run twice.
+
+```
+  Two adapters, tested two-sided but NOT shared
+
+  ┌─ JournalStore (the port) ───────────────────────────────────────┐
+  │  create · listDue · snooze · resolve                             │
+  │  doc comment: "listDue's open→review-due transition — BOTH       │
+  │  implementations must do this identically" (contracts.ts:60-64)  │
+  └───────────────┬─────────────────────────┬─────────────────────────┘
+        implements │             implements  │
+  ┌────────────────▼──────────┐  ┌───────────▼──────────────────────┐
+  │ InMemoryJournalStore       │  │ PgJournalStore                    │
+  │ journal.test.ts (8 tests)  │  │ pg-journal-store.test.ts (5 tests)│
+  │ own fixtures, own asserts  │  │ own fixtures, own asserts         │
+  └─────────────────────────────┘  └────────────────────────────────────┘
+         ▲ duplicated, not shared — no single script proves both agree
+```
+
+**Why this isn't cosmetic — a real bug proved it.** `InMemoryJournalStore.listDue` originally mutated `status` on *every* entry matching `reviewAt <= now`, with no `userId`/`workspaceId` check in the mutation loop — only the returned list was scoped (`in-memory-journal-store.ts:37-53`, pre-fix). That's a cross-tenant side-effect leak: calling `listDue` for one workspace could silently flip another workspace's decision to `review-due`. Commit `41ecce8` fixed it (added the `e.userId === userId && e.workspaceId === workspaceId` guard directly in the mutation loop, `in-memory-journal-store.ts:39-41`) and added exactly one regression test — `journal.test.ts:76-91`, `'listDue does not transition another user's/workspace's entries to review-due as a side effect'`.
+
+That regression test was added **only to the in-memory side.** `pg-journal-store.test.ts` was not touched in that commit. `PgJournalStore.listDue` never had this bug class — its "mark due" step is a single parameterized `UPDATE ... WHERE app_id = $1 AND user_id = $2 AND workspace_id = $3` (`pg-journal-store.ts:56-60`), scoped by construction, not by a checked condition inside a loop. So the Postgres side is safe today — but *not because a test says so*. Nothing in `pg-journal-store.test.ts` asserts "a `listDue` call for workspace A must not touch workspace B's rows" the way the in-memory test now does. If that `UPDATE` is ever refactored into two steps (a scan-then-update, mirroring what the in-memory version originally did), there is no test on the Postgres side that would catch the same regression coming back.
+
+**The verdict:** this is the contract-parity pattern's failure mode made concrete, not a new pattern. A contract test's whole value is that a bug found and fixed on one side is *provably* checked on the other. Here it wasn't — the fixture duplication is the tell. The fix is the one already named as "the honest move": extract one assertion script (plant a decision, call `listDue` scoped to workspace A, call it again scoped to workspace B with a `now` past the reviewAt, assert workspace A's entry is still `open`) and run it against both `InMemoryJournalStore` and `PgJournalStore` — not two independently-authored describe blocks that happen to cover similar ground.
+
+---
+
 ## Elaborate
 
-Contract testing comes from the problem of multiple implementations behind one interface — classically, the same test suite is run against *every* implementation to prove they're interchangeable. Here only `PgVectorStore` is tested in buffr (the in-memory store is tested in aptkit, upstream), so it's a one-sided contract test: buffr asserts its adapter matches the contract the in-memory reference defines. If buffr ever grew a second store, the honest move would be to extract these assertions into a shared suite run against both.
+Contract testing comes from the problem of multiple implementations behind one interface — classically, the same test suite is run against *every* implementation to prove they're interchangeable. `VectorStore` in this repo is a one-sided instance of that (only `PgVectorStore` is tested here; the in-memory reference is tested upstream in aptkit). `JournalStore` is a two-sided instance where buffr owns both implementations — and, as the section above shows, two-sided doesn't mean shared unless someone deliberately extracts the shared suite.
 
-The dimension-mismatch test in the same file (`pg-vector-store.test.ts:42-46`) is part of the same contract: the interface promises a 768-dim store, and a wrong-length vector must throw, never truncate (the must-not-change constraint in the project context). That's an error-branch contract assertion — see `audit.md` lens 5, where it's noted as the one error path this repo actually tests.
+The dimension-mismatch test in the same file (`pg-vector-store.test.ts:42-46`) is part of the same contract: the interface promises a 768-dim store, and a wrong-length vector must throw, never truncate (the must-not-change constraint in the project context). That's an error-branch contract assertion — see `audit.md` lens 5, where it's noted as one of the few error paths this repo actually tests.
 
 The parity-over-integrity decision links to data modeling: the dropped FK is a normalization/integrity tradeoff. Cross-link to `study-data-modeling` for the schema-shape view; here it matters only as *the thing that lets the parity test pass*.
 
@@ -169,11 +200,16 @@ No, it's the contract. aptkit's in-memory store has no concept of a documents ro
 
 *Anchor:* "Dropped FK on purpose — parity-over-integrity — so the Postgres store is a true drop-in for aptkit's in-memory one."
 
+**Q: buffr has two implementations of `JournalStore` tested in the same repo — why isn't that just a stronger version of this pattern?**
+Because two-sided doesn't automatically mean shared. `InMemoryJournalStore` and `PgJournalStore` are each tested in their own file with hand-duplicated fixtures, not one script run against both — so a bug fixed on one side isn't provably checked on the other. That's exactly what happened: a cross-tenant scoping bug in `InMemoryJournalStore.listDue` got fixed and regression-tested, but only in `journal.test.ts`; `pg-journal-store.test.ts` never got the equivalent assertion, even though the contract's doc comment says both implementations must behave identically. Real contract-test discipline means one shared assertion list parameterized over every implementation — not "we tested both stores" as a synonym for it.
+
+*Anchor:* "Two implementations tested doesn't mean one contract tested twice — without a shared suite, a fix on one side is a coin flip on the other."
+
 ---
 
 ## See also
 
 - `02-fake-embedder-injection.md` — the same port-substitution idea applied to the `EmbeddingProvider` interface.
-- `04-idempotent-migration-test.md` — the migration that creates (and drops the FK on) the `chunks` table this test relies on.
-- `audit.md` lens 5 — the dimension-mismatch error branch, the contract's one tested error path.
+- `04-idempotent-migration-test.md` — the migration that creates (and drops the FK on) the `chunks` table this test relies on, and now also creates `agents.decisions` for `PgJournalStore`.
+- `audit.md` lens 5 — the dimension-mismatch error branch, and the JournalStore scoping-leak fix, as this repo's two real error-branch regression tests.
 - `study-data-modeling` — the dropped-FK decision as a schema/integrity tradeoff.

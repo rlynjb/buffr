@@ -224,6 +224,23 @@ billing system.
 The trust/security angle — that `app_id` is *also* not enforced (no RLS) — is a
 sibling decision; see `04-app-id-tenant-column.md` and **study-security**.
 
+**A step further, in the newer `agents.decisions` table.** `chunks.document_id`
+is a *soft* link — the column exists, points at a real `documents.id`, and
+would resolve with a `join` if you ran one; only the constraint is dropped.
+`agents.decisions` (`sql/002_decision_journal.sql`, see `audit.md` §4) doesn't
+even have that: `subject_id`/`subject_type` name an external thing (today
+always `subject_type = 'research-topic'`, `subject_id = <the topic string>`,
+`session.ts:752-753,773-774`) with no table in this schema to join against,
+and `evidence_ids` is a jsonb array of connector `sourceId` strings
+(`src/cli/research-flow.ts:117,149`) pointing at search results that are
+**never persisted anywhere in this database** — not in `documents`, not in
+`chunks`, nowhere. A soft link points at a row that might not exist; these
+columns point at values that were never rows to begin with. That's not a
+stricter or weaker version of this pattern — it's a different one: this
+schema doesn't try to reference other tables at all, it just archives the
+identifiers as opaque provenance. There's nothing to reconcile because
+there was never anything to join.
+
 ---
 
 ## Interview defense
@@ -265,3 +282,6 @@ link without a plan for orphans is just a bug with a nice name.
 - `06-trajectory-tables.md` — the memory chunks the soft link enables
 - `audit.md` §4 — transactions-and-integrity, the non-atomic write this interacts with
 - **study-system-design** — the VectorStore contract / drop-in-parity seam
+- `agents.decisions`'s `subject_id`/`evidence_ids` — a step further than a
+  soft link: identifiers with no row anywhere in this database, not even a
+  droppable one. See the "step further" note above and `audit.md` §4.

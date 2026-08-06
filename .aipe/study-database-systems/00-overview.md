@@ -2,10 +2,12 @@
 
 > `buffr-laptop`: a single Postgres instance (database `reindb`, schema `agents`)
 > with the vector extension (`pgvector`) bolted on. Embeddings, source documents,
-> conversation trajectories, and episodic memory all live in **one** engine. There
-> is no second datastore, no cache tier, no replica. That makes the storage-engine
-> questions sharp and concrete: every read and write you care about goes through
-> one query planner, one transaction manager, one buffer pool.
+> conversation trajectories, episodic memory, and now a decision journal
+> (`agents.decisions` — predictions from `/research`, resolved by `/review`) all
+> live in **one** engine. There is no second datastore, no cache tier, no replica.
+> That makes the storage-engine questions sharp and concrete: every read and write
+> you care about goes through one query planner, one transaction manager, one
+> buffer pool.
 
 This guide audits the storage-engine and consistency mechanisms *beneath* the repo —
 the layer that actually executes and preserves your reads and writes. The neighbours:
@@ -51,6 +53,8 @@ layers every concept file in this guide drops into.
   ┌─ Application layer (TypeScript / aptkit) ───────────────────────────┐
   │  PgVectorStore.upsert / .search   indexDocumentRow   SupabaseTrace  │
   │  src/pg-vector-store.ts           src/runtime.ts     src/...-sink.ts│
+  │  PgJournalStore .create/.listDue/.snooze/.resolve  src/pg-journal-  │
+  │  store.ts  (the decision journal — a fifth call site)               │
   └───────────────────────────┬─────────────────────────────────────────┘
                               │  node-postgres (pg) — one Pool, no sizing
   ┌─ Connection layer ────────▼─────────────────────────────────────────┐
@@ -91,20 +95,25 @@ ranked by consequence. Each has a dedicated file; the full audit with evidence i
    results.** This is the single most important thing to understand about a
    pgvector deployment. → `03`, `04`.
 
-2. **The document+chunk write is non-atomic across two transactions.**
-   `indexDocumentRow` (`src/runtime.ts:11-17`) writes the `documents` row on the
-   pool directly (autocommit, one transaction), then calls `pipeline.index(...)`
-   which lands in `PgVectorStore.upsert` — a *second, separate* transaction
-   (`src/pg-vector-store.ts:40-58`). A crash between them leaves a document row
-   with no chunks. The dropped FK (a deliberate modeling choice → data-modeling)
-   means the engine won't even complain. → `05`.
+2. **The document+chunk write is non-atomic across two transactions — and it's not
+   the only place this shape shows up.** `indexDocumentRow` (`src/runtime.ts:11-17`)
+   writes the `documents` row on the pool directly (autocommit, one transaction),
+   then calls `pipeline.index(...)` which lands in `PgVectorStore.upsert` — a
+   *second, separate* transaction (`src/pg-vector-store.ts:40-58`). A crash between
+   them leaves a document row with no chunks. The dropped FK (a deliberate modeling
+   choice → data-modeling) means the engine won't even complain. The decision
+   journal's `PgJournalStore.listDue` (`src/pg-journal-store.ts:86-98`) repeats the
+   identical shape — an `UPDATE` and a `SELECT` as two unwrapped autocommit
+   statements — and `runAllMigrations` (`src/migrate.ts:25-30`) does it a third
+   time across migration files. Three independent call sites reached for "two
+   `pool.query` calls" where the intent was one operation. → `05`, `07`.
 
 3. **Isolation is whatever Postgres defaults to — READ COMMITTED — and the code
-   never says so.** Every `begin` in the repo (`upsert`, `runMigration`) takes the
-   default. No `SET TRANSACTION ISOLATION LEVEL`, no `SELECT ... FOR UPDATE`, no
-   optimistic-concurrency version column. That's *fine* for a single-device app
-   with one writer — but it's an assumption, not a decision, and it's invisible.
-   → `05`, `06`.
+   never says so.** Every `begin` in the repo (`upsert`, `runMigration`, and now
+   `listDue`) takes the default. No `SET TRANSACTION ISOLATION LEVEL`, no
+   `SELECT ... FOR UPDATE`, no optimistic-concurrency version column. That's *fine*
+   for a single-device app with one writer — but it's an assumption, not a
+   decision, and it's invisible. → `05`, `06`.
 
 4. **MVCC is doing real work you never see, and the index churns under it.** Every
    `on conflict do update` in `upsert` writes a *new row version* and leaves the
@@ -165,6 +174,10 @@ shows up — which is exactly the boundary this guide draws.
   FK as a modeling choice, the soft-link id scheme (`"<docId>#<index>"`), column
   types, the `meta jsonb` design. This guide treats those shapes as given and audits
   what the engine *does* with them.
+- **`study-testing`** (`04-idempotent-migration-test.md`) — owns *verifying* that
+  `runAllMigrations` is safe to re-run after a partial failure. This guide names
+  *why* that idempotency is what makes the migration runner's missing outer
+  transaction survivable (`07`); the testing guide proves it holds.
 - **`study-performance-engineering`** — owns *measurement and tuning*: pool sizing
   under load, HNSW `ef_search`/`m` recall-vs-latency curves, EXPLAIN-driven
   optimization. This guide names *where* those knobs live in the mechanism; that

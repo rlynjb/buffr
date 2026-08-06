@@ -77,32 +77,29 @@ Without the guard, a second submit during the `await` would run a second turn co
 
 ### Move 2 — the walkthrough
 
-**The `busy` guard — the one synchronization primitive in the repo.** Look at the order of operations in `onSubmit`:
+**The `busy` guard — the one synchronization primitive in the repo.** The function is `handleSubmit` now (renamed from `onSubmit`; it also switched from reading a `value` argument to reading a ref, since the textarea's text lives in `taRef` rather than controlled React state). The synchronization shape is unchanged — same guard, same place in the function — but the completion mechanism changed: instead of `async/await` wrapped in `try/finally`, every branch now uses the two-argument `.then(success, error)` form (the same fix `03` covers for the research/review flows):
 
 ```ts
-// src/cli/chat.tsx:15-34 — the re-entrancy guard
-const onSubmit = async (value: string): Promise<void> => {
-  const q = value.trim();
-  if (busy) return;                 // ← GUARD: synchronous, runs before any await
-  // ... /exit handling ...
-  if (!q) return;
-  setInput('');
-  setTurns((t) => [...t, { role: 'you', text: q }]);
-  setBusy(true);                    // ← claim the lock (still synchronous)
-  try {
-    const answer = await session.ask(q);   // ← YIELD: thread is free, but busy===true
-    setTurns((t) => [...t, { role: 'buffr', text: answer }]);
-  } catch (err) {
-    setTurns((t) => [...t, { role: 'buffr', text: `error: ...` }]);
-  } finally {
-    setBusy(false);                 // ← release the lock
-  }
+// src/cli/chat.tsx:154-169, 358-376 — the re-entrancy guard, current shape
+const handleSubmit = (): void => {
+  const q = (taRef.current?.plainText as string | undefined)?.trim() ?? '';
+  if (busy) return;                     // ← GUARD: synchronous, runs before any await
+  if (!activeFlow && !q) return;
+  taRef.current?.setText('');
+  // ... /exit, /help, activeFlow dispatch, etc. ...
+
+  setTurns(t => [...t, { role: 'you', text: q }]);
+  setBusy(true);                        // ← claim the lock (still synchronous)
+  session.ask(q, { ... }).then(
+    answer => { setTurns(t => [...t, { role: 'buffr', text: answer }]); setBusy(false); },
+    err    => { setTurns(t => [...t, { role: 'buffr', text: `error: ...` }]); setBusy(false); },
+  );
 };
 ```
 
-The critical detail: `if (busy) return` and `setBusy(true)` both run **synchronously, before the first `await`**. Run-to-completion guarantees no other task interleaves between them — so the check-then-set is atomic without any lock. By the time the thread yields at `await session.ask(q)`, `busy` is already `true`, so any second submit hits `if (busy) return` and bails. This is a mutex implemented with the loop's own serialization. (One caveat the UI sidesteps anyway: while `busy`, the `<TextInput>` is replaced by the spinner — `src/cli/chat.tsx:48-56` — so the user *can't* even submit again. The guard is belt *and* suspenders.)
+The critical detail is unchanged: `if (busy) return` and `setBusy(true)` both run **synchronously, before the first yield**. Run-to-completion guarantees no other task interleaves between them — so the check-then-set is atomic without any lock. What changed is *where* the release happens: instead of one `finally` clearing `busy` on both paths, each `.then()` branch clears it explicitly — success and error both do, so the guarantee holds either way, but it's now enforced by discipline (every branch remembers to call `setBusy(false)`) rather than by the language construct (`finally` can't be forgotten; a second `.then()` argument can). That's precisely the shape of hazard `03`'s R8 finding covers: the `/research`/`/review` flows initially forgot the error branch, and an unhandled rejection left `busy` stuck `true` with no `finally` to save it. `handleSubmit`'s plain-`/ask` path got the two-arg form right from the start; the flow call sites didn't, until `26f0e4b`. (While `busy`, the input is hidden behind the spinner/progress panel too — belt *and* suspenders — but the guard is what actually prevents re-entrant execution, not the hidden UI.)
 
-**`turns[]` and `input` — React's reducer keeps them safe.** Every mutation goes through `setTurns((t) => [...t, ...])` — a functional update that reads the latest state and returns a new array, never mutating in place (`src/cli/chat.tsx:25,29,31`). Two facts make this race-free: the updater is pure, and React applies updaters in order. There's no `turns.push()` anywhere — that immutable discipline is what makes concurrent-looking updates from before/after an `await` compose correctly.
+**`turns[]` and `input` — React's reducer keeps them safe.** Every mutation goes through `setTurns(t => [...t, ...])` — a functional update that reads the latest state and returns a new array, never mutating in place. Two facts make this race-free: the updater is pure, and React applies updaters in order. There's no `turns.push()` anywhere — that immutable discipline is what makes concurrent-looking updates from before/after an `await` compose correctly.
 
 **`pending[]` — single owner, push-only across awaits.** The sink's array (`src/supabase-trace-sink.ts:50`) is mutated by `push()` from inside synchronous `emit()` calls. Even though many `persistMessage` Promises are in flight concurrently, the *array mutation* (`this.pending.push(p)`) is synchronous and runs to completion each time — no two pushes interleave. The reads happen only in `flush()` after the run. Single writer, single reader, no overlap.
 
@@ -121,14 +118,18 @@ The critical detail: `if (busy) return` and `setBusy(true)` both run **synchrono
 
 **Where real concurrency actually lands: Postgres.** The one place multiple operations genuinely hit a shared resource at once is the database — several `persistMessage` inserts in flight, plus the `upsert` transaction's `begin/commit` (`src/pg-vector-store.ts:42-58`) holding one connection. The repo doesn't synchronize these in app code; it leans on two things: transactions (the upsert is all-or-nothing within one checked-out connection) and `created_at = event.timestamp` so that *replay order* is correct even though *insert order* is whatever the pool schedules. That's the right division of labor — let the database be the concurrency-control authority, don't reimplement it in JS.
 
+**The `busy` guard now also fences two multi-step closures, not just single turns.** `/research` and `/review` (`src/cli/research-flow.ts`, `src/cli/review-flow.ts`) are new since the last pass — each is a `createXFlow(session, ...)` closure holding mutable `let step`, plus flow-specific state (`collected`, `prediction`, `stake` for research; `due`, `index`, `pendingDisposition` for review) across every `await` in `start()`/`submit()`. That's the same re-entrancy shape as `onSubmit`: a multi-step exchange with the user, state mutated between awaits, and no guarantee the same closure won't be re-entered before a step finishes. `handleSubmit` in `chat.tsx` closes that gap identically to the single-turn case — `if (busy) return` before dispatching to `activeFlow.controller.submit(q)`, `setBusy(true)` before the `await`, both synchronous and adjacent. One guard, two shapes of async work (a single request/response turn, and a multi-step state machine) — the guard doesn't care which, because the hazard it closes (re-entrancy across an `await`) is identical in both.
+
+**The journal stores confirm the pattern rather than extend it.** `InMemoryJournalStore` (`packages/kernel/src/journal/in-memory-journal-store.ts`) mutates a plain `Map` — `entries.set(id, full)`, `e.status = 'review-due'` inside a `for...of` over `.values()` — with no lock. That's safe for the identical reason `pending[]` is safe: every mutation is synchronous, so no two mutations can interleave mid-write, and the `Map` is single-owner (constructed once, referenced only by the store instance, used only in tests). `PgJournalStore` (`src/pg-journal-store.ts`) pushes its concurrency control down to Postgres exactly like `PgVectorStore` does — `listDue`'s `update ... where status = 'open' and review_at <= $4` is one atomic statement, not a read-then-write race, and every method scopes its `where` clause by `app_id`. Neither store introduces a new synchronization primitive; both confirm the repo's existing division of labor (single-thread run-to-completion in-process, transactions/atomic statements in Postgres) rather than needing a new one.
+
 ### Move 2 variant — the load-bearing skeleton of the guard
 
 The kernel of "serialize re-entrant async work":
 
 1. **A flag read-and-set with no `await` between.** `if (busy) return; ... setBusy(true)`. *Put an `await` between the check and the set* and the guard breaks — two submits could both pass the check before either sets the flag (the check-then-act race). The whole correctness rests on those two lines being synchronous and adjacent.
-2. **Release in `finally`.** `setBusy(false)` in `finally` (`src/cli/chat.tsx:33`). *Remove the `finally`* and a thrown error inside `ask` leaves `busy` stuck `true` forever — the UI deadlocks, no further input accepted.
+2. **Release on every terminal path.** Today that's `setBusy(false)` in *both* arguments of `.then(success, error)`, not a single `finally`. *Drop the second argument* (the error one) and a thrown error leaves `busy` stuck `true` forever — the UI deadlocks, no further input accepted. This is exactly what happened in the `/research`/`/review` flows before `26f0e4b` (`03`, `08` R8) — the skeleton part is the same whether you enforce it with `finally` or with a two-arg `.then()`; what matters is that *every* terminal path clears the flag, and the language doesn't check that for you the way it does with `finally`.
 
-Optional hardening: hiding the input while busy (`src/cli/chat.tsx:48`) is defense-in-depth, not the guard itself. The flag is the lock; the UI swap is courtesy.
+Optional hardening: hiding the input while busy is defense-in-depth, not the guard itself. The flag is the lock; the UI swap is courtesy.
 
 ### Move 3 — the principle
 
@@ -146,12 +147,14 @@ The full synchronization picture across the three layers.
   ┌─ UI (React, chat.tsx) ──────────────────────────────────────────┐
   │  busy: GUARD flag    if(busy)return → setBusy(true) [atomic]     │
   │  turns/input: functional setState, never mutated in place        │
-  │  ── critical section: setBusy(true) ... finally setBusy(false) ──│
+  │  ── critical section: setBusy(true) ... .then(ok,err) both clear ─│
+  │  same guard now also fences /research, /review flow closures     │
   └────────────────────────────┬────────────────────────────────────┘
                                │ await session.ask (yield point)
-  ┌─ Runtime (sink, session) ──▼────────────────────────────────────┐
-  │  pending[]: single owner, push synchronous, read once in flush   │
-  │  session closure: pool/agent/conv — built once, read-only after  │
+  ┌─ Runtime (sink, session, flows) ─▼────────────────────────────────┐
+  │  pending[]: single owner, push synchronous, read once in flush    │
+  │  session closure: pool/agent/conv/journal — built once, read-only │
+  │  flow closures: step/collected/prediction — mutable across awaits │
   └────────────────────────────┬────────────────────────────────────┘
                                │ many inserts in flight (concurrent)
   ┌─ Storage (Postgres) ───────▼────────────────────────────────────┐
@@ -175,18 +178,18 @@ The "no data races, but yes re-entrancy" distinction trips up engineers coming f
 
 **Q: "It's single-threaded, so there are no race conditions, right?"**
 
-> No data races — two pieces of code can't write the same variable simultaneously, because the loop runs one task to completion. But there's still *async re-entrancy*: a function can yield at an `await` and be entered again before it finishes. In the chat UI, that's two rapid submits both starting a turn. I close it with a synchronous `if (busy) return` set before the first await, released in `finally`. The check-and-claim has to be synchronous — put an await between checking and setting the flag and the guard breaks.
+> No data races — two pieces of code can't write the same variable simultaneously, because the loop runs one task to completion. But there's still *async re-entrancy*: a function can yield at an `await` and be entered again before it finishes. In the chat UI, that's two rapid submits both starting a turn — or, since the last pass, two rapid steps through a `/research` or `/review` flow. I close it with a synchronous `if (busy) return` set before the first yield, released on every terminal path — today that's both arguments of `.then(success, error)`, which has to cover the error path explicitly or a rejection leaves the UI stuck (that's exactly the bug `26f0e4b` fixed). The check-and-claim has to be synchronous — put an await between checking and setting the flag and the guard breaks.
 
 ```
   the race that single-threading does NOT prevent
 
-  onSubmit#1: check busy(false) ─► [await] ─► set busy(true)
-  onSubmit#2:        check busy(false) ─► ...  ← BOTH passed!
+  handleSubmit#1: check busy(false) ─► [await] ─► set busy(true)
+  handleSubmit#2:        check busy(false) ─► ...  ← BOTH passed!
                      (only if check and set are split by an await)
   fix: check + set synchronous, adjacent, before any await
 ```
 
-**Anchor:** "The async mutex is the `busy` flag — check-and-claim synchronous before the await at `src/cli/chat.tsx:18,25`, released in `finally`; the loop's run-to-completion is the lock."
+**Anchor:** "The async mutex is the `busy` flag — check-and-claim synchronous before the yield at `src/cli/chat.tsx:156,169`, released on both branches of `.then(success, error)`; the loop's run-to-completion is the lock. The same guard now fences the `/research`/`/review` flow closures too."
 
 ---
 

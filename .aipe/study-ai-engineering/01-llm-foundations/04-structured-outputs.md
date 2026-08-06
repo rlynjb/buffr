@@ -57,7 +57,7 @@ the contract, frontend vs LLM
 
 #### The contract is declared in English, in the system prompt
 
-There's no `response_format: json` flag. The schema is *rendered as text* and the rule is *stated as a sentence*. From `buildSystemText` (`gemma-provider.ts:133–165`):
+There's no `response_format: json` flag. The schema is *rendered as text* and the rule is *stated as a sentence*. From `buildSystemText` (`packages/kernel/src/model-gateway/gemma-provider.ts:110-126`):
 
 ```ts
 parts.push([
@@ -74,7 +74,7 @@ Annotation that matters: this is the *entire* enforcement mechanism on the outbo
 
 #### The parser scavenges JSON out of whatever came back
 
-`parseAgentJson` (`packages/runtime/src/json-output.ts:7–28`) is two-stage: try a fenced ```` ```json ```` block, then a bounded `{`…`}` substring scan. It's built to forgive a model that wraps JSON in chatter:
+`parseAgentJson` (a local copy inside `gemma-provider.ts:140-151` — a separately exported twin lives at `packages/kernel/src/workflow-runtime/json-output.ts:9-20` for the unwired rigorous path below) is two-stage: try a fenced ```` ```json ```` block, then a bounded `{`…`}` substring scan. It's built to forgive a model that wraps JSON in chatter:
 
 ```ts
 export function parseAgentJson(text: string): unknown {
@@ -104,7 +104,7 @@ parseAgentJson, two-stage scavenge
 
 #### The validator turns parsed-JSON into a trusted shape — or `null`
 
-`parseToolCall` (`gemma-provider.ts:168–182`) checks the object actually has a string `name` and an object `input` (tolerating aliases like `tool`/`name`/`tool_name`). If not, it returns `null`, and `complete()` treats the output as plain text instead:
+`parseToolCall` (`gemma-provider.ts:128-138`) checks the object actually has a string `name` and an object `input` (tolerating aliases like `tool`/`name`/`tool_name`). If not, it returns `null`, and `complete()` treats the output as plain text instead:
 
 ```ts
 const name  = obj.tool ?? obj.name ?? obj.tool_name;
@@ -116,7 +116,7 @@ return { name, input: input as Record<string, unknown> };
 
 #### The one retry: a single corrective nudge
 
-If the output *looked* like a botched tool call (`looksLikeToolAttempt` = "contains a `{`"), `complete()` retries **once** with a `RETRY_NUDGE` appended (`gemma-provider.ts:35–37`, `:62–89`). One retry, then it gives up and returns the text as-is. That's the entire error-recovery budget for the structured path.
+If the output *looked* like a botched tool call (`looksLikeToolAttempt` = "contains a `{`", line 153-155), `complete()` retries **once** with a `RETRY_NUDGE` appended (defined lines 29-31; used in the retry loop around lines 57-73). One retry, then it gives up and returns the text as-is. That's the entire error-recovery budget for the structured path.
 
 ```
 the retry budget
@@ -126,14 +126,56 @@ the retry budget
 
 ### Move 2.5 — current vs future state (the rigorous path is unwired)
 
-There's a *better* structured-output engine in the stack that buffr does not use: `generateStructured` (`packages/runtime/src/structured-generation.ts`) drives a typed validator with bounded retries, and `RubricJudge` (`packages/evals/src/rubric-judge.ts`) builds on it with a real `createRubricJudgmentValidator` that range-checks scores and rejects unknown verdicts. It's the closest thing to "Zod at the boundary" buffr has — and **nothing in buffr instantiates it.** The validator exists; no caller does.
+There's a *better* structured-output engine in the stack that the main chat agent does not use: `generateStructured` (`packages/kernel/src/workflow-runtime/structured-generation.ts`) drives a typed validator with bounded retries, and `RubricJudge` (`packages/kernel/src/evals/rubric-judge.ts`) builds on it with a real validator that range-checks scores and rejects unknown verdicts. It's the closest thing to "Zod at the boundary" buffr has — and **nothing in buffr's chat/eval path instantiates it.** The validator exists; no caller does.
 
 ```
-two structured paths
-  ACTIVE   │ tool-call JSON │ parseAgentJson + parseToolCall │ 1 retry  │ buffr USES
-  UNWIRED  │ RubricJudge    │ generateStructured + validator │ 2 attempts│ buffr DOESN'T
-                                  ▲ richer (range checks, typed result), but no caller
+three structured paths in buffr today
+  ACTIVE     │ tool-call JSON │ parseAgentJson + parseToolCall │ 1 retry, prose fallback  │ RagQueryAgent
+  ACTIVE     │ tool-call JSON │ SAME mechanism + FIELD fallback│ 1 retry, per-field       │ Teacher (→ below)
+  UNWIRED    │ RubricJudge    │ generateStructured + validator │ 2 attempts, no caller    │ nobody
+                                  ▲ richer (range checks, typed result), but still unused
 ```
+
+### Move 2.75 — a second worked example: Teacher adds a field-level fallback on top of the same mechanism
+
+`Teacher.execute()` (`packages/capabilities/src/teacher/index.ts:48-138`, shared by `InvestingEngine` and `MarketResearchEngine` — see `ai-features-in-this-codebase.md` feature 8) is not a different structured-output mechanism from the one above — it runs through the identical `runAgentLoop` → `GemmaModelProvider` → emulated-JSON path, just with its own tool schema instead of `search_knowledge_base`:
+
+```ts
+// packages/capabilities/src/teacher/index.ts:24-38
+const SUBMIT_EXPLANATION_TOOL: ModelTool = {
+  name: 'submit_explanation',
+  inputSchema: {
+    type: 'object',
+    required: ['explanation', 'keyLessons', 'actionableNext', 'principle', 'reflectionQuestion'],
+    properties: { /* explanation, keyLessons, actionableNext, principle, reflectionQuestion */ },
+  },
+};
+```
+
+What's genuinely new here (added `01a212e`) is what happens *after* the parse succeeds but a field comes back **empty rather than malformed** — a case the RagQueryAgent path doesn't handle at all, because it only has one output ("the text") with a trivial fallback (`FALLBACK_ANSWER`). Teacher has five output fields and treats two of them — `principle` and `reflectionQuestion` — as important enough to need their own fallback, computed **in code, not by re-prompting the model**:
+
+```ts
+// teacher/index.ts:40-46, 111-117
+function fallbackPrinciple(findings: AnalysisFinding[]): string {
+  if (findings.length === 0) return 'No dimension stood out clearly — treat this result as low-signal.';
+  const strongest = findings.reduce((max, f) => (f.score > max.score ? f : max), findings[0]!);
+  return `${strongest.dimensionId} was the strongest signal (${Math.round(strongest.score)}/100) — ${strongest.summary}`;
+}
+const FALLBACK_REFLECTION_QUESTION = 'What additional evidence would make this worth validating?';
+// ...
+const principle = args.principle?.trim() ? args.principle : fallbackPrinciple(input.findings);
+const reflectionQuestion = args.reflectionQuestion?.trim() ? args.reflectionQuestion : FALLBACK_REFLECTION_QUESTION;
+```
+
+```
+field-level fallback, one output at a time
+  captured.args.principle           │ present & non-blank? │ use model's value
+                                     │ blank / missing?     │ DERIVE from findings (data, not a static string)
+  captured.args.reflectionQuestion  │ present & non-blank? │ use model's value
+                                     │ blank / missing?     │ fixed canned question (static string)
+```
+
+The two fallbacks aren't identical in kind, and that asymmetry is the actual lesson: `fallbackPrinciple` is *data-driven* — it degrades to a real, evidence-grounded sentence built from the findings you already have, so the user never sees a generic placeholder. `FALLBACK_REFLECTION_QUESTION` is a *static* fallback — a fixed, always-reasonable question, because there's no cheap data-driven way to synthesize a good reflection prompt without another model call. Both are tested directly (`packages/capabilities/test/teacher.test.ts:105-151`): one test asserts the fallback fires and names the strongest dimension, the other asserts a model-supplied principle passes through untouched. This is Move 3's principle ("fall back gracefully") taken one step further than the chat agent takes it: instead of one coarse fallback for the whole response, Teacher makes a per-field call about whether a cheap derived value beats a canned string.
 
 ### Move 3 — the principle that generalizes
 
@@ -166,8 +208,8 @@ structured output in buffr
 ## Elaborate
 
 - **Origin.** OpenAI's function-calling (2023) made "model returns typed JSON" mainstream; later JSON-mode and constrained decoding (grammar-bound sampling) made it *reliable* by forcing the tokens. `gemma2:9b` predates none of this but *has* none of it — hence buffr's emulation, which is what everyone did before native support existed.
-- **Adjacent concepts.** *Sampling* (03) — low temperature makes the model drift off-shape less. *Agents* (sub-section 04) — the consumer of the tool-call structured output. *Evals* (sub-section 05) — where the `RubricJudge` would finally get a caller.
-- **Honest gap.** No Zod, no JSON-mode, no constrained decoding in buffr's own code. The active path is "render schema as text, parse it back" — adequate for one tool with two fields, fragile for anything richer. The rigorous path (`generateStructured`/`RubricJudge`) is built but unwired.
+- **Adjacent concepts.** *Sampling* (03) — low temperature makes the model drift off-shape less. *Agents* (sub-section 04) — the consumer of the tool-call structured output. *Evals* (sub-section 05) — where the `RubricJudge` would finally get a caller, and where Teacher's principle/reflection output feeds the predict-then-reveal loop's "human" eval rung (`05-evals-and-observability/02-eval-methods.md`).
+- **Honest gap.** No Zod, no JSON-mode, no constrained decoding in buffr's own code. The active path is "render schema as text, parse it back" — adequate for one tool with two fields, fragile for anything richer. Teacher pushes the same active path to five fields and adds per-field fallback rather than a schema library — proof the ceiling can be raised without new infrastructure, but also proof it doesn't scale past hand-written fallbacks for every field that matters. The rigorous path (`generateStructured`/`RubricJudge`) is built but unwired.
 - **What to read next.** File 05 — streaming, which *conflicts* with structured output: you can't parse a JSON object until it's fully arrived.
 
 ## Project exercises
@@ -177,7 +219,7 @@ structured output in buffr
 - **Exercise ID:** [B1.7] (Phase 1 — LLM foundations) — **the rigorous structured path is built but unwired.**
 - **What to build:** Instantiate `RubricJudge` against `GemmaModelProvider`, define a small rubric (groundedness, citation-present), and score a handful of buffr's real RAG answers. This is buffr's first *validated* structured-output call — `generateStructured` + a typed validator, not the loose tool-call parse.
 - **Why it earns its place:** Moves buffr from "ask nicely, parse loosely" to "validate against a typed contract with bounded retries." Also exposes the temperature problem from file 03 (the judge needs `temperature:0`, which the provider currently drops).
-- **Files to touch:** new `src/cli/judge-cmd.ts`; reuse `src/session.ts` wiring for the model; read-only against the aptkit `RubricJudge`.
+- **Files to touch:** new `src/cli/judge-cmd.ts`; reuse `src/session.ts` wiring for the model; read-only against `@buffr/kernel`'s `RubricJudge` (`packages/kernel/src/evals/rubric-judge.ts`).
 - **Done when:** running the judge on 3 answers prints validated `{dimensions, verdict, fix}` objects, and a malformed model reply triggers the strict-suffix retry.
 - **Estimated effort:** 1–2 days
 
@@ -186,7 +228,7 @@ structured output in buffr
 - **Exercise ID:** [B1.8] (Phase 1 — LLM foundations)
 - **What to build:** Emit a trace warning whenever `parseToolCall` returns `null` after the retry, so you can measure how often `gemma2:9b` botches the JSON contract over a session.
 - **Why it earns its place:** You can't trust the emulated path without knowing its real-world failure rate. Turns "it usually works" into a number.
-- **Files to touch:** a buffr-side wrapping provider around `GemmaModelProvider` (aptkit is consumed); `src/supabase-trace-sink.ts` already persists `warning` events.
+- **Files to touch:** a buffr-side wrapping provider around `GemmaModelProvider` (`@buffr/kernel` is consumed, not edited); `src/supabase-trace-sink.ts` already persists `warning` events.
 - **Done when:** a `tool-call-miss` warning lands in `agents.messages` each time the structured contract fails post-retry.
 - **Estimated effort:** 1–4hr
 
@@ -212,3 +254,5 @@ Anchor: *No native tool-calling — render the schema as text, then defensively 
 - `03-sampling-parameters.md` — low temperature keeps the model on-shape.
 - `05-streaming.md` — why streaming and structured output pull against each other.
 - `../04-agents-and-tool-use/` — the agent loop that dispatches the parsed tool call.
+- `../ai-features-in-this-codebase.md` — feature 8 (Teacher, shared by both engines), feature 11 (the predict-then-reveal loop that consumes Teacher's principle/reflection output).
+- `../05-evals-and-observability/02-eval-methods.md` — the "human" rung, updated for the predict-then-reveal calibration pattern.

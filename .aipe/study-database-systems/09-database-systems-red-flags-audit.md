@@ -19,6 +19,7 @@ cited. It spans the whole map — the risks live at different bands.
   └───────────────────────────┬────────────────────────────────────────┘
   ┌─ Access methods ──────────▼────────────────────────────────────────┐
   │  ★ operator/opclass alignment — the silent-scan trap (R1)           │
+  │  ★ redundant decisions_app_id index (R7)                            │
   └───────────────────────────┬────────────────────────────────────────┘
   ┌─ Storage / durability ────▼────────────────────────────────────────┐
   │  ★ upsert bloat / HNSW churn (R4)   ★ no PITR/backup (R6)           │
@@ -51,6 +52,7 @@ in order, each with its file cross-link and the move that fixes it.
   R4 upsert bloat          →  SLOW-CREEPING. degrades over re-indexes; visible in size.
   R5 no EXPLAIN            →  META: this is the absence of the tool that reveals R1.
   R6 no PITR/backup        →  SILENT until disaster. no restore path when you need one.
+  R7 redundant index       →  QUIET COST. no correctness impact, just wasted write I/O.
 
   the through-line: buffr's storage risks don't error — they require a DELIBERATE
   probe (EXPLAIN, size check, a recovery drill) to surface. that's the audit's job.
@@ -73,11 +75,13 @@ silence-weighted, each anchored to a file and a fix.
 
   ┌─ R1 ─ operator/opclass alignment ── HIGH ── the silent seq scan ──┐
   │  ─ R2 ─ cross-transaction write ──── HIGH ── orphaned documents ──│
-  │  ─ R3 ─ unstated isolation level ─── MED  ── safe-by-luck ─────────│
+  │  ─ R3 ─ unstated isolation level ─── MED  ── safe-by-luck, now 2 call sites │
   │  ─ R4 ─ upsert bloat / HNSW churn ── MED  ── degrades over time ───│
   │  ─ R5 ─ no EXPLAIN discipline ────── MED  ── can't verify R1 ──────│
   │  ─ R6 ─ no PITR / backup ─────────── LOW* ── *LOW only because     │
-  └──────────────────────────────────────────  corpus is reproducible ┘
+  │                                              corpus is reproducible │
+  │  ─ R7 ─ redundant decisions_app_id ─ LOW  ── no correctness cost ──│
+  └──────────────────────────────────────────────────────────────────┘
 ```
 
 ### Move 2 — each risk, evidence, fix
@@ -140,13 +144,19 @@ documents with no chunks. → full walk in `05`.
 
 **Evidence:**
 - Every `begin` takes the default — no `SET TRANSACTION ISOLATION LEVEL` anywhere:
-  `src/pg-vector-store.ts:42`, `src/migrate.ts:11`.
+  `src/pg-vector-store.ts:42`, `src/migrate.ts:13`.
+- The same "two unwrapped statements for one intent" shape now appears a second
+  time: `PgJournalStore.listDue` (`src/pg-journal-store.ts:86-98`) runs an `UPDATE`
+  and a `SELECT` as separate autocommit calls, same as `indexDocumentRow` (R2).
 
 **Verdict:** correct today *only* because there's exactly one writer (file `06`). READ
 COMMITTED permits non-repeatable reads and lost updates; buffr never hits them because
 no two transactions touch the same row. The risk is that this safety is a property of
 the deployment, not a decision in the code — and it's invisible. A second writer (a sync
-daemon, a second device) makes the anomalies reachable with zero warning.
+daemon, a second device) makes the anomalies reachable with zero warning. `listDue`
+is the newest place this would bite first — a concurrent `snooze`/`resolve` landing
+between its `UPDATE` and its `SELECT` would produce a stale read, not a crash, which
+is exactly the "silent" signature this whole audit is about. → `05` walks it in full.
 
 **Fix:** when a second writer arrives, decide the level explicitly — for buffr's
 mostly-disjoint writes, an optimistic `version int` column beats raising the global
@@ -198,14 +208,52 @@ discipline owned by `study-performance-engineering`.
 an accidental `delete from chunks` has no restore path. Scored **LOW only because** the
 corpus is reproducible from source markdown (`documents.source_path`,
 `sql/001_agents_schema.sql:7`) — re-index and it's back. The score jumps the moment the
-database holds non-reproducible state: the conversation trajectories in `messages` and
-the episodic-memory chunks (`meta.kind='memory'`) *cannot* be regenerated from source.
+database holds non-reproducible state: the conversation trajectories in `messages`, the
+episodic-memory chunks (`meta.kind='memory'`), and now `agents.decisions`
+(`sql/002_decision_journal.sql`) — a lost decision-journal row is a lost prediction and
+its resolved outcome, and there is no source artifact to regenerate it from.
 
 **Fix:** a `pg_dump` on a schedule covers the non-reproducible tables cheaply; PITR
 (base backup + archived WAL) is the full answer when the data justifies it. → `07`;
 decision owned by `study-system-design`.
 
 ---
+
+#### R7 — `decisions_app_id` is a redundant index · LOW
+
+**Evidence:**
+- `decisions_app_id` on `(app_id)`: `sql/002_decision_journal.sql:26`.
+- `decisions_status_review` on `(app_id, user_id, workspace_id, status, review_at)`:
+  `sql/002_decision_journal.sql:27`.
+
+**Verdict:** `decisions_app_id` is a strict left-prefix of `decisions_status_review`,
+so any plan that could use the single-column index can use the composite one instead
+— the planner never has a reason to pick the smaller one over the bigger one when
+they cover the same leading column (file `03`, file `04`'s left-prefix rule). It's
+not a correctness issue and not silent in the way R1–R3 are; it's a small, known,
+measurable cost: a second B-tree maintained on every `insert`/`update`/`delete`
+against `decisions` for zero additional query coverage. Scored LOW because the table
+is small and single-writer today — the tax is real but currently negligible.
+
+**Fix:** `drop index agents.decisions_app_id;` — one line, no query depends on it
+existing standalone. Worth doing specifically *because* it's cheap and has zero
+downside, unlike most fixes in this audit which trade something for something.
+→ `03`.
+
+---
+
+### The `decisions_status_review` composite index — a good pattern, named positively
+
+Not a red flag — the opposite. `sql/002_decision_journal.sql:27` builds a five-column
+composite B-tree, `(app_id, user_id, workspace_id, status, review_at)`, and it's
+shaped exactly to the two queries `PgJournalStore.listDue` runs: equality filters on
+the first four columns, then `review_at` as both the range predicate (`<= now`) and
+the `ORDER BY` column. That means the `SELECT` in `listDue` needs no separate `Sort`
+node — the index's natural leaf order already matches the requested order. It's the
+one index in this schema that was clearly designed *against* an actual query shape
+rather than added reflexively per-column (contrast `chunks_app_id`, R-adjacent and
+low-selectivity by construction). Worth citing as the template the next composite
+index in this repo should follow. → `03`, `04`.
 
 ### The minScore post-retrieval filter note (not a red flag, but relevant here)
 
@@ -239,11 +287,13 @@ recovery drill) that would have caught it.
   │ R1 opclass alignment  pg-vector-store.ts:75 ⟷ schema:28-29  silent  │
   │ R2 cross-txn write    runtime.ts:11-17 + FK dropped schema:27       │
   ├─ MEDIUM ───────────────────────────────────────────────────────────┤
-  │ R3 unstated isolation pg-vector-store.ts:42, migrate.ts:11          │
+  │ R3 unstated isolation pg-vector-store.ts:42, migrate.ts:13,         │
+  │                       pg-journal-store.ts:86-98 (listDue, 2nd site) │
   │ R4 upsert bloat/churn pg-vector-store.ts:50-54                      │
   │ R5 no EXPLAIN         (absent across src/ + sql/)                   │
   ├─ LOW* ─────────────────────────────────────────────────────────────┤
   │ R6 no PITR/backup    *LOW only b/c corpus reproducible from source  │
+  │ R7 redundant index    decisions_app_id ⊂ decisions_status_review    │
   └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -300,12 +350,19 @@ HIGH risks, and both are silent today." Anchor: *fix the silent ones first — a
 ## See also
 
 - `00-overview.md` — the same ranking in the overview, with the reading order.
-- `03` / `04` — R1 and R5 (the alignment and EXPLAIN).
-- `05` — R2 and R3 (the cross-transaction write and isolation).
+- `01` — write path D (`PgJournalStore`), the fifth call site behind R3's second
+  evidence line and R7.
+- `03` / `04` — R1, R5, and R7 (the alignment, EXPLAIN, and the redundant/composite
+  index pair on `decisions`).
+- `05` — R2 and R3 (the cross-transaction write, `listDue`'s matching anomaly, and
+  isolation); the migration-runner atomicity note.
 - `06` — R4 (upsert bloat / HNSW churn).
-- `07` — R6 (durability / PITR gap).
+- `07` — R6 (durability / PITR gap, now including `agents.decisions`); the
+  per-file-atomic-not-per-run migration story.
 - `08` — replication (not yet exercised).
 - `study-data-modeling` — the dropped FK as a modeling choice (the missing constraint
-  behind R2).
+  behind R2); the `decisions` status-lifecycle design.
+- `study-testing` (`04-idempotent-migration-test.md`) — the test proving
+  `runAllMigrations` is safe to retry, the fact R3's migration note leans on.
 - `study-performance-engineering` — pool sizing, HNSW tuning, batching, EXPLAIN
   discipline.

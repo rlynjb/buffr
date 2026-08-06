@@ -96,5 +96,9 @@ They could. The common shape `execute(input, ctx): Promise<AgentResult<T>>` woul
 
 - `packages/capabilities/src/` — the five capability implementations.
 - `packages/engines/investing/src/engine.ts` — how they're wired.
+- `07-collect-then-evaluate-split.md` — the SAME five capabilities, wired
+  by `MarketResearchEngine` into a two-phase topology instead of
+  `InvestingEngine`'s single `run()` — a human checkpoint changes the
+  wiring, not the capabilities.
 - `study-system-design/07-capability-pipeline.md` — the pipeline-level view.
 - `05-deep-session-facade.md` — the session facade that exposes the engine's results.

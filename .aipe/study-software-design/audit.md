@@ -6,25 +6,45 @@ nothing real, it says `not yet exercised` rather than manufacturing a
 finding. Where a finding earns a deep walk, it cross-links to the Pass 2
 pattern file instead of restating it.
 
-A note on size before we start: this is a small, young, single-device
-codebase — now a monorepo with six packages (`packages/kernel`, `packages/connectors`, `packages/contracts`, `packages/capabilities`, `packages/domain-packs/investing`, `packages/engines/investing`) plus ~15 root source files (`src/`), with `session.ts` growing past ~400 lines as `analyze()` and `evalInvesting()` join `ask()`. Most APOSD red flags bite hardest in big multi-team codebases. So expect a lot of honest
-"too small to show meaningful X yet" — and expect the praise findings
-to outnumber the problem findings. That's not flattery; the deep-module
-discipline here is genuinely good for the size.
+A note on size before we start: this is still a small, single-device
+codebase, but it's no longer a young one. It's a monorepo with six
+packages (`packages/kernel` — now including `journal/`, `packages/
+connectors`, `packages/contracts`, `packages/capabilities`, `packages/
+domain-packs/{investing,market-research}`, `packages/engines/
+{investing,market-research}`) plus ~20 root source files (`src/`). Two
+things changed enough since the last audit to move the needle: (1)
+`session.ts` grew from ~400 to **883 lines**, and its exported
+`ChatSession` interface grew from 4 methods to **15**, spanning four
+product surfaces (chat, investing, market research, the decision
+journal); (2) a second Postgres-backed subsystem landed — `agents.
+decisions`, `PgJournalStore`, and the `JournalStore` port it shares with
+a test double — and a real behavioral-contract bug shipped and got
+caught between those two adapters (`41ecce8`). Most APOSD red flags still
+bite hardest in big multi-team codebases, so plenty of lenses are still
+"too small to show meaningful X yet" — but two lenses that were quiet
+last time (`session.ts`'s size, and information leakage) now have real
+material.
 
 ```
   the 8 lenses, ranked by what they found in THIS repo
 
   FIRES / WORTH READING            QUIET / TOO SMALL YET
   ───────────────────────          ─────────────────────
-  3. info-hiding (the dead         4. layers (1 clean
-     cfg.schema knob — the            pass-through, fine)
-     one real leak)                6. errors (handled well,
-  5. pull-complexity-down             little to bite)
-     (dimension owned, good)       7. readability (clean;
-  2. deep-vs-shallow (mostly          two micro-nits)
-     deep — praise)                8. red-flags (mostly
-  1. complexity overview              doesn't-fire)
+  1. complexity — session.ts is    4. layers (clean; CLI flows
+     now the #1 hotspot               keep domain logic OUT —
+  3. info-hiding (dead schema         a new praise finding)
+     knob + the JournalStore       7. readability (clean; a
+     contract that drifted)           few micro-nits)
+  8. red-flags — god-class watch
+     escalated to FIRES
+  6. errors (mostly handled well,
+     but a real crash shipped and
+     got fixed — good case study)
+  5. pull-complexity-down
+     (still the model example)
+  2. deep-vs-shallow (deepest
+     module unchanged; facade's
+     breadth is the new story)
 ```
 
 ---
@@ -36,42 +56,61 @@ amplification** (one decision forces edits in many files), **cognitive
 load** (the module nobody wants to touch), and **unknown-unknowns** (you
 can't tell what you'd have to change). Let's locate each in real files.
 
-**Change amplification — the one real instance: the hardcoded schema.**
-`config.ts:13` computes `schema: env.AGENT_DB_SCHEMA || 'agents'`. But no
-file ever reads `cfg.schema`. Instead, the literal `agents.` is hardwired
-into every SQL string: `pg-vector-store.ts:48` (`agents.chunks`),
-`pg-vector-store.ts:72`, `runtime.ts:12` (`agents.documents`),
-`profile.ts:5` (`agents.profiles`), `supabase-trace-sink.ts:6` and `:29`
-(`agents.conversations` / `agents.messages`). Rename the schema and you
-edit six call sites across five files — and the config knob that *looks*
-like it controls this is dead. That's textbook change amplification,
-made worse by a knob that lies. Full treatment in lens 3.
+**Cognitive load — the new #1 hotspot: `session.ts` itself.** At 883
+lines and 15 exported methods across four domains (chat, investing,
+market research, journal review), this is now the file with the most
+going on, full stop — more than `pg-vector-store.ts` ever had. The good
+news: it's still not the *bad* kind of complexity, because every method
+is individually deep (see lens 2) — nobody has to read all 883 lines to
+call `ask()`. The real symptom is different from "hard to use"; it's
+"hard to *own*": a change to how `AgentContext` is built (`userId`/
+`workspaceId`/`traceId`/`domain`/`now`/`permissions`) is hand-repeated at
+four call sites (`session.ts:695-697`, `715-722`, `732-739`, `852-859`)
+because four unrelated domains share one file. That's change
+amplification at the *intra-module* scale — normally this red flag fires
+between files; here it fires between four responsibilities crammed into
+one. → full walk in `05-deep-session-facade.md`.
 
-**Cognitive load — lowest in `pg-vector-store.ts`, and that's the
-point.** The module with the most going on (a transaction, dimension
-guards, vector encoding, a cosine flip, a meta round-trip) is also the
-one you can use without understanding any of it: you call `upsert` and
-`search`, two methods. Behind a small interface, the load stays inside
-the module. That's the opposite of the symptom — it's the cure. → see
-`01-adapter-behind-a-contract.md`.
+**Change amplification — the still-live instance: the hardcoded schema.**
+`config.ts:13` computes `schema: env.AGENT_DB_SCHEMA || 'agents'`. Still
+nothing reads `cfg.schema` — the literal `agents.` is still hardwired
+into every SQL string across `pg-vector-store.ts`, `runtime.ts`,
+`profile.ts`, `supabase-trace-sink.ts`, and now also `pg-journal-store.ts`
+(`agents.decisions`, seven call sites total now). Full treatment in
+lens 3.
 
-**Unknown-unknowns — the undocumented meta contract.** `search` at
-`pg-vector-store.ts:80-84` rebuilds `meta` with three magic keys:
-`docId`, `chunkIndex`, `text`. `upsert` at `pg-vector-store.ts:44-46`
-reads those same three keys back out. Nothing on the `Chunk`/`Hit` types
-(`pg-vector-store.ts:4-5`) tells you these keys are load-bearing — that
-the `search_knowledge_base` tool's citations break if `text` goes
-missing. A new contributor indexing a document has no way to know which
-meta keys matter. That's an unknown-unknown: the information needed to
-change the code safely isn't visible from the code. → lens 3 and lens 7.
+**Unknown-unknowns — two instances now, one old, one new.** The
+undocumented `PgVectorStore` meta contract (`docId`/`chunkIndex`/`text`,
+`pg-vector-store.ts:44-46,80-84`) is unchanged from the last audit. The
+new one: `JournalStore.listDue`'s side-effect contract
+(`packages/kernel/src/journal/contracts.ts:61-65`) — "any decision with
+status `open` and `reviewAt <= now` flips to `review-due` as a side
+effect of being listed... both implementations must do this
+identically" — is stated only in a comment, and it silently *didn't*
+hold until `41ecce8` fixed it. A new contributor implementing a third
+`JournalStore` adapter has no compiler check telling them what
+"identically" means. → lens 3, and `01-adapter-behind-a-contract.md`'s
+third worked example.
 
-**The two hotspots, ranked:**
-1. `config.ts` ↔ the five SQL files — the dead-`schema` leak (lens 3).
-2. `pg-vector-store.ts:44-46,80-84` — the implicit meta contract.
+**The hotspots, ranked:**
+1. `session.ts` — 883 lines, 15 methods, 4 bundled domains (new #1;
+   lens 2, lens 8, `05-deep-session-facade.md`).
+2. `config.ts` ↔ seven SQL-writing files — the dead-`schema` leak
+   (lens 3).
+3. `pg-vector-store.ts:44-46,80-84` and `contracts.ts:61-65` — two
+   implicit contracts, one old (still open), one new (fixed once, no
+   shared test yet).
 
-**New additions, low complexity:** `src/db-sources.ts` is a clean config-object array (`DbSource[]`) with no imperative logic — pure data, no methods, easily extended by appending entries. `src/cli/index-db-cmd.ts` adds a `sanitize()` pure helper (strip UTF-16 surrogates before chunking) that is isolated, single-purpose, and easy to test. Both follow the codebase's "behaviour pushed down, configuration pushed up" instinct.
-
-Everything else in the repo is genuinely low-complexity for its size.
+**New additions, low complexity on their own:** `packages/kernel/src/
+journal/contracts.ts` is a clean 72-line port definition — no logic,
+just types and one behavioral doc comment. `src/pg-journal-store.ts` is
+a straightforward CRUD adapter, one method per SQL statement, no branch
+complexity worth naming. `packages/engines/market-research/src/engine.ts`
+splits what used to be one `run()`-shaped job into `collect()`/
+`evaluate()` (238 lines total) — individually each method is simpler
+than `InvestingEngine.run()`'s single body, even though the *system*
+gained a state machine (`research-flow.ts`) to hold the seam between
+them. → `07-collect-then-evaluate-split.md`.
 
 ---
 
@@ -81,348 +120,431 @@ Depth = functionality ÷ interface width. Deep is good (lots of behaviour,
 tiny surface); shallow is the red flag (interface nearly as wide as the
 body — **classitis**, a class that adds a layer without hiding anything).
 
-**The deepest module — `PgVectorStore` (`pg-vector-store.ts:19-86`).**
-Interface: two methods plus a readonly `dimension`. Body hides: a
-connect/begin/commit/rollback/release transaction (`:40-64`), a dimension
-guard that throws on mismatch (`:32-36`), JS-`number[]`→pgvector-text
-encoding (`:14-17`), the cosine-distance→similarity-score flip
-(`:69`, `1 - (embedding <=> ...)`), and the meta round-trip (`:80-84`).
-A caller — `session.ts:41` — names none of that. **This is the best
-deep module in the repo.** → `01-adapter-behind-a-contract.md`.
+**The deepest module, unchanged — `PgVectorStore` (`pg-vector-store.ts:
+19-86`).** Interface: two methods plus a readonly `dimension`. Body
+hides a transaction, a dimension guard, JS→pgvector encoding, a
+cosine→similarity flip, and a meta round-trip. **Still the best deep
+module in the repo, and nothing this cycle touched it.** →
+`01-adapter-behind-a-contract.md`.
 
-**Runner-up — `createChatSession` (`session.ts`).** Wider job (it wires the embedder, store, pipeline, tool, model, profile, memory, conversation, trace, up to 7 connector tools, and the agent, and now also constructs `InvestingEngine`) behind a 3-method interface: `ask(question, opts?)`, `analyze(ticker, entityType, opts?)`, `evalInvesting()`, and `close()`. More constructed things, still a small number of exposed verbs. Deep — and growing. The session facade has grown from `ask()` alone to three distinct computational modes, all hidden behind the same factory. → `05-deep-session-facade.md`. **New design note:** the addition of `analyze()` and `evalInvesting()` is the first sign that `session.ts` may be acquiring multiple responsibilities — it now orchestrates both the ReAct loop path and the engine pipeline path. Still one module, but worth watching.
+**`createChatSession` — same subsystem depth, very different interface
+story now.** Each individual method is still deep: `researchCollect`
+(`session.ts:713-726`) is three lines hiding a full connector fan-out;
+`dueReviewCount`/`listDueReviews` (`session.ts:784-790`) are one line
+each hiding a Postgres `UPDATE`-then-`SELECT`. No method in the fifteen
+is a bare pass-through. What changed is the *aggregate*: the interface
+went from 4 methods (last audit) to **15**, spanning chat, investing,
+market research, and the journal — four product surfaces behind one
+factory function. Individually-deep-but-collectively-wide is a shape
+APOSD doesn't have a single red flag for; the closest is the "god class"
+checklist item, and it's the right lens here (see lens 8, now escalated
+to FIRES). The evidence that this is a real seam, not a hypothetical
+one: the three actual callers (`cli/chat.tsx`, `research-flow.ts`,
+`review-flow.ts`) already partition the fifteen methods with zero
+overlap between them — the split the module wants is visible in usage
+today. → full walk, diagrams, and the fix in `05-deep-session-facade.md`.
 
-**New cognitive load — the mutable-trace-slot.** `session.ts:120-138` introduces module-level mutable variables (`currentOnStatus`, `currentOnTokens`, `currentInputTokens`, `currentOutputTokens`) that are swapped on each `ask()` call and reset after. This is not wrong — the pattern works — but it is the first piece of `session.ts` that requires temporal reasoning to understand (you have to know *when* these slots are set to know which turn's callbacks fire). A reader who sees `currentOnStatus` at the top of the module without following its assignment in `ask()` will be confused. The APOSD name for this: a **temporal coupling** embedded in global mutable state. It's the narrowest candidate for a future refactor (e.g., wrapping the trace intercept in a closure per-call rather than module-level variables). Not a problem today; flagged because it's the first non-obvious piece in `session.ts`.
+**`PgJournalStore` (`src/pg-journal-store.ts:41-117`) — a second deep
+adapter, smaller stakes.** Four methods (`create`/`listDue`/`snooze`/
+`resolve`), each a thin wrapper over one or two SQL statements. Shallower
+than `PgVectorStore` in absolute terms (no transaction, no encoding
+step), but it hides real things: the `rowToEntry` mapper
+(`pg-journal-store.ts:9-39`) absorbs the `snake_case` column ↔ `camelCase`
+field translation and all the `null → undefined` coercions in one place,
+so no caller does that conversion. Depth is modest but real, and the
+interface earns it. → `01-adapter-behind-a-contract.md`.
 
-**The shallowest modules — and why it's fine here.** `db.ts` is one
-function wrapping one constructor (`createPool` → `new pg.Pool`,
-`db.ts:4-6`). `profile.ts` is one function wrapping one query
-(`profile.ts:4-8`). By the strict ratio these are shallow — the
-interface is about as big as the body. But this isn't classitis: there's
-no *class* adding ceremony, and each names one decision worth isolating
-(`db.ts` owns "how we get a pool"; `profile.ts` owns "most-recent
-profile, empty string if none" — note the `?? ''` default at `:7`, a
-real decision the caller doesn't repeat). A one-line module that hides
-one decision and gives it a name is a seam, not a smell. **No fix
-needed.** The honest read: the repo is too small to have grown a real
-classitis offender. Watch for it if `profile.ts` ever sprouts a
-`ProfileManager` class with getters that just forward.
+**The shallowest modules — unchanged, still fine.** `db.ts` and
+`profile.ts` are still one-function-one-decision modules — thin, but
+each names a real decision, no classitis. No fix needed.
 
-**Verdict:** the design instinct here is right — behaviour pushed down,
-interfaces kept narrow. The worst you can say is two modules are thin,
-and both earn their thinness.
+**Verdict, updated:** the *per-module* design instinct is still right —
+every individual module this cycle added (`PgJournalStore`, the
+capability classes, both engines) is deep on its own terms. The new
+finding isn't about any single module's depth; it's that one module
+(`createChatSession`) is now the load-bearing point for four unrelated
+depths at once. That's worth fixing before a fifth domain lands.
 
 ---
 
 ## 3. information-hiding-and-leakage
 
-The lens that actually fires. A leak is a fact known in two modules that
-forces them to change together. Find the seams where knowledge crosses
-that shouldn't.
+The lens that fires hardest this cycle. A leak is a fact known in two
+places that forces them to change together. Two real leaks now — one
+carried over, one new and more interesting.
 
-**THE leak — the dead `cfg.schema` knob (worst offender in the repo).**
-`config.ts:13` produces a `schema` field. It's a promise: "the schema is
-configurable." Every SQL-writing module breaks that promise by hardcoding
-`agents.`:
+**THE leak, still open — the dead `cfg.schema` knob.** `config.ts:13`
+still computes a `schema` field nothing reads; the literal `agents.` is
+now hardcoded in **seven** places (`pg-vector-store.ts` ×2, `runtime.ts`,
+`profile.ts`, `supabase-trace-sink.ts` ×2, and now `pg-journal-store.ts`
+— `agents.decisions`). Same fix as before: delete the field, or thread
+it everywhere. **Recommended: delete.** Still the single highest-leverage
+cheap fix in the repo, and it got *more* expensive to ignore (one more
+call site joined) without anyone actually needing the knob.
+
+**The new leak, and the interesting one — the `JournalStore` contract
+that only a comment enforces.** `contracts.ts:61-65` documents a
+behavioral requirement across two adapters (`InMemoryJournalStore`,
+`PgJournalStore`): `listDue()` must transition matching `open` decisions
+to `review-due` **scoped to the calling `userId`/`workspaceId`**, as a
+side effect, identically in both implementations. Until `41ecce8`,
+`InMemoryJournalStore.listDue` ran that transition over *every* stored
+entry regardless of caller — unscoped — while `PgJournalStore.listDue`
+was correctly scoped from the start (`pg-journal-store.ts:87-92`, a
+`where app_id = $1 and user_id = $2 and workspace_id = $3` on the
+`update`). The bug: a test written against the in-memory adapter could
+pass while exercising behavior the production adapter would never
+actually exhibit — the test double was quietly *more permissive* than
+reality.
 
 ```
-  config.ts:13         schema = env.AGENT_DB_SCHEMA || 'agents'   ← COMPUTED
-       │
-       │  (never flows anywhere)
-       ▼
-  pg-vector-store.ts:48   insert into agents.chunks ...           ┐
-  pg-vector-store.ts:72   from agents.chunks ...                  │
-  runtime.ts:12           insert into agents.documents ...        │ HARDCODED
-  profile.ts:5            from agents.profiles ...                │ 'agents.'
-  supabase-trace-sink.ts:6  ... agents.conversations ...          │ ×6
-  supabase-trace-sink.ts:29 ... agents.messages ...               ┘
+  the same knowledge (the review-due transition rule), enforced in 2 places,
+  and only 1 of the 2 got it right until a review pass caught the gap
+
+  contracts.ts:61-65    "both implementations must do this identically"
+       │                        (a COMMENT — no compiler check)
+       ├──────────────────────────────┬──────────────────────────────┐
+       ▼                              ▼
+  PgJournalStore.listDue          InMemoryJournalStore.listDue
+  (pg-journal-store.ts:86-92)     (in-memory-journal-store.ts:37-53)
+  scoped by app_id/user_id/       BEFORE 41ecce8: unscoped —
+  workspace_id  ✓ correct         transitioned EVERY entry ✗
+                                  AFTER 41ecce8: scoped, matches ✓
 ```
 
-The same knowledge — "the schema name" — lives in seven places (the
-config field plus six literals), and they don't agree on who's
-authoritative. The red flag is **the same knowledge edited in two
-places**, here amplified to six. Worse, the config field is a *lie*:
-setting `AGENT_DB_SCHEMA=foo` changes nothing, which is more dangerous
-than no knob at all because it invites a wrong mental model.
+This is the information-leakage red flag in a form the rest of this
+guide hasn't shown yet: the leaking "knowledge" isn't a constant (like
+the schema name) or a data shape (like the vector-store meta keys) — it's
+a *behavior*, and the only thing carrying it between the two
+implementations is prose in a doc comment. TypeScript's structural typing
+happily accepts both versions of `listDue` as satisfying `JournalStore`;
+nothing in the type system can express "and do the same side effect."
+**The fix that would have caught this before a review pass had to:** one
+shared contract-test suite (a single test file parameterized over both
+adapter constructors) that asserts the same behavior against both — the
+kind of test `01-adapter-behind-a-contract.md`'s worked example names as
+the general lesson. → full walk in `01-adapter-behind-a-contract.md`'s
+third worked example.
 
-**The move — pick one of two, don't straddle:**
-- *Delete the lie.* Drop `schema` from `Config` (`config.ts:3,13`) and
-  the `AGENT_DB_SCHEMA` env read. The literal `agents.` becomes the
-  honest single source of truth. Cheapest, and correct for a
-  single-tenant single-device app. **Recommended.**
-- *Honor the knob.* Thread `cfg.schema` into every query — pass it to
-  `PgVectorStore`, `loadProfile`, the trace sink, `indexDocumentRow`.
-  More code, only worth it if multi-schema is a real near-term need. It
-  isn't (context.md: "Schema is `agents` in database `reindb`").
+**The third leak, unchanged — the implicit `PgVectorStore` meta
+contract (`docId`/`chunkIndex`/`text`).** Same as last audit, still
+open, still the right fix (a typed `ChunkMeta` + a comment naming the
+three required keys). → `01-adapter-behind-a-contract.md`.
 
-Pick delete. A knob nobody turns is complexity with no payoff.
-
-**The second leak — the implicit meta contract (`docId`/`chunkIndex`/
-`text`).** This crosses a different seam: between `PgVectorStore` and
-aptkit's pipeline/tool. `upsert` (`pg-vector-store.ts:44-46`) digs three
-keys out of `c.meta`; `search` (`pg-vector-store.ts:83`) puts three keys
-back into `meta`. The shape of that object is a contract with aptkit's
-`search_knowledge_base` tool, but it's invisible — not on a type, not in
-a comment naming all three keys as required. Two modules (this store and
-aptkit's tool) must agree on those key names or citations silently break.
-This is a real leak, but it's **partly inherited** — the key names are
-aptkit's in-memory-store shape, and matching them is the whole point of
-drop-in parity (context.md). Fix: a typed `ChunkMeta = { docId: string;
-chunkIndex: number; text: string }` and a one-line comment at `:79`
-naming the contract. → covered deeper in `01-adapter-behind-a-contract.md`.
-
-**Not a leak (worth noting):** the soft `document_id` link with no FK
-(`sql/001_agents_schema.sql`, `chunks` table) looks like a leak but is a
-deliberate, documented decision — the FK is dropped so memory chunks can
-exist with no `documents` row (`session.ts:52`). Information is *hidden*
-correctly here; the comment at the SQL and at `session.ts:51-52` carries
-exactly the knowledge a comment should.
+**Not a leak (worth noting, unchanged):** the soft `document_id` link
+with no FK is still a deliberate, well-documented decision, not a leak.
 
 ---
 
 ## 4. layers-and-abstractions
 
-Find pass-through methods (a method that just forwards to another with no
-new abstraction) and pass-through variables (a value threaded through
-layers that don't use it). Adjacent layers offering the same abstraction
-earn no keep.
+Find pass-through methods and pass-through variables. Adjacent layers
+offering the same abstraction earn no keep.
 
-**One pass-through, and it's benign — `runtime.ts:17`.**
-`indexDocumentRow` does real work first (it writes the `agents.documents`
-source-of-truth row, `:11-16`) and *then* forwards to
-`pipeline.index({ id, text })` (`:17`). That last line is a pass-through
-to aptkit's pipeline — but the function isn't *just* the pass-through; it
-adds the documents-row write that the pipeline doesn't know about. The
-two layers offer *different* abstractions (one owns the corpus row, one
-owns chunk indexing), so the layer earns its place. No fix.
+**New praise finding — the CLI flows keep domain logic OUT, and the
+boundary is clean.** `research-flow.ts` and `review-flow.ts` are
+interactive state machines living in the CLI layer (`src/cli/`), and the
+worry with any UI-layer state machine is that domain logic creeps in
+where it's easy to reach for (parsing, then just... computing the
+answer right there). It didn't happen here. `research-flow.ts`'s
+`formatDigest`/`formatReveal`/`parsePrediction`/`PREDICTION_PROMPT` are
+all *presentation and input-parsing* concerns — they turn typed values
+into strings and strings into typed values. The actual domain
+computation — `PredictionComparison`'s `scoreGap`/`dimensionMatched` —
+is computed inside `MarketResearchEngine.evaluate()`
+(`engine.ts:202-208`), never in the CLI. `formatReveal`
+(`research-flow.ts:56-69`) only *reads* `output.comparison` fields the
+engine already computed; it doesn't derive them. Same story in
+`review-flow.ts`: `parseDisposition` is a pure string→enum parser, and
+the actual state transition (`open` → `resolved`) happens in
+`PgJournalStore.resolve` (`pg-journal-store.ts:110-116`), not the CLI.
+**This is the layering doing its job under new pressure** — two fairly
+complex interactive flows landed in the UI layer and neither one
+smuggled domain logic across the boundary. No fix; worth naming as the
+positive control case for lens 4.
 
-**Pass-through variable — `appId`, and it's load-bearing, not noise.**
-`appId` threads from `loadConfig` → `createChatSession` → `PgVectorStore`,
-`loadProfile`, `startConversation`. It looks like a variable forwarded
-through layers untouched. But each layer *uses* it: the store scopes
-queries `where app_id = $2` (`pg-vector-store.ts:73`), profile scopes its
-lookup (`profile.ts:5`), the conversation tags its row
-(`supabase-trace-sink.ts:6`). A pass-through variable is only a smell
-when intermediate layers carry it without using it. Here every layer
-that touches it reads it. No fix.
+**The two pass-throughs from last audit — unchanged.** `runtime.ts:17`'s
+pass-through to `pipeline.index` still earns its place (it does real
+work first). The `appId` pass-through variable is still load-bearing at
+every layer it threads through, now including `pg-journal-store.ts`'s
+`appId` field (`pg-journal-store.ts:43,47`), which follows the same
+"used, not just forwarded" pattern as everywhere else it appears.
 
-**Verdict:** `not a problem in this repo`. The layering is shallow (CLI →
-session → store → pg) and each layer changes the abstraction — UI events
-become session calls, session calls become SQL, SQL becomes rows. Nothing
-forwards blindly. Too few layers to grow a redundant one yet; watch for
-it if a "service" layer ever appears between `session.ts` and the stores.
+**Verdict:** still `not a problem in this repo` — and the new CLI-layer
+material is a genuine strength, not just an absence of a smell.
 
 ---
 
 ## 5. pull-complexity-downward
 
-The red flag: a knob or parameter pushed up to the caller that the module
-had enough information to decide itself. APOSD's rule — it's better for a
-module to absorb complexity than to export it.
+The red flag: a knob or parameter pushed up to the caller that the
+module had enough information to decide itself.
 
-**The best example in the repo — dimension is pulled down, then taught
-upward correctly.** `PgVectorStore` takes an optional `dimension` and
-defaults it (`pg-vector-store.ts:29`, `?? 768`); it then *enforces* it
-itself in `assertDim` (`:32-36`) on every upsert and search, throwing on
-mismatch rather than making the caller check. The caller doesn't validate
-dimensions — the module owns that. And the one place dimension *must*
-agree (embedder vs store), `session.ts:41` wires
-`dimension: embedder.dimension` so the store learns it from the embedder
-instead of a hand-typed constant. The complexity (768-everywhere,
-mismatch-must-throw — context.md's hard constraint) lives down in the
-module where it belongs. **This is the lens working as intended.**
+**Still the model example, and a new instance of the same discipline.**
+`PgVectorStore`'s dimension guard (unchanged from last audit) is still
+the sharpest example. The new instance: `MarketResearchEngine.evaluate()`
+computes the *entire* prediction-vs-actual comparison in code
+(`engine.ts:196-208`) — score gap, dimension match, the strongest
+finding — rather than asking the model to eyeball the difference or
+pushing that arithmetic up into `research-flow.ts`. The doc comment says
+it outright: "computes the prediction comparison in code (never asks the
+model to invent the gap)" (`engine.ts:120-121`). The caller
+(`research-flow.ts`) only formats the already-computed `comparison`
+object. This is the same "the module decides, the caller doesn't" shape
+as the dimension guard, applied to a different kind of decision
+(arithmetic instead of validation).
 
-**The counter-example — `cfg.schema`, the knob that should never have
-been exported.** Same lens, opposite verdict. The schema is a decision
-the modules could own (it's a constant, `agents`), but it was pushed up
-into config as a knob — and then ignored. The fix is the lens's own
-prescription: pull it down. Hardcode `agents.` (already done in practice)
-and delete the upward-facing knob. See lens 3.
+**The counter-example, still open — `cfg.schema`.** Unchanged: a knob
+nobody turns, still exported, still ignored. See lens 3.
 
-**A small one — `embeddingModel` and `appId` on `PgVectorStoreOptions`
-(`pg-vector-store.ts:7-12`).** Both are optional with sensible defaults
-(`'laptop'`, `'nomic-embed-text:v1.5'`, `:27-28`). Exposing them is fine
-— they're genuine per-deployment facts, and defaulting them means the
-common caller passes neither. This is the *right* way to expose a knob:
-optional, defaulted, the module owns the common case. Contrast with
-`schema`, which is exposed but never variable. No fix.
+**Unchanged, still fine:** `embeddingModel`/`appId` on
+`PgVectorStoreOptions`, and `PgJournalStoreOptions.appId`
+(`pg-journal-store.ts:4-7`) follows the identical pattern — optional,
+defaulted to `'laptop'`, the module owns the common case. Consistent with
+the established convention.
 
 ---
 
 ## 6. errors-and-special-cases
 
 Find exception handling scattered across call sites, and special cases a
-better definition would erase. APOSD's preference: define errors *out of
-existence*, mask them at a low level, or aggregate handling — not
-sprinkle try/catch everywhere.
+better definition would erase.
 
-**Errors are handled at the right altitude — little to fix.**
-- *Defined out of existence:* `loadProfile` returns `''` for "no profile"
-  (`profile.ts:7`, `?? ''`) instead of throwing or returning null — the
-  caller never special-cases "missing profile." `SupabaseTraceSink.emit`
-  uses a `switch` with no `default` (`supabase-trace-sink.ts:56-84`): an
-  unknown event type is silently a no-op, not an error path. Both erase a
-  special case by definition.
-- *Masked low:* the transaction's rollback-on-error is inside `upsert`
-  (`pg-vector-store.ts:59-64`) — the caller sees a thrown error, never
-  the rollback machinery.
-- *Aggregated:* the chat UI has exactly one try/catch
-  (`cli/chat.tsx:27-34`), turning any `ask()` failure into a rendered
-  `error: <message>` turn. One catch, not one per failure mode.
+**A real crash shipped and got caught — the best case study in the
+repo for this lens.** `MarketResearchEngine.evaluate()` used to compute
+its "strongest finding" with a bare non-null assertion:
 
-**One deliberate swallow, correctly placed.** `session.ts:64-69` wraps
-`memory.remember` in a try/catch with an empty body and a comment:
-"a memory-write failure must not lose the answer the user has." This is a
-*good* swallow — best-effort episodic memory should never fail a turn
-that already succeeded. The comment carries the *why*, which is exactly
-what a swallow needs to not look like a bug. No fix.
+```ts
+// the shape of the bug, before 41ecce8
+const strongestFinding = analyzerResult.data.findings.reduce(
+  (max, f) => (f.score > max.score ? f : max),
+  analyzerResult.data.findings[0]!,   // ← crashes if findings is empty
+);
+```
 
-**The one gap worth naming:** the dimension guard throws a bare
-`Error` (`pg-vector-store.ts:34`), as do the missing-`DATABASE_URL`
-checks (`session.ts:37`). For a single-device CLI that's fine — nobody's
-catching by type. If buffr ever grows programmatic callers that need to
-distinguish "dimension mismatch" from "DB down," a typed error class
-would let them. Not now. `mostly not yet exercised.`
+The method's own doc comment names an invariant — "assumes
+`collected.evidence.length > 0`" (`engine.ts:122-123`) — and the caller
+*does* honor that half of the contract (`research-flow.ts:85-88` checks
+`digest.totalCount === 0` before ever reaching this code path). But
+non-empty evidence does not imply the Analyzer returns non-empty
+findings — an LLM can look at real evidence and produce zero findings —
+and that's the exact gap the stated invariant didn't cover. The fix
+(`41ecce8`, `engine.ts:196-201`) generalizes the fallback pattern the
+same function already used for `keyProblems`/`productAngles`/
+`explanation` (`engine.ts:185-194`) to also cover `strongestFinding`:
+guard the empty case, degrade to `'unknown'`/`false` instead of
+crashing. **This is exactly what APOSD means by defining a special case
+out of existence** — the fix doesn't add a try/catch, it makes "zero
+findings" a value the function can represent instead of an assertion
+failure. → the full contract-across-a-checkpoint story is in
+`07-collect-then-evaluate-split.md`.
+
+**Errors still handled at the right altitude elsewhere — unchanged.**
+`loadProfile`'s `?? ''` default, `SupabaseTraceSink.emit`'s no-`default`
+switch, the transaction rollback masked inside `upsert`, the one
+aggregated try/catch in the chat UI, and the deliberate `memory.remember`
+swallow in `ask()` are all unchanged from the last audit and still good
+examples.
+
+**A second, smaller instance from the same review pass.** `chat.tsx`'s
+startup sequence used to call `session.dueReviewCount()` unguarded,
+which meant a fresh database or a transient connection hiccup would
+crash the whole CLI before the first render. `41ecce8` wraps it:
+`session.dueReviewCount().catch(() => 0)` (`chat.tsx:461`) — a
+best-effort read on startup degrades to "nothing due" instead of taking
+the process down. Same shape as the `memory.remember` swallow: a
+non-critical read, failed silently, with the failure mode chosen
+deliberately (0 due reviews is always a safe default to show).
+
+**The one gap worth naming, unchanged:** the dimension guard and
+`DATABASE_URL` checks still throw bare `Error`. Still fine for a
+single-device CLI. `mostly not yet exercised.`
 
 ---
 
 ## 7. readability — names · comments · consistency · obviousness
 
-Four facets, one lens. This repo is clean; the findings are micro-nits,
-ranked.
+Four facets, one lens. Still clean; two new micro-nits joined the old
+ones.
 
-**Names — strong, two near-misses.** Names are precise throughout:
-`assertDim`, `toVectorLiteral`, `persistMessage`, `indexDocumentRow` all
-say exactly what they do. No `data`/`obj`/`tmp`/`manager` anywhere — the
-classic vague-name red flag doesn't fire. Near-misses: `c` for a chunk in
-the `upsert` loop (`pg-vector-store.ts:43-56`) and `r` for a row in the
-`search` map (`:80`) — fine in a 3-line scope, but `chunk`/`row` would
-cost nothing. Minor.
+**Names — unchanged, still strong.** No new vague names anywhere in the
+journal or market-research additions — `rowToEntry`, `formatDigest`,
+`parsePrediction`, `currentEntry` all say what they do.
 
-**Comments — the strength of this codebase.** The comments carry
-*why*, not *what*. Examples worth copying: the cosine-distance note
-(`pg-vector-store.ts:69`, "`<=>` is cosine DISTANCE; similarity = 1 -
-distance") explains a sign flip you'd otherwise misread; the jsonb
-stringify note (`supabase-trace-sink.ts:23-24`) explains a node-postgres
-gotcha that isn't visible in the code; the `SupabaseTraceSink` class
-comment (`:39-48`) explains the sync/async split and what was previously
-dropped. None restate the code. **This is the model — interface comments
-that say what the signature can't.**
+**Comments — still the strength of the codebase, one new example worth
+copying.** `contracts.ts:61-65`'s doc comment stating the `listDue` side
+effect and the "both implementations must do this identically" clause
+is exactly the kind of interface comment lens 7 keeps praising — it
+names a fact the type signature can't. The irony (see lens 3) is that
+this particular comment turned out to be necessary but not *sufficient*:
+it stated the rule correctly but nothing enforced it, so it's a good
+example of comments' real limit — they inform a careful reader, they
+don't compile-check a careless one.
 
-**The one missing interface comment:** the `meta` round-trip
-(`pg-vector-store.ts:79`) has a comment about *why* it rebuilds the shape,
-but nothing names `docId`/`chunkIndex`/`text` as the *required* keys — the
-contract a caller must satisfy. That's the comment most worth adding (see
-lens 3).
+**New nit — the `ChatSession` type reads as a flat list with no
+domain grouping.** `session.ts:102-126` declares all fifteen methods in
+declaration order with no separating comments (`// chat`, `// investing`,
+`// research`, `// journal`) even though the four domains are real and
+the callers already respect them (lens 2, lens 4). A reader skimming the
+type today has to reverse-engineer the grouping from method names. Cheap
+fix, independent of whether the bigger facade-split (lens 8) ever
+happens: four one-line banner comments would make the existing structure
+visible immediately.
 
-**Consistency — one split convention.** Schema access is inconsistent in
-*intent*: `config.ts` says schema is configurable, every query says it's
-the literal `agents`. Two conventions for one job — the consistency red
-flag, same root cause as lens 3. Otherwise consistent: every SQL string
-uses `$n` params, every async DB call is awaited, every module imports
-`pg` the same way.
+**The two nits carried over, unchanged:** the missing `ChunkMeta`
+key-contract comment (lens 3), and the `chunkIndex`/`content` default
+inconsistency (`pg-vector-store.ts:45-46`).
 
-**Obviousness — one "huh?" spot.** `chunkIndex` defaults to `0` when
-absent (`pg-vector-store.ts:45`) but `content` defaults to `''` (`:46`).
-A chunk with no `text` meta silently indexes empty content — and since
-`text` round-trips into citations (lens 3), a missing key means a silent
-empty citation, not a loud failure. The default hides a data problem.
-Worth a thrown error or at least a warning. Minor but real.
+**Consistency — one more instance of the schema split, otherwise
+unchanged.** `pg-journal-store.ts` joined the "every query hardcodes
+`agents.` while config claims it's variable" club (lens 3) — same root
+cause, one more symptom.
 
-**Verdict:** readability is a strength. The comments especially — they're
-better than most production code. Fix the one missing key-contract
-comment and you've closed the only real gap.
+**Verdict, unchanged:** readability is still a strength. The two new
+findings (the ungrouped `ChatSession` type, the `listDue` comment that
+was correct-but-unenforced) are both small and both point at the same
+underlying story as lenses 2 and 3 — this repo's comments are excellent
+at *describing* contracts; it doesn't yet have a habit of *testing* the
+ones that cross an adapter boundary.
 
 ---
 
 ## 8. red-flags-audit — the capstone checklist
 
 Ousterhout's red flags as a review checklist, each marked against this
-repo: **FIRES** / doesn't / N/A, with location and the one-line fix when
-it fires. Sorted by severity for buffr.
+repo: **FIRES** / doesn't / N/A / **WATCH**, with location and the
+one-line fix when it fires. Sorted by severity for buffr. Two rows moved
+since the last audit — one escalated, one newly fired-and-fixed.
 
 ```
   RED FLAG                        VERDICT   WHERE / FIX
   ──────────────────────────────  ────────  ─────────────────────────────
-  Information leakage              FIRES     cfg.schema vs 6 hardcoded
-   (same knowledge, two places)   ★ worst   'agents.' literals
-                                             → delete the dead knob (lens 3)
+  God class / over-large module    FIRES     session.ts: 883 lines, 15
+   (escalated from WATCH)         ★ new     methods, 4 unrelated domains
+                                    worst     behind ONE factory function.
+                                             Callers already partition it
+                                             0-overlap → split into 4 thin
+                                             domain facades over 1 shared
+                                             build-once context (lens 2,
+                                             05-deep-session-facade.md)
 
-  Avoidable config / exposed       FIRES     cfg.schema knob never read
-   knob the module could own       (same)    → pull the decision down
+  Information leakage              FIRES     (a) cfg.schema vs 7 hardcoded
+   (same knowledge, two places)   ★ tied    'agents.' literals (unchanged)
+                                    worst     (b) NEW: JournalStore's
+                                             listDue side effect, stated
+                                             only in a comment, drifted
+                                             between 2 adapters until
+                                             41ecce8 (lens 3)
 
   Hard-to-describe (implicit       FIRES     meta keys docId/chunkIndex/
-   contract, no type/comment)      minor     text not typed or named
-                                             → add ChunkMeta type + comment
+   contract, no type/comment)      minor     text still not typed (lens 3)
 
   Nonobvious code                  FIRES     content '' / chunkIndex 0
                                    minor     defaults hide missing-key bug
-                                             → throw or warn on missing text
 
-  Shallow module / classitis       doesn't   db.ts/profile.ts are thin but
-                                             hide one decision each, no
-                                             class ceremony — seams, not smells
+  Special case undefined           FIXED     MarketResearchEngine crashed
+   (fired, then caught in review)  in       on empty findings; assertion
+                                    review   → explicit guard in 41ecce8
+                                             (lens 6). Good case study —
+                                             keep, don't need to re-fix.
 
-  Pass-through method/variable     doesn't   runtime.ts adds the docs-row
-                                             write; appId is used at every
-                                             layer it threads through
+  Shallow module / classitis       doesn't   db.ts/profile.ts thin but
+                                             earn it; PgJournalStore hides
+                                             a real row-mapping decision
+
+  Pass-through method/variable     doesn't   runtime.ts adds real work;
+                                             appId used at every layer,
+                                             including the new journal store
 
   Temporal decomposition           doesn't   modules split by concern
-                                             (store/profile/trace), not by
-                                             execution order
 
-  Comment restates code            doesn't   comments carry WHY, not WHAT —
-                                             a repo strength (lens 7)
+  Comment restates code            doesn't   comments carry WHY — a repo
+                                             strength (lens 7), though
+                                             the JournalStore case shows
+                                             a comment's real limit: it
+                                             can't compile-check itself
 
-  Try/catch everywhere             doesn't   one catch in the UI, one
-                                             deliberate swallow with a
-                                             reason — errors aggregated low
+  Try/catch everywhere             doesn't   errors aggregated low; 2 new
+                                             deliberate swallows this
+                                             cycle (dueReviewCount at
+                                             startup, same shape as the
+                                             existing memory.remember one)
 
-  Vague names (data/obj/tmp/mgr)   doesn't   names are precise; only c/r in
-                                             3-line scopes
+  Vague names (data/obj/tmp/mgr)   doesn't   names still precise repo-wide
 
-  Repetition (same code N times)   N/A       too small; no duplicated logic
-                                             block beyond the schema literal
-
-  God class / over-large module    WATCH     session.ts has grown to ~400+
-                                             lines and now wires both the
-                                             ReAct loop AND InvestingEngine
-                                             (two distinct computational
-                                             modes). Still one factory
-                                             function, but the boundary
-                                             between "chat session" and
-                                             "investing session" is blurring.
+  Repetition (same code N times)   FIRES     NEW: AgentContext construction
+                                   minor     hand-repeated at 4 call sites
+                                             in session.ts (lens 1) — a
+                                             symptom of the god-class row,
+                                             not a separate root cause
 
   Temporal coupling via module-    FIRES     currentOnStatus / currentOnTokens
-   level mutable state             minor     module-level vars swapped per-ask;
-                                             first temporal reasoning needed
-                                             → no fix yet; refactor if session
-                                               grows a second concurrent caller
+   level mutable state             minor     unchanged from last audit —
+                                             not worse, not yet fixed
 ```
 
-## Discovered patterns (new since initial audit)
+## Discovered patterns (updated this cycle)
 
-Two new patterns emerged with the capabilities + engine additions:
+Three patterns now exercise the repo's capability + engine layer:
 
-**`capability-as-typed-computation-unit`** — each capability (`Collector`, `Analyzer`, `Scorer`, `Teacher`, `Journal` in `packages/capabilities/src/`) has a single typed input/output contract, is independently instantiable, and is composable in pipelines. No shared mutable state between capabilities. No base class or inheritance — composability comes from explicit wiring. → see `06-capability-as-typed-computation-unit.md`.
+**`capability-as-typed-computation-unit`** — unchanged from last audit.
+Each capability (`Collector`, `Analyzer`, `Scorer`, `Teacher`, `Journal`
+in `packages/capabilities/src/`) has a single typed input/output
+contract, is independently instantiable, and composes by explicit
+wiring, no shared mutable state, no base class. → `06-capability-as-
+typed-computation-unit.md`.
 
-**`engine-as-linear-pipeline`** — `InvestingEngine.run()` (`packages/engines/investing/src/engine.ts`) fixes the step order in code: Collector → Analyzer → Scorer → Teacher → Journal. The model does not decide the next step. LLM calls are isolated inside Analyzer and Teacher; the rest is pure or I/O. This is the canonical alternative to the ReAct loop when the steps are known ahead of time.
+**`engine-as-linear-pipeline`** — `InvestingEngine.run()` fixes the step
+order in code, one `async` call start to finish. Unchanged. Still
+described inline here rather than as its own Pass 2 file — it's the
+*absence* of the interesting move, and the interesting move (the
+contrast with it) now has its own file.
+
+**`collect-then-evaluate-split` (new)** — `MarketResearchEngine` doesn't
+have a `run()`; it has `collect()` and `evaluate()`, split at exactly the
+point where a human prediction has to land between evidence-gathering
+and scoring, so the predict-then-reveal ritual (`/research`'s core
+product feature, context.md) can capture the guess before the model's
+answer exists to bias it. Same five capabilities as `InvestingEngine`,
+genuinely different topology — the engine shape follows the product
+requirement (a checkpoint), not a stylistic preference. This is where
+this cycle's empty-findings crash (lens 6) actually happened, because
+the contract carried across the checkpoint was named incompletely. →
+`07-collect-then-evaluate-split.md`.
 
 **The actionable index, ranked across the whole repo:**
 
-1. **Delete the dead `cfg.schema` knob.** One leak, six call sites, a
-   lying config field. `config.ts:3,13`. The single highest-leverage fix.
-2. **Type the meta contract.** `ChunkMeta` + a comment naming
-   `docId`/`chunkIndex`/`text` as required. `pg-vector-store.ts:4,79`.
-   Closes the unknown-unknown.
-3. **Throw (or warn) on missing `text` meta.** Turn a silent empty
-   citation into a loud failure. `pg-vector-store.ts:46`.
-4. **Watch the mutable-slot pattern.** `session.ts:120-138` — currently
-   the only place in the codebase with temporal-coupling via module globals.
-   Not a problem for single-user single-threaded use; a refactor target if
-   concurrent `ask()` calls ever become possible.
+1. **Split `createChatSession`'s interface along the domain boundary
+   the callers already respect.** Four thin facades (chat / investing /
+   research / journal) over the one shared build-once context. The
+   highest-leverage fix this cycle — the god-class row is the new worst
+   offender, and unlike the schema knob it's a structural cost that
+   compounds with every new domain. `session.ts:102-126` (the type),
+   `session.ts:394-665` (the shared build-once block to keep).
+   `05-deep-session-facade.md`.
+2. **Write one shared contract-test suite for `JournalStore`'s
+   `listDue` side effect, run against both `InMemoryJournalStore` and
+   `PgJournalStore`.** The bug that shipped (unscoped transition in the
+   in-memory adapter) is exactly the class of bug a parameterized
+   contract test catches before review has to. `contracts.ts:61-65`.
+   `01-adapter-behind-a-contract.md`.
+3. **Delete the dead `cfg.schema` knob.** Still open, now seven call
+   sites instead of six. `config.ts:3,13`.
+4. **Type the `PgVectorStore` meta contract.** `ChunkMeta` + a comment
+   naming `docId`/`chunkIndex`/`text` as required. `pg-vector-store.ts:
+   4,79`. Unchanged from last audit — still not fixed.
+5. **Add domain-grouping banner comments to `ChatSession`.** Cheap,
+   immediate readability win independent of whether/when the facade
+   split (#1) lands. `session.ts:102-126`.
+6. **Throw (or warn) on missing `text` meta.** Unchanged, still open.
+   `pg-vector-store.ts:46`.
 
-Everything else is praise or "too small to bite yet." For an
-eight-file repo, that's a healthy audit — the design instincts (deep
-modules, why-comments, errors handled low) are right; the one structural
-problem is a knob that should never have shipped.
+Everything else is praise, or genuinely "too small to bite yet." The
+overall shape hasn't changed: the design instincts here (deep modules,
+why-comments, pulling complexity down into the module that owns it) are
+still right, and the codebase caught its own worst bug this cycle
+(`41ecce8`) via review rather than shipping it silently — which is
+itself evidence the discipline is working. The new work is at the
+*composition* altitude, not the module altitude: individual pieces are
+still well-built; the place they're wired together (`session.ts`) is the
+one place that's outgrown its original shape.

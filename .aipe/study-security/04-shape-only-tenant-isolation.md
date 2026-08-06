@@ -136,6 +136,37 @@ missing is in the database: there is **no** `alter table ... enable row level
 security` and **no** `create policy` anywhere in `sql/001_agents_schema.sql`. Nothing
 stops a query from passing a different `app_id` and reading those rows.
 
+**New since the last audit — the decision journal doubles down on the same shape.**
+`agents.decisions` (`sql/002_decision_journal.sql:1-25`) carries *three*
+discriminator columns, not one: `app_id`, `user_id`, `workspace_id` (plus a
+composite index on all three, `:27`). That looks like it's *more* isolated than
+the rest of the schema — until you check where the values come from:
+
+```ts
+// src/session.ts:770-778 — the journal write path
+await session.journal.promote({
+  ...
+  userId: cfg.appId,        // ← same env var as app_id
+  workspaceId: cfg.appId,   // ← same env var, again
+  ...
+});
+```
+
+Every call site that touches the journal (`:696`, `:716-717`, `:733-734`,
+`:749-750`, `:800`, `:853-854`) sets `userId: cfg.appId, workspaceId: cfg.appId` —
+the same single environment-sourced string, copied into three columns. It's not
+three independent identities; it's one value wearing three column names. If
+anything this makes the "shape, not enforcement" framing *sharper* here than
+elsewhere: a reader skimming `sql/002_decision_journal.sql` could reasonably
+assume `user_id`/`workspace_id` mean a real multi-user model already exists
+(`decisions_status_review` even keys its composite index on all three, `:27`, as
+if per-user/per-workspace lookups were live). They aren't — `PgJournalStore`
+(`src/pg-journal-store.ts:41-48`) takes one `appId` in its constructor options and
+that's the only tenant value in play. Lens 3's SQL-boundary finding still holds
+(every value here is parameterized, see `01-parameterized-sql-boundary.md`); this
+is purely the authorization half being shape-only, same as the rest of the schema
+— just spread across more columns.
+
 **The widening factor — memory and documents share one store.**
 
 ```ts
@@ -158,6 +189,8 @@ rows too.
   │ app_id index on chunks       │ identity from a token        │
   │ `where app_id = $2` filters  │ DB-side automatic filtering  │
   │ default 'laptop'             │ per-request tenant binding   │
+  │ decisions: 3 columns, but ALL │ user_id/workspace_id are NOT │
+  │ 3 = cfg.appId (session.ts)    │ independent identities yet   │
   └──────────────────────────────┴──────────────────────────────┘
   safe today ONLY because: one tenant, one operator, one device
 ```
@@ -258,6 +291,14 @@ Two: the shared doc+memory store means the policy has to cover *memory* rows too
 just documents (`session.ts:53`) — and the `DATABASE_URL` superuser role bypasses
 RLS entirely, so it has to become an RLS-bound role at the same time, or the policy
 does nothing.
+
+**Q: The decisions table has `user_id` and `workspace_id`, not just `app_id` —
+doesn't that mean multi-user is already handled?**
+No, and that's the trap in reading a schema without reading the call sites. Every
+write path sets `userId: cfg.appId, workspaceId: cfg.appId` (`session.ts:770-778`
+and five other call sites) — three column names, one value. The schema anticipates
+a real user/workspace split; nothing in the app populates it yet. Same gap as
+`app_id`, just laid down with finer-grained columns this time.
 
 **Anchor:** "The column says whose data — it doesn't yet say you can't have anyone
 else's. That's RLS plus a token, and both are Phase B."

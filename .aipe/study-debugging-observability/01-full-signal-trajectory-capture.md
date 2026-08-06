@@ -62,7 +62,7 @@ Before the mechanics, the skeleton. Three layers, one axis traced across them, t
   └────────────────────────────────────────────────┘
 ```
 
-**The seam that matters: `trace.emit()`.** This is the vertical contract between aptkit (which *produces* events in a shape it controls) and buffr (which *consumes* them into a schema it controls). The axis flips here — above the seam the event is an in-memory typed union; below it, it's a row. Everything load-bearing about this pattern is buffr's job *below* the seam: deciding which fields of each variant survive into which columns. That's where you study it.
+**The seam that matters: `trace.emit()`.** This is the vertical contract between `@buffr/kernel` (which *produces* events in a shape it controls) and buffr (which *consumes* them into a schema it controls). The axis flips here — above the seam the event is an in-memory typed union; below it, it's a row. Everything load-bearing about this pattern is buffr's job *below* the seam: deciding which fields of each variant survive into which columns. That's where you study it.
 
 ## How it works
 
@@ -92,7 +92,7 @@ The point the diagram makes: six tags, six row shapes, and the two that carry th
 
 #### Move 2 — the step-by-step walkthrough
 
-**The `emit()` dispatch.** `emit()` is synchronous because that's aptkit's contract — the agent loop can't `await` a trace write mid-step. So buffr's sink doesn't write inline; it *queues* the promise and awaits the batch later via `flush()`. Here's the dispatch and the two load-bearing cases, from `src/supabase-trace-sink.ts:53-72`:
+**The `emit()` dispatch.** `emit()` is synchronous because that's `@buffr/kernel`'s contract — the agent loop can't `await` a trace write mid-step. So buffr's sink doesn't write inline; it *queues* the promise and awaits the batch later via `flush()`. Here's the dispatch and the two load-bearing cases, from `src/supabase-trace-sink.ts:53-72`:
 
 ```
   src/supabase-trace-sink.ts:53   emit(event: CapabilityEvent): void {
@@ -198,6 +198,8 @@ The deliberate design choice worth calling out: buffr persists the trajectory in
 
 Where it connects: `study-agent-architecture` owns the loop that *produces* these events (`run-agent-loop`, `RagQueryAgent`); this file owns the sink that *persists* them. `study-performance-engineering` reads `durationMs` as a latency budget; here it's just a trace field.
 
+**Scope boundary worth stating plainly: this pattern is `/ask`-only.** `/research` and `/investing` run the identical `runAgentLoop` kernel inside `Analyzer`/`Teacher` (`packages/capabilities/src/analyzer/index.ts:115-123`), but neither passes a `trace` option, so none of this file's machinery applies to them — no row in `agents.messages`, ever, for those pipelines. → `05-live-progress-panel.md` covers what they have instead (a live, non-durable panel) and names that gap in full.
+
 ## Interview defense
 
 **Q: Your agent calls a tool and gets a wrong answer. Walk me through debugging it with your trace.**
@@ -216,11 +218,12 @@ Pull the turn by `conversation_id`, sort by `created_at`. Find the `tool_call` r
 
 **Q: What's the one thing this trace gets wrong?**
 
-The FALLBACK_ANSWER gap. The `step` case skips empty content (`:58`), and `RagQueryAgent` returns its fallback string *without emitting a step* (aptkit `rag-query-agent.js:51`) — so an empty-synthesis turn shows the user "I couldn't find anything" but leaves no assistant row in the table. The trace says the agent answered nothing; the user got an answer. That's the load-bearing part people miss: full-signal capture is only as full as the loop's willingness to emit. **Anchor:** `if (event.content)` at `src/supabase-trace-sink.ts:58`.
+The FALLBACK_ANSWER gap. The `step` case skips empty content (`:58`), and `RagQueryAgent` returns its fallback string *without emitting a step* (`packages/kernel/src/agents/rag-query-agent.ts:86`) — so an empty-synthesis turn shows the user "I couldn't find anything" but leaves no assistant row in the table. The trace says the agent answered nothing; the user got an answer. That's the load-bearing part people miss: full-signal capture is only as full as the loop's willingness to emit. **Anchor:** `if (event.content)` at `src/supabase-trace-sink.ts:58`.
 
 ## See also
 
 - `02-client-timestamp-ordering.md` — why `created_at` carries the event timestamp, and the tie it leaves.
 - `03-stdout-as-only-log.md` — what observability looks like *outside* this table.
-- `audit.md` lens 5 (traces) and lens 6 (state snapshots).
+- `05-live-progress-panel.md` — the sibling live-only mechanism for `/research`/`/investing`, and the durable gap those pipelines have that `/ask` doesn't.
+- `audit.md` lens 1 (observability-map), lens 5 (traces), and lens 6 (state snapshots).
 - Cross-guide: `study-agent-architecture` (the emitting loop), `study-performance-engineering` (`durationMs` as a budget).

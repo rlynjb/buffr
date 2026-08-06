@@ -40,7 +40,7 @@ Zoom in. The question: *after a parallel flush scrambles insertion order, how do
   One question down the layers: what determines order?
 
   ┌──────────────────────────────────────────────┐
-  │ emission (aptkit run-agent-loop)              │  → WALL-CLOCK at emit
+  │ emission (@buffr/kernel run-agent-loop)       │  → WALL-CLOCK at emit
   │   timestamp() = new Date().toISOString()      │    (ms resolution)
   └───────────────────────┬───────────────────────┘
        seam: flush()       │  ═══ order is DESTROYED here ═══
@@ -84,11 +84,11 @@ The mechanism recovers order perfectly *except* inside a shared millisecond. Tha
 
 #### Move 2 — the step-by-step walkthrough
 
-**Where the timestamp is born.** It's not buffr's — aptkit's runtime stamps it. `timestamp()` is `new Date().toISOString()` (aptkit `runtime/dist/src/events.js:2`), called inline at each emit site, e.g. the assistant `step`:
+**Where the timestamp is born.** It's not buffr's — `@buffr/kernel`'s runtime stamps it. `timestamp()` is `new Date().toISOString()` (`packages/kernel/src/tracing.ts:32-34`), called inline at each emit site, e.g. the assistant `step`:
 
 ```
-  aptkit runtime/dist/src/run-agent-loop.js:51
-    trace?.emit({ type: 'step', …, content: text, timestamp: timestamp() });
+  packages/kernel/src/workflow-runtime/run-agent-loop.ts:103
+    if (text) trace?.emit({ type: 'step', …, content: text, timestamp: timestamp() });
 ```
 
 Millisecond resolution, no monotonic counter. This is the root of both the guarantee (it's the *emit* moment, captured at the source) and the limit (two emits in one millisecond get identical strings).
@@ -110,7 +110,7 @@ Millisecond resolution, no monotonic counter. This is the root of both the guara
   :30   values (…, coalesce($8::timestamptz, now()))
 ```
 
-Read the boundary condition carefully. When the event *has* a timestamp, replay order = emit order — clean. When it *doesn't*, the row gets server `now()`, which is the insert moment — and because `flush()` inserts in parallel, that's *arrival* order, the very thing the pattern set out to avoid. So the fallback is a controlled degradation: timestamped events stay ordered; un-timestamped ones fall back to the racy path. Every aptkit event ships a timestamp today, so the fallback is defensive, not active — but it's the line where the guarantee is conditional.
+Read the boundary condition carefully. When the event *has* a timestamp, replay order = emit order — clean. When it *doesn't*, the row gets server `now()`, which is the insert moment — and because `flush()` inserts in parallel, that's *arrival* order, the very thing the pattern set out to avoid. So the fallback is a controlled degradation: timestamped events stay ordered; un-timestamped ones fall back to the racy path. Every `@buffr/kernel` event ships a timestamp today, so the fallback is defensive, not active — but it's the line where the guarantee is conditional.
 
 **Where order is recovered.** Any replay sorts by `created_at` (e.g. the reproduction query in `audit.md` lens 2). That's the `ORDER BY` seam. It recovers emit order for every distinct-millisecond pair — and ties on the rest.
 
@@ -118,11 +118,11 @@ Read the boundary condition carefully. When the event *has* a timestamp, replay 
 
 The kernel:
 
-1. **A source timestamp on every event** — the order's source of truth. Drop it and you're sorting by arrival, which the parallel flush has already scrambled. (`run-agent-loop.js:51`, carried at `sink.ts:54`)
+1. **A source timestamp on every event** — the order's source of truth. Drop it and you're sorting by arrival, which the parallel flush has already scrambled. (`run-agent-loop.ts:97,103,111,126`, carried at `sink.ts:54`)
 2. **The timestamp travels with the row** — written to `created_at`, not recomputed at insert. Recompute it and you'd capture insert time = arrival time = scrambled. (`sink.ts:30`)
 3. **Read-time sort on that column** — `ORDER BY created_at`. Without it the rows come back in physical/arbitrary order.
 
-What's *missing* from the kernel, and is the residual edge: **a tiebreaker**. A monotonic sequence number per conversation (`seq` 0,1,2,…) emitted alongside the timestamp would make order total. aptkit emits no such counter, so two same-millisecond events have no defined order. For a fast local loop — several events per turn through an in-process agent — same-millisecond emits are reachable, not theoretical.
+What's *missing* from the kernel, and is the residual edge: **a tiebreaker**. A monotonic sequence number per conversation (`seq` 0,1,2,…) emitted alongside the timestamp would make order total. `@buffr/kernel` emits no such counter, so two same-millisecond events have no defined order. For a fast local loop — several events per turn through an in-process agent — same-millisecond emits are reachable, not theoretical.
 
 Optional hardening: the `coalesce(now())` fallback is defensive hardening for the (currently impossible) un-timestamped event — not part of the correctness kernel.
 
@@ -135,7 +135,7 @@ Optional hardening: the `coalesce(now())` fallback is defensive hardening for th
 ```
   Client-timestamp ordering — threat and fix, end to end
 
-  SOURCE (aptkit run-agent-loop)
+  SOURCE (@buffr/kernel run-agent-loop)
     e0 t=…001   e1 t=…002   e2 t=…002   e3 t=…004     ← emit order = truth
        │           │           │           │
        └───────────┴─────┬─────┴───────────┘
@@ -160,7 +160,9 @@ Optional hardening: the `coalesce(now())` fallback is defensive hardening for th
 
 This is the single-machine, low-stakes cousin of a problem distributed systems spend whole papers on: event ordering when you can't trust arrival. In a distributed log you reach for Lamport clocks or hybrid logical clocks precisely because wall-clock timestamps tie and skew. buffr is in-process, so there's no clock skew — but the *tie* half of the problem still shows up because `Date.now()` resolution is coarser than the loop is fast.
 
-The reason buffr chose source-timestamp-into-`created_at` over the simpler "let Postgres set `now()`" is spelled out in the sink comment (`src/supabase-trace-sink.ts:46-48`): the timestamp is persisted "so replay order matches emit order rather than the race between concurrent flush inserts." That's an explicit, correct trade — it accepts the same-millisecond tie in exchange for not depending on insert arrival at all. The fix for the residual (a per-conversation sequence counter) lives upstream in aptkit, which buffr consumes and never edits (`context.md`), so buffr can't close it unilaterally without adding its own counter in the sink.
+The reason buffr chose source-timestamp-into-`created_at` over the simpler "let Postgres set `now()`" is spelled out in the sink comment (`src/supabase-trace-sink.ts:46-48`): the timestamp is persisted "so replay order matches emit order rather than the race between concurrent flush inserts." That's an explicit, correct trade — it accepts the same-millisecond tie in exchange for not depending on insert arrival at all. The fix for the residual (a per-conversation sequence counter) lives upstream in `@buffr/kernel`, which buffr consumes and never edits (`context.md`), so buffr can't close it unilaterally without adding its own counter in the sink.
+
+**A related-but-distinct client-timestamp choice: the decision journal.** `agents.decisions` (`sql/002_decision_journal.sql`) also takes its `created_at`/`review_at`/`resolved_at` from the caller rather than a server default — `JournalStore.create()`/`resolve()` both take an explicit `now: string` parameter (`packages/kernel/src/journal/contracts.ts:68,71`), and `session.ts` supplies it as `new Date().toISOString()` at each call site (`src/session.ts:746` for `saveHypothesis`, `:767` for `saveDecision`, similarly at `resolveReview`). `PgJournalStore.create()` passes that string straight into the INSERT (`src/pg-journal-store.ts:70,77`) instead of relying on the column's `default now()` (`sql/002_decision_journal.sql:12`). Don't read this as the same pattern, though — the *reason* is different. The trace sink stamps at the source because a **parallel flush** could scramble multiple rows' insertion order (this file's whole subject); a decision is written with **one sequential INSERT**, so there's no arrival race to defend against. The caller-supplied `now` here is about determinism for tests and consistency between the row's own timestamp and any in-memory logic keyed off "now" in the same call (`InMemoryJournalStore` takes the identical parameter so both implementations of `JournalStore` can be driven by the same injected clock) — not about surviving a scramble. Same *shape* (caller stamps, not the database), different *problem being solved*.
 
 ## Interview defense
 
@@ -180,10 +182,10 @@ Because order doesn't come from insertion — it comes from `created_at`, which 
 
 **Q: When does that break?**
 
-Same millisecond, no tiebreaker. `timestamp()` is `new Date().toISOString()` — millisecond resolution (`events.js:2`). Two events emitted in the same millisecond get byte-identical `created_at`, and there's no sequence column to break the tie, so their replay order is arbitrary. The fix is a monotonic `seq` per conversation — but that's an aptkit-side emit change, and aptkit is consumed, not edited here. **Anchor:** the missing tiebreaker is the load-bearing part — naming it shows you know source timestamps give *mostly*-ordered, not *totally*-ordered.
+Same millisecond, no tiebreaker. `timestamp()` is `new Date().toISOString()` — millisecond resolution (`packages/kernel/src/tracing.ts:32-34`). Two events emitted in the same millisecond get byte-identical `created_at`, and there's no sequence column to break the tie, so their replay order is arbitrary. The fix is a monotonic `seq` per conversation — but that's a `@buffr/kernel`-side emit change, and that package is consumed, not edited here (`context.md`). **Anchor:** the missing tiebreaker is the load-bearing part — naming it shows you know source timestamps give *mostly*-ordered, not *totally*-ordered.
 
 ## See also
 
 - `01-full-signal-trajectory-capture.md` — the trajectory whose order this guarantees.
-- `audit.md` lens 5 (traces) and lens 8 (red-flag rank 2).
-- Cross-guide: `study-distributed-systems` (logical clocks, total vs partial order), `study-performance-engineering` (the parallel-flush throughput choice that created the race).
+- `audit.md` lens 5 (traces) and lens 8 (red-flag rank 3).
+- Cross-guide: `study-distributed-systems` (logical clocks, total vs partial order), `study-performance-engineering` (the parallel-flush throughput choice that created the race), `study-data-modeling` (the `agents.decisions` schema, `sql/002_decision_journal.sql`).

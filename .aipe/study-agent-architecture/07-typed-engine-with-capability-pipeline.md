@@ -25,6 +25,15 @@ buffr now has two parallel computation shapes under the same TUI, both entered t
 
 InvestingEngine sits **alongside** the ReAct loop, not inside it. It is accessed via `session.analyze()` which is a sibling of `session.ask()`. The TUI never knows which shape ran — both return a `Promise<string>`.
 
+**A second engine now reuses this same kernel.** `packages/engines/market-research/src/engine.ts`
+(`MarketResearchEngine`) is wired the same way — `/research <topic>` → `session.researchCollect()`
+/ `session.researchEvaluate()` → the capability pipeline — and it builds on the *exact same*
+`Collector`/`Analyzer`/`Scorer`/`Teacher` capabilities this file describes. The one structural
+difference: `MarketResearchEngine` doesn't have a single `run()` — it's split into `collect()` and
+`evaluate()`, with a human required to supply a prediction in between. That's the same kernel below
+with one new joint; the joint itself is covered as its own pattern in
+`08-human-in-the-loop-pipeline-checkpoint.md` rather than repeated here.
+
 ---
 
 ## Structure pass
@@ -167,6 +176,13 @@ The dispatch in `chat.tsx` is the one place this distinction is made: `/investin
 
 The capabilities layer is **entirely reused**. The domain knowledge (what dimensions matter, how to weight them, what to tell the Analyzer) is in the pack. That's the separation of concerns this architecture buys.
 
+This isn't hypothetical anymore — `packages/domain-packs/market-research/` and
+`packages/engines/market-research/src/engine.ts` are exactly this recipe followed a second time.
+The one deviation: `MarketResearchEngine` doesn't implement a single `run()` — it exposes `collect()`
+and `evaluate()` separately, because this domain needed a human's prediction folded in partway
+through. That deviation is covered on its own in `08-human-in-the-loop-pipeline-checkpoint.md`; the
+five-step recipe above is otherwise unchanged.
+
 **"Why not just add investing as a new tool in the ReAct loop?"**
 
 Because the steps are known and ordered: you always collect before you analyze, you always score before you explain. Giving the model control over that ordering adds variance without adding value. The engine makes it auditable — if the Scorer returns a low score, you can inspect the findings from step 2 and the metrics from step 3 directly. A ReAct loop that tries to do this would have to be prompted to follow the steps, which is prompt-fragile and unauditable.
@@ -176,8 +192,12 @@ Because the steps are known and ordered: you always collect before you analyze, 
 ## See also
 
 - `agent-patterns-in-this-codebase.md` — the two shapes contrasted.
-- `packages/engines/investing/src/engine.ts` — the full pipeline implementation.
+- `packages/engines/investing/src/engine.ts` — the full unbroken pipeline implementation.
+- `packages/engines/market-research/src/engine.ts` — the same kernel, split at a human checkpoint.
+- `08-human-in-the-loop-pipeline-checkpoint.md` — that split, as its own pattern.
+- `09-predict-then-reveal-calibration-loop.md` — what the split's output feeds into over time.
 - `packages/capabilities/src/` — each capability as an independently-testable unit.
-- `packages/domain-packs/investing/src/` — dimensions, scorecards, prompts.
+- `packages/domain-packs/investing/src/`, `packages/domain-packs/market-research/src/` —
+  dimensions, scorecards, prompts per domain.
 - `test/commands.test.ts` — Scorer accuracy tests via fixture-based eval.
 - `study-software-design/06-capability-as-typed-computation-unit.md` — the capability-level design.

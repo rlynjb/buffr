@@ -140,9 +140,16 @@ The three cells, their lifecycles, and the canonical record they sit above.
 
 ## Elaborate
 
-The client-state / server-state split is the idea react-query and SWR institutionalized: server state is owned elsewhere (the server), cached on the client, and needs invalidation; client state is yours and ephemeral. Buffr hand-rolls the cheapest version — `turns` is a write-through display copy with no read-back and no invalidation, because for a single-user local CLI the cost of staleness is "restart shows an empty transcript," which is acceptable. The day buffr wants to show history on launch, the move is to hydrate `turns` from `messages` on mount — and *that's* when a fetch-cache library would start earning its place. Input text clearing is handled for free by the uncontrolled `<input>` unmounting when `busy` is true and remounting fresh when `busy` is false — no `setInput('')` needed.
+The client-state / server-state split is the idea react-query and SWR institutionalized: server state is owned elsewhere (the server), cached on the client, and needs invalidation; client state is yours and ephemeral. Buffr hand-rolls the cheapest version — `turns` is a write-through display copy with no read-back and no invalidation, because for a single-user local CLI the cost of staleness is "restart shows an empty transcript," which is acceptable. The day buffr wants to show history on launch, the move is to hydrate `turns` from `messages` on mount — and *that's* when a fetch-cache library would start earning its place. Input text clearing is handled for free by the uncontrolled `<textarea>` (see `05-uncontrolled-input-with-submit.md` for the current widget — it superseded the plain `<input>` this file originally described).
 
-Read next: `03-async-ui-with-a-busy-flag.md` (the `busy` lifecycle in full) and `04-session-as-the-data-layer.md` (where the canonical state lives). System-level ownership of the conversation is `study-system-design`.
+**Update note — the state graph tripled, the classification discipline didn't change.** At the last sync this component held two `useState` hooks; it now holds six (`turns`, `busy`, `activeFlow`, `status`, `liveTokens`, `progressSteps`) plus three `useRef`s (`taRef`, `scrollRef`, and `progressStepsRef`). The *lesson* above still applies verbatim to each new piece — classify by lifecycle and ownership before reaching for anything heavier:
+- `activeFlow` is client state, but it's unusual client state: it doesn't hold data, it holds a *reference to a closure* (a `ResearchFlow`/`ReviewFlow` controller) that owns its own private state machine outside React entirely. → `06-multi-step-flow-as-state-machine.md`.
+- `progressStepsRef` is the same "stale value across an await" problem this file names for `turns` (Move 2), solved with a *second* technique — a ref mirror written in lockstep with the state, instead of a functional updater — because the read site needs a post-hoc snapshot, not an in-flight update. → `07-streaming-progress-panel.md`.
+- `status` and `liveTokens` are unchanged in kind from the original audit: ephemeral, per-turn, reset at the start of every async hop.
+
+None of this growth required a store. Six co-located `useState` calls in one component is still "local state, classified honestly" — the ceiling for when that stops being true is still the same test in Move 3: shared across components, or survives navigation, or becomes the source of truth. Still none of the six qualify.
+
+Read next: `03-async-ui-with-a-busy-flag.md` (the `busy` lifecycle in full, now also spanning multi-turn flows) and `04-session-as-the-data-layer.md` (where the canonical state lives). System-level ownership of the conversation is `study-system-design`.
 
 ---
 
@@ -179,5 +186,7 @@ Because the answer append happens *after* an `await` (`chat.tsx:29`), so the clo
 - `03-async-ui-with-a-busy-flag.md` — the `busy` lifecycle and `try/finally`
 - `04-session-as-the-data-layer.md` — where canonical state lives
 - `05-uncontrolled-input-with-submit.md` — why input isn't a hook (uncontrolled OpenTUI widget)
-- `audit.md` lens 2 (state-architecture), red flag #2 (display/canonical drift)
+- `06-multi-step-flow-as-state-machine.md` — `activeFlow`, the state cell that references an external closure
+- `07-streaming-progress-panel.md` — `progressStepsRef`, the ref-mirror technique for post-await reads
+- `audit.md` lens 2 (state-architecture), red flag #2 (display/canonical drift), red flag #3 (`progressStepsRef` sync risk)
 - cross-link: `study-system-design` (system-level state ownership)

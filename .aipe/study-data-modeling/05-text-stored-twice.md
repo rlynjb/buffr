@@ -265,5 +265,9 @@ guarantee is conventional, not enforced, is the load-bearing admission.
 
 - `01-vector-column-and-ann-index.md` — the read path that rebuilds `meta` from columns
 - `02-deterministic-chunk-ids.md` — the `meta` round-trip that preserves the in-memory shape
+- `07-predicted-vs-assessed-columns.md` — a table that *looks* like this
+  pattern (two column families about one row) but isn't: `agents.decisions`
+  keeps a forecast and an outcome deliberately un-reconciled, rather than
+  the same fact duplicated. That file names the test that tells them apart.
 - `audit.md` §2, §7 — normalization-and-duplication lens and the red-flag checklist
 - **study-software-design** — duplication-as-leakage, the information-hiding primitive

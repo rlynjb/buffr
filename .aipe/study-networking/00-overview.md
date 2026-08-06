@@ -1,101 +1,155 @@
 # Study — Networking · Overview (buffr-laptop)
 
-The whole networking story of this repo fits in one sentence: **two long-lived
-outbound clients, no inbound server.** buffr-laptop opens a connection pool
-(`pg.Pool`) to Postgres over TCP and makes HTTP requests to a local model server
-(Ollama) — and that is the entire wire surface. Nothing listens. Nothing
-accepts connections. There is no browser, so there is no CORS, no cookies, no
-WebSocket, no SSE. That absence is not a gap to apologize for — it's the shape
-of a single-device CLI brain, and naming it precisely is half the lesson.
+The whole networking story of this repo still opens with **no inbound
+server** — but it no longer closes with "two outbound clients." buffr-laptop
+opens one connection pool (`pg.Pool`) to Postgres over TCP, makes a fixed pair
+of HTTP calls to a local model server (Ollama), and — new since the last pass —
+fans out to up to **six real internet APIs** the moment `/research` or
+`/investing` runs: Reddit, Google Custom Search, Brave, Tavily, an RSS feed,
+Amazon reviews, and Google Trends. Nothing listens. Nothing accepts
+connections. There is still no browser, so there is still no CORS, no cookies,
+no WebSocket, no SSE. What changed: the HTTP surface stopped being "one host
+string to a loopback model server" and became a concurrent fan-out to the open
+internet — real DNS, real TLS, real per-host failure modes. That shift is the
+headline of this update.
 
 ## The system in one diagram
 
-This is every byte that crosses a socket in buffr. Two outbound paths from one
-Node process; both endpoints are on (or reachable from) the same machine.
+This is every byte that crosses a socket in buffr. Two always-on outbound
+paths (pool + model server) plus a connector fan-out that only fires during
+`/research` and `/investing`.
 
 ```
   buffr-laptop — the complete on-the-wire map
 
-  ┌─ Process layer (one Node ESM process) ───────────────────────┐
-  │  npm run chat → OpenTUI → createChatSession()                 │
-  │     │                                                         │
-  │     ├──► PgVectorStore / trace sink / profile  (src/*.ts)     │
-  │     │         uses the connection pool (pg.Pool)              │
-  │     │                                                         │
-  │     └──► RagQueryAgent (aptkit)                               │
-  │               uses GemmaModelProvider + OllamaEmbeddingProvider│
-  └───────┬───────────────────────────────────┬──────────────────┘
-          │ pg-wire over TCP                   │ HTTP/1.1 over TCP
-          │ (libpq protocol, port 5432)        │ (POST JSON, port 11434)
-          ▼                                    ▼
-  ┌─ Storage layer ──────────┐        ┌─ Provider layer ──────────┐
-  │  Postgres (reindb)       │        │  Ollama model server      │
-  │  pgvector / agents schema│        │  gemma2:9b  (/api/chat)   │
-  │  TLS gated by sslmode    │        │  nomic-embed (/api/embed) │
-  └──────────────────────────┘        └───────────────────────────┘
+  ┌─ Process layer (one Node ESM process) ─────────────────────────────┐
+  │  npm run chat → OpenTUI → createChatSession()                       │
+  │     │                                                               │
+  │     ├──► PgVectorStore / PgJournalStore / trace sink (src/*.ts)     │
+  │     │         uses the connection pool (pg.Pool)                    │
+  │     │                                                               │
+  │     ├──► RagQueryAgent (aptkit)                                     │
+  │     │         uses GemmaModelProvider + OllamaEmbeddingProvider     │
+  │     │                                                               │
+  │     └──► MarketResearchEngine / InvestingEngine → Collector         │
+  │               fans out to N connectors CONCURRENTLY (Promise.all)   │
+  └───────┬────────────────────┬──────────────────────┬────────────────┘
+          │ pg-wire/TCP :5432  │ HTTP/TCP :11434       │ HTTPS/TCP :443 (× up to 6, parallel)
+          ▼                    ▼                       ▼
+  ┌─ Storage ────────┐ ┌─ Provider ─────────┐ ┌─ External APIs ──────────────────┐
+  │ Postgres (reindb)│ │ Ollama (gemma2)    │ │ reddit.com · googleapis.com      │
+  │ pgvector/agents  │ │ /api/chat /embed   │ │ api.search.brave.com             │
+  │ TLS via sslmode  │ │ plaintext loopback │ │ api.tavily.com · amazon.com      │
+  └───────────────────┘ └─────────────────────┘ │ (an RSS feed host) · Google Trends│
+                                                 └─────────────────────────────────────┘
+                                                  real DNS + default-verified TLS,
+                                                  each wrapped in a 1h TTL cache
 ```
 
 Everything in this guide hangs off that picture. The connection pool (`pg.Pool`)
 owns the left path; aptkit's HTTP transport (`defaultHttpTransport`) owns the
-right path; buffr's only contribution to the right path is the host string.
+middle path (buffr contributes only the host string); buffr's **own**
+`@buffr/connectors` package owns the right path — six connectors, each
+authoring its own `fetch()` call.
 
 ## The ranked findings — what to look at first
 
 Verdict-first. Here is what actually matters on the wire, in order of
 consequence:
 
-1. **One warm connection pool (`pg.Pool`) across many turns is the
-   load-bearing networking decision.** `createChatSession()` opens the pool once
-   (`src/session.ts:39`) and every turn borrows a connection from it. This is the
-   single most important wire-level choice in the repo — it's what makes a
-   long-lived CLI cheap instead of paying a TCP + TLS + Postgres-auth handshake
-   on every keystroke. → `03-tcp-udp-connections-and-sockets.md`,
+1. **Concurrent connector fan-out tolerates fast failures but not hangs — and
+   that gap now spans six external APIs, not one.** `Collector.execute`
+   (`packages/capabilities/src/collector/index.ts:35-52`) runs every source
+   through `Promise.all`, each wrapped in its own `try/catch` so one connector
+   throwing doesn't sink the batch. But `Promise.all` only resolves once *every*
+   promise settles — and nothing passes an `AbortSignal` into
+   `source.connector.fetch(source.params)`. A connector that never
+   resolves (a stalled TCP connection to Reddit, a slow-loading Amazon page)
+   blocks the *entire* `/research` or `/investing` turn forever, even though
+   five other connectors already succeeded. This is the single most important
+   new finding — the fault-tolerance is real but it's a rejection handler, not
+   a timeout. → `07-timeouts-retries-pooling-and-backpressure.md`,
+   `08-networking-red-flags-audit.md`.
+
+2. **One warm connection pool (`pg.Pool`) across many turns is still the
+   load-bearing database decision.** `createChatSession()` opens the pool once
+   (`src/session.ts:399`) and every turn — including the new `PgJournalStore`
+   queries for `/review` — borrows a connection from it. → `03-tcp-udp-connections-and-sockets.md`,
    `07-timeouts-retries-pooling-and-backpressure.md`.
 
-2. **buffr's HTTP surface is one string.** The actual `fetch()` calls live in
-   aptkit (`defaultHttpTransport` → `POST /api/chat`, `POST /api/embed`). buffr
-   contributes exactly the host `http://localhost:11434` (`src/config.ts:14`).
-   The most surprising thing here: the HTTP client is wired-but-thin — buffr
-   never sees a header, a status code, or a response body directly.
+3. **buffr's HTTP surface grew from one host string to buffr's own connectors
+   package.** The Ollama path is still thin — the `fetch()` lives in aptkit's
+   `defaultHttpTransport`, and buffr only supplies `http://localhost:11434`
+   (`src/config.ts:14`). But the six web connectors in `@buffr/connectors`
+   (`packages/connectors/src/discovery/*.ts`) are buffr's **own** code writing
+   real `fetch()` calls, parsing real response bodies, and each handling
+   non-2xx and malformed-body failures slightly differently.
    → `05-http-semantics-caching-and-cors.md`.
 
-3. **TLS is configured by connection string, not by code.** There is no
-   `ssl: {...}` object anywhere. Whether the pg-wire connection encrypts is
-   decided entirely by the `sslmode=` parameter inside `DATABASE_URL`. The repo
-   has no opinion in code — the credential carries the policy.
-   → `04-tls-and-trust-establishment.md`.
+4. **TLS: the pg-wire policy is still a credential string, but the web
+   connectors now do real, default-verified HTTPS.** `sslmode=` inside
+   `DATABASE_URL` still decides pg-wire encryption with zero TLS code
+   (`src/db.ts:4`). What's new: every connector fetch (`reddit.com`,
+   `googleapis.com`, `api.search.brave.com`, `api.tavily.com`, `amazon.com`,
+   Google's trends servers) goes out over HTTPS with Node's default
+   certificate verification — no custom `Agent`, no `rejectUnauthorized:
+   false` anywhere in the repo. → `04-tls-and-trust-establishment.md`.
 
-4. **Cancellation is wired in the transport but unused at buffr's layer.**
-   aptkit's transports accept an `AbortSignal` and call `signal?.throwIfAborted()`
-   — but buffr passes no signal. So a hung `/api/chat` request blocks the turn
-   forever. → `07-timeouts-retries-pooling-and-backpressure.md`.
+5. **Cancellation is wired in the contract at every layer but used nowhere.**
+   aptkit's model transport accepts an `AbortSignal`; every connector's
+   `fetch(params, opts)` accepts `FetchOptions.signal`
+   (`packages/connectors/src/contracts.ts:15`). buffr passes a signal to
+   neither. → `07-timeouts-retries-pooling-and-backpressure.md`.
 
-5. **Loopback is the transport for the model server.** `localhost:11434` resolves
-   to the loopback interface (`127.0.0.1`/`::1`) — the request never touches a
-   network card. → `02-dns-routing-and-addressing.md`.
+6. **A bounded teardown was added for the pool.** `session.close()` now races
+   `pool.end()` against a 1-second timeout, and `chat.tsx`'s `forceExit()` sets
+   a hard 1.5s deadline regardless of whether the pool finishes draining
+   (`src/session.ts` `close()`, `src/cli/chat.tsx` `forceExit`). This is the
+   first place buffr treats "shut down within N seconds" as a real contract
+   rather than an unbounded `await`. → `03-tcp-udp-connections-and-sockets.md`.
+
+7. **Loopback is still the transport for the model server.** `localhost:11434`
+   resolves to the loopback interface (`127.0.0.1`/`::1`) — the request never
+   touches a network card. This is now the *exception*, not the rule — every
+   other outbound HTTP call in the repo leaves the machine.
+   → `02-dns-routing-and-addressing.md`.
 
 ## Not yet exercised (honest absences)
 
 These are real networking concepts the repo simply does not contain. Each file
-says when it would start to matter.
+says when it would start to matter. Note what moved out of this list this
+pass: real DNS and real TLS to remote hosts are no longer absences — the
+connector fan-out exercises both. What's still missing:
 
 - **No inbound server.** buffr accepts zero connections. No Express, no HTTP
   listener, no port bound for incoming traffic. → it's a CLI process, not a
   service.
-- **No CORS, no cookies, no browser policy.** There is no browser in the loop.
-  CORS is a browser enforcement; with no browser, it never fires.
+- **No CORS, no cookies, no browser policy.** There is no browser in the loop,
+  not even for the six new connectors — they're server-to-server calls from a
+  Node CLI. CORS is a browser enforcement; with no browser, it never fires.
   → `05-http-semantics-caching-and-cors.md`.
-- **No WebSocket, no SSE, no streaming.** `agent.answer()` returns one whole
-  string (`src/session.ts:62`); the model response is awaited in full, not
-  streamed token-by-token. → `06-websockets-sse-streaming-and-realtime.md`.
-- **No retries, no timeouts, no backoff, no jitter.** A failed `fetch` or a
-  dropped pg connection throws straight up to the OpenTUI catch
-  (`src/cli/chat.tsx:39`). → `07-timeouts-retries-pooling-and-backpressure.md`.
+- **No WebSocket, no SSE, no network streaming.** `agent.answer()` returns one
+  whole string (`src/session.ts`); the model response is awaited in full, not
+  streamed token-by-token. The new live progress panel (`onProgress`/
+  `onStatus` callbacks) *looks* like streaming in the UI but is in-process
+  function calls, not a network transport. → `06-websockets-sse-streaming-and-realtime.md`.
+- **No per-request timeout, anywhere.** Not on the model call, not on any of
+  the six connectors. `Promise.all` in `Collector.execute` tolerates a
+  connector that *throws*; it does not tolerate one that *hangs*.
+  → `07-timeouts-retries-pooling-and-backpressure.md`,
+  `08-networking-red-flags-audit.md`.
+- **No retries, no backoff, no jitter — for the model call or any connector.**
+  A failed `fetch` or a dropped pg connection throws straight up.
+  → `07-timeouts-retries-pooling-and-backpressure.md`.
 - **No pool tuning.** `new pg.Pool({ connectionString })` takes node-postgres
   defaults — `max: 10`, no `idleTimeoutMillis` override, no
   `connectionTimeoutMillis`. → `07-timeouts-retries-pooling-and-backpressure.md`.
-- **No proxy, no CDN, no edge, no load balancer.** Single device, two direct
-  outbound paths. → `02-dns-routing-and-addressing.md`.
+- **No proxy, no CDN, no edge, no load balancer.** Every connector dials the
+  provider's origin directly. → `02-dns-routing-and-addressing.md`.
+- **No in-flight request dedupe.** The 1-hour `CachedConnector` TTL cache stops
+  *repeat* calls with identical params, but two concurrent identical calls
+  issued before the first resolves still both fire.
+  → `07-timeouts-retries-pooling-and-backpressure.md`.
 
 ## Reading order
 

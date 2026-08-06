@@ -201,7 +201,11 @@ The full machine, flag and render branch together, across the async seam.
 
 This machine is the thing react-query, SWR, and TanStack Query exist to delete from your handlers — they own the flag, the dedup (your `if (busy) return` guard, generalized), the cache, retries, and cancellation, exposing `{ data, isLoading, isError }`. Buffr hand-rolls it because there's exactly one call site and no caching story, so a library would be ceremony. The honest read: this is the *correct* amount of machinery for the current surface. The trigger to adopt a library is a second async call site that needs the same dedup/cache/retry — at which point copy-pasting the flag becomes the smell.
 
-Read next: `04-session-as-the-data-layer.md` (what's behind the await) and `02-hooks-state-in-a-cli.md` (`busy` among the state triad). The suspend/resume at the `await` is `study-runtime-systems`; the wire timeout/retry semantics under `ask()` are `study-networking`.
+**Update note — the flag now spans more shapes of "in flight," and one of them briefly shipped without an error branch.** `busy` no longer only guards a single `ask()` call: it also guards each round-trip of the `/research`/`/review` multi-turn flows (`06-multi-step-flow-as-state-machine.md`) and the live-updating `/research` progress panel (`07-streaming-progress-panel.md`). The mechanism is identical — one boolean, set before the hop, reset in both branches of `.then` — but it's now doing that job at up to nine call sites instead of one.
+
+That repetition surfaced exactly the bug this file predicts. Commit `1344d9b` wired the `activeFlow` interceptor and the `/research`/`/review` start handlers with a **single-argument** `.then(result => …)` — no rejection handler — meaning a thrown error (a DB failure, an engine error) left `busy` stuck `true` forever, with no `finally`-equivalent to catch it. This is precisely the "what's the bug if you move `setBusy(false)` out of `finally`" interview question above, except it shipped as a real commit and needed a follow-up fix (`26f0e4b`) to convert all three call sites to the two-argument `.then(onSuccess, onError)` form the rest of the file already used. The lesson holds even sharper in hindsight: **there is no compiler check for a missing rejection handler on a `.then()` call** — it's pure code-review discipline, and it's the first thing to check when a new async call site is added to this file.
+
+Read next: `04-session-as-the-data-layer.md` (what's behind the await), `02-hooks-state-in-a-cli.md` (`busy` among the state triad), and `06-multi-step-flow-as-state-machine.md` (the multi-turn shape this same flag now also guards). The suspend/resume at the `await` is `study-runtime-systems`; the wire timeout/retry semantics under `ask()` are `study-networking`.
 
 ---
 
@@ -237,5 +241,7 @@ If it's the last line of `try`, a throw from `ask()` skips it and the UI is stuc
 - `02-hooks-state-in-a-cli.md` — `busy` within the state triad
 - `04-session-as-the-data-layer.md` — what the await calls into
 - `01-react-without-the-dom.md` — how the spinner⇄input swap reconciles
-- `audit.md` lens 4 (data-fetching), red flag #3 (no cancellation)
+- `06-multi-step-flow-as-state-machine.md` — the multi-turn shape `busy` now also guards, and the rejection-handling fix (`26f0e4b`) at those call sites
+- `07-streaming-progress-panel.md` — `<ProgressPanel>`, the direct descendant of `<Spinner>`
+- `audit.md` lens 4 (data-fetching), red flag #2 (rejection-handling as a pattern to watch), red flag #6 (no cancellation)
 - cross-link: `study-runtime-systems` (suspend/resume at the await), `study-networking` (timeout/retry on the wire)

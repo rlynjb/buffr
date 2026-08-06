@@ -258,6 +258,22 @@ teams do too late: noticing that a chunk of your app code is actually
 This is the same port/adapter inversion as `01-adapter-behind-a-contract.md`
 seen from the dependency-direction angle rather than the depth angle.
 
+**Where this boundary does NOT apply — `JournalStore`.** buffr's own
+`JournalStore` port (`packages/kernel/src/journal/contracts.ts`) looks
+identical to the aptkit boundary at first glance — a port with two
+adapters — but the dependency direction is different in kind. aptkit is
+an external, unowned package; buffr's arrow points at it because buffr
+*cannot* edit the other side (the hard constraint). `JournalStore` is a
+port buffr defines *and* owns both implementations of — there's no
+external package forcing the inversion, and buffr could edit either
+adapter freely. It's still a real port/adapter seam (worth studying as
+*that*), just not an instance of *this* pattern, which is specifically
+about depending on code you don't control. The interesting failure mode
+for `JournalStore` isn't a dependency-direction problem — it's a
+contract-consistency problem between two adapters buffr owns both sides
+of. → see `01-adapter-behind-a-contract.md`'s third worked example, and
+`audit.md` lens 3, for that story.
+
 ---
 
 ## Interview defense

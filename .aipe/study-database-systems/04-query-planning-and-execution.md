@@ -208,6 +208,35 @@ One subtlety worth naming: on a *tiny* table the planner may legitimately pick a
 scan because scanning 20 rows is cheaper than walking a graph. So you verify on a
 *populated* table — a seq scan on 12 rows is fine; a seq scan on 50k rows is the bug.
 
+**A second query shape — `listDue`'s composite-index scan.** The vector search isn't
+the only query worth planning through. `PgJournalStore.listDue` (`pg-journal-store.ts:86-98`)
+runs against `decisions_status_review`, the composite B-tree from file `03`
+(`app_id, user_id, workspace_id, status, review_at`). Both its statements can use the
+*same* index, for two different reasons:
+
+```
+  listDue's two statements, same index, two access patterns
+
+  UPDATE ... where app_id=$1 and user_id=$2 and workspace_id=$3
+              and kind='decision' and status='open' and review_at <= $4
+    → index scan: equality on the 4-column prefix, range on review_at (the 5th)
+    → kind='decision' is a residual filter — applied to the rows the index already
+      narrowed, since kind isn't a column in this index at all
+
+  SELECT ... where app_id=$1 and user_id=$2 and workspace_id=$3 and status='review-due'
+    order by review_at asc
+    → index scan: equality on a 4-column LEFT PREFIX (skipping review_at as a filter),
+      and the trailing review_at column already sorts the output — no separate Sort
+```
+
+The general rule both statements demonstrate: a composite B-tree can serve any query
+whose equality/range predicates form a *left prefix* of the index's column order —
+you don't need to filter on every column, and you don't need to filter in the exact
+order you declared them, as long as the columns you *do* filter on are an unbroken
+prefix. `decisions_app_id` (file `03`) never gets picked for either statement,
+because `decisions_status_review`'s own leading `app_id` column already covers
+anything the single-column index could do, at no extra cost to read.
+
 **No joins, no N+1 — by construction.** Worth stating plainly: buffr's queries are
 all single-table. `search` hits only `chunks`; `persistMessage` hits only `messages`;
 `indexDocumentRow` hits `documents` then (separately) `chunks`. There are no SQL

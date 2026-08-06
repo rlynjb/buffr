@@ -10,7 +10,7 @@ reads and writes it.
   The two partition seams — what's HERE vs what's NEXT DOOR
 
   ┌─ study-data-modeling (HERE) ───────────────────────────────┐
-  │  the SHAPE of persistent data: the five tables, the        │
+  │  the SHAPE of persistent data: the six tables, the         │
   │  soft link, the vector column, normalization, indexes      │
   │  vs queries, integrity, migrations                         │
   └────────────────────────────────────────────────────────────┘
@@ -43,12 +43,14 @@ rather than re-teaching it.
 
 ## The schema, in one diagram
 
-Five tables in the `agents` schema (database `reindb`). One real foreign key.
-One deliberately dropped one. One table (`chunks`) does double duty — it holds
-both retrieval chunks and episodic memory.
+Six tables in the `agents` schema (database `reindb`), across two migrations.
+One real foreign key. One deliberately dropped one. One table (`chunks`) does
+double duty — it holds both retrieval chunks and episodic memory; `decisions`
+does the same move with a `kind` column instead.
 
 ```
-  agents schema — the data model as-built (sql/001_agents_schema.sql)
+  agents schema — the data model as-built
+  (sql/001_agents_schema.sql + sql/002_decision_journal.sql)
 
   ┌─ documents ──────────────┐         ┌─ profiles ───────────────┐
   │ id          text PK      │         │ id        uuid PK        │
@@ -84,18 +86,36 @@ both retrieval chunks and episodic memory.
                                        │ tokens_used  int         │
                                        │ created_at   timestamptz │
                                        └──────────────────────────┘
+
+  ┌─ decisions ─────────────────────────────────────────────────┐  NO LINK
+  │ id uuid PK · app_id/user_id/workspace_id text (collapsed     │  at all —
+  │   to one value today) · domain · subject_type/subject_id     │  not even
+  │   (points OUTSIDE this db — no table to join)                │  soft
+  │ kind 'hypothesis'|'decision'  ── discriminates the family    │  (see
+  │   below, same move as chunks' meta.kind overload)            │  03, 07)
+  │ status 'open'→'review-due'→'resolved'/'discarded'            │
+  │   (transitioned LAZILY, inside listDue() — see 08)           │
+  │ predicted_score/dimension/confidence  ◄─┐ TWO FACTS, not one │
+  │ assessed_score/confidence             ──┘ duplicate — see 07 │
+  │ stake, resolution_condition (free text) · review_at (indexed)│
+  │ evidence_ids jsonb[]  ── sourceId strings, never persisted    │
+  │   anywhere in this db                                        │
+  └────────────────────────────────────────────────────────────────┘
 ```
 
-Read that diagram before opening anything else. The two interesting joints —
-the dashed soft link and the solid cascade FK — are the whole story of how
-this schema enforces (and chooses not to enforce) integrity.
+Read that diagram before opening anything else. The two interesting joints in
+the original five tables — the dashed soft link and the solid cascade FK —
+are the whole story of how that half of the schema enforces (and chooses not
+to enforce) integrity. `decisions` adds a third story: a table with no joint
+to any other table at all, twin columns that look like duplication but
+aren't, and a status column that only advances when someone reads it.
 
 ---
 
 ## Reading order
 
 ```
-  00-overview.md   one-page orientation: the five tables, the verdict
+  00-overview.md   one-page orientation: the six tables, the verdict
   audit.md         Pass 1 — all 7 data-modeling lenses walked, honest
                    "not yet exercised" where the repo doesn't go there
 
@@ -106,6 +126,8 @@ this schema enforces (and chooses not to enforce) integrity.
   04-app-id-tenant-column.md            tenant shape without RLS
   05-text-stored-twice.md               deliberate denormalization
   06-trajectory-tables.md               conversations + messages full-signal
+  07-predicted-vs-assessed-columns.md   decisions' forecast/actual twin columns
+  08-lazy-status-transition.md          decisions' status flips on read, not on a schedule
 ```
 
 Start at `00-overview.md`, then `audit.md` for the systematic sweep, then the
@@ -129,3 +151,8 @@ self-contained and uses the full concept-file format.
 - **study-software-design** — normalization as information-hiding; the
   text-stored-twice call (`05-text-stored-twice.md`) is the DB analog of the
   duplication primitive taught there.
+- **study-agent-architecture** — the predict → reveal → promote flow that
+  writes `agents.decisions` (`src/cli/research-flow.ts`) is a data-modeling
+  concern here (what the row shape captures) and an agent-loop concern there
+  (how the multi-turn CLI state machine drives it). See
+  `07-predicted-vs-assessed-columns.md`.

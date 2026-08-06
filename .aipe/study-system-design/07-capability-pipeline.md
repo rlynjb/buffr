@@ -68,7 +68,9 @@ Deterministic. Same inputs → same output. This is why the fixture-based accura
 
 ### Teacher (`packages/capabilities/src/teacher/`)
 
-LLM single-shot. The model calls `submit_explanation({ explanation, keyLessons, actionableNext })` once and the capability returns that struct. The `audience` parameter drives the framing (currently always `'individual investor'`). No loop, no tool calls beyond the single submit.
+LLM single-shot. The model calls `submit_explanation({ explanation, keyLessons, actionableNext, principle, reflectionQuestion })` once and the capability returns that struct. The `audience` parameter drives the framing (`'individual investor'` for investing, `'solo creator building digital products and Shopify apps'` for market research). No loop, no tool calls beyond the single submit.
+
+`principle` and `reflectionQuestion` (`packages/capabilities/src/teacher/index.ts:20-22`) were added on top of the original three fields — one transferable rule the result illustrates, and one question aimed at deciding whether the finding is worth validating further. Both get a code-side fallback if the model returns an empty string (`teacher/index.ts:40-46,112-117`): `fallbackPrinciple()` picks the highest-scoring finding and states it as a principle directly; the reflection question falls back to a fixed generic prompt. This is the same defensive pattern the engine layer uses everywhere findings might be empty (see `08-domain-pack-and-engine.md`'s note on `MarketResearchEngine.evaluate()`'s empty-findings guard) — never trust the model to have produced a non-empty structured field, always have a code path that degrades instead of surfacing `undefined` or an empty string to the user. `MarketResearchEngine.evaluate()` (`packages/engines/market-research/src/engine.ts:220-221`) forwards both fields straight into `MarketResearchOutput.summary`, and `research-flow.ts`'s `formatReveal()` (`src/cli/research-flow.ts:56-69`) is what actually surfaces them to the user, right after the score-gap line.
 
 ### Journal (`packages/capabilities/src/journal/`)
 

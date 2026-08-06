@@ -137,7 +137,40 @@ Called at `src/session.ts:63`, right after `agent.answer` returns and before `me
        every "await" = a yield point; the loop runs other tasks between
 ```
 
-**Non-blocking I/O is why none of this freezes.** Every `pool.query` and every Ollama `fetch` hands a socket to the OS and yields. While Postgres is computing the HNSW search or Ollama is generating tokens, buffr's thread is *idle and available* — which is exactly what lets Ink render the spinner (`src/cli/chat.tsx:48-51`) during a long turn. If `persistMessage` were synchronous (it isn't — it's `pool.query`, which is async), the whole UI would lock up on every trace write.
+**Non-blocking I/O is why none of this freezes.** Every `pool.query` and every Ollama `fetch` hands a socket to the OS and yields. While Postgres is computing the HNSW search or Ollama is generating tokens, buffr's thread is *idle and available* — which is exactly what lets OpenTUI render the spinner and the live progress panel during a long turn. If `persistMessage` were synchronous (it isn't — it's `pool.query`, which is async), the whole UI would lock up on every trace write.
+
+**A second async hazard, found in the wild: the unhandled rejection.** The sync-emit/async-flush queue above is a *deliberate* pattern for decoupling completion from the call site. The interactive `/research` and `/review` flows (`src/cli/research-flow.ts`, `src/cli/review-flow.ts`) hit the *accidental* version of the same shape — and it shipped as a real bug, fixed in `26f0e4b`. When these flows were first wired into `chat.tsx` (`1344d9b`), three call sites drove them with one-argument `.then(result => ...)`:
+
+```ts
+// the shape of the bug — one-arg .then, no rejection path
+controller.start().then(result => {
+  setTurns(t => [...t, ...result.messages.map(...)]);
+  setBusy(false);
+  // if journalStore.create() (inside start()) throws, NONE of this runs
+});
+```
+
+A Promise has exactly two terminal states, and `.then(onFulfilled)` only wires up one of them. If `controller.start()` rejects — a DB error from `journalStore.create`, any thrown validation failure — the rejection has nowhere to go. It becomes an **unhandled promise rejection**: Node/Bun logs a warning (by default, does not crash the process — there's no `process.on('unhandledRejection', ...)` configured here to change that policy), and the `.then` callback that would have called `setBusy(false)` simply never runs. Since the input box is conditionally hidden while `busy === true`, the practical symptom was a UI that looked frozen — no error, no input, no way forward short of killing the process.
+
+```
+  the event-loop-shaped bug — a Promise's two paths, one wired
+
+  controller.start() ──► resolves ──► .then(result => ...) ──► busy=false ✓
+                     └──► REJECTS ──► (nowhere to go) ──► busy stays true ✗
+                                       no catch, no second .then argument
+```
+
+The fix (`26f0e4b`) is the two-argument form already used elsewhere in the same file for `/investing`, `/eval`, and plain `/ask`:
+
+```ts
+// src/cli/chat.tsx — after the fix, both terminal states wired
+controller.start().then(
+  result => { /* success path — unchanged */ setBusy(false); },
+  err    => { setTurns(t => [...t, { role: 'buffr', text: `error: ${err.message}` }]); setBusy(false); setActiveFlow(null); },
+);
+```
+
+The lesson generalizes past this one bug: **a `.then()` with only a success handler is a `try` with no `catch`.** The event loop doesn't make that safe just because there's no second thread — a rejected Promise routes to nowhere unless you give it somewhere to go, and "nowhere" in a `busy`-gated UI means "stuck forever," not "crashed and restarted." This is the same discipline `06`'s `try/finally` teaches for synchronous resource cleanup, applied to the async completion path instead.
 
 **The microtask vs macrotask detail that matters here.** When `agent.answer` resolves, its continuation in `ask` is a *microtask* — it runs before the loop checks for new I/O. The pg insert completions are *macrotasks* — they fire when the OS reports the socket is readable. So `Promise.all(pending)` in `flush` is waiting on macrotasks (the DB round-trips), interleaved with microtasks (each insert's `.then`). You don't manage this ordering; the loop does. You only need to know that `flush` won't resolve until the slowest *macrotask* (DB round-trip) in the batch lands.
 
@@ -220,6 +253,7 @@ What the repo does *not* do: bound the queue. `pending[]` grows with the number 
 ## See also
 
 - `02-processes-threads-and-tasks.md` — the one thread the loop runs on
-- `04-shared-state-races-and-synchronization.md` — why pushing to `pending[]` across awaits is race-free
+- `04-shared-state-races-and-synchronization.md` — why pushing to `pending[]` across awaits is race-free, and how the `busy` guard now also fences the flow closures this file's rejection fix protects
 - `07-backpressure-bounded-work-and-cancellation.md` — the unbounded queue and missing timeouts
 - `06-filesystem-streams-and-resource-lifecycle.md` — the pool the async writes run against
+- `08-runtime-systems-red-flags-audit.md` — R8, the unhandled-rejection bug and its fix, ranked

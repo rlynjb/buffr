@@ -2,7 +2,7 @@
 
 Index + reading order for the prompt-engineering study guide, anchored to `buffr-laptop`'s real prompt path.
 
-The thing to hold in your head before you open anything: in this repo **the prompt is not written, it is assembled** — across three owners, at runtime, every turn. There is no `prompt.md` you can open. The system prompt (`BASE_SYSTEM`) is a constant in aptkit, the profile gets prepended in front of it, and the tool catalog gets appended behind it by the model provider. Most of this guide is teaching you to see that assembly.
+The thing to hold in your head before you open anything: in this repo **the prompt is not written, it is assembled** — across three owners, at runtime, every turn. There is no `prompt.md` you can open. The system prompt (`DEFAULT_SYSTEM_TEMPLATE`) is a constant in `@buffr/kernel`, a sibling workspace package in this same repo, the profile gets prepended in front of it, and the tool catalog gets appended behind it by the model provider. Most of this guide is teaching you to see that assembly.
 
 ---
 
@@ -19,7 +19,7 @@ Operational discipline first, then the specific techniques. If you read top to b
 
 1. **[01-anatomy.md](01-anatomy.md)** — the four sections of a production prompt, and how buffr's three owners map onto them.
 2. **[02-structured-outputs.md](02-structured-outputs.md)** — tool calling, schemas, the markdown-fence bug, and why buffr's tool calls are *emulated* on a model with no native tool API. The load-bearing file.
-3. **[03-prompts-as-code.md](03-prompts-as-code.md)** — prompts as version-controlled source, the prompt+model-version pairing, and where buffr's prompt actually lives (spoiler: in `node_modules`).
+3. **[03-prompts-as-code.md](03-prompts-as-code.md)** — prompts as version-controlled source, the prompt+model-version pairing, and where buffr's prompt actually lives (spoiler: one workspace package over, plus two domain-pack `prompts.ts` files it owns directly).
 4. **[04-token-budgeting.md](04-token-budgeting.md)** — counting tokens, the 80% rule, lost-in-the-middle, prefix caching, and buffr's hard 8192-token guard.
 5. **[05-eval-driven-iteration.md](05-eval-driven-iteration.md)** — the golden set, the regression suite, and the honest gap: buffr evals *retrieval*, not the *prompt*.
 
@@ -47,21 +47,27 @@ A reader scanning this should learn what's interesting about buffr's prompt path
   ─────────────────────────────────────────
   ✓ three-owner prompt assembly        → 00, 01
   ✓ tool-call emulation prompt         → 02   ← the load-bearing one
+  ✓ same kernel reused: 3 tool schemas → 02   (RAG, Analyzer, Teacher)
+  ✓ field-level structured-output      → 02   Teacher's principle/reflection
+    fallback (no retry, deterministic)         fallback, tested
   ✓ profile injection (personalization)→ 01, 12
   ✓ grounding & citation instruction   → 02, 05
   ✓ bounded synthesis nudge            → 02, 06
-  ✓ structured-output reprompt         → 02   (aptkit has it; buffr's path doesn't fire it)
+  ✓ structured-output reprompt         → 02   (@buffr/kernel has it; unused)
+  ✓ prompt-as-data (2 domain packs)    → 03   investing + market-research
   ✓ token-budget guard (hard 8192)     → 04
-  ✓ retrieval eval set                 → 05
+  ✓ retrieval + Scorer + fallback evals→ 05
+  ✓ structured input FROM a human      → 02   the predict-then-reveal loop
 
   NOT YET EXERCISED (curriculum targets)
   ──────────────────────────────────────
   ✗ few-shot examples                  → 08
-  ✗ prompt versioning / eval-of-prompts→ 03, 05
+  ✗ per-output prompt-version stamp    → 03   (computed, not persisted)
   ✗ chain-of-thought                   → 09
   ✗ self-critique / self-consistency   → 10
   ✗ prompt caching                     → 04
   ✗ forbidden-pattern rotation         → 13
+  ✗ delimiters on untrusted evidence   → 12   3 exposed channels now
 ```
 
 ---

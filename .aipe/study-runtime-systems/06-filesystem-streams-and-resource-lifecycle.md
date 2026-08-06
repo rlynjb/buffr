@@ -12,7 +12,7 @@ Every long-lived handle the OS hands your process — a file descriptor, a socke
   Zoom out — the handles the process holds
 
   ┌─ Interface layer ────────────────────────────────────────┐
-  │  readFile(.md / .sql)   ·   ★ raw-mode TTY stdin (Ink) ★ │ ← chat
+  │  readFile(.md / .sql)   ·   ★ raw-mode TTY stdin (OpenTUI) ★ │ ← chat
   └──────────────────────────┬───────────────────────────────┘
   ┌─ Runtime layer ──────────▼───────────────────────────────┐
   │  ★ the connection pool (`pgPool`) — checkout/release ★   │ ← the deep one
@@ -28,7 +28,7 @@ Zoom in: a "resource" here is anything you acquire and must release. The interes
 
 ## The structure pass
 
-**Layers.** File handles (transient, fully managed by `readFile`) → the connection pool (the resource with real acquire/release semantics) → individual pooled connections (the leaf, checked out per transaction) → the TTY (acquired by Ink, released on exit).
+**Layers.** File handles (transient, fully managed by `readFile`) → the connection pool (the resource with real acquire/release semantics) → individual pooled connections (the leaf, checked out per transaction) → the TTY (acquired by OpenTUI, released via a now-bounded exit path).
 
 **Axis — trace `failure`: if this resource isn't released, what breaks?**
 
@@ -44,8 +44,9 @@ Zoom in: a "resource" here is anything you acquire and must release. The interes
           ┌─ the pool itself ───────┐  forget pool.end() → batch CLI HANGS
           │  must pool.end()         │  (idle sockets keep the loop alive)
           └──────────────────────────┘
-              ┌─ raw-mode TTY ──────┐  Ink owns acquire+release; skip exit()
-              │  exit() restores it  │  (Ctrl-C) → terminal can be left raw
+              ┌─ raw-mode TTY ──────┐  OpenTUI owns acquire; forceExit() now
+              │  bounded release,    │  guarantees a release attempt within
+              │  fixed Aug 2         │  1.5s on /exit, Ctrl-C, or SIGINT
               └──────────────────────┘
 ```
 
@@ -117,9 +118,9 @@ The plain `pool.query()` calls — `search` (`src/pg-vector-store.ts:70`), `load
   └───────────────────┘                  └──────────────────────────┘
 ```
 
-**The pool's own lifetime — `pool.end()`.** The pool aggregates sockets; closing it closes them all. Batch CLIs call `await pool.end()` as their last act (`migrate.ts:30`, `index-cmd.ts:27`, `eval-cmd.ts:34`) — without it, the idle sockets keep the event loop alive and the process hangs after printing its result (`02`). The chat session wraps it in `close()` (`src/session.ts:72-74`), called only on `/exit`. This is the resource-lifecycle seam between the two process shapes: batch ends the pool passively at end-of-script; chat ends it on an explicit command.
+**The pool's own lifetime — `pool.end()`, now bounded on the chat side.** The pool aggregates sockets; closing it closes them all. Batch CLIs call `await pool.end()` as their last act (`migrate.ts:39`, `index-cmd.ts:40`, `eval-cmd.ts:36`), unbounded — without it, the idle sockets keep the event loop alive and the process hangs after printing its result (`02`). The chat session wraps it in `close()` (`src/session.ts:876-881`), and as of `64f822f` that call itself races `pool.end()` against a 1s timer rather than trusting it to return. This is the resource-lifecycle seam between the two process shapes, sharpened by that fix: batch ends the pool passively and unbounded at end-of-script (no TTY to hang, so an unbounded close just means a slower exit); chat ends it on `/exit`, Ctrl-C, or SIGINT, and now caps how long it will wait for a clean release before forcing the process down anyway.
 
-**The raw-mode TTY — Ink's resource, released on exit.** `render(<Chat/>)` (`src/cli/chat.tsx:63`) puts stdin into raw mode so it reads keystrokes immediately (no line buffering). That's an acquired terminal resource — the terminal's normal "cooked" mode is suspended. Ink's `exit()` (called via `useApp().exit()` at `src/cli/chat.tsx:20`) restores cooked mode and releases stdin. The boundary condition: if the process dies *without* `exit()` — a hard crash, or Ctrl-C with no SIGINT handler — the terminal can be left in raw mode (no echo, no line editing) until reset. Ink installs its own signal handling to mitigate the common Ctrl-C case, but the repo adds none of its own (`07`).
+**The raw-mode TTY — OpenTUI's resource, released through a path that used to be missing entirely.** `createRoot(renderer).render(...)` (`src/cli/chat.tsx:468`) puts stdin into raw mode so it reads keystrokes immediately (no line buffering). That's an acquired terminal resource — the terminal's normal "cooked" mode is suspended. Until `64f822f`/`9c1b1e6` (Aug 2), there was no code path that reliably restored it on Ctrl-C: `exitOnCtrlC: false` (passed to `createCliRenderer`) means OpenTUI does *not* handle Ctrl+C itself, and raw-mode stdin means the terminal never emits a real SIGINT for that keystroke either — so a bare `process.on('SIGINT', ...)` would never fire, and there was nothing else. The fix wires an explicit Ctrl+C handler into the `useKeyboard` layer (`src/cli/chat.tsx:379-383`) plus a `process.on('SIGINT', forceExit)` fallback for a signal sent from outside the terminal — both funnel into `forceExit()` (`src/cli/chat.tsx:464`), which attempts `session.close()` but guarantees `process.exit(0)` within 1.5s regardless. The boundary condition that's *still* real: if `forceExit()`'s hard timer fires before `session.close()` finishes, the release is best-effort, not guaranteed — bounded exposure, not zero exposure. → `07` for the full walkthrough of why the fix needed two commits, not one.
 
 ### Move 2 variant — the load-bearing skeleton of resource cleanup
 
@@ -146,17 +147,20 @@ The full resource-lifecycle picture across all three handle types.
 
   ┌─ Interface ─────────────────────────────────────────────────────┐
   │ readFile(.md/.sql) ── open+read+close internally, fully buffered │
-  │ raw-mode TTY ── Ink acquires on render(), releases on exit()     │
+  │ raw-mode TTY ── OpenTUI acquires on render(), forceExit() releases│
+  │                  (bounded, ≤1.5s — fixed Aug 2, was unhandled)    │
   └─────────────────────────────┬───────────────────────────────────┘
   ┌─ Runtime: the pool ─────────▼───────────────────────────────────┐
   │  pool.query   ──► auto checkout/return (no leak surface)         │
   │  pool.connect ──► const client = connect()                       │
   │                   try { begin..commit } catch { rollback }       │
   │                   finally { release() }  ◄── the leak-proof joint │
-  │  pool.end     ──► batch: end-of-script · chat: /exit             │
+  │  pool.end     ──► batch: end-of-script, unbounded                │
+  │                   chat: via close(), races a 1s timer            │
   └─────────────────────────────┬───────────────────────────────────┘
   ┌─ Storage: Postgres ─────────▼───────────────────────────────────┐
   │  sockets: born at first query, all closed by pool.end()          │
+  │  (chat: closure not guaranteed to finish before forceExit's 1.5s)│
   └──────────────────────────────────────────────────────────────────┘
 ```
 
@@ -164,7 +168,9 @@ The full resource-lifecycle picture across all three handle types.
 
 ## Elaborate
 
-`try/finally` around an acquired resource is the manual version of what C++ calls RAII and Python calls a context manager (`with`) — tie release to a scope so it can't be forgotten. JavaScript has no destructors, so `finally` is the tool, and node-postgres deliberately makes `pool.query` the easy default (auto-managed) so you only reach for manual `connect`/`release` when a transaction forces you to. The repo follows that grain exactly: every multi-statement transaction uses the manual pattern with `finally`; every single query uses `pool.query`.
+`try/finally` around an acquired resource is the manual version of what C++ calls RAII and Python calls a context manager (`with`) — tie release to a scope so it can't be forgotten. JavaScript has no destructors, so `finally` is the tool, and node-postgres deliberately makes `pool.query` the easy default (auto-managed) so you only reach for manual `connect`/`release` when a transaction forces you to. The repo follows that grain exactly: every multi-statement transaction uses the manual pattern with `finally`; every single query uses `pool.query`. `PgJournalStore` (new since the last pass, backing `/review`'s decision journal) follows the same grain too — every method is a single `pool.query`, no manual checkout, because none of its statements span a transaction.
+
+The chat process's shutdown path is a second instance of "tie release to a scope so it can't be forgotten" — just at the process level instead of the connection level, and layered with a twist: `Promise.race` against a timer, because the *scope itself* (`session.close()`) can't be trusted to return promptly. `try/finally` guarantees the release runs; it says nothing about how long the release takes. That gap is exactly what `64f822f` closed.
 
 `not yet exercised`: no streams anywhere (no `createReadStream`/`createWriteStream`, no piping, no backpressure on a stream — that's `07`'s territory), no file watchers, no temp-file cleanup. The repo reads small files fully and talks to Postgres/Ollama; it never holds a streaming handle. The day it indexes a corpus too big to `readFile` into memory is the day streaming and its backpressure become real.
 
@@ -174,7 +180,7 @@ The full resource-lifecycle picture across all three handle types.
 
 **Q: "How do you make sure a database connection is never leaked back into the pool?"**
 
-> Two rules. For a single query, I use `pool.query` — node-postgres checks out an idle connection, runs it, and returns it automatically, so there's no handle to leak. For a multi-statement transaction I check one out with `pool.connect()`, then the body goes in a `try`, `rollback` in `catch`, and `release()` in `finally`. The `finally` is the whole point — it runs whether the transaction commits or throws, so a failed migration still returns its connection. And the pool itself gets `pool.end()` at the process boundary: end-of-script for batch CLIs, `/exit` for chat.
+> Two rules. For a single query, I use `pool.query` — node-postgres checks out an idle connection, runs it, and returns it automatically, so there's no handle to leak. For a multi-statement transaction I check one out with `pool.connect()`, then the body goes in a `try`, `rollback` in `catch`, and `release()` in `finally`. The `finally` is the whole point — it runs whether the transaction commits or throws, so a failed migration still returns its connection. The pool itself gets `pool.end()` at the process boundary — unbounded for batch CLIs, since there's no TTY to hang if it's slow — but for chat, `pool.end()` is wrapped in a race against a 1-second timer, because a hung pool close used to hang the whole process on Ctrl-C before that fix landed.
 
 ```
   the leak-proof checkout — one sketch
@@ -182,16 +188,17 @@ The full resource-lifecycle picture across all three handle types.
   connect() ─► try { begin..commit } catch { rollback } finally { release() }
                                                           └─ runs on BOTH paths
   pool.query ─► auto: no handle held, can't leak
-  pool.end   ─► returns all sockets to the OS
+  pool.end   ─► batch: returns all sockets, unbounded
+             ─► chat: races a 1s timer — bounded, may not fully drain
 ```
 
-**Anchor:** "Acquire, `try`, release in `finally` — identical in `runMigration` (`src/migrate.ts:9-19`) and `upsert` (`src/pg-vector-store.ts:40-64`); the `finally` is what survives the throw."
+**Anchor:** "Acquire, `try`, release in `finally` — identical in `runMigration` (`src/migrate.ts`) and `upsert` (`src/pg-vector-store.ts:40-64`); the `finally` is what survives the throw. One layer up, the pool's own close is now bounded too — `session.close()` (`src/session.ts:876-881`) races `pool.end()` against a timer, the same discipline applied to a resource that can itself hang."
 
 ---
 
 ## See also
 
 - `01-runtime-map.md` — the pool as the central runtime resource
-- `02-processes-threads-and-tasks.md` — why batch CLIs must call `pool.end()`
+- `02-processes-threads-and-tasks.md` — why batch CLIs call `pool.end()` unbounded and chat doesn't
 - `03-event-loop-and-async-io.md` — the async writes that run against checked-out connections
-- `07-backpressure-bounded-work-and-cancellation.md` — the missing TTY-restore-on-SIGINT, and streaming
+- `07-backpressure-bounded-work-and-cancellation.md` — the full walkthrough of the SIGINT/TTY fix, and the streaming gap

@@ -2,9 +2,9 @@
 
 > How do you *know* the code works — and will keep working after the next change?
 
-This guide audits the test suite of `buffr-laptop` (the laptop "brain" of a self-hosted personal RAG agent: TypeScript ESM, `node:test` + `node:assert/strict`, Postgres + pgvector, an Ollama-served Gemma loop, and an Ink chat CLI). It is grounded in the real files — what's tested, how, and where the holes are.
+This guide audits the test suite of `buffr-laptop` (the laptop "brain" of a self-hosted personal RAG agent: TypeScript ESM monorepo, `node:test` + `node:assert/strict`, Postgres + pgvector, an Ollama-served Gemma loop, and an OpenTUI chat CLI with two interactive multi-turn flows, `/research` and `/review`). It is grounded in the real files — what's tested, how, and where the holes are.
 
-The verdict up front: **the suite is small but honest — 9 tests, 9 pass, and every test that touches the database says so by gating on `DATABASE_URL` and skipping cleanly when it's unset.** The test *design* is unusually disciplined for a personal project: the database-touching tests are real integration tests against a live Postgres, the embedder is faked deterministically so the model never enters the loop, and the persistence layer (`PgVectorStore`) is tested as a contract that mirrors aptkit's in-memory store. The single highest-leverage gap is that the one piece of code that orchestrates everything — `src/session.ts` — has **no test at all**.
+The verdict up front: **the suite is large and honest — ~188 tests across 8 separate `npm test` invocations (root plus 7 workspace packages), 187 pass, 1 gated skip — and every test that touches the database says so by gating on `DATABASE_URL` and skipping cleanly when it's unset.** The test *design* is unusually disciplined for a personal project, and it now holds at monorepo scale, not just in the root package: the database-touching tests are real integration tests against a live Postgres, the embedder is faked deterministically so the model never enters the loop, the persistence layer (`PgVectorStore`, `PgJournalStore`) is tested as a contract against the interface it implements, and every capability/engine that calls a model is tested against an injected `StubModel`. The single highest-leverage gap, unchanged in kind but grown in size since the last pass: the one piece of code that orchestrates everything — `src/session.ts`, now 15 public methods — has **no test at all**.
 
 ---
 
@@ -28,7 +28,7 @@ There are two ways to check an AI system, and they are not the same job:
 
 If a test asserts an **exact value** — `tokens_used === 123`, `hits[0].id === 'planted#0'`, replay order `=== ['tool_call','tool','model_usage','warning','error']` — it's a *testing* finding and it lives here. If it asserts a **threshold on a non-deterministic output** — "mean P@1 over the eval set didn't drop below 0.6" — it's an *evaluation* finding and it belongs to `study-ai-engineering`.
 
-This repo has both, and the line is clean: `test/` is all deterministic (`==`), and `eval/queries.json` + `src/cli/eval-cmd.ts` is the eval seam (a reporting script, not a unit test — it prints precision@k, it never asserts). They **meet** in exactly one place: the trace-sink test wraps a deterministic harness around what would otherwise be a probabilistic agent run, by capturing synthetic `CapabilityEvent`s instead of running Gemma. That's the textbook shape — a deterministic harness around a probabilistic core — and this repo gets it right. See `audit.md` → lens 6.
+This repo has both, and the line is clean: every `test/` and `packages/*/test/` file is deterministic (`==`), and `eval/queries.json` + `src/cli/eval-cmd.ts` is the eval seam (a reporting script, not a unit test — it prints precision@k, it never asserts). They **meet** in several places now, not just one: the trace-sink test wraps a deterministic harness around what would otherwise be a probabilistic agent run by capturing synthetic `CapabilityEvent`s instead of running Gemma, and the same shape — inject a `StubModel`, assert exact output — now also covers `Teacher`, `MarketResearchEngine`, and `InvestingEngine`. That's the textbook shape — a deterministic harness around a probabilistic core — and this repo applies it consistently across the monorepo. See `audit.md` → lens 6.
 
 ---
 
@@ -39,9 +39,11 @@ This repo has both, and the line is clean: `test/` is all deterministic (`==`), 
 3. **Pass 2 — the discovered-pattern files.** Each names a testing *technique* this repo applies deliberately, walked with the full concept template:
    - **`01-env-gated-integration-tests.md`** — the `DATABASE_URL`-gated suite that SKIPs instead of failing.
    - **`02-fake-embedder-injection.md`** — the deterministic 768-dim test double that keeps Ollama out of the loop.
-   - **`03-contract-parity-test.md`** — `PgVectorStore` tested as the same contract aptkit's in-memory store satisfies.
-   - **`04-idempotent-migration-test.md`** — run the migration twice, assert no error.
+   - **`03-contract-parity-test.md`** — `PgVectorStore` tested as the same contract aptkit's in-memory store satisfies, plus a second instance (`JournalStore`) that shows what happens when the same discipline isn't followed all the way through.
+   - **`04-idempotent-migration-test.md`** — run the migrations twice, assert no error — now a multi-file sequence, not one script.
    - **`05-full-signal-trajectory-assertion.md`** — assert all 6 `CapabilityEvent` types land, with `created_at` ordering.
+   - **`06-fixture-based-scorer-accuracy.md`** — golden-fixture JSON files as the contract for deterministic scoring functions.
+   - **`07-scripted-multi-turn-flow-test.md`** — the interactive `/research`/`/review` conversations, tested as pure state machines with an injected session — no mocked stdin, no terminal.
 
 ---
 

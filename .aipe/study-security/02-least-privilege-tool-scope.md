@@ -245,6 +245,24 @@ adds a second, write-capable tool — at that point the policy is the line that 
 it out of the RAG agent's reach. Building toward that is where this control earns its
 keep.
 
+**Since this file was last written — the market-research/investing engines
+(`packages/capabilities/src/analyzer`, `.../teacher`) landed a second, unrelated
+scoping shape, not an extension of this one.** `Analyzer` and `Teacher` each run
+`runAgentLoop` with a single tool schema — `submit_analysis` / `submit_explanation`
+— whose handler doesn't call anything; it just captures the arguments and returns
+`{ ok: true }` (`analyzer/index.ts:107-121`). There's no `*ToolPolicy` allowlist
+here and no `filterToolsForPolicy` call, because there's no shared registry to
+filter from — the model is handed exactly one fake tool per call, built fresh each
+time. Read narrowly, that's *tighter* than `ragQueryToolPolicy`: the model can't
+reach anything at all, not even a read. But it's not this control working harder;
+it's a different mechanism (structured-output-only capture) that happens to land
+in the same place. The place it does **not** land is output safety — this
+pipeline's "tool result" is the model's own generated score, which flows straight
+into deterministic scoring code with no gate. That's not a tool-scope gap; walk it
+in `03-indirect-prompt-injection-surface.md` (re-entry point 3) and `audit.md`
+lens 7, where the containment argument for this second pipeline is worked out on
+its own terms rather than borrowed from this file's.
+
 ## Interview defense
 
 **Q: Your agent has one tool that you also only registered once. Why bother with a

@@ -171,6 +171,22 @@ check (optimistic) anywhere in the repo. The day a second writer appears — a s
 process, a second device writing the same `agents` schema — that structural guarantee
 evaporates and you'd need to *add* one of those two strategies.
 
+**A related-but-different gap — `listDue`'s missing row lock.** Worth distinguishing
+this from the conflict above, because it's not the same failure mode.
+`PgJournalStore.listDue` (file `05` walks it in full) runs an `UPDATE ... where
+status = 'open'` and then a separate `SELECT ... where status = 'review-due'`,
+neither holding a row lock across the gap — no `SELECT ... FOR UPDATE`, no shared
+transaction. This isn't the classic MVCC write-write conflict (two transactions
+racing to update the *same* row); it's read skew — the `SELECT` can observe a
+different set of rows than the `UPDATE` just produced, if a third statement
+(`snooze`/`resolve`) changes `status` on one of them in between. MVCC doesn't
+protect against this by default because neither statement asked it to: READ
+COMMITTED gives each *statement* its own fresh snapshot, and nothing here holds a
+lock or wraps both statements in one transaction to keep the snapshot stable across
+them. The fix, if it's ever needed, is the same one-transaction move as everywhere
+else in this file: `begin`, run both statements (or better, one `UPDATE ...
+RETURNING *`), `commit`.
+
 **The cost buffr DOES pay — dead tuples and HNSW churn.** Even with one writer, MVCC
 isn't free. Every `on conflict do update` in `upsert` (`pg-vector-store.ts:50-54`)
 creates a new tuple version and orphans the old one. Two costs stack:
@@ -295,8 +311,9 @@ thing to break at scale.*
 ## See also
 
 - `05-transactions-isolation-and-anomalies.md` — MVCC is what enforces the isolation
-  level; why one writer makes READ COMMITTED safe.
-- `02-records-pages-and-storage-layout.md` — dead tuples on the heap page; the bloat.
+  level; why one writer makes READ COMMITTED safe; `listDue`'s full anomaly walk.
+- `02-records-pages-and-storage-layout.md` — dead tuples on the heap page; the bloat;
+  the `decisions` narrow-row dead-tuple pattern (same mechanic, smaller rows).
 - `03-btree-hash-and-secondary-indexes.md` — why every update re-inserts the HNSW entry.
 - `07-wal-durability-and-recovery.md` — vacuum, checkpoints, and the WAL.
 - `study-performance-engineering` — autovacuum tuning under write load.

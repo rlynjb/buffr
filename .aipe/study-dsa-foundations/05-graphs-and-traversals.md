@@ -31,7 +31,7 @@ one DDL line. The zoom-out marks it.
   └───────────────────────────┬────────────────────────────────┘
                               │ this same graph also serves:
   ┌─ memory recall ───────────▼────────────────────────────────┐
-  │  createConversationMemory → SAME graph, SAME walk           │  session.ts:53
+  │  createConversationMemory → SAME graph, SAME walk           │  session.ts:454
   └────────────────────────────────────────────────────────────┘
 ```
 
@@ -199,13 +199,13 @@ row. That substitution, planner-chosen, is the entire performance story. (The
 *planner decision* and tuning knobs like `ef_search` belong to
 **`study-database-systems`**; this file owns the traversal algorithm.)
 
-**The same graph serves memory — no second structure.** `session.ts:53` wires
+**The same graph serves memory — no second structure.** `session.ts:454` wires
 `createConversationMemory({ embedder, store })` into the *same* `PgVectorStore`.
 Past conversation exchanges get embedded and inserted as nodes in the *same*
 HNSW graph, recalled by the *same* greedy walk:
 
 ```
-  One graph, two features (session.ts:53, context.md memory model)
+  One graph, two features (session.ts:454, context.md memory model)
 
   ┌─ documents (indexed corpus) ──┐
   │  chunks tagged kind=document   │──┐
@@ -252,7 +252,7 @@ The full HNSW story, one frame, anchored to your builds and buffr's line.
   │  stop at local min → return k nearest (limit k)             │
   └────────────────────────────────────────────────────────────┘
        triggered by: pg-vector-store.ts:74-77  order by <=> limit k
-       reused by:    session.ts:53  conversation memory
+       reused by:    session.ts:454  conversation memory
        trade:        EXACT O(n) → APPROXIMATE O(log n)
 ```
 
@@ -322,7 +322,7 @@ recall at O(log n) beats 100% at O(n) every time."*
 ```
   no new structure — the SAME HNSW graph
   past exchanges → embedded → inserted as nodes → recalled by same walk
-  session.ts:53  createConversationMemory({ embedder, store })
+  session.ts:454  createConversationMemory({ embedder, store })
 ```
 
 Answer: none new — conversation memory reuses the existing vector store, so

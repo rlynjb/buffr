@@ -13,9 +13,11 @@ This is an **audit-style** guide. One audit walks the 8 lenses; the numbered fil
   01-hnsw-approximate-search.md          the main latency win (untuned)
   02-embedding-roundtrip.md              batched-per-doc, serial-across-files
   03-per-chunk-insert-loop.md            one INSERT per chunk in a txn
-  04-connection-pool-reuse.md            one warm pool across a whole session
+  04-connection-pool-reuse.md            one warm pool across a session — now also a bounded-shutdown story
   05-per-turn-memory-and-trace-cost.md   the write amplification per chat turn
-  06-no-caching.md                       identical query re-embeds every time
+  06-no-caching.md                       the RAG path re-embeds every time (still true)
+  07-connector-fan-out.md                /research + /investing gather concurrently, not serially
+  08-connector-result-caching.md         every external connector sits behind a TTL cache
 ```
 
 ## How to read a finding
@@ -29,8 +31,10 @@ These files lead with the established industry term and put the repo's local nam
 ## Cross-links to neighbouring guides
 
 - **`study-database-systems`** — the storage-engine mechanics underneath: how the HNSW index actually traverses its graph, what `begin`/`commit` costs, MVCC, and why a multi-row INSERT beats a loop. This guide *measures* those; that guide *explains* them.
-- **`study-networking`** — the transport layer under every Ollama call and every `pg` query: connection reuse, the HTTP roundtrip to `/api/embed`, timeouts, pooling. The serialization findings here bottom out in network behaviour there.
+- **`study-networking`** — the transport layer under every Ollama call, every `pg` query, and every connector's HTTP call: connection reuse, the HTTP roundtrip to `/api/embed`, timeouts, pooling. The serialization and fan-out findings here bottom out in network behaviour there.
 - **`study-ai-engineering`** — the retrieval pipeline, embedding model choice, eval harness, and the RAG shape these costs hang off. Why precision@k matters, what `nomic-embed-text` is doing, where caching would change eval cost.
+- **`study-frontend-engineering`** — the OpenTUI rendering mechanics behind the live progress panel (`07`'s UI counterpart) and the raw-mode terminal input handling behind `04`'s Ctrl+C fix. This guide notes both exist and why they matter for perceived latency / exit reliability; that guide owns how they're built.
+- **`study-debugging-observability`** — the trace sink and `ProgressEvent` stream as observability mechanisms, and the "process won't exit" class of failure `04`'s bounded shutdown now guards against.
 
 ## Partition seam
 

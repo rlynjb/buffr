@@ -52,8 +52,10 @@ Zoom in: this file is the *map* the other seven hang off. It answers three quest
   ┌─ the process itself ────────────┐   born: `bun dist/...` (chat) / `node dist/...` (batch)   dies: event loop empties
   └─────────────────────────────────┘   chat: never empties until /exit
 
-      ┌─ the pool (`pgPool`) ───────┐   born: createPool()      dies: pool.end()
-      └─────────────────────────────┘   chat: held across turns · batch: ends the run
+      ┌─ the pool (`pgPool`) ───────┐   born: createPool()      dies: pool.end() —
+      └─────────────────────────────┘   chat: held across turns, close() now races
+                                          pool.end() against a 1s timer (fixed Aug 2)
+                                          · batch: ends the run, unbounded
 
           ┌─ a pooled connection ───┐   born: pool.connect()    dies: client.release()
           └─────────────────────────┘   lives only inside one txn (upsert/migration)
@@ -103,22 +105,24 @@ Everything in the later files is one of these handles seen up close.
 **The process boundary.** Each `npm run *` script spawns a fresh OS process. There is no shared memory between two runs; `npm run index` and a running `npm run chat` are entirely separate processes that happen to talk to the same Postgres. The chat entry (`npm run chat` → `bun dist/src/cli/chat.js`) is the bottom of `src/cli/chat.tsx`:
 
 ```ts
-// src/cli/chat.tsx:69-79 — the entire process bootstrap (runs under Bun)
+// src/cli/chat.tsx:461-472 — the entire process bootstrap (runs under Bun)
 const session = await createChatSession();   // top-level await: opens the pool, builds the agent
 const renderer = await createCliRenderer({ exitOnCtrlC: false });  // OpenTUI Zig core via bun:ffi
-createRoot(renderer).render(<Chat session={session} onExit={…} />);  // hands control to OpenTUI
+const forceExit = () => { setTimeout(() => process.exit(0), 1500).unref(); session.close().finally(() => process.exit(0)); };
+process.on('SIGINT', forceExit);              // fallback for a signal sent from outside the terminal
+createRoot(renderer).render(<Chat session={session} onExit={async () => { forceExit(); }} … />);
 ```
 
-Three lines, but they set the process's whole character: a `createChatSession()` that opens long-lived resources, then `createCliRenderer()` + `createRoot().render()` which *never return* — OpenTUI takes over the loop until `process.exit(0)` is called from the `/exit` handler. Contrast the batch shape (still Node):
+A few more lines than a year ago, but they set the process's whole character: a `createChatSession()` that opens long-lived resources, then `createCliRenderer()` + `createRoot().render()` which *never return* — OpenTUI takes over the loop until `forceExit()` calls `process.exit(0)`, whether that's triggered by `/exit`, a Ctrl-C keystroke caught inside the `useKeyboard` layer, or an external `SIGINT`. Contrast the batch shape (still Node):
 
 ```ts
-// src/cli/index-cmd.ts:17-27 — the batch process bootstrap
+// src/cli/eval-cmd.ts:6-36 — the batch process bootstrap
 const pool = createPool(cfg.databaseUrl);    // open
-// ... for (const path of paths) { index } ...
-await pool.end();                            // close → loop drains → process exits
+// ... for (const query of queries) { ... } ...
+await pool.end();                            // close → loop drains → process exits, unbounded
 ```
 
-The difference is the whole `02` file: `createRoot().render()` keeps the loop alive forever (OpenTUI holds it open until `process.exit(0)`); `await pool.end()` lets it die.
+The difference is the whole `02` file: `createRoot().render()` keeps the loop alive forever (OpenTUI holds it open until `forceExit()` fires); `await pool.end()` lets a batch process die on its own, with no timeout wrapping it because there's no TTY to keep hostage if it's slow.
 
 **The pool as the one shared runtime resource.** `createPool` is four lines (`src/db.ts:4`) — it wraps `new pg.Pool({ connectionString })` and nothing else. No `max`, no `idleTimeoutMillis`, so node-postgres' defaults apply (max 10 connections). In the chat process this single pool is created once (`src/session.ts:39`) and every turn's queries — `loadProfile`, `startConversation`, `persistMessage`, every `PgVectorStore.search`/`upsert` — borrow from it. That's the warm-pool win: turn 2 reuses turn 1's TCP connections instead of paying a fresh handshake.
 
@@ -129,13 +133,16 @@ The difference is the whole `02` file: `createRoot().render()` keeps the loop al
   │  createChatSession()                                        │
   │     hop 1: createPool() ─────────────► pool holds N sockets │
   │     turn 1 .. turn K: borrow ◄────────► return (per query)  │
-  │     /exit → close() → pool.end() ─────► all sockets closed  │
+  │     /exit, Ctrl-C, or SIGINT → forceExit() ──────────────────│
+  │       → close() races pool.end() vs 1s timer (BOUNDED)      │
+  │       → hard 1.5s deadline guarantees exit either way        │
   └────────────────────────────────────────────────────────────┘
 
   ┌─ batch process (index/migrate/eval) ───────────────────────┐
   │     hop 1: createPool() ─────────────► pool holds sockets   │
   │     do all work under top-level await                      │
   │     hop 2: pool.end() ───────────────► sockets closed, exit │
+  │       (unbounded — no timeout, but no TTY to hang either)   │
   └────────────────────────────────────────────────────────────┘
 ```
 
@@ -190,18 +197,20 @@ Where this comes from: the "inventory your long-lived handles" discipline is how
 
 **Q: "Walk me through what resources this process holds open and when each is released."**
 
-> One pool to Postgres, HTTP sockets to Ollama opened per request, the V8 heap, and — for chat only — stdin in raw mode. The pool is the only one with an interesting lifecycle: in the batch CLIs it's `createPool` → work → `pool.end()`, so the event loop drains and the process exits. In chat it's held across every turn for connection reuse and only dies when the user types `/exit`, which calls `session.close()` → `pool.end()`. The honest gap: there's no SIGINT handler, so Ctrl-C skips that release path.
+> One pool to Postgres, HTTP sockets to Ollama opened per request, the JS heap, and — for chat only — stdin in raw mode. The pool is the only one with an interesting lifecycle: in the batch CLIs it's `createPool` → work → `pool.end()`, unbounded, so the event loop drains and the process exits on its own. In chat it's held across every turn for connection reuse and dies via `forceExit()` — triggered by `/exit`, a Ctrl-C keystroke, or an external SIGINT — which races `session.close()` (itself racing `pool.end()` against a 1s timer) against a hard 1.5s deadline. That used to be a real gap: Ctrl-C had no handler at all until `64f822f`/`9c1b1e6` fixed it. The remaining honest gap is narrower now — the shutdown is *bounded*, not *guaranteed-to-drain*: if the pool doesn't close within its timer, in-flight trace writes can still be lost.
 
 ```
   resources × lifetimes — the one-sketch answer
 
-  pool   ──► createPool ........ pool.end()   (/exit in chat, end-of-run in batch)
+  pool   ──► createPool ... close() races pool.end() vs 1s timer, then forceExit()
+                            fires by 1.5s regardless (/exit, Ctrl-C, or SIGINT — chat)
+                            ... pool.end() unbounded (end-of-run — batch)
   socket ──► per Ollama request  GC / close
   heap   ──► alloc ............. unreachable → GC
-  stdin  ──► OpenTUI raw mode ... process.exit(0) on /exit (chat only)
+  stdin  ──► OpenTUI raw mode ... process.exit(0) via forceExit() (chat only)
 ```
 
-**Anchor:** "One pool, opened in `createChatSession` at `src/session.ts:39`, closed only at `/exit` via `process.exit(0)` — that single fact explains both the warm-pool speedup and the missing graceful shutdown. Chat runs under Bun (OpenTUI needs `bun:ffi`); every other script runs under Node — same event-loop model, different engine."
+**Anchor:** "One pool, opened in `createChatSession` at `src/session.ts:399`, closed via `forceExit()` (`src/cli/chat.tsx:464`) racing a hard 1.5s deadline — that single fact explains the warm-pool speedup, why Ctrl-C used to hang the process, and why the fix is bounded rather than fully graceful. Chat runs under Bun (OpenTUI needs `bun:ffi`); every other script runs under Node — same event-loop model, different engine."
 
 ---
 

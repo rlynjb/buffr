@@ -170,7 +170,7 @@ highest-value thing to drill. Where it *would* land in a system like buffr:
 ```
 
 The last one is the most buffr-relevant: `ContextWindowGuardedProvider(...,
-{ maxTokens: 8192 })` (`src/session.ts:46`) caps the context window. *Choosing
+{ maxTokens: 8192 })` (`src/session.ts:447`) caps the context window. *Choosing
 which retrieved chunks to keep under that token budget to maximise relevance*
 is a knapsack problem — textbook DP. buffr doesn't do this (it just truncates),
 but it's the most natural place DP would earn its place here. Naming that
@@ -226,7 +226,7 @@ Recursion/backtracking/DP in buffr — almost entirely the gap map.
 
   NOT YET EXERCISED (the gaps, ranked):
   ┌─ DYNAMIC PROGRAMMING ★★★ ─┐  highest value — absent in buffr AND portfolio
-  │ would land: token-budget    │  session.ts:46 maxTokens — knapsack-shaped
+  │ would land: token-budget    │  session.ts:447 maxTokens — knapsack-shaped
   │ chunk selection, edit dist  │  → drill, file 08
   └─────────────────────────────┘
   ┌─ backtracking ──────────────┐  you built PG.ts (river-crossing) — foundation
@@ -280,7 +280,7 @@ actually overlap."*
   token-budget chunk selection = knapsack
   chunks have (relevance, token-cost); budget = context window (8192)
   maximise total relevance subject to total tokens ≤ budget → DP
-       session.ts:46  ContextWindowGuardedProvider({ maxTokens: 8192 })
+       session.ts:447  ContextWindowGuardedProvider({ maxTokens: 8192 })
 ```
 
 Answer: choosing which retrieved chunks to fit in a fixed context window to

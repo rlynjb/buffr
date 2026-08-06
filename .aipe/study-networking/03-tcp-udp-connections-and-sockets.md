@@ -5,11 +5,15 @@
 
 ## Zoom out, then zoom in
 
-Both of buffr's boundaries run over **TCP** — ordered, reliable, connection-
+All of buffr's boundaries run over **TCP** — ordered, reliable, connection-
 oriented. No UDP anywhere (no metrics datagrams, no QUIC, no DNS-over-UDP buffr
-initiates). The interesting object is the connection pool (`pg.Pool`): a set of
-warm TCP connections to Postgres that buffr holds open and lends out, turn after
-turn.
+initiates). The interesting object is still the connection pool (`pg.Pool`): a
+set of warm TCP connections to Postgres that buffr holds open and lends out,
+turn after turn. What's new: the pool now has an explicit, bounded teardown
+(`pool.end()` raced against a timeout), and the connector fan-out
+(`Collector.execute`) opens up to six more short-lived TCP sockets per
+`/research`/`/investing` turn — all unpooled, all closed by `fetch`/undici the
+moment the response finishes.
 
 ```
   Zoom out — connections live at the transport boundary
@@ -115,7 +119,7 @@ single-user CLI and is called out as a tuning gap in
 `07-timeouts-retries-pooling-and-backpressure.md`.
 
 **The session opens it once and holds it across every turn.** This is the
-load-bearing decision (`src/session.ts:39`):
+load-bearing decision (`src/session.ts:3999`):
 
 ```ts
 const pool = createPool(cfg.databaseUrl);
@@ -187,6 +191,58 @@ buffr neither pools nor closes these — they're managed by Node's HTTP stack. S
 "connection lifetime" on the model path is implicit, which is why the axis flips
 across the seam.
 
+**The connector fan-out is the same implicit-lifetime shape, just six times
+over and to real hosts.** Every connector's `defaultFetch` is a bare
+`fetch(url, { signal })` — no pooling, no keep-alive management, no explicit
+close. `CachedConnector` wraps each one in a 1-hour TTL cache
+(`packages/connectors/src/cached-connector.ts:21-28`), which avoids *repeat*
+sockets for identical params but does nothing for the socket lifetime of a
+single in-flight request. Six connectors firing through `Promise.all` means up
+to six independent, buffr-unmanaged TCP+TLS handshakes to six different remote
+hosts, all at once, all torn down by undici when each response completes.
+
+**The pool now has an explicit, bounded teardown — a genuinely new lifecycle
+event.** Every connection the pool opens eventually has to close, and until
+recently that was one unbounded `await`. It's now a race
+(`src/session.ts`, `close()`):
+
+```ts
+async close(): Promise<void> {
+  await Promise.race([
+    pool.end(),                                          // drain all pooled sockets, gracefully
+    new Promise<void>(resolve => setTimeout(resolve, 1000)), // …but don't wait past 1s
+  ]);
+}
+```
+
+`pool.end()` is node-postgres's graceful drain: wait for in-flight queries to
+finish, then close every warm socket cleanly. The problem this fixes: if
+Postgres is unreachable or a connection is wedged, `pool.end()` itself can hang
+— and a CLI that hangs on `/exit` or Ctrl+C is worse than one that leaves a
+socket to the OS to reap. The `chat.tsx` caller adds a second, harder deadline
+on top (`forceExit`): a `setTimeout(() => process.exit(0), 1500).unref()` fires
+regardless of whether `session.close()` ever resolves, so the process always
+terminates within 1.5 seconds. Two nested bounds — a soft one inside `close()`,
+a hard one around the call site — is the load-bearing pattern: *never let a
+socket teardown be the reason a process won't die.*
+
+```
+  Pattern — bounded teardown, two nested deadlines
+
+   process.exit path:
+     forceExit() ──► setTimeout(1.5s) ──────────────────► process.exit(0)  (hard deadline, always fires)
+                 └─► session.close() ──► Promise.race ──► process.exit(0)  (soft path, usually wins)
+                                            │
+                                            ├─ pool.end() resolves first  → clean drain
+                                            └─ 1s timeout fires first     → abandon pool.end(), move on
+```
+
+This is the first place in the repo that treats "shut down within N seconds"
+as an explicit contract rather than an implicit assumption that the OS will
+eventually clean up. It's a small addition, but it's the connection-lifecycle
+counterpart to the fan-out's missing timeout — the pool now bounds its own
+exit; the connector fetches still don't bound theirs.
+
 **Why TCP, never UDP.** Both protocols here demand ordered, complete delivery:
 SQL results can't arrive out of order, and a JSON response body can't lose a
 chunk. TCP gives that; UDP would force buffr to rebuild ordering and
@@ -208,7 +264,7 @@ is *tuning* the pool, not *using* it.
   buffr connections — recap
 
   boundary 1 — pg-wire over TCP :5432
-    one warm pool (pg.Pool), created once  ── src/db.ts:4, src/session.ts:39
+    one warm pool (pg.Pool), created once  ── src/db.ts:4, src/session.ts:399
     upsert  → pool.connect() + begin/commit + release  (dedicated socket)
     search  → pool.query()  (borrow-run-return, one statement)
     default max 10, no connect/idle timeout overrides
@@ -216,6 +272,14 @@ is *tuning* the pool, not *using* it.
   boundary 2 — HTTP over TCP :11434
     fetch() per request inside aptkit transport
     connection reuse = undici keep-alive (buffr owns nothing)
+
+  boundary 3 — HTTPS over TCP :443, × up to 6, concurrent
+    fetch() per request inside @buffr/connectors (buffr's own package)
+    no pooling, no keep-alive management, no explicit close
+    1h TTL cache (CachedConnector) avoids repeat sockets, not in-flight ones
+
+  pool teardown — src/session.ts close(), src/cli/chat.tsx forceExit()
+    pool.end() raced against a 1s timeout; hard 1.5s process-exit deadline
 
   UDP: not yet exercised (no datagram use case)
 ```
@@ -240,7 +304,7 @@ timeouts, validation queries, eviction of dead sockets), all covered in `07`.
 
 Answer: "A chat session fires many queries over its lifetime. Connecting per
 query pays a full TCP + TLS + Postgres-auth handshake each time. One warm pool
-(`src/db.ts:4`, opened once at `src/session.ts:39`) amortizes that handshake — the
+(`src/db.ts:4`, opened once at `src/session.ts:3999`) amortizes that handshake — the
 exact reason it replaced the old one-shot `ask` CLI."
 
 **Q: Why does `upsert` call `pool.connect()` but `search` calls `pool.query()`?**
@@ -255,6 +319,16 @@ transaction means no need to pin." Anchor: `src/pg-vector-store.ts:40` vs `:70`.
 Answer: "Connection leak. Each unreleased borrow shrinks the pool; once you've
 leaked `max` connections, every future `pool.connect()` blocks forever and the app
 hangs. That's why it's in a `finally`."
+
+**Q: How does buffr shut the pool down, and why does it matter?**
+
+Answer: "`session.close()` races `pool.end()` — node-postgres's graceful drain
+— against a 1-second timeout, and the CLI adds a second, harder 1.5-second
+deadline around the whole call. Without that, a wedged connection or an
+unreachable Postgres would make `pool.end()` hang forever, and `/exit` or
+Ctrl+C would never actually exit. It's the one place in the repo where
+'shut down within N seconds' is an explicit contract instead of an assumption."
+Anchor: `src/session.ts` `close()`, `src/cli/chat.tsx` `forceExit()`.
 
 ## See also
 

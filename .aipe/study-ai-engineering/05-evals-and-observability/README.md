@@ -15,13 +15,15 @@ You already own the testing primitives — assertions, fixtures, CI gates. An ev
 │                               ◇ no adversarial set, no regression set (Case B)
 │
 ├── 02-eval-methods.md        ★ EXACT-MATCH on docIds: precision@k / recall@k
+│                               ◐ NEW: predict-then-reveal calibration (/research) —
+│                                 human forecast vs. engine score, still exact-match
 │                               ◇ no rubric / no judge method wired (Case B → 03)
 │
-├── 03-llm-as-judge-bias.md   ◇ THE UNWIRED RubricJudge — exists in aptkit,
+├── 03-llm-as-judge-bias.md   ◇ THE UNWIRED RubricJudge — exists in @buffr/kernel,
 │                               buffr never calls it → FAITHFULNESS unmeasured (Case B)
 │
 └── 04-llm-observability.md   ★ SupabaseTraceSink: all 6 events → agents.messages
-                                ◇ replay-runner exists, unwired; no dashboard (Case B)
+                                ◇ no replay runner in the current stack; no dashboard (Case B)
 
   ★ = implemented in buffr (Case A)   ◇ = named gap, primary build target (Case B)
 ```
@@ -31,9 +33,9 @@ You already own the testing primitives — assertions, fixtures, CI gates. An ev
 Read in number order. They go: what you measure against, how you measure it, why the fancier "how" lies to you, and how you record what happened.
 
 1. **`01-eval-set-types.md`** — the three kinds of eval set (golden, adversarial, regression). buffr has exactly one: the **golden set** (`eval/queries.json`, 3 hand-labeled queries). Small, high-signal, honest — and the only one. The adversarial and regression sets are named gaps you build.
-2. **`02-eval-methods.md`** — the method ladder from exact-match up through human eval. buffr sits on the bottom rung and stays there *on purpose*: **exact-match on docIds** via `scorePrecisionAtK` / `scoreRecallAtK`, driven by `src/cli/eval-cmd.ts`. This rung measures **retrieval**, not the answer.
-3. **`03-llm-as-judge-bias.md`** — the rung buffr skipped, and why it's load-bearing. The **LLM-as-judge** (the unwired `RubricJudge`) exists in aptkit and is never constructed in buffr, so buffr **does not measure faithfulness** — whether the answer stays grounded in the retrieved chunks. This is the headline gap. Read it with the judge's known biases (position, verbosity, self-preference) in hand, because the fix is the exercise.
-4. **`04-llm-observability.md`** — what buffr *does* record well. The **trace sink** (`SupabaseTraceSink`) persists all six event types into `agents.messages`: traces (per request) and spans (tool calls, `durationMs`, tokens). The replay runner exists in aptkit but is unwired; there's no dashboard, no dollar cost.
+2. **`02-eval-methods.md`** — the method ladder from exact-match up through human eval. For **retrieval**, buffr sits on the bottom rung and stays there *on purpose*: **exact-match on docIds** via `scorePrecisionAtK` / `scoreRecallAtK`, driven by `src/cli/eval-cmd.ts`. Separately, the `/research` command's **predict-then-reveal loop** now exercises the top ("human") rung — but as a calibration comparison (human forecast vs. engine score, both `===`), not a classic human-rates-the-output eval. Read the file's Move 3.5 for why those are different questions.
+3. **`03-llm-as-judge-bias.md`** — the rung buffr skipped, and why it's load-bearing. The **LLM-as-judge** (the unwired `RubricJudge`, `packages/kernel/src/evals/rubric-judge.ts`) exists and is never constructed in buffr, so buffr **does not measure faithfulness** — whether the answer stays grounded in the retrieved chunks. This is the headline gap. Read it with the judge's known biases (position, verbosity, self-preference) in hand, because the fix is the exercise.
+4. **`04-llm-observability.md`** — what buffr *does* record well. The **trace sink** (`SupabaseTraceSink`) persists all six event types into `agents.messages`: traces (per request) and spans (tool calls, `durationMs`, tokens). Trajectories are captured in replay-ready order, but no replay runner exists anywhere in the current stack; there's no dashboard, no dollar cost.
 
 ## Phase 3 anchor
 
@@ -41,9 +43,9 @@ The driving exercises for this sub-section are **Phase 3 — measure and observe
 
 > **Strengthen what's measured** ([B3.1]–[B3.5]) — grow the golden set past 3 items, add a per-query failure view, and add a tokens/latency summary query over the traces buffr already captures.
 
-> **Close the named gaps** ([B3.6]–[B3.12]) — add an **adversarial set** (prompt-injection queries that must refuse), freeze production failures into a **regression set**, **wire the `RubricJudge`** into a faithfulness eval over `eval/queries.json`, and wire the **replay runner** so a recorded trajectory can be re-run and re-asserted.
+> **Close the named gaps** ([B3.6]–[B3.12]) — add an **adversarial set** (prompt-injection queries that must refuse), freeze production failures into a **regression set**, **wire the `RubricJudge`** into a faithfulness eval over `eval/queries.json`, and build a **replay runner** (there is no aptkit fallback to wire — this would be new) so a recorded trajectory can be re-run and re-asserted.
 
-**The honest state, stated plainly:** buffr *measures retrieval* (precision@k / recall@k over a 3-item golden set) and *records trajectories* (all six events, with durations and tokens, in a local table). buffr does **not** measure generation faithfulness — the `RubricJudge` is built in aptkit and never wired — and it does **not** replay or visualize what it records. Those aren't apologies; they're the clean seams Phase 3 fills.
+**The honest state, stated plainly:** buffr *measures retrieval* (precision@k / recall@k over a 3-item golden set), *records trajectories* (all six events, with durations and tokens, in a local table), and now runs one genuine **human-in-the-loop calibration comparison** (`/research`'s predict-then-reveal loop, `02-eval-methods.md` Move 3.5). buffr does **not** measure generation faithfulness — the `RubricJudge` is built in `@buffr/kernel` and never wired — and it does **not** replay or visualize what it records. Those aren't apologies; they're the clean seams Phase 3 fills.
 
 ## Cross-links
 

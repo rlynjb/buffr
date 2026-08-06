@@ -7,36 +7,50 @@ re-entering the model context). *Industry standard* (LLM threat class).
 
 The model in this system never sees only the operator's question. It also sees
 whatever the search tool pulls back — indexed documents *and* recalled past
-exchanges. The question this pattern surfaces: that retrieved text is data, but the
-model reads it the same way it reads instructions. What happens when the data
-*contains* instructions? Here's where that data re-enters.
+exchanges — and, since the market-research and investing engines landed, whatever a
+Reddit search or a Google search snippet pulled back too. The question this pattern
+surfaces: that retrieved text is data, but the model reads it the same way it reads
+instructions. What happens when the data *contains* instructions? Here's where that
+data re-enters — now from two structurally different mechanisms.
 
 ```
-  Zoom out — where untrusted content re-enters the prompt
+  Zoom out — where untrusted content re-enters the prompt (two mechanisms)
 
   ┌─ Service layer ──────────────────────────────────────────┐
   │  ChatSession.ask (src/session.ts:60) — question in        │
-  └───────────────────────────────┬──────────────────────────┘
-                                  │  agent loop
-  ┌─ Agent (aptkit) ──────────────▼──────────────────────────┐
-  │  model calls search_knowledge_base                        │
-  │  ★ tool RESULT pushed back as a user message ★            │ ← we are here
-  │     (run-agent-loop.ts:189)                               │
-  └───────────────────────────────┬──────────────────────────┘
-                                  │  search returns...
-  ┌─ Storage ─────────────────────▼──────────────────────────┐
-  │  agents.chunks: indexed docs  +  recalled memory rows     │
-  │  (memory shares the store, src/session.ts:53)             │
-  └───────────────────────────────────────────────────────────┘
+  │  ChatSession.researchCollect/Evaluate, .runInvesting       │
+  └───────┬─────────────────────────────────┬─────────────────┘
+          │  agent loop (tool call/result)   │  direct prompt build
+  ┌─ Agent (aptkit) ──────▼──────┐  ┌─ Analyzer/Teacher (@buffr/capabilities) ─┐
+  │  search_knowledge_base       │  │  ★ Evidence[] STRING-JOINED into the      │ ← we are here
+  │  tool RESULT pushed back as  │  │  userPrompt template, no tool call at all │   (new)
+  │  a user message              │  │  (analyzer/index.ts:73-74,87-90)         │
+  │  (run-agent-loop.ts:189)     │  └─────────────────────┬─────────────────────┘
+  └───────┬───────────────────────┘                       │
+          │  search returns...          reddit-search.ts / google-search.ts:
+  ┌─ Storage ─────────────▼──────┐      Collector.execute → connector.fetch()
+  │  agents.chunks: indexed docs  │◄────────────┐
+  │  + recalled memory rows       │             │
+  │  (memory shares store,        │   ┌─ Internet ──────────────────────────┐
+  │  src/session.ts:53)           │   │  r/wallstreetbets, r/stocks posts;   │
+  └───────────────────────────────┘   │  Google Custom Search snippets       │
+                                       │  (anyone can author these)           │
+                                       └───────────────────────────────────────┘
 ```
 
 The pattern (indirect prompt injection) is the RAG-era version of "never trust user
 input." Direct injection is the user typing "ignore your instructions." *Indirect*
-injection is sneakier: the hostile text lives in a *document* (or, here, in a
-*remembered exchange*) and only reaches the model when retrieval pulls it in. The
-operator never typed it this turn — it arrived through the data channel. This is a
-real surface in buffr. What makes it survivable is the previous file's control: the
-agent has one read-only tool, so a hijacked turn has nowhere dangerous to go.
+injection is sneakier: the hostile text lives in a *document* (or a *remembered
+exchange*, or now a *Reddit post someone else wrote*) and only reaches the model
+when retrieval pulls it in. The operator never typed it this turn — it arrived
+through the data channel. This is a real surface in buffr, and it comes in two
+shapes now: the aptkit RAG-agent's tool-call re-entry (re-entry points 1 and 2
+below, unchanged since the last audit), and a second, architecturally different
+re-entry point in the market-research/investing capabilities pipeline (re-entry
+point 3, new). What makes the first shape survivable is the previous file's
+control: the agent has one read-only tool, so a hijacked turn has nowhere
+dangerous to go. The second shape needs its own containment argument — there's no
+tool-call boundary to point to, because there's no tool call.
 
 ## The structure pass
 
@@ -66,7 +80,10 @@ data?" The painful answer: the model collapses the distinction.
 The seam where trust breaks is *inside the model*: it has no boundary between "this
 span is reference material" and "this span is a command." That's the whole threat.
 The defense can't be at that seam (you can't make the model un-flatten); it has to
-be in what the model can *do* once flattened — lens 7's bounded read-only scope.
+be in what the model can *do* once flattened — lens 7's bounded read-only scope
+for re-entry points 1 and 2, and, for re-entry point 3, in what the model's
+*output* is allowed to become once flattened (a structured `score` field feeding a
+deterministic average, not a tool call).
 
 ## How it works
 

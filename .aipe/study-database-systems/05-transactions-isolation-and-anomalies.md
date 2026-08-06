@@ -69,12 +69,18 @@ the two-transaction write anomaly, then pin down the unstated isolation level.
   ┌─ persistMessage (one event) ────────┐
   │  query(insert)                       │  → trivially atomic (single statement)
   └──────────────────────────────────────┘
-  ┌─ runMigration (schema) ─────────────┐
-  │  begin → run whole .sql → commit     │  → YES. DDL atomic (Postgres allows it)
+  ┌─ runMigration (one schema file) ────┐
+  │  begin → run one .sql file → commit  │  → YES, PER FILE. each file is one atom.
+  └──────────────────────────────────────┘
+  ┌─ runAllMigrations (the CLI run) ────┐
+  │  runMigration(001) ; runMigration(002) │ → NO, ACROSS FILES. two atoms, no
+  └──────────────────────────────────────┘   outer transaction wraps the pair.
+  ┌─ listDue (due-decision lookup) ─────┐
+  │  query(update status) ; query(select) │ → NO. two atoms. ★ SECOND ANOMALY ★
   └──────────────────────────────────────┘
 
-  the answer flips at indexDocumentRow: every other writer is atomic for its
-  intent; this one splits a single logical write across two transactions.
+  the answer flips at indexDocumentRow, runAllMigrations, AND listDue: each
+  splits one logical operation across two unwrapped transactions.
 ```
 
 ### Seams
@@ -89,7 +95,8 @@ the two-transaction write anomaly, then pin down the unstated isolation level.
 ```
 
 Hand off: two real transactions, autocommit elsewhere, the document+chunk intent
-split across two atoms, and an isolation level nobody chose.
+(and now the due-decision lookup) split across two atoms each, and an isolation
+level nobody chose.
 
 ---
 
@@ -206,8 +213,74 @@ Until aptkit's pipeline accepts an injected transaction, the pragmatic mitigatio
 "document exists" flag is the *last* thing to commit) or a periodic reconciliation
 sweep that deletes documents with no chunks. Neither is in the repo today.
 
+**A second worked example — `listDue`'s unwrapped update+select.** The decision
+journal (`sql/002_decision_journal.sql`) adds a fifth writer, `PgJournalStore`
+(`src/pg-journal-store.ts`), and its `listDue` method repeats the same shape as
+`indexDocumentRow`: one logical intent, two unwrapped statements.
+
+```ts
+// src/pg-journal-store.ts:86-98 (condensed)
+await this.pool.query(                              // ← txn #1: autocommit
+  `update agents.decisions set status = 'review-due'
+   where app_id = $1 and user_id = $2 and workspace_id = $3
+     and kind = 'decision' and status = 'open' and review_at <= $4`,
+  [this.appId, userId, workspaceId, now],
+);
+const { rows } = await this.pool.query(              // ← txn #2: autocommit, separate
+  `select * from agents.decisions
+   where app_id = $1 and user_id = $2 and workspace_id = $3 and status = 'review-due'
+   order by review_at asc`,
+  [this.appId, userId, workspaceId],
+);
+```
+
+The intent is "flip every due decision to `review-due`, then hand me the flipped
+set." Read literally, that's one operation — but it's physically an `UPDATE` on one
+connection borrowed from the pool, then a `SELECT` on another (or the same,
+returned-and-reborrowed) connection, with no `begin`/`commit` around the pair.
+Nothing stops `snooze` or `resolve` — the other two `PgJournalStore` writers — from
+landing on the same row in the gap between the `UPDATE` and the `SELECT`; the
+`SELECT` could then return a row whose status has already moved past
+`review-due` again, or miss one that another `listDue` call (a second `/review`
+session) just claimed.
+
+```
+  listDue — the gap, drawn
+
+  UPDATE status='review-due' ──commit── ░gap░ ──► SELECT status='review-due'
+                                          ▲
+                          another writer's snooze()/resolve() could land here,
+                          and this SELECT would read a state the caller didn't expect
+```
+
+**Why this is lower-stakes than the `indexDocumentRow` anomaly, and why it's the
+same bug shape anyway.** `/review` is a single interactive CLI loop — there's no
+concurrent second `/review` session in practice, so the gap is structurally
+unreachable today, same as every other MVCC conflict in this repo (file `06`). But
+notice the parallel is exact: a single intent ("read the due set") got split across
+two autocommit statements because nobody thought to reach for `pool.connect()` +
+`begin` instead of two `pool.query` calls. It's the identical mistake as write path
+B, just with lower consequence because of the deployment shape, not because the
+code is more careful. **Fix, if a second concurrent caller ever exists:** wrap both
+statements in one transaction (`begin` → `UPDATE ... returning *` in a single
+statement replaces both, which is also strictly better — one round trip instead of
+two).
+
+**The migration runner — atomic per file, not across the run.** `runMigration`
+(`migrate.ts:10-22`) still wraps *one* SQL file in `begin`/`commit` — that part is
+unchanged and still atomic. What changed is the CLI entry point: it used to call
+`runMigration` once, directly, on `001_agents_schema.sql`. It now calls
+`runAllMigrations` (`migrate.ts:25-30`), which loops `MIGRATION_FILES` and calls
+`runMigration` once *per file* — `001_agents_schema.sql`, then
+`002_decision_journal.sql`. Each file is its own atom; **the run as a whole is
+not.** If `002` fails after `001` already committed, `001`'s tables exist,
+durably, and `002`'s do not — there's no outer transaction to roll `001` back.
+File `07` walks this in full, including why it's safe in practice (every
+statement in both files is idempotent) even though the multi-file run isn't one
+transaction.
+
 **The isolation level nobody chose — READ COMMITTED.** Every `begin` in the repo —
-`upsert` (`pg-vector-store.ts:42`), `runMigration` (`migrate.ts:11`) — takes
+`upsert` (`pg-vector-store.ts:42`), `runMigration` (`migrate.ts:13`) — takes
 Postgres's default isolation level, **READ COMMITTED**, because no code ever runs
 `SET TRANSACTION ISOLATION LEVEL`.
 
@@ -235,11 +308,15 @@ guarantee masquerading as a chosen one.
 ### Move 3 — the principle
 
 A transaction's job is to make the *atom boundary match the intent boundary*. When
-they match (upsert: one intent, one atom) you get correctness for free. When they
-drift (indexDocumentRow: one intent, two atoms) you get an anomaly the engine can't
-catch — especially once you've dropped the constraint that would have caught it. And
-isolation level is a *decision*, even when you don't make it: the default is a choice
-you've delegated to Postgres, safe only as long as your concurrency assumptions hold.
+they match (upsert: one intent, one atom; runMigration: one file, one atom) you get
+correctness for free. When they drift (indexDocumentRow: one intent, two atoms;
+listDue: one intent, two atoms; runAllMigrations: one CLI invocation, N atoms) you get
+an anomaly the engine can't catch — especially once you've dropped the constraint
+that would have caught it. This is a *repeated* mistake shape in this repo, not a
+one-off: three different call sites choose "two `pool.query` calls" over
+"`pool.connect()` + `begin`" for what's conceptually one operation. And isolation
+level is a *decision*, even when you don't make it: the default is a choice you've
+delegated to Postgres, safe only as long as your concurrency assumptions hold.
 
 ---
 
@@ -254,11 +331,18 @@ The full transaction picture: who's atomic, who isn't, what isolation everyone r
   │                                                                    │
   │  upsert           [ begin → insert×N → commit ]   ATOMIC  ✓        │
   │  persistMessage   [ single insert ]               ATOMIC  ✓        │
-  │  runMigration     [ begin → DDL → commit ]        ATOMIC  ✓        │
+  │  runMigration     [ begin → one file → commit ]   ATOMIC  ✓ (per file) │
+  │  create/snooze/   [ single statement ]            ATOMIC  ✓        │
+  │  resolve (journal)                                                 │
   │                                                                    │
-  │  indexDocumentRow [ doc txn ] ░gap░ [ chunk txn ] NOT ATOMIC  ✗    │
-  │                    crash in gap → orphaned document                │
-  │                    (FK dropped → engine stays silent)              │
+  │  indexDocumentRow  [ doc txn ] ░gap░ [ chunk txn ]  NOT ATOMIC  ✗   │
+  │                     crash in gap → orphaned document                │
+  │                     (FK dropped → engine stays silent)              │
+  │  listDue (journal)  [ update txn ] ░gap░ [ select txn ]  NOT ATOMIC ✗│
+  │                     concurrent snooze/resolve could land in the gap │
+  │  runAllMigrations  [ file 001 txn ] ░gap░ [ file 002 txn ]  NOT ATOMIC ✗│
+  │                     failure after 001 commits leaves 002 unapplied  │
+  │                     (mitigated by idempotency, not atomicity — → 07)│
   └───────────────────────────┬────────────────────────────────────────┘
                               │  every begin inherits…
   ┌─ Isolation ───────────────▼────────────────────────────────────────┐
@@ -318,13 +402,32 @@ reachable, and the code gives no signal because the level was never named. Inher
 not decided." Anchor: *the isolation level is a delegated decision, safe only while the
 single-writer assumption holds.*
 
+**Q: "Is `indexDocumentRow` the only place with this bug shape?"**
+
+Answer: "No — it's the pattern, and it shows up twice more. `PgJournalStore.listDue`
+runs an `UPDATE` (flip due decisions to `review-due`) and a `SELECT` (read them back)
+as two separate autocommit statements, so a concurrent `snooze` or `resolve` could
+land in the gap. And `runAllMigrations` runs each migration file in its own
+transaction with nothing wrapping the sequence, so a failure on file two leaves file
+one committed. All three are the same root cause: reaching for two `pool.query` calls
+where the intent was one operation. The first is HIGH consequence (a permanently
+orphaned document with no FK to catch it); the other two are lower consequence today
+because buffr has one writer and every migration statement is idempotent — but
+they're the identical shape." Anchor: *the same seam mistake, made three times, at
+three different consequence levels.*
+
 ---
 
 ## See also
 
-- `01-database-systems-map.md` — seam 1, the transaction boundary on the map.
+- `01-database-systems-map.md` — seam 1, the transaction boundary on the map; write
+  path D (`PgJournalStore`).
+- `02-records-pages-and-storage-layout.md` — the `decisions` row lifecycle, the dead
+  tuple `listDue`'s status flip leaves behind.
 - `06-locks-mvcc-and-concurrency-control.md` — how MVCC enforces atomicity and
   isolation, and why one writer makes the default safe.
-- `07-wal-durability-and-recovery.md` — what "commit" actually durably guarantees.
+- `07-wal-durability-and-recovery.md` — what "commit" actually durably guarantees; the
+  full walk of `runAllMigrations`'s per-file-atomic, not-whole-run-atomic durability
+  story, and why idempotency substitutes for atomicity there.
 - `study-data-modeling` — the *deliberately dropped* chunks→documents FK (the missing
   constraint).

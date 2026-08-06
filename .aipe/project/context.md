@@ -6,10 +6,12 @@
 
 `buffr-laptop` — the laptop "brain" of a self-hosted personal RAG agent. It graduates an
 in-memory RAG pipeline to **persistent Supabase pgvector** (database `reindb`, schema
-`agents`), single-device. It consumes the **aptkit** toolkit as a library and adds the
-persistence + an **interactive chat CLI**. The sole interface is `npm run chat` — a
-long-lived Ink (React-in-terminal) session that holds one conversation in-process; the old
-one-shot `npm run ask` was removed.
+`agents`), single-device. It consumes internal `@buffr/*` monorepo packages as libraries
+and adds the persistence + an **interactive chat CLI**. The sole interface is `npm run chat`
+— a long-lived OpenTUI (React-in-terminal) session that holds one conversation in-process;
+the old one-shot `npm run ask` was removed. Beyond plain chat, the CLI now hosts two
+domain-pack-driven research engines (`/investing`, `/research`) and a decision-journal loop
+(`/review`) that tracks predictions made during `/research` through to a resolved outcome.
 
 Design docs live in `docs/superpowers/specs/` and `docs/superpowers/plans/`; the parent
 vision is `agent-layer-plan.md`.
@@ -18,7 +20,7 @@ vision is `agent-layer-plan.md`.
 
 - **Language/runtime:** TypeScript, ESM (`"type": "module"`), `module`/`moduleResolution`
   = `NodeNext`. Node ≥ 20.
-- **AI toolkit:** monorepo packages in `packages/` — `@buffr/contracts` (shared types), `@buffr/kernel` (model provider contract, runtime agent loop, retrieval pipeline, tools, evals, context, memory engine), `@buffr/connectors` (DataConnector interface + web search/RSS/Amazon connectors). These replaced `@rlynjb/aptkit-core`. Build order: contracts → kernel → connectors (`npm run build:packages`).
+- **AI toolkit:** monorepo packages in `packages/` — `@buffr/contracts` (shared types, incl. `DomainPack`/`SourcePolicy`), `@buffr/kernel` (model provider contract, runtime agent loop, retrieval pipeline, tools, evals, context, memory engine, `journal/` — `JournalStore` contract + `InMemoryJournalStore`), `@buffr/connectors` (`DataConnector` interface + Google/Reddit/RSS/Amazon/search-trends connectors), `@buffr/capabilities` (typed computation units shared across engines — Collector, Analyzer, Scorer, Teacher, Journal), `@buffr/domain-pack-investing` and `@buffr/domain-pack-market-research` (per-domain dimensions/scorecards/prompts, under `packages/domain-packs/`), `@buffr/engine-investing` and `@buffr/engine-market-research` (per-domain pipelines composed from capabilities + a domain pack, under `packages/engines/`). These replaced `@rlynjb/aptkit-core`. Build order: contracts → kernel → connectors → capabilities → domain-packs → engines (`npm run build:packages`).
 - **UI:** `@opentui/react` + `@opentui/core` for the chat TUI (OpenTUI — React reconciler over a Zig native renderer). Requires **Bun** as the runtime for the chat command (`npm run chat` invokes `bun dist/src/cli/chat.js`). React 19.2.8. Previously Ink; migrated to OpenTUI because Ink became inactive.
 - **Database:** Postgres + `pgvector` (`pg` / node-postgres, direct connection — no Edge
   Functions this phase). HNSW cosine index.
@@ -41,6 +43,15 @@ vision is `agent-layer-plan.md`.
   `"memory:<conv>:<n>"`), written via `@aptkit/memory` — relevant past exchanges resurface
   through the same `search_knowledge_base` tool (retrieval-based episodic memory).
 - `profiles` — the `me.md`-style user profile injected into the system prompt.
+- `decisions` (`sql/002_decision_journal.sql`) — the decision journal: one row per promoted
+  `/research` prediction. Carries both sides of the predict-then-reveal loop
+  (`predicted_score`/`predicted_dimension`/`predicted_confidence` from the user,
+  `assessed_score`/`assessed_confidence` from the engine), plus `stake`,
+  `resolution_condition`, `review_at`, and a `status` lifecycle
+  (`open` → `review-due` → `resolved`/`snoozed`). Written via `PgJournalStore`
+  (`src/pg-journal-store.ts`), implementing the same `JournalStore` contract
+  (`packages/kernel/src/journal/contracts.ts`) that `InMemoryJournalStore` implements for
+  tests — the same adapter-behind-a-contract shape as `PgVectorStore`/`VectorStore`.
 - Every table carries `app_id` (default `'laptop'`). **No RLS this phase.**
 
 ## File structure
@@ -53,11 +64,15 @@ vision is `agent-layer-plan.md`.
 - `src/profile.ts` — `loadProfile` from `agents.profiles`.
 - `src/session.ts` — `createChatSession()`: warm pool + one conversation held across turns;
   builds the agent once; per-turn `ask()` persists, runs the agent, and remembers the exchange.
-- `src/cli/chat.tsx` — the OpenTUI interactive chat UI. Uses `<textarea ref={taRef}>` (multiline input), `<scrollbox stickyScroll>`, `useKeyboard` hook; Enter=submit, Alt+Enter=newline. Role-coloured turns, `formatStats()` per-turn footer. Run via `bun`.
+- `src/cli/chat.tsx` — the OpenTUI interactive chat UI. Uses `<textarea ref={taRef}>` (multiline input), `<scrollbox stickyScroll>`, `useKeyboard` hook; Enter=submit, Alt+Enter=newline. Role-coloured turns, `formatStats()` per-turn footer, a live per-step progress panel during `/research`/`/investing`, and connector-aware `/help`. Now also drives two interactive multi-turn flows (`research-flow.ts`, `review-flow.ts`) as an in-command state machine. Run via `bun`.
+- `src/cli/research-flow.ts` — the `/research` interactive loop: predict (raw evidence, no analysis shown yet) → reveal (score/gap/principle/reflection) → promote to a tracked decision (stake, resolution condition, review date).
+- `src/cli/review-flow.ts` — the `/review` loop: surfaces due decisions one at a time, each resolved via keep/snooze/resolve.
+- `src/cli/parse-review-date.ts` — shared day-count-or-ISO-date parser used by both flows.
+- `src/pg-journal-store.ts` — `PgJournalStore`, the Postgres adapter for the `JournalStore` contract (`agents.decisions`), scoped by `app_id`.
 - `src/cli/{index,eval,index-db}-cmd.ts` — index markdown corpus / score precision@k / index 8 DB tables (one-shot CLIs).
 - `src/db-sources.ts` — `DB_SOURCES: DbSource[]` — 8 tables across `loopd` (entries/todo_meta/nutrition/vlogs/habits) and `contrl` (exercises/sessions/week_progress) schemas. Each entry has `query`, `toId`, `toText`; used by `index-db-cmd`.
-- `packages/` — monorepo: `@buffr/contracts`, `@buffr/kernel`, `@buffr/connectors`.
-- `test/` — mirrors `src/`; `sql/` — migrations; `eval/queries.json` — labeled eval set.
+- `packages/` — monorepo: `@buffr/contracts`, `@buffr/kernel` (incl. `journal/`), `@buffr/connectors`, `@buffr/capabilities`, `packages/domain-packs/{investing,market-research}`, `packages/engines/{investing,market-research}`.
+- `test/` — mirrors `src/`; `sql/` — migrations (`migrate.ts` now runs every migration file in order, not just one); `eval/queries.json` — labeled eval set.
 
 ## Must-not-change constraints
 

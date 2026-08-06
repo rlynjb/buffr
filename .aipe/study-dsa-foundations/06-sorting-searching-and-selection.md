@@ -121,6 +121,35 @@ Honest read: it's the simplest correct thing, and aptkit picks it because its
 in-memory n is small enough that O(n log n) doesn't hurt. Simplicity over
 optimality, correctly.
 
+**A second sort+slice, and cheaper for it — trending-topic ranking.** The
+`/research` command's trending-topic suggestions (added this cycle) do the
+identical three-step live in `src/session.ts`, `fetchTrendingRedditTopics`
+(`src/session.ts:190-215`):
+
+```ts
+return raw
+  .map((child) => { /* … pull title, subreddit, score, stickied … */ })
+  .filter(p => !p.stickied && p.title.length > 0)   // ← drop pinned/empty posts
+  .sort((a, b) => b.score - a.score)                // ← full sort, descending upvotes
+  .slice(0, limit)                                  // ← take top k (default 6)
+  .map(p => ({ title: p.title, source: `r/${p.subreddit}`, detail: `${p.score} upvotes` }));
+```
+
+Same shape as `pg-vector-store.ts`'s sort+slice: filter, sort by a numeric
+key, slice to k. But here the verdict on "is sort+slice OK?" flips for a
+different reason than aptkit's. `raw` is Reddit's `hot.json` listing capped
+at `limit * 3` (line 194) — at most 18 items for the default `limit = 6` — so
+O(n log n) on 18 elements isn't "small n, doesn't hurt," it's *free*: log₂(18)
+≈ 4.2, indistinguishable from a constant. Reaching for a size-k heap or
+quickselect here would be optimizing an operation that already runs in
+microseconds. Contrast with `pg-vector-store.ts`'s n — thousands of chunks
+and climbing — where the same code shape earns a real "simplicity over
+optimality" tradeoff instead of a free pass. Two call sites, identical
+`.filter().sort().slice()`, opposite cost verdict — because n is the only
+variable that changed. That's the practical test for "is sort+slice fine
+here": is n small enough that log n rounds to a constant, or are you paying
+for the log?
+
 **(b) Size-k heap — the textbook answer nobody here uses.** Covered in depth in
 file `03`: keep a max-heap of size k, O(n log k). Better than sort+slice when
 k ≪ n because it never orders the discards. Not used in buffr because the layer

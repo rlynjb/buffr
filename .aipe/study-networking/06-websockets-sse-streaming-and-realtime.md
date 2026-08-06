@@ -34,7 +34,7 @@ request/response: ask, wait, get the whole answer. The realtime layer is empty.
 
 ## Structure pass
 
-**Layers.** UI (Ink) → Session (`ask`) → Provider (HTTP). The realtime concern
+**Layers.** UI (OpenTUI) → Session (`ask`) → Provider (HTTP). The realtime concern
 would live at the seam between Session and Provider — does the answer arrive in
 one piece or as a stream?
 
@@ -56,7 +56,7 @@ one piece or as a stream?
 
 **Seam.** The seam that *would* flip is `agent.answer()`. Today it returns
 `Promise<string>` — a single resolved value. Streaming would change that contract
-to an async iterator / callback, and the flip would ripple up into the Ink
+to an async iterator / callback, and the flip would ripple up into the OpenTUI
 component's render. Because the contract is "one string," nothing downstream is
 built for incremental output.
 
@@ -85,7 +85,7 @@ have an answer.
 ### Move 2 — the walkthrough
 
 **The answer is awaited as a single value.** The one line that settles it
-(`src/session.ts:62`):
+(`src/session.ts:675`):
 
 ```ts
 const answer = await agent.answer(question);   // Promise<string> — resolves ONCE, whole
@@ -96,17 +96,21 @@ handler, no chunk callback. The turn blocks until the complete answer exists, th
 returns it.
 
 **The OpenTUI UI renders the whole string in one `setState`.** The render side
-matches (`src/cli/chat.tsx:28-29`):
+matches (`src/cli/chat.tsx:368-370`):
 
 ```ts
 const answer = await session.ask(q);
 setTurns((t) => [...t, { role: 'buffr', text: answer }]);   // whole answer, one append
 ```
 
-Between submit and this line, the UI shows a spinner (`busy` true, the `<Spinner
-type="dots" /> thinking…` block at `src/cli/chat.tsx:48-52`). The user sees
-*nothing* of the answer until it's fully done, then the whole block appears. A
-streaming version would append tokens to the last turn as they arrived.
+Between submit and this line, the UI shows the live `ProgressPanel` (`busy`
+true renders it at `src/cli/chat.tsx:431` — status text, token counts, and the
+per-connector step list, none of which is the answer itself). The user sees
+*nothing* of the answer until it's fully done, then the whole block appears in
+one `setState`. A streaming version would append tokens to the last turn as
+they arrived, the same way the progress panel already appends *steps* live —
+the model's answer is the one piece of output in this UI that still isn't
+incremental.
 
 **The HTTP transport reads the whole body too.** Recall from `05` that
 `defaultHttpTransport` does `res.json()` — it waits for the *complete* response
@@ -133,10 +137,24 @@ transport, whole string at the session, whole block at the UI.
   └────────────────────────┘
 ```
 
+**The live progress panel looks like streaming and isn't — worth being precise
+about the difference.** `/research` and `/investing` now show a Claude-Code-style
+step list that updates live as each connector starts, finishes, or fails (the
+`onProgress`/`onStatus` callbacks threaded through `MarketResearchEngine.collect()`
+and rendered in `src/cli/chat.tsx`'s `ProgressPanel`). That *looks* like server-push
+from the user's chair — text updates in real time, before the final answer — but
+there's no network transport underneath it. It's an in-process callback: the
+engine calls `onProgress({ type: 'connector-done', … })` as a plain function call,
+in the same Node process, and React re-renders. No socket carries that event; it
+never crosses a network boundary at all. The six connector `fetch()`s it's
+reporting *on* are real network calls, but the reporting mechanism itself is not.
+
 **WebSocket and SSE: `not yet exercised`, and there's no place for them.** Both
 are server-push transports — they need a *server* holding a long-lived connection
 to push to a client. buffr has no inbound server and no browser client, so neither
-transport has a home here. They'd become relevant only if buffr grew a UI that
+transport has a home here — not for the model response, and not for the new
+connector progress events either, precisely because those events never leave the
+process to begin with. They'd become relevant only if buffr grew a UI that
 needed live updates pushed *to* it (a web dashboard, a multi-client view) — which
 is a different architecture, not a tweak.
 
@@ -175,7 +193,7 @@ one.
   buffr realtime — recap (everything here is absent)
 
   streaming:    NOT exercised — agent.answer() returns Promise<string>
-                whole answer, one setState  (src/session.ts:62, chat.tsx:29)
+                whole answer, one setState  (src/session.ts:675, chat.tsx:368-370)
   transport:    res.json() reads the WHOLE body (no NDJSON stream consumed)
   WebSocket:    NOT exercised — no inbound server, no browser client
   SSE:          NOT exercised — same reason (server-push needs a server)
@@ -204,16 +222,16 @@ naming an absence precisely: you know the exact two lines that change.
   spinner until done, then the whole answer appears
 ```
 
-Answer: "No. `agent.answer()` returns `Promise<string>` (`src/session.ts:62`) —
-the whole answer, awaited once, rendered in a single Ink update
-(`src/cli/chat.tsx:29`). The transport reads the complete body with `res.json()`,
-not Ollama's NDJSON stream. The user sees a spinner, then everything at once."
+Answer: "No. `agent.answer()` returns `Promise<string>` (`src/session.ts:675`) —
+the whole answer, awaited once, rendered in a single OpenTUI update
+(`src/cli/chat.tsx:368-370`). The transport reads the complete body with `res.json()`,
+not Ollama's NDJSON stream. The user watches the progress panel, then everything appears at once."
 
 **Q: How would you add streaming?**
 
 Answer: "Change `agent.answer`'s contract to yield tokens — an async iterator or a
 callback — switch the transport to consume Ollama's streaming NDJSON, and have the
-Ink component append to the in-flight turn instead of waiting. It's an aptkit-side
+OpenTUI component append to the in-flight turn instead of waiting. It's an aptkit-side
 change first, since the transport and the `answer` signature live there. The
 pg-wire writes stay after the stream completes — streaming only touches the model
 path."

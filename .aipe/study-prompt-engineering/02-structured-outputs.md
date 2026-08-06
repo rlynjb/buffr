@@ -144,7 +144,52 @@ const messages = attempt === 0 ? baseMessages
 
 What breaks if removed: drop the `{`-tell gate and you'd retry on every plain-prose answer — burning a second model call and a nudge on replies that were *correct final answers*. The gate is what distinguishes "the model tried to call a tool and fumbled the JSON" from "the model answered you in English." Max attempts is 2 (`maxToolCallAttempts`, default clamped to ≥1 at `:13`) — one try, one nudge, then give up and treat the text as the answer.
 
-**Optional hardening, not kernel:** the generic structured-output reprompt (`generateStructured` + `DEFAULT_STRICT_SUFFIX = "Return ONLY valid JSON - no prose, no markdown fences."`, `structured-generation.js:3`) is a *separate*, more general retry loop in aptkit — validate against a schema, retry once with a strict suffix appended to the last user turn. buffr's RAG path **does not call it**. It's the same idea as Part 4, generalized to arbitrary schemas, and it's the thing you'd reach for if buffr ever needed a validated JSON *answer* (not just a tool call). Worth knowing it's there; honest to say it doesn't fire today.
+**Optional hardening, not kernel:** the generic structured-output reprompt (`generateStructured` + `DEFAULT_STRICT_SUFFIX = "Return ONLY valid JSON - no prose, no markdown fences."`, `packages/kernel/src/workflow-runtime/structured-generation.ts`) is a *separate*, more general retry loop in `@buffr/kernel` — validate against a schema, retry once with a strict suffix appended to the last user turn. buffr's RAG path **does not call it**. It's the same idea as Part 4, generalized to arbitrary schemas, and it's the thing you'd reach for if buffr ever needed a validated JSON *answer* (not just a tool call). Worth knowing it's there; honest to say it doesn't fire today.
+
+### Part 5 — the same kernel, reused: Analyzer and Teacher's tool schemas
+
+The render→ask→parse→retry kernel isn't special-cased to the RAG agent's `search_knowledge_base` tool. It's the mechanism `runAgentLoop` runs for *any* `toolSchemas` array against `GemmaModelProvider` — and buffr now has two more capabilities that lean on it: `Analyzer` (`packages/capabilities/src/analyzer/index.ts`) and `Teacher` (`packages/capabilities/src/teacher/index.ts`), both wired through `MarketResearchEngine`/`InvestingEngine` with the exact same `model` instance (`session.ts:447`, `new ContextWindowGuardedProvider(new GemmaModelProvider(...))`, shared by `RagQueryAgent`, `InvestingEngine`, and `MarketResearchEngine` alike, `session.ts:517,561`).
+
+```
+// analyzer/index.ts:34 — a second tool schema through the same kernel
+const SUBMIT_ANALYSIS_TOOL: ModelTool = {
+  name: 'submit_analysis',
+  inputSchema: { required: ['findings'], properties: { findings: { type: 'array', ... } } },
+};
+// teacher/index.ts:24 — a third
+const SUBMIT_EXPLANATION_TOOL: ModelTool = {
+  name: 'submit_explanation',
+  inputSchema: { required: ['explanation','keyLessons','actionableNext','principle','reflectionQuestion'], ... },
+};
+```
+
+Same emulation, three schemas: `search_knowledge_base`, `submit_analysis`, `submit_explanation`. Render the schema as text, ask for one JSON object, parse it back, retry once on a botched attempt — that discipline doesn't change per-capability. This is the self-similarity worth naming out loud: "structured output" in this codebase is one mechanism at the provider layer, called with a different shape at the capability layer.
+
+**What Teacher adds that the kernel doesn't cover: field-level fallback on a successful parse.** The render/ask/parse/retry kernel handles *no valid tool call at all*. Teacher's `execute()` (`teacher/index.ts:110-125`) handles a different failure a level up: the tool call parses fine, `captured.args` is a real object, but an individual field the schema asked for — `principle` or `reflectionQuestion` — comes back empty or missing. That's not a parse failure the kernel would ever retry on; it's a **quality gap in a successful call**, and buffr closes it with a values fallback instead of a second model call:
+
+```js
+// teacher/index.ts:112-117
+const principle = typeof args.principle === 'string' && args.principle.trim().length > 0
+  ? args.principle
+  : fallbackPrinciple(input.findings);          // deterministic, derived from findings already in hand
+const reflectionQuestion = typeof args.reflectionQuestion === 'string' && args.reflectionQuestion.trim().length > 0
+  ? args.reflectionQuestion
+  : FALLBACK_REFLECTION_QUESTION;                // a fixed string
+```
+
+`fallbackPrinciple` (`teacher/index.ts:40-44`) picks the strongest-scoring `AnalysisFinding` out of data the Analyzer already produced and formats a sentence from it — no model call, no retry, no added latency. What breaks if this fallback is removed: an empty `principle` string ships to the user, silently, because the schema's `required` array doesn't stop an LLM from submitting a technically-valid call with an empty string in a required field — `required` in JSON Schema means "the key must be present," not "the value must be non-empty." That's the exact gap this fallback closes, and it's a gap every structured-output implementation using JSON Schema shares, not a buffr-specific quirk.
+
+```
+  Two different failure modes, two different fixes
+
+  ┌─ no valid tool call at all ──────┐   ┌─ valid call, empty field ─────┐
+  │ fix: retry the WHOLE request      │   │ fix: substitute ONE field     │
+  │ once, with a corrective nudge     │   │ deterministically, no retry   │
+  │ (Part 4, this file)               │   │ (Teacher, teacher/index.ts)   │
+  └────────────────────────────────────┘   └────────────────────────────────┘
+```
+
+`packages/capabilities/test/teacher.test.ts:105-150` locks both branches down as regression tests — one asserting the fallback fires and references the strongest dimension by name, one asserting a model-supplied `principle`/`reflectionQuestion` passes through untouched. That's [05-eval-driven-iteration.md](05-eval-driven-iteration.md)'s discipline applied to a structured-output fallback path specifically: the fallback isn't just written, it's pinned so a future refactor can't silently regress it back to shipping empty strings.
 
 ### Move 2.5 — what grounding actually rides on
 
@@ -201,6 +246,24 @@ The full emulated round trip — the recap.
 
 Tool calling vs JSON mode vs `response_format`: three flavors of the same goal across providers. Anthropic and OpenAI expose native tool APIs and schema modes where the *provider* enforces the shape; Google's Gemini exposes function calling similarly. Gemma 2 9B served by Ollama has none of these, which is why buffr emulates. The markdown-fence bug is provider-agnostic folklore that's actually true: courteous models wrap structured output in fences, and the fix is to unwrap before parsing — which is precisely what `parseAgentJson` does. When *not* to use structured output: open-ended generation and exploratory chains, where forcing a schema flattens the very thing you wanted. The runtime-side half of this contract — never letting parsed tool output trigger an unguarded side effect — is `study-ai-engineering`'s production-serving subject.
 
+**The best structured-output call is sometimes the one you don't make.** `MarketResearchEngine.evaluate()` (`packages/engines/market-research/src/engine.ts:202-208`) computes a `PredictionComparison` — the gap between what the user predicted and what the engine scored — as plain subtraction and equality checks in TypeScript, not as a model call:
+
+```js
+// engine.ts:202-208 — comparison is arithmetic, not a prompt
+const comparison: PredictionComparison = {
+  prediction,
+  actualScore: scorerResult.data.totalScore,
+  actualDimension: strongestFinding?.dimensionId ?? 'unknown',
+  scoreGap: scorerResult.data.totalScore - prediction.expectedScore,   // subtraction
+  dimensionMatched: strongestFinding !== null
+    && strongestFinding.dimensionId === prediction.expectedDimension, // equality
+};
+```
+
+The docstring above it says the quiet part out loud: *"computes the prediction comparison in code (never asks the model to invent the gap)."* Once both sides of a comparison are already structured values — the user's `ResearchPrediction` and the engine's scored `AnalysisFinding[]` — asking an LLM to diff them adds latency, cost, and a new hallucination surface for zero benefit. The lesson generalizes past this repo: structured output's job is to get *unstructured* signal (evidence, free text, a model's judgment) into a typed shape once; once you're holding two typed values, comparing them is a code problem, not a prompt problem.
+
+**A mirror worth noting: structured input FROM a human, not just structured output FROM a model.** `src/cli/research-flow.ts` asks the *user* to type a prediction in a fixed shape — `PREDICTION_PROMPT` (`research-flow.ts:37-42`) literally says `Reply with: <expected score 0-100> <strongest dimension> <confidence 0-100>`. `parsePrediction()` (`research-flow.ts:44-54`) then runs the same shape of contract a model's tool call gets: split on whitespace, validate field count, validate each field's type and range, and on failure return `null` rather than guessing — which the flow turns into a re-prompt (`research-flow.ts:96-102`, `Could not parse that. Format: ...`), not a crash. It's the same discipline as the render/ask/parse/retry kernel above, aimed at a human instead of a model: ask for an exact shape, parse defensively, reject and re-ask rather than accept garbage.
+
 ## Interview defense
 
 **Q: How does this system do tool calling on a model with no tool API?**
@@ -213,11 +276,23 @@ It emulates the protocol in both directions. Outbound: the provider renders the 
 
 Anchor: *"The load-bearing part people forget is the `{`-tell gate — you only retry when the reply looked like a botched tool call. Retry on plain prose and you burn a model call on a reply that was actually the correct answer. And the courteous-model fence bug is handled in `parseAgentJson`: it unwraps ```` ```json ```` before `JSON.parse`, because I've watched that exact thing break a parser in production."*
 
+**Q: A tool call parses successfully but comes back with an empty string in a required field. What do you do?**
+
+Not retry the whole request — that's the wrong tool for this failure. `required` in JSON Schema only guarantees the key is present, not that the value is non-empty, so a technically-valid call can still ship an empty `principle`. buffr's `Teacher` (`packages/capabilities/src/teacher/index.ts:112-117`) checks each optional-but-important field for non-empty content and substitutes a deterministic fallback derived from data already in hand — no second model call, no added latency — while a separate, cheaper kernel (Part 4) handles the *no valid call at all* case with a bounded retry.
+
+```
+  no call at all → retry once, bounded    |    call OK but field empty → substitute, no retry
+```
+
+Anchor: *"Those are two different failure modes and I fix them two different ways. Parse failure gets one retry with a corrective nudge. A successful call with a hollow field gets a deterministic substitution — retrying a whole request to fix one string is throwing away a model call you already paid for."*
+
 ## See also
 
 - [00-overview.md](00-overview.md) — where the tool catalog gets appended in the three-owner assembly
 - [01-anatomy.md](01-anatomy.md) — the prompt sections this contribution is the fifth of
-- [05-eval-driven-iteration.md](05-eval-driven-iteration.md) — why unenforced citation means you must measure
+- [03-prompts-as-code.md](03-prompts-as-code.md) — the domain-pack `instructions[]` strings that ride into Analyzer/Teacher's `extraInstructions` section
+- [05-eval-driven-iteration.md](05-eval-driven-iteration.md) — why unenforced citation means you must measure, and where Teacher's fallback-path tests live
 - [07-output-mode-mismatch.md](07-output-mode-mismatch.md) — the tool-call-vs-prose disambiguation as an output-mode boundary
+- [12-prompt-injection-defense.md](12-prompt-injection-defense.md) — the Analyzer's evidence channel is the same bare-concatenation pattern as the RAG retrieval channel
 - `study-agent-architecture` — the ReAct loop the tool call lives inside
 - `study-ai-engineering` — the runtime-side defense: never let parsed output trigger an unguarded side effect

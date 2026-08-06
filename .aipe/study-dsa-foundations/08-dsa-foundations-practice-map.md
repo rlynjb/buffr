@@ -114,7 +114,7 @@ that buffr's whole search reduces to array math + selection.
   STEP 2  add a memo (top-down DP)              → O(m·n), recursion + cache
   STEP 3  rewrite as a table (bottom-up)        → no call stack, same answer
   STEP 4  knapsack: chunk selection under       → the buffr-relevant landing:
-          maxTokens=8192 (session.ts:46)           session.ts:46 token budget
+          maxTokens=8192 (session.ts:447)           session.ts:447 token budget
 ```
 
 Why first: it's your thinnest area (`me.md`) *and* the closest to your
@@ -236,7 +236,7 @@ you close that?**
 ```
   DP = recursion (have) + cache (gap) + overlap-recognition (the real skill)
   plan: edit distance → memoize → tabulate → knapsack(token budget)
-  anchor it to a real system, not a toy: session.ts:46 maxTokens
+  anchor it to a real system, not a toy: session.ts:447 maxTokens
 ```
 
 Answer: I'd start with DP because it's my thinnest area *and* closest to what I

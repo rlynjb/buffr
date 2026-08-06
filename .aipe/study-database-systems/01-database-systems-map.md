@@ -23,15 +23,22 @@ ends.
   │   │ .upsert/.search  │                  │ persistMessage           │ │
   │   │ pg-vector-store  │ runtime.ts       │ supabase-trace-sink.ts   │ │
   │   └────────┬─────────┴────────┬─────────┴───────────┬──────────────┘ │
-  └────────────┼──────────────────┼────────────────────┼────────────────┘
-               │                  │                     │
-  ┌─ Connection layer ────────────▼─────────────────────▼────────────────┐
-  │   pg.Pool  (src/db.ts:5)  —  one pool, default config                │
-  └───────────────────────────────┬──────────────────────────────────────┘
+  │                                                                      │
+  │   ★ a fifth call site, added with the decision journal ★              │
+  │   ┌──────────────────────────────────────────────────────────────┐  │
+  │   │ PgJournalStore  .create / .listDue / .snooze / .resolve       │  │
+  │   │ src/pg-journal-store.ts                                       │  │
+  │   └──────────────────────────────┬───────────────────────────────┘  │
+  └────────────┼──────────────────┼────────────────────┼────────────────┼──┘
+               │                  │                     │                │
+  ┌─ Connection layer ────────────▼─────────────────────▼────────────────▼──┐
+  │   pg.Pool  (src/db.ts:5)  —  one pool, default config                   │
+  └───────────────────────────────┬─────────────────────────────────────────┘
                                   │ SQL over TCP (libpq protocol)
   ┌─ Postgres (reindb) ───────────▼──────────────────────────────────────┐
   │   schema agents:                                                     │
   │   documents · chunks(+vector) · conversations · messages · profiles  │
+  │   · decisions (the decision journal)                                 │
   │   parser → planner → executor → access methods → MVCC → WAL → heap   │
   └──────────────────────────────────────────────────────────────────────┘
 ```
@@ -48,8 +55,12 @@ relational Postgres.
 The map answers one question: *when buffr issues a read or a write, what engine
 runs it, through which path, and how far does the guarantee reach?* There's exactly
 one engine (Postgres), exactly one connection mechanism (the pool), and three
-distinct write paths plus one read path. Name them once here; the rest of the guide
-zooms into each.
+distinct write paths plus one read path — plus a fourth call site, `PgJournalStore`
+(`src/pg-journal-store.ts`), added by the decision journal (`sql/002_decision_journal.sql`),
+which adds four more operations that don't fit either bucket cleanly: three are
+autocommit writes and one (`listDue`) is a *mixed* read-and-write that runs an
+`UPDATE` and a `SELECT` as two separate, unwrapped statements. Name them once here;
+the rest of the guide zooms into each.
 
 ---
 
@@ -204,6 +215,27 @@ by writing `created_at` from `event.timestamp` (`supabase-trace-sink.ts:55`), so
 the *data* is ordered even though the *writes* aren't. That's a real pattern: when
 writes are concurrent, push ordering into a column, not into the insert sequence.
 
+**Write path D — the decision journal, three autocommit writes plus one mixed
+read/write.** `PgJournalStore` (`src/pg-journal-store.ts`) is the newest call site,
+backing `agents.decisions` (`sql/002_decision_journal.sql`). `create`, `snooze`, and
+`resolve` are each a single `pool.query` — same autocommit shape as write path C.
+`listDue` is the new pattern: it runs *two* statements, neither wrapped together.
+
+```ts
+// src/pg-journal-store.ts:86-100 (condensed)
+await this.pool.query(`update agents.decisions set status = 'review-due' ...`); // txn #1
+const { rows } = await this.pool.query(`select * from agents.decisions ... `);   // txn #2
+//    ▲ the UPDATE (the status flip) and the SELECT (the read) are two separate
+//      autocommit statements. nothing stops another writer's snooze/resolve from
+//      landing on the same row in the gap between them.
+```
+
+That's a fourth instance of the same trap the fan-in warns about at the top of this
+file: `listDue` chooses its own transaction scope, and the scope it chose is "none."
+For buffr's single CLI process this is inert — there's no second writer to land in
+the gap — but it's the same unstated-assumption shape as write path B. File `05`
+walks it as a second worked example next to `indexDocumentRow`.
+
 **The read path — vector search, one statement.** `search` is a single
 `pool.query` ordering by cosine distance.
 
@@ -221,7 +253,7 @@ One read path, and it's the one the whole RAG product depends on. Files `03` and
 A storage map isn't a list of tables — it's a list of *transaction boundaries* and
 *durability boundaries*. The tables tell you what data exists; the boundaries tell
 you what the engine promises about it. buffr has one engine and one pool, which
-makes the tables easy — but four call sites each choosing their own transaction
+makes the tables easy — but five call sites each choosing their own transaction
 scope is where every consistency question in this guide originates. Map the
 boundaries first; the tables are the easy part.
 
@@ -229,14 +261,15 @@ boundaries first; the tables are the easy part.
 
 ## Primary diagram
 
-The full map: four call sites, one pool, one engine, the three seams marked.
+The full map: five call sites, one pool, one engine, the three seams marked.
 
 ```
   buffr storage map — call sites, pool, engine, seams
 
   ┌─ Application ────────────────────────────────────────────────────────┐
   │  upsert(txn)   indexDocumentRow(2 txns)   persistMessage(autocommit)  │
-  │  search(read)                                                         │
+  │  search(read)  PgJournalStore(3 autocommit writes + listDue's         │
+  │                unwrapped update+select)                              │
   └──────┬──────────────┬────────────────────────────┬───────────────────┘
          │              │  ░ SEAM 1: transaction boundary — atom or no atom?
   ┌──────▼──────────────▼────────────────────────────▼───────────────────┐

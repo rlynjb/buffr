@@ -19,6 +19,7 @@ The cross-cutting NFR audit. Eight lenses from DDIA 2e Ch 2: functional-requirem
 | `study-distributed-systems` | availability under partition |
 | `study-system-design` | reliability / scalability architecture |
 | `study-data-modeling` | schema evolution · evolvability |
+| `study-networking` | timeouts · retries · fan-out failure shape (cross-linked for the connector-fan-out reliability finding) |
 
 ## What DDIA 2e Ch 2 says these mean
 

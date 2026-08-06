@@ -329,6 +329,39 @@ interface DataConnector<P, D> {
 
 Three adapters implement it — `BraveConnector`, `TavilyConnector`, `GoogleConnector` — each hiding: API key injection, HTTP construction (endpoint URL, headers), response parsing, and the vendor-specific error shape. `session.ts:76-107` depends on the port (conditionally instantiating adapters based on env keys), not on any particular search vendor. The seam is narrower than `VectorStore` (one method vs two, no transaction complexity), but the shape is identical: port → adapter → external API. Comparing the two adapters side-by-side is a clean exercise in how the same move scales from deep-module-with-five-decisions to thin-adapter-with-one-concern.
 
+**A third adapter family — and the one where the seam actually broke: `JournalStore`.** `packages/kernel/src/journal/contracts.ts:67-72` defines the port; `InMemoryJournalStore` (`packages/kernel/src/journal/in-memory-journal-store.ts`, a test double) and `PgJournalStore` (`src/pg-journal-store.ts`, the real Postgres adapter over `agents.decisions`) both implement it. Same three roles as `VectorStore`: port, two adapters, a client (`session.ts:410`, `new PgJournalStore({ pool, appId: cfg.appId })`) that names the concrete adapter in exactly one place. What makes this instance worth a *second* worked example, not just a restated one, is what it teaches that `VectorStore` doesn't: **a contract can have a behavioral clause that only a comment enforces, and the two adapters can silently disagree about it.**
+
+`listDue`'s doc comment states a side effect, in prose, that both implementations have to reproduce identically:
+
+```ts
+// contracts.ts:61-65
+/**
+ * listDue() is also where the open -> review-due transition happens: any
+ * decision with status 'open' and reviewAt <= now is flipped to 'review-due'
+ * as a side effect of being listed, then returned. Both implementations
+ * must do this identically.
+ */
+```
+
+Nothing in the TypeScript type checks "identically." Until `41ecce8`,
+`InMemoryJournalStore.listDue` ran that transition over *every* stored
+entry, unscoped by `userId`/`workspaceId` — while `PgJournalStore.listDue`
+correctly scoped its `update` to the caller's `app_id`/`user_id`/
+`workspace_id` (`pg-journal-store.ts:87-92`). The test adapter was quietly
+more permissive than the real one: a test written against
+`InMemoryJournalStore` could pass while exercising a code path that would
+behave differently in production. The fix
+(`in-memory-journal-store.ts:39-46`) added the same three-field scope the
+Postgres version already had. This is the same "same knowledge in two
+places" leak the audit's information-hiding lens (lens 3) names elsewhere
+in the repo — except the "knowledge" here is a *behavior*, not a
+constant, and it's carried only in a docstring the compiler can't check.
+The general lesson: when a port's contract includes a side effect a
+signature can't express, write one test that runs against *both*
+adapters and asserts the same outcome — a shared contract-test suite
+would have caught this divergence before a review pass had to. → the full
+incident, with the fix diff, lives in `audit.md` lens 3.
+
 ---
 
 ## Interview defense

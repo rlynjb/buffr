@@ -7,8 +7,10 @@ then close with the per-codebase pattern summary.
 ## What buffr is, in one line
 
 A **single-agent bounded ReAct loop** over local Gemma2:9b — one read-only search tool, a
-hard turn/tool-call budget, a forced final synthesis, and retrieval-based episodic memory.
-Not a chain. Not multi-agent.
+hard turn/tool-call budget, a forced final synthesis, and retrieval-based episodic memory —
+plus two fixed-order **capability pipelines** (investing, market research) for known analysis
+jobs, the second of which pauses for a human-in-the-loop checkpoint and feeds a calibration loop
+that closes across separate sessions. Not a chain. Not multi-agent.
 
 ## Reading order
 
@@ -22,6 +24,9 @@ Not a chain. Not multi-agent.
   04-agent-infrastructure/            ← context, memory, tools, eval, control (D)
   05-production-serving/              ← serving a loop, not one call (E)
   06-orchestration-system-design-templates/  ← interview reframings (F)
+  07-typed-engine-with-capability-pipeline.md  ← the shared kernel: investing + market research
+  08-human-in-the-loop-pipeline-checkpoint.md  ← 07's kernel, one joint added: collect()/evaluate()
+  09-predict-then-reveal-calibration-loop.md   ← 08's checkpoint, closed across sessions over time
         │
         ▼
   agent-patterns-in-this-codebase.md  ← read last: what buffr actually runs
@@ -45,6 +50,12 @@ A → B → C → D → E → F.
   breaking — what changes once the unit is a loop.
 - `06-orchestration-system-design-templates/` — the three generic interview templates, each
   with an honest "applies to buffr" verdict and the refactor that would adopt it.
+- `07-typed-engine-with-capability-pipeline.md` — the `Collector→Analyzer→Scorer→Teacher` kernel
+  both `InvestingEngine` and `MarketResearchEngine` are built from.
+- `08-human-in-the-loop-pipeline-checkpoint.md` — `MarketResearchEngine`'s `collect()`/`evaluate()`
+  split: a judgment-capture pause, not an approval gate.
+- `09-predict-then-reveal-calibration-loop.md` — the predict→reveal→promote→review loop that
+  closes across separate `/research` and `/review` sessions; agent-as-calibration-partner.
 - `agent-patterns-in-this-codebase.md` — the table of patterns buffr actually exercises.
 
 ## Cross-links to sibling guides

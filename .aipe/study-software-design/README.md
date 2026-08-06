@@ -41,14 +41,23 @@ its keep when it hides decisions the caller never has to learn.
 
   2. 01-adapter-behind-a-contract.md   PgVectorStore = the adapter
                                         behind aptkit's VectorStore port
+                                        (+ PgJournalStore, a 3rd instance
+                                        where the two adapters diverged)
   3. 02-pure-core-impure-shell.md      loadConfig (pure seam) vs the
                                         CLIs (the I/O shell)
   4. 03-dependency-as-a-boundary.md    depending on aptkit's contracts,
                                         and the memory engine extracted UP
   5. 04-sync-interface-async-work.md   SupabaseTraceSink = the observer
                                         (sync emit / async flush)
-  6. 05-deep-session-facade.md         createChatSession = a deep facade
-                                        behind ask()/close()
+  6. 05-deep-session-facade.md         createChatSession — a deep facade
+                                        that grew to 15 methods, 4 domains
+  7. 06-capability-as-typed-computation-unit.md   the 5 capabilities
+                                        (Collector/Analyzer/Scorer/
+                                        Teacher/Journal) as reusable units
+  8. 07-collect-then-evaluate-split.md  MarketResearchEngine's two-phase
+                                        split for a human prediction
+                                        checkpoint, vs InvestingEngine's
+                                        single run()
 ```
 
 ## Cross-links — what this guide does NOT cover

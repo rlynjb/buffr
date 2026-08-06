@@ -1,8 +1,18 @@
 # Agent Patterns in This Codebase — buffr-laptop
 
-The patterns buffr actually runs, not the study catalogue. One shape, named honestly, with
-the control envelope and the eval seam called out. Read `00-overview.md` first for the
-whole-system frame; this file is the close-out.
+The patterns buffr actually runs, not the study catalogue. Named honestly, with the control
+envelope and the eval seam called out. Read `00-overview.md` first for the whole-system frame;
+this file is the close-out.
+
+## The two shapes: a ReAct loop, and two capability pipelines (one with a human joint)
+
+buffr runs one autonomous loop (the ReAct chat agent) and two fixed-order capability pipelines
+(`InvestingEngine`, `MarketResearchEngine`) side by side under the same TUI. The pipelines are not
+new agent shapes each time — they're the same `Collector → Analyzer → Scorer → Teacher` kernel
+(`07-typed-engine-with-capability-pipeline.md`) reused twice. What's new since the last sync is that
+the second pipeline cuts itself in half at a human checkpoint
+(`08-human-in-the-loop-pipeline-checkpoint.md`), and that checkpoint feeds a loop that closes across
+separate sessions, not just within one call (`09-predict-then-reveal-calibration-loop.md`).
 
 ## The shape: single-agent bounded ReAct loop over multiple tools
 
@@ -88,15 +98,31 @@ The patterns buffr exercises, the shape each instantiates, and why it's the righ
   │                          │ (Engine<In,Out>)       │ →Teacher — no model decides │
   │                          │                        │ the next step               │
   ├──────────────────────────┼────────────────────────┼─────────────────────────────┤
-  │ /investing & /eval       │ pipeline-vs-loop        │ known job → engine pipeline │
-  │ (chat.tsx slash commands)│ dispatch               │ unknown question → ReAct    │
-  │                          │ (command router)       │ loop — right tool each time │
+  │ Market research          │ same capability         │ reuses Collector→Analyzer→  │
+  │ (MarketResearchEngine    │ pipeline, split at a    │ Scorer→Teacher; splits into │
+  │ .collect()/.evaluate())  │ human checkpoint        │ collect()/evaluate() so a   │
+  │                          │                        │ human prediction enters     │
+  │                          │                        │ before the score is shown   │
+  ├──────────────────────────┼────────────────────────┼─────────────────────────────┤
+  │ /research predict→reveal │ human-in-the-loop       │ digest-only reveal (counts/ │
+  │ (research-flow.ts)       │ judgment-capture        │ titles, no findings/scores) │
+  │                          │ checkpoint             │ keeps the prediction honest │
+  │                          │                        │ — see 08                    │
+  ├──────────────────────────┼────────────────────────┼─────────────────────────────┤
+  │ /research→/review        │ predict-then-reveal     │ closes across SEPARATE      │
+  │ (decision journal,       │ calibration loop        │ sessions, days/weeks apart  │
+  │ agents.decisions)        │ (agent-as-calibration-  │ — agent-as-calibration-     │
+  │                          │ partner)                │ partner, not oracle; see 09 │
+  ├──────────────────────────┼────────────────────────┼─────────────────────────────┤
+  │ /investing & /eval,      │ pipeline-vs-loop        │ known job → engine pipeline │
+  │ /research & /eval        │ dispatch               │ unknown question → ReAct    │
+  │ (chat.tsx slash commands)│ (command router)       │ loop — right tool each time │
   └──────────────────────────┴────────────────────────┴─────────────────────────────┘
 ```
 
 ## The two computation shapes in buffr
 
-buffr now runs two fundamentally different computation shapes under the same chat TUI, dispatched by command prefix in `handleSubmit` (`src/cli/chat.tsx`):
+buffr now runs two fundamentally different computation shapes under the same chat TUI, dispatched by command prefix in `handleSubmit` (`src/cli/chat.tsx`). A third command (`/research`) uses the same code-controlled shape as Shape 2, cut into two calls around a human checkpoint — see the note after Shape 2 below, and the full walk in `08-human-in-the-loop-pipeline-checkpoint.md`.
 
 **Shape 1: `ask()` → ReAct loop (the model decides the next step)**
 
@@ -124,7 +150,16 @@ The model is in control. The same question asked twice may follow different tool
 
 The engineer is in control. The order is fixed in `engine.ts`. Two of the five steps involve LLM calls; three (Collector, Scorer, Journal) are deterministic.
 
-**The caller (`chat.tsx`) doesn't know which shape ran.** Both paths return a string. The dispatch is purely: does the input start with `/investing `? If yes, pipeline. Otherwise, loop. That clean dispatch point is the whole interface. → deep walk in `07-typed-engine-with-capability-pipeline.md`.
+**`/research` is Shape 2 with one joint added.** `MarketResearchEngine` reuses the same four
+capabilities, but `run()` doesn't exist — `collect()` returns after the Collector step, a human
+supplies a `ResearchPrediction`, then `evaluate()` runs Analyzer→Scorer→Teacher. The engineer is
+still in control of the order on both sides of the joint; the joint itself is the one place control
+passes to a person. Full walk in `08-human-in-the-loop-pipeline-checkpoint.md`.
+
+**The caller (`chat.tsx`) doesn't know which shape ran.** All three paths return a string (or a
+multi-turn flow's message list). The dispatch is purely: does the input start with `/investing `?
+`/research `? If either, pipeline (whole or split). Otherwise, loop. That clean dispatch point is
+the whole interface. → deep walk in `07-typed-engine-with-capability-pipeline.md`.
 
 ## The control envelope buffr ships with
 
@@ -184,5 +219,11 @@ it recover — is the gap: the signal is recorded, not yet scored.
 - `00-overview.md` — verdict + whole-system frame.
 - `01-reasoning-patterns/02-agent-loop-skeleton.md` — the kernel buffr runs.
 - `02-agentic-retrieval/01-agentic-rag.md` — the retrieval loop in depth.
-- `04-agent-infrastructure/05-guardrails-and-control.md` — the control envelope in depth.
+- `04-agent-infrastructure/05-guardrails-and-control.md` — the control envelope in depth (note:
+  scoped to the ReAct loop — the market-research pipeline's human checkpoint is a different
+  mechanism, covered in 08).
+- `07-typed-engine-with-capability-pipeline.md` — the capability kernel both engines share.
+- `08-human-in-the-loop-pipeline-checkpoint.md` — the collect()/evaluate() split and why it exists.
+- `09-predict-then-reveal-calibration-loop.md` — the predict→reveal→promote→review loop across
+  sessions.
 - `06-orchestration-system-design-templates/` — buffr reframed as three interview answers.

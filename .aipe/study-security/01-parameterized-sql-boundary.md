@@ -152,16 +152,45 @@ numbers-only input, plus parameterized placement — close it.
 (`:5-7`), `loadProfile` (`src/profile.ts:5-6`, `$1`). No exception across the
 codebase — every value is bound, never concatenated.
 
+**New since the last audit — the decision journal (`PgJournalStore`).** The
+`/research` → `/review` loop writes user-authored free text (`stake`,
+`resolution_condition`, and a resolve-time `note`) into `agents.decisions`
+(`sql/002_decision_journal.sql`). Same contract, no exception:
+
+```ts
+// src/pg-journal-store.ts:68-82 — PgJournalStore.create
+`insert into agents.decisions
+  (app_id, user_id, workspace_id, domain, subject_type, subject_id, kind, claim, evidence_ids, created_at,
+   status, stake, resolution_condition, review_at, predicted_score, predicted_dimension, predicted_confidence,
+   assessed_score, assessed_confidence)
+ values ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,'open',$11,$12,$13,$14,$15,$16,$17,$18)`,
+[ this.appId, entry.userId, entry.workspaceId, ..., decisionFields.stake,      // ← $11: raw operator text
+  decisionFields.resolution_condition, ... ],                                  // ← $12: raw operator text
+```
+
+`stake` and `resolutionCondition` are whatever the operator types at the
+`research-flow.ts:122-137` prompts ("What's the stake…", "Resolution condition?")
+— unvalidated free text — and they still ride as `$11`/`$12`, never concatenated.
+`resolve()` (`src/pg-journal-store.ts:110-116`) does the same for the resolve-time
+`note`: `review-flow.ts:106` passes `input.trim()` straight through as `$4`. The
+one nuance is `evidence_ids`, which is `JSON.stringify`'d client-side and cast with
+`$9::jsonb` (`:77`) — still a bound value, Postgres parses the JSON, not SQL, from
+it.
+
 ```
   Every sink, audited — the args-array contract
 
-  ┌─ sink ────────────────────┬─ user/model text in it ─┬─ how bound ─┐
-  │ upsert       (pg-vs:47)   │ content ($5)            │ $1..$8       │
-  │ search       (pg-vs:70)   │ app_id ($2)             │ $1..$3       │
-  │ indexDocumentRow (rt:11)  │ content ($4)            │ $1..$4       │
-  │ persistMessage  (sts:27)  │ content ($3)            │ $1..$8       │
-  │ loadProfile  (prof:5)     │ app_id ($1)             │ $1           │
-  └───────────────────────────┴─────────────────────────┴─────────────┘
+  ┌─ sink ────────────────────────┬─ user/model text in it ─┬─ how bound ─┐
+  │ upsert          (pg-vs:47)    │ content ($5)            │ $1..$8       │
+  │ search          (pg-vs:70)    │ app_id ($2)             │ $1..$3       │
+  │ indexDocumentRow (rt:11)      │ content ($4)            │ $1..$4       │
+  │ persistMessage  (sts:27)      │ content ($3)            │ $1..$8       │
+  │ loadProfile     (prof:5)      │ app_id ($1)             │ $1           │
+  │ decisions.create (pjs:68)     │ stake, resolution ($11,$12)│ $1..$18   │
+  │ decisions.resolve (pjs:110)   │ note ($4)               │ $1..$5       │
+  │ decisions.snooze (pjs:102)    │ — (dates only)          │ $1..$3       │
+  │ decisions.listDue (pjs:86,93) │ — (ids only)             │ $1..$4       │
+  └────────────────────────────────┴─────────────────────────┴─────────────┘
   one exception: migrate.ts runs a dev-authored .sql file whole — not user input
 ```
 

@@ -27,10 +27,17 @@ exactly one tool, and that tool is a read.
   └─────────────────────────────────────────────────────────────────┘
 ```
 
-The surprising part: buffr needs **no human-in-the-loop gate** — and that's not a gap, it's a
+The surprising part: the ReAct loop needs **no human-in-the-loop gate** — and that's not a gap, it's a
 consequence of the design. The agent's only tool is read-only, so its output cannot trigger a side
 effect. The load-bearing idea: **the strongest guardrail isn't a check on the output, it's
 shrinking what the agent can touch in the first place.**
+
+*Scope note:* this claim is about the ReAct loop specifically. buffr's `MarketResearchEngine`
+pipeline (a separate computation shape, not this loop) *does* pause for a human — but not to
+approve a side effect. It pauses to capture a prediction before revealing its own analysis, a
+different reason to pause covered in `../08-human-in-the-loop-pipeline-checkpoint.md`. The two
+gates answer different questions: this file's gate would ask "is it safe to let this commit?";
+that file's checkpoint asks "what did you think, before you see my answer?"
 
 ## Structure pass
 
@@ -169,12 +176,14 @@ or hijacked by a prompt injection inside a retrieved document, can still only *a
 no `delete_user`, no `send_email`, no `run_sql` in scope to ask for. The damage a successful injection
 could do is bounded to "search the knowledge base," which is exactly what the agent does anyway.
 
-### Why there's no human-in-the-loop gate (and that's correct)
+### Why there's no human-in-the-loop gate (and that's correct) — for this loop
 
 A human-in-the-loop gate exists to catch a *side effect* before it commits — pause before sending the
-email, before the irreversible write. buffr has no side effect to gate. Its one tool reads; its output
+email, before the irreversible write. The ReAct loop has no side effect to gate. Its one tool reads; its output
 is text returned to the user. There is nothing to approve, so adding a gate would be ceremony, not
-safety. Bridge from known: you don't put a confirmation modal on a `SELECT` query.
+safety. Bridge from known: you don't put a confirmation modal on a `SELECT` query. (The
+market-research pipeline's checkpoint is not this kind of gate at all — nothing there commits a side
+effect either; it pauses for a different reason entirely. See `../08-human-in-the-loop-pipeline-checkpoint.md`.)
 
 ```
   THE LOGIC — no gate needed because there's no side effect to gate
@@ -286,3 +295,6 @@ because a read has no side effect to approve.*
 - `../03-multi-agent-orchestration/` — the supervisor, the multi-agent shape of this envelope.
 - `study-security` → prompt-injection blast-radius analysis; this file is the architectural
   containment half of that story.
+- `../08-human-in-the-loop-pipeline-checkpoint.md` — the *other* reason buffr pauses for a human:
+  capturing a judgment, not approving a side effect. A different mechanism, in a different
+  computation shape (the market-research pipeline, not this loop).

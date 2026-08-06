@@ -134,6 +134,8 @@ Round-trips are the unit of database cost, not statements. The loop is correct a
 
 This is the textbook chatty-database pattern, and it's everywhere because the naive loop is the obvious way to write it. The reason it's tolerable here and not in a high-throughput service: localhost latency is sub-millisecond and the write volume is tiny. In a cloud setup with the DB across a network hop (which buffr explicitly is *not* this phase — `src/db.ts` is a direct connection), each round-trip would carry real network latency and the loop would dominate index time.
 
+**A newer write path gets this right without trying.** `PgJournalStore.create` (`src/pg-journal-store.ts:50-84`) — the write path behind promoting a `/research` prediction to a tracked decision in `agents.decisions` — is a single `pool.query(insert ...)` with no loop, no `begin`/`commit`, because it only ever writes one logical row per call. It's not "the fixed version of this pattern" — it's a different shape entirely, because a decision-journal entry is one row, not N chunks. Worth naming anyway: it's the contrast case that shows the loop in `upsert` isn't chattiness-by-default in this codebase — every other write path (`persistMessage`, `PgJournalStore`'s four methods) is a single round-trip because the write really is single-row. `upsert` is the one place N rows legitimately need N inserts (until collapsed to one multi-row statement), and it's the only place that pattern shows up.
+
 For *why* each INSERT costs what it does — parse/plan/execute, WAL append, the HNSW index maintenance per row — see **`study-database-systems`** (query execution, durability). For the pooled connection this loop borrows, see `04-connection-pool-reuse.md`. This file owns the *round-trip count* read.
 
 ## Interview defense
@@ -160,4 +162,5 @@ For *why* each INSERT costs what it does — parse/plan/execute, WAL append, the
 - `02-embedding-roundtrip.md` — the embed step these writes follow
 - `04-connection-pool-reuse.md` — the pooled connection this loop borrows
 - `05-per-turn-memory-and-trace-cost.md` — the per-turn write side
+- `src/pg-journal-store.ts` — the single-row write path that contrasts with this loop
 - **`study-database-systems`** — INSERT cost, WAL, index maintenance
