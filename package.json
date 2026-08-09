@@ -1,35 +1,14 @@
 {
-  "name": "buffr-laptop",
+  "name": "buffr",
   "version": "0.0.0",
   "type": "module",
   "private": true,
-  "workspaces": ["packages/*", "packages/domain-packs/*", "packages/engines/*"],
   "scripts": {
-    "build:packages": "npm run build -w @buffr/contracts && npm run build -w @buffr/kernel && npm run build -w @buffr/connectors && npm run build -w @buffr/capabilities && npm run build -w @buffr/domain-pack-investing && npm run build -w @buffr/engine-investing && npm run build -w @buffr/domain-pack-market-research && npm run build -w @buffr/engine-market-research",
-    "build": "npm run build:packages && tsc -p tsconfig.json",
-    "test": "npm run build && node --test --test-concurrency=1 dist/test/*.test.js",
-    "test:kernel": "npm run build -w @buffr/kernel && node --test --test-concurrency=1 packages/kernel/dist/test/*.test.js",
-    "migrate": "npm run build && node dist/src/migrate.js",
-    "index": "npm run build && node dist/src/cli/index-cmd.js",
-    "index:db": "npm run build && node dist/src/cli/index-db-cmd.js",
-    "eval": "npm run build && node dist/src/cli/eval-cmd.js",
-    "chat": "npm run build && bun dist/src/cli/chat.js"
-  },
-  "dependencies": {
-    "@buffr/contracts": "0.0.1",
-    "@buffr/kernel": "0.0.1",
-    "@buffr/connectors": "0.0.1",
-    "@buffr/capabilities": "0.0.1",
-    "@opentui/core": "^0.4.5",
-    "@opentui/react": "^0.4.5",
-    "dotenv": "^16.4.0",
-    "pg": "^8.11.0",
-    "react": "^19.2.8"
+    "build": "tsc",
+    "start": "node dist/index.js"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
-    "@types/pg": "^8.11.0",
-    "@types/react": "^19.2.17",
     "typescript": "^5.4.0"
   }
 }
