@@ -1,6 +1,7 @@
 # secrets — never commit
 .env
 .env.local
+.local/
 
 # node
 node_modules/
