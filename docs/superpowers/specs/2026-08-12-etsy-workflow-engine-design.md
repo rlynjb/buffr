@@ -15,32 +15,97 @@ seller onboarding, billing, voice UX, hosted multi-user infrastructure, or a web
 ## Recommended architecture
 
 Use a deterministic TypeScript workflow engine with specialist Agents SDK modules. Do not build one
-master agent, and do not let an LLM control lifecycle routing. The workflow engine owns the lifecycle;
+master agent, and do not let an LLM control lifecycle routing. M0 is shared policy/runtime
+configuration for every module, not a state-machine turn. The workflow engine owns the lifecycle;
 LLM-backed modules return structured judgments inside the boundary assigned to them.
 
 ```
 Etsy API (read-only)
-        │
-        ▼
-Etsy Connector ──► Normalized evidence store
-                         │
-                         ▼
-                 Workflow Engine
-       ┌───────────────┼────────────────┐
-       │               │                │
-   validation      routing/state     persistence
-       │               │                │
-       ▼               ▼                ▼
- M1 Context → M2 Metrics → M4 Diagnosis → M5 Hypothesis → M6 Test Plan
-                      │                         │
-                      └── M3 Research ◄─────────┘
-                                                    │
-                                                    ▼
+        |
+        v
+Etsy Connector (Ports and adapters / external tool adapter)
+        |
+        v
+Normalized evidence store
+        |
+        v
++--------------------------------------------------------------------------------+
+| Workflow Engine: Finite State Machine / deterministic workflow orchestrator     |
+| owns explicit allowed routes and lifecycle states                               |
++------------------------------+------------------------+------------------------+
+| Gates / guard clauses /      | Finite State Machine   | Repository pattern +   |
+| schema validation            | routing/state          | ports-and-adapters     |
+| decides whether transitions  | transition, pause,     | persistence:           |
+| may proceed                  | wait, resume, complete | JsonFileRunRepository /|
+|                              |                        | local JSON files /     |
+|                              |                        | atomic writes          |
++------------------------------+------------------------+------------------------+
+        |
+        v
+M0 shared policy/runtime configuration for M1-M7 (not a state-machine turn)
+        |
+        v
+Strategy-like specialist agent modules / structured outputs
+
+Primary lifecycle:
+M1 Context -> M2 Metrics -> M4 Diagnosis -> M5 Hypothesis -> M6 Test Plan
+                                                        |
+                                                        v
                                       real-world experiment waits
-                                                    │
-                                                    ▼
-                                      M2 Results → M7 Learning
+                                                        |
+                                                        v
+                                      M2 Results -> M7 Learning
+
+Bounded research detour:
+M2 Metrics    <--- request/result ---> M3 Research
+M5 Hypothesis <--- request/result ---^
+                                    Bounded agentic tool-use loop /
+                                    ReAct-style research loop with circuit breaker
+                                    permitted read-only tools; returns to requester
+                                    |
+                                    +-- OpenAI hosted web search
+                                        (Ports and adapters / external tool adapter)
 ```
+
+Pattern mapping:
+
+| Capability | Pattern / alternative name | Simple implementation name |
+| --- | --- | --- |
+| Workflow lifecycle | Finite State Machine / deterministic workflow orchestrator | TypeScript engine with explicit allowed routes and lifecycle states |
+| Transition checks | Gates / guard clauses / schema validation | Zod-backed guards that decide whether transitions may proceed |
+| Routing/state | Finite State Machine | State transitions for pause, wait, resume, and complete |
+| Persistence | Repository pattern + ports-and-adapters | `RunRepository` port and `JsonFileRunRepository`; local persistent JSON files with atomic writes, not browser local storage |
+| M1-M7 modules | Strategy-like specialist agent modules / structured outputs | Agents SDK module per stage returning validated structured output |
+| M3 Research | Bounded agentic tool-use loop / ReAct-style research loop with circuit breaker | LLM may choose permitted read-only tools and interpret evidence; engine caps calls, time, and budget; M3 returns to its requester without lifecycle-routing authority |
+| Etsy connector and web search | Ports and adapters / external tool adapters | Read-only Etsy connector and hosted web search adapters |
+| M0 Core | Shared policy/runtime configuration | Shared module policy and limits, not a state-machine turn |
+
+## Architecture patterns
+
+The primary description for interviews is: **deterministic workflow orchestrator with bounded
+agentic workers**.
+
+This design combines several complementary industry patterns:
+
+- **Workflow orchestration / state machine:** the engine defines explicit routes, loops, stop
+  states, and waits. Stages do not advance because an LLM says so; they advance when deterministic
+  route guards and evidence gates allow it.
+- **Manager-worker:** the deterministic engine manages M1 through M7 specialist workers. Each worker
+  receives a scoped input, performs its stage-specific reasoning, and returns structured output to
+  the engine.
+- **Hexagonal architecture / ports and adapters:** Etsy API access, hosted web search, local-file
+  persistence, and the future terminal-chat interface are adapters around the workflow core. The
+  core should depend on stable ports and normalized contracts, so those adapters can be replaced
+  without rewriting lifecycle logic.
+- **Functional core, imperative shell:** deterministic calculations, validation rules, and state
+  transitions belong in the core. LLM calls, Etsy API calls, web search, file I/O, tracing, and
+  future terminal-chat interaction sit at the imperative edge.
+- **Human-in-the-loop:** recommendations are manual. The system can propose experiments and listing
+  changes for the user to approve and apply, but it does not automatically edit Etsy listings.
+
+The differentiator is bounded agentic behavior. The model may choose tools and interpret evidence
+only inside permitted modules such as M3, under engine-enforced limits and contracts. It never gets
+control over business-process or lifecycle routing.
 
 ## Component responsibilities
 
@@ -79,10 +144,10 @@ evidence and user-provided context.
 real-world experiment wait as **M2 Results**, comparing post-experiment evidence with the planned
 measurement window.
 
-**M3 Research** is a bounded conditional detour. A calling module emits structured research status;
-the engine records the requester, runs M3 within limits, and returns the research result only to the
-calling module. M3 may choose among permitted tools inside its defined research scope, but it cannot
-select the lifecycle stage or alter the workflow route.
+**M3 Research** is a bounded conditional detour. A calling module emits a structured research
+request; the engine records the requester, runs M3 within configured hard limits, and returns the
+research result only to the calling module. M3 may choose among permitted tools inside its defined
+research scope, but it cannot select the lifecycle stage or alter the workflow route.
 
 **M4 Diagnosis** interprets context, metrics, and any returned research to identify likely causes of
 performance problems or opportunities.
@@ -127,12 +192,38 @@ would be brittle.
 M3 uses only read-only tools. It must run with maximum call count, time, and budget safeguards. Each
 research result must include:
 
-- `status`: `resolved`, `partly-resolved`, or `unresolved`.
+- `status`: `resolved`, `partly_resolved`, or `unresolved`.
+- `next_action`: `continue` or `stop`.
 - `requester`: the module that requested research.
 - `question`: the specific bounded research question.
 - `evidence`: cited evidence found by permitted tools.
 - `confidence`: a normalized confidence value.
 - `limitations`: what remains unknown or weakly supported.
+
+`status` describes whether the research question was answered. It does not control lifecycle
+routing. The canonical normalized values are:
+
+- `resolved`: the evidence answers the bounded research question well enough for the caller to use.
+- `partly_resolved`: the evidence reduces uncertainty but leaves material limitations.
+- `unresolved`: reliable information is insufficient or unavailable.
+
+`next_action` describes only M3's recommendation for the research loop. M3 may recommend `continue`
+only when another permitted lookup has a concrete reason, such as a named source to check, a
+specific missing Etsy evidence record, or a clearly bounded citation gap. M3 recommends `stop` when
+it is ready to return its structured finding. The engine honors `continue` only while the invocation
+stays within configured hard limits; once a limit is reached, the engine forces `stop` and returns
+the best structured finding available. Do not add a `blocked` M3 status: unresolved research is
+represented by `status: unresolved`.
+
+Initial design defaults, configurable pending implementation:
+
+- Maximum 3 research tool calls per M3 invocation.
+- Maximum 2 minutes wall-clock time per M3 invocation.
+- A per-run cost/token budget must be chosen and configured before a real API-backed run.
+
+These are upper safety bounds, not automatic targets. M3 should stop as soon as the bounded question
+is adequately answered or cannot be improved by another permitted lookup. Implementation may tighten
+or change these defaults through configuration.
 
 External web research is open-web research with citations required. Version-one M3 tools are:
 
@@ -179,6 +270,20 @@ A database is deferred until the product needs hosted multi-user access, concurr
 querying, access control, background workers, account isolation, or operational observability that
 local files cannot provide cleanly.
 
+## Post-build next actions
+
+After the workflow engine exists and its non-networked tests pass, the next work should proceed in
+this order:
+
+1. Configure real Etsy API and OAuth credentials in the local ignored `.env` file.
+2. Run an OAuth connection validation through the future connector configuration layer.
+3. Run one representative listing through the initial analysis and test-plan route.
+4. Manually apply one approved experiment in Etsy. No Etsy listing changes are automated.
+5. Return with outcome data after the experiment window so M2 Results and M7 Learning can run.
+6. Review run traces, evidence snapshots, module outputs, and persisted experiment plans; refine
+   prompts and contracts where the trace shows ambiguity or weak structure.
+7. Build the terminal-chat adapter after the engine's inputs, pauses, and outputs are proven.
+
 ## Documentation folder structure
 
 This is the intended structure for the future implementation. This spec does not create these
@@ -188,7 +293,6 @@ application files.
 buffr/
 ├── .env                         # local, ignored placeholders
 ├── docs/
-│   ├── module-prompts/          # architectural prompt sources
 │   ├── system-design-plan/      # source-of-truth workflow docs
 │   └── superpowers/
 │       ├── specs/
@@ -196,7 +300,6 @@ buffr/
 ├── src/
 │   ├── index.ts                 # temporary entry point
 │   ├── core/
-│   │   ├── policy.ts            # M0 shared policy
 │   │   ├── config.ts            # validated app configuration
 │   │   └── errors.ts
 │   ├── contracts/
@@ -210,15 +313,39 @@ buffr/
 │   │   ├── state.ts             # persisted run state
 │   │   └── guards.ts            # evidence and readiness checks
 │   ├── agents/
-│   │   ├── context.ts           # M1
-│   │   ├── metrics.ts           # M2
-│   │   ├── research.ts          # M3
-│   │   ├── diagnosis.ts         # M4
-│   │   ├── hypothesis.ts        # M5
-│   │   ├── test-definition.ts   # M6
-│   │   └── evaluation.ts        # M7
-│   ├── prompts/
-│   │   └── modules/
+│   │   ├── runner.ts            # shared Agents SDK adapter
+│   │   ├── core/                # M0 shared policy/runtime configuration
+│   │   │   ├── policy.ts
+│   │   │   ├── policy.md
+│   │   │   └── README.md
+│   │   ├── context/             # M1
+│   │   │   ├── agent.ts
+│   │   │   ├── prompt.md
+│   │   │   └── README.md
+│   │   ├── metrics/             # M2 initial and M2 results
+│   │   │   ├── agent.ts
+│   │   │   ├── prompt.md
+│   │   │   └── README.md
+│   │   ├── research/            # M3 bounded research
+│   │   │   ├── agent.ts
+│   │   │   ├── prompt.md
+│   │   │   └── README.md
+│   │   ├── diagnosis/           # M4
+│   │   │   ├── agent.ts
+│   │   │   ├── prompt.md
+│   │   │   └── README.md
+│   │   ├── hypothesis/          # M5
+│   │   │   ├── agent.ts
+│   │   │   ├── prompt.md
+│   │   │   └── README.md
+│   │   ├── test-definition/     # M6
+│   │   │   ├── agent.ts
+│   │   │   ├── prompt.md
+│   │   │   └── README.md
+│   │   └── evaluation/          # M7
+│   │       ├── agent.ts
+│   │       ├── prompt.md
+│   │       └── README.md
 │   ├── connectors/
 │   │   └── etsy/
 │   │       ├── client.ts
@@ -233,6 +360,15 @@ buffr/
 │       └── connectors/
 └── package.json
 ```
+
+Each `src/agents/<role>/README.md` is a concise module card. It documents purpose, when the
+module runs, input contract, output contract, dependencies, permitted tools, success/stop/pause/
+failure conditions, and links back to the related design documents. The README references shared
+contracts in `src/contracts/`; it must not duplicate those contract definitions.
+
+Prompt text stays co-located in each module folder as Markdown. TypeScript owns schema validation,
+model calls, deterministic helpers, and tool wiring. M0 uses `src/agents/core/policy.md` and
+`policy.ts` instead of a standalone workflow turn.
 
 ## Out of scope
 
@@ -251,21 +387,31 @@ buffr/
 
 - The workflow-engine architecture is documented as deterministic routing plus specialist modules.
 - M0 is documented as shared policy/runtime configuration, not a workflow turn.
-- M3 is documented as a bounded read-only research detour with citations, status, evidence,
-  confidence, and safeguards.
+- M3 is documented as a bounded read-only research detour with citations, canonical status,
+  `next_action`, evidence, confidence, and configurable safeguards.
 - The Etsy connector and credential boundary are documented without changing the existing Etsy
   configuration boundary.
 - Local files are explicitly justified for the first single-user version, and the database deferral
   boundary is clear.
+- The architecture is explainable as a deterministic workflow orchestrator with bounded agentic
+  workers, using workflow orchestration, manager-worker, ports/adapters, functional core, and
+  human-in-the-loop patterns.
+- The agent module folder convention is documented: runtime TypeScript, Markdown prompt or policy,
+  and a concise README live together under `src/agents/<role>/`, while shared contracts remain in
+  `src/contracts/`.
 - The folder structure is included as a documentation artifact only.
 
 ## Self-review
 
-- Placeholders: there are no unresolved markers or empty sections; future files are intentionally
-  listed as architecture targets, not created by this documentation-only change.
+- Placeholders: there are no unresolved markers or empty sections; the only intentional future
+  choice is the per-run cost/token budget that must be configured before a real API-backed run.
 - Contradictions: the spec consistently assigns lifecycle routing to deterministic TypeScript and
-  judgment to bounded Agents SDK modules.
-- Ambiguity: M3 may choose permitted tools inside its scope, but only the engine chooses lifecycle
-  stages and transition routes.
+  judgment to bounded Agents SDK modules; M3 `next_action` controls only its research loop.
+- Ambiguity: M3 may choose permitted tools inside its scope and recommend `continue` or `stop`, but
+  only the engine enforces limits and chooses lifecycle stages and transition routes.
+- Architecture patterns: the interview-facing pattern names describe the same boundaries already in
+  the spec and do not introduce a separate implementation scope.
+- Module organization: module folders improve navigation and prompt ownership without moving shared
+  contracts out of `src/contracts/` or adding duplicate schema definitions.
 - Scope: this spec documents the approved design only; it does not implement code, dependencies,
   connector behavior, chat UX, onboarding, billing, voice, or web app work.

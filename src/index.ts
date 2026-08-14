@@ -1,1 +1,1 @@
-console.log("buffr — reset scaffold. Ready for phase 1.");
+console.log('buffr workflow engine scaffold loaded');
