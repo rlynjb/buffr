@@ -52,50 +52,114 @@ Etsy Connector ──► Normalized evidence store
 Annotated pattern diagram:
 
 ```
-Etsy API (read-only)
-        |
-        v
-Etsy Connector (Ports and adapters / external tool adapter)
-        |
-        v
-Normalized evidence store
-        |
-        v
++--------------------------- Ports and adapters boundary -------------------------+
+| external systems                                                               |
+| Pattern: Ports and Adapters                                                    |
+|                                                                                |
+| Etsy API (read-only) ---> Etsy Connector ---> Normalized evidence store         |
+|                            Folder target: src/connectors/etsy/                 |
+|                            Folder: src/contracts/                              |
+|                                                                                |
+| External Web Search ---> hosted web-search adapter (no local source file)       |
+|                            cited research edge                                  |
++------------------------------------+-------------------------------------------+
+                                     |
+                                     v
 +--------------------------------------------------------------------------------+
-| Workflow Engine: Finite State Machine / deterministic workflow orchestrator     |
-| owns explicit allowed routes and lifecycle states                               |
+| Workflow Engine: Folder: src/workflow/                                          |
+| Pattern: Finite State Machine / deterministic workflow orchestrator             |
 +------------------------------+------------------------+------------------------+
-| Gates / guard clauses /      | Finite State Machine   | Repository pattern +   |
-| schema validation            | routing/state          | ports-and-adapters     |
-| decides whether transitions  | pause, wait, resume,   | JsonFileRunRepository /|
-| may proceed                  | complete               | local JSON files /     |
-|                              |                        | atomic writes          |
+| Validation / Gates           | Routing / State        | Pattern: Repository    |
+| File: guards.ts              | File: routes.ts        | File: src/storage/runs.ts |
+| schemas + evidence checks    | File: state.ts         | RunRepository port     |
+| transition allowed?          | pause/wait/resume      | JsonFileRunRepository  |
+|                              | complete/stop          | -> local JSON files    |
 +------------------------------+------------------------+------------------------+
-        |
-        v
-M0 shared policy/runtime configuration for M1-M7 (not a state-machine turn)
-        |
-        v
-Strategy-like specialist agent modules / structured outputs
-
-Primary lifecycle:
-M1 Context -> M2 Metrics -> M4 Diagnosis -> M5 Hypothesis -> M6 Test Plan
-                                                        |
-                                                        v
-                                      real-world experiment waits
-                                                        |
-                                                        v
-                                      M2 Results -> M7 Learning
-
-Bounded research detour:
-M2 Metrics    <--- request/result ---> M3 Research
-M5 Hypothesis <--- request/result ---^
-                                    Bounded agentic tool-use loop /
-                                    ReAct-style research loop with circuit breaker
-                                    read-only tools; returns to requester
-                                    |
-                                    +-- OpenAI hosted web search
-                                        (Ports and adapters / external tool adapter)
+                                     |
+             +-----------------------+-----------------------+
+             |                                               |
+             v                                               v
+M0 shared policy/runtime configuration          +--------------------------------------------------------------+
+Folder: src/agents/core/; not a state turn      | Pattern: Strategy + FSM route                                |
+File: src/agents/core/policy.md                 | Workflow Engine = Context                                   |
+File: src/agents/core/policy.ts                 | File: src/agents/runner.ts                                  |
+                                                | SpecialistModule.run(input) -> structured output             |
+                                                | Folder target: src/agents/context/; src/agents/metrics/     |
+                                                | Folder target: src/agents/diagnosis/; src/agents/hypothesis/ |
+                                                | Folder target: src/agents/test-definition/; src/agents/evaluation/ |
+                                                |                                                              |
+                                                |  Main lifecycle FSM                 Conditional M3 sidecar    |
+                                                |                                                              |
+                                                |  +----------------+                                          |
+                                                |  | M1 Context     |                                          |
+                                                |  +----------------+                                          |
+                                                |          | context accepted                                    |
+                                                |          v                                                     |
+                                                |  +----------------+    - - research needed - -+                |
+                                                |  | M2 Metrics     |---------------------------|                |
+                                                |  +----------------+                           |                |
+                                                |          | metrics calculated                  |                |
+                                                |          v                                     |                |
+                                                |  +--------------------------+                  |                |
+                                                |  | evidence sufficient gate |                  |                |
+                                                |  +--------------------------+                  |                |
+                                                |          | no: request_data                    |                |
+                                                |          +----> +-------------------+          |                |
+                                                |          |      | request-data wait |          |                |
+                                                |          |      +-------------------+          |                |
+                                                |          |              | resume_with_data     |                |
+                                                |          |              +-- back to M2 above   |                |
+                                                |          | yes: evidence_sufficient            |                |
+                                                |          v                                   |                |
+                                                |  +----------------+    - - research needed - -|                |
+                                                |  | M4 Diagnosis   |---------------------------|                |
+                                                |  +----------------+                           |                |
+                                                |          | allowed: diagnose                  |                |
+                                                |          v                                   |                |
+                                                |  +----------------+    - - research needed - -|                |
+                                                |  | M5 Hypothesis  |---------------------------|                |
+                                                |  +----------------+                           |                |
+                                                |          | allowed: propose                   |                |
+                                                |          v                                   |                |
+                                                |  +----------------+    - - research needed - -|                |
+                                                |  | M6 Test Plan   |---------------------------|                |
+                                                |  +----------------+                           |                |
+                                                |          | test plan approved                 |                |
+                                                |          v                                   |                |
+                                                |  +-----------------+                         |                |
+                                                |  | experiment wait |                         |                |
+                                                |  +-----------------+                         |                |
+                                                |          | outcome data received              |                |
+                                                |          v                                   |                |
+                                                |  +----------------+                          |                |
+                                                |  | M2 Results     |                          |                |
+                                                |  +----------------+                          |                |
+                                                |          | allowed: evaluate                  |                |
+                                                |          v                                   |                |
+                                                |  +----------------+    - - research needed - -|                |
+                                                |  | M7 Learning    |---------------------------|                |
+                                                |  +----------------+                           |                |
+                                                |          | allowed: learn                     |                |
+                                                |          v                                   v                |
+                                                |  +----------------+        +--------------------------------+  |
+                                                |  | cycle complete |        | M3 Research sidecar            |  |
+                                                |  +----------------+        | Pattern: Bounded ReAct Loop    |  |
+                                                |                          | + Circuit Breaker              |  |
+                                                |                          | conditional; not linear stage   |  |
+                                                |                          | bounded ReAct/tool-use loop     |  |
+                                                |                          | Folder target: src/agents/research/ |
+                                                |                          | caps source: Folder: src/workflow/ |
+                                                |                          | circuit breaker caps            |  |
+                                                |                          | calls / time / budget           |  |
+                                                |                          | records original requester      |  |
+                                                |                          | read-only Etsy Connector lookups|  |
+                                                |                          | External Web Search citations   |  |
+                                                |                          +--------------------------------+  |
+                                                |                                      | structured result             |
+                                                |                                      v                               |
+                                                |                          return only to requesting state;    |
+                                                |                          same M2/M4/M5/M6/M7 box resumes     |
+                                                +--------------------------------------------------------------+
 ```
 
 | Capability | Pattern / alternative name | Plain implementation name |
@@ -107,6 +171,39 @@ M5 Hypothesis <--- request/result ---^
 | M3 Research | Bounded agentic tool-use loop / ReAct-style research loop with circuit breaker | Read-only tool choice and evidence interpretation inside engine caps |
 | Etsy and web search | Ports and adapters / external tool adapters | Replaceable read-only connector/search adapters |
 | M0 Core | Shared policy/runtime configuration | Shared module policy and limits, not a workflow turn |
+
+Pattern guide:
+
+**Finite State Machine / deterministic workflow orchestrator**:
+`src/workflow/routes.ts`, `guards.ts`, `state.ts`, and `engine.ts` define the
+explicit workflow stages, allowed transitions, validation gates, wait states,
+and completion paths. The lifecycle route is code-owned, not chosen by an LLM.
+
+**Repository pattern / ports and adapters**: `src/storage/runs.ts` defines the
+engine-facing `RunRepository` contract and the `JsonFileRunRepository` adapter.
+The workflow depends on the repository contract; readable JSON files and atomic
+writes stay behind the adapter boundary.
+
+**Ports and adapters**: `src/connectors/etsy/` and external web-search tool
+adapters sit at the edge of the system. The core workflow works with normalized
+evidence and shared contracts in `src/contracts/`, so external systems remain
+replaceable.
+
+**Bounded agentic tool-use loop / ReAct-style research loop with circuit
+breaker**: `src/agents/research/` is the M3 research module home, while
+`src/workflow/` enforces call, time, budget, and return-to-requester rules. M3
+may choose permitted read-only research tools, but it does not control lifecycle
+routing.
+
+**Strategy-like specialist agent modules**: `src/agents/<role>/` holds the
+role-focused M1-M7 module convention, and `src/agents/runner.ts` is the shared
+structured-output runner. M0 policy plus focused prompts, readmes, and contracts
+keep the modules consistent without making them one general-purpose agent.
+
+**Functional core, imperative shell**: deterministic contracts and workflow
+state live in `src/contracts/` and `src/workflow/`. LLM calls, Etsy calls,
+web-search calls, and file I/O stay at the edges in agents, connectors, and
+storage adapters.
 
 Etsy listing changes remain manual. The first user interface comes later as a
 terminal-chat adapter after the workflow is proven.
