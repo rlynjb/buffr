@@ -105,11 +105,10 @@ export function createWorkflowEngine(deps: {
   const now = deps.now ?? (() => new Date());
   const researchLimits = deps.researchLimits ?? DEFAULT_RESEARCH_LIMITS;
 
-  async function persist(state: WorkflowRunState): Promise<WorkflowRunState> {
+  async function persist(state: WorkflowRunState, emitFromIndex = Math.max(0, state.events.length - 1)): Promise<WorkflowRunState> {
     await deps.repository.save(state);
-    const lastEvent = state.events.at(-1);
-    if (lastEvent) {
-      await deps.emit?.(lastEvent);
+    for (const event of state.events.slice(emitFromIndex)) {
+      await deps.emit?.(event);
     }
     return state;
   }
@@ -127,12 +126,15 @@ export function createWorkflowEngine(deps: {
       initialEvidenceRef: evidenceRef('initial', evidence),
       now: now(),
     });
+    const stateWithEvidence = {
+      ...state,
+      evidenceSnapshots: { initial: evidence },
+    };
 
-    await deps.repository.create(state);
+    await deps.repository.create(stateWithEvidence);
     const created = await deps.repository.load(input.runId);
-    const lastEvent = created.events.at(-1);
-    if (lastEvent) {
-      await deps.emit?.(lastEvent);
+    for (const event of created.events) {
+      await deps.emit?.(event);
     }
     return created;
   }
@@ -185,6 +187,7 @@ export function createWorkflowEngine(deps: {
         status: 'ready_for_evaluation',
         stage: 'm2_metrics_results',
         evidenceRefs: [...state.evidenceRefs, evidenceRef('result', evidence)],
+        evidenceSnapshots: { ...state.evidenceSnapshots, result: evidence },
       },
       'workflow.experiment_results_supplied',
       'Experiment result evidence supplied',
@@ -254,125 +257,198 @@ export function createWorkflowEngine(deps: {
   async function runM1(state: WorkflowRunState): Promise<WorkflowRunState> {
     assertCurrentStage(state, 'm1_context');
     assertCanRunStage(state, 'm1_context');
-    const output = parseWithSchema(ContextOutputSchema, await deps.modules.runM1(state), 'M1 context output');
-    return persist(
-      withEvent(
-        {
-          ...state,
-          stage: 'm2_metrics_initial',
-          moduleOutputs: { ...state.moduleOutputs, m1: output },
-        },
-        'module.m1.completed',
-        'M1 context completed',
-      ),
+    const emitFromIndex = state.events.length;
+    const started = withModuleStarted(state, 'm1', 'M1 context started');
+    const output = parseWithSchema(ContextOutputSchema, await deps.modules.runM1(started), 'M1 context output');
+    const completed = withModuleCompleted(
+      {
+        ...started,
+        moduleOutputs: { ...started.moduleOutputs, m1: output },
+      },
+      'm1',
+      'M1 context completed',
     );
+
+    return applyRoute(completed, { type: 'advance', nextStage: 'm2_metrics_initial' }, emitFromIndex);
   }
 
   async function runM2Initial(state: WorkflowRunState): Promise<WorkflowRunState> {
     assertCurrentStage(state, 'm2_metrics_initial');
     assertCanRunStage(state, 'm2_metrics_initial');
+    const emitFromIndex = state.events.length;
+    const started = withModuleStarted(state, 'm2', 'M2 initial metrics started');
     const output = parseWithSchema(
       MetricsOutputSchema,
-      await deps.modules.runM2Initial(state),
+      await deps.modules.runM2Initial(started),
       'M2 initial metrics output',
     );
-    return applyRoute(
+    const completed = withModuleCompleted(
       {
-        ...state,
-        moduleOutputs: { ...state.moduleOutputs, m2Initial: output },
+        ...started,
+        moduleOutputs: { ...started.moduleOutputs, m2Initial: output },
       },
+      'm2',
+      'M2 initial metrics completed',
+      { phase: 'initial' },
+    );
+
+    return applyRoute(
+      completed,
       routeAfterM2Initial(output),
+      emitFromIndex,
     );
   }
 
   async function runM4(state: WorkflowRunState): Promise<WorkflowRunState> {
     assertCurrentStage(state, 'm4_diagnosis');
     assertCanRunStage(state, 'm4_diagnosis');
-    const output = parseWithSchema(DiagnosisOutputSchema, await deps.modules.runM4(state), 'M4 diagnosis output');
-    return applyRoute({ ...state, moduleOutputs: { ...state.moduleOutputs, m4: output } }, routeAfterM4(output));
+    const emitFromIndex = state.events.length;
+    const started = withModuleStarted(state, 'm4', 'M4 diagnosis started');
+    const output = parseWithSchema(DiagnosisOutputSchema, await deps.modules.runM4(started), 'M4 diagnosis output');
+    const completed = withModuleCompleted(
+      { ...started, moduleOutputs: { ...started.moduleOutputs, m4: output } },
+      'm4',
+      'M4 diagnosis completed',
+    );
+
+    return applyRoute(completed, routeAfterM4(output), emitFromIndex);
   }
 
   async function runM5(state: WorkflowRunState): Promise<WorkflowRunState> {
     assertCurrentStage(state, 'm5_hypothesis');
     assertCanRunStage(state, 'm5_hypothesis');
-    const output = parseWithSchema(HypothesisOutputSchema, await deps.modules.runM5(state), 'M5 hypothesis output');
-    return applyRoute({ ...state, moduleOutputs: { ...state.moduleOutputs, m5: output } }, routeAfterM5(output));
+    const emitFromIndex = state.events.length;
+    const started = withModuleStarted(state, 'm5', 'M5 hypothesis started');
+    const output = parseWithSchema(HypothesisOutputSchema, await deps.modules.runM5(started), 'M5 hypothesis output');
+    const completed = withModuleCompleted(
+      { ...started, moduleOutputs: { ...started.moduleOutputs, m5: output } },
+      'm5',
+      'M5 hypothesis completed',
+    );
+
+    return applyRoute(completed, routeAfterM5(output), emitFromIndex);
   }
 
   async function runM6(state: WorkflowRunState): Promise<WorkflowRunState> {
     assertCurrentStage(state, 'm6_test_plan');
     assertCanRunStage(state, 'm6_test_plan');
-    const output = parseWithSchema(TestPlanOutputSchema, await deps.modules.runM6(state), 'M6 test plan output');
-    return applyRoute({ ...state, moduleOutputs: { ...state.moduleOutputs, m6: output } }, routeAfterM6(output));
+    const emitFromIndex = state.events.length;
+    const started = withModuleStarted(state, 'm6', 'M6 test plan started');
+    const output = parseWithSchema(TestPlanOutputSchema, await deps.modules.runM6(started), 'M6 test plan output');
+    const completed = withModuleCompleted(
+      { ...started, moduleOutputs: { ...started.moduleOutputs, m6: output } },
+      'm6',
+      'M6 test plan completed',
+    );
+
+    return applyRoute(completed, routeAfterM6(output), emitFromIndex);
   }
 
   async function runM2Results(state: WorkflowRunState): Promise<WorkflowRunState> {
     assertCurrentStage(state, 'm2_metrics_results');
     assertCanRunStage(state, 'm2_metrics_results');
+    const emitFromIndex = state.events.length;
+    const started = withModuleStarted(state, 'm2', 'M2 result metrics started');
     const output = parseWithSchema(
       MetricsOutputSchema,
-      await deps.modules.runM2Results(state),
+      await deps.modules.runM2Results(started),
       'M2 result metrics output',
     );
+    const completed = withModuleCompleted(
+      { ...started, moduleOutputs: { ...started.moduleOutputs, m2Results: output } },
+      'm2',
+      'M2 result metrics completed',
+      { phase: 'post_experiment' },
+    );
+
     return applyRoute(
-      { ...state, moduleOutputs: { ...state.moduleOutputs, m2Results: output } },
+      completed,
       routeAfterM2Results(output),
+      emitFromIndex,
     );
   }
 
   async function runM7(state: WorkflowRunState): Promise<WorkflowRunState> {
     assertCurrentStage(state, 'm7_learning');
     assertCanRunStage(state, 'm7_learning');
-    const output = parseWithSchema(EvaluationOutputSchema, await deps.modules.runM7(state), 'M7 learning output');
-    return applyRoute({ ...state, moduleOutputs: { ...state.moduleOutputs, m7: output } }, routeAfterM7(output));
+    const emitFromIndex = state.events.length;
+    const started = withModuleStarted(state, 'm7', 'M7 learning started');
+    const output = parseWithSchema(EvaluationOutputSchema, await deps.modules.runM7(started), 'M7 learning output');
+    const completed = withModuleCompleted(
+      { ...started, moduleOutputs: { ...started.moduleOutputs, m7: output } },
+      'm7',
+      'M7 learning completed',
+    );
+
+    return applyRoute(completed, routeAfterM7(output), emitFromIndex);
   }
 
-  async function applyRoute(state: WorkflowRunState, decision: RouteDecision): Promise<WorkflowRunState> {
+  async function applyRoute(
+    state: WorkflowRunState,
+    decision: RouteDecision,
+    emitFromIndex = Math.max(0, state.events.length - 1),
+  ): Promise<WorkflowRunState> {
+    const decided = withEvent(state, 'route.decided', `Route decided: ${decision.type}`, {
+      decisionType: decision.type,
+      nextStage: 'nextStage' in decision ? decision.nextStage : undefined,
+      reason: 'reason' in decision ? decision.reason : undefined,
+    });
+
     if (decision.type === 'advance') {
       return persist(
         withEvent(
-          { ...state, status: statusForStage(decision.nextStage), stage: decision.nextStage },
+          { ...decided, status: statusForStage(decision.nextStage), stage: decision.nextStage },
           'workflow.advanced',
           `Workflow advanced to ${decision.nextStage}`,
         ),
+        emitFromIndex,
       );
     }
 
     if (decision.type === 'research') {
-      return requestResearchFromState(state, decision);
+      return requestResearchFromState(decided, decision, emitFromIndex);
     }
 
     if (decision.type === 'wait') {
       const nextStage = decision.nextStage ?? state.stage;
+      const waiting = withEvent(
+        {
+          ...decided,
+          status: nextStage === 'experiment_wait' ? 'ready_for_experiment' : 'waiting_for_data',
+          stage: nextStage,
+        },
+        'workflow.waiting',
+        decision.reason,
+      );
+
       return persist(
         withEvent(
-          {
-            ...state,
-            status: nextStage === 'experiment_wait' ? 'ready_for_experiment' : 'waiting_for_data',
-            stage: nextStage,
-          },
+          waiting,
           nextStage === 'experiment_wait' ? 'workflow.waiting_for_experiment' : 'workflow.waiting_for_data',
           decision.reason,
         ),
+        emitFromIndex,
       );
     }
 
     if (decision.type === 'complete') {
       return persist(
         withEvent(
-          { ...state, status: 'cycle_complete', stage: 'cycle_complete' },
+          { ...decided, status: 'cycle_complete', stage: 'cycle_complete' },
           'workflow.completed',
           decision.reason,
         ),
+        emitFromIndex,
       );
     }
 
-    return persist(withEvent({ ...state, status: 'stopped' }, 'workflow.stopped', decision.reason));
+    return persist(withEvent({ ...decided, status: 'stopped' }, 'workflow.stopped', decision.reason), emitFromIndex);
   }
 
   async function requestResearchFromState(
     state: WorkflowRunState,
     request: ResearchRequest,
+    emitFromIndex = Math.max(0, state.events.length - 1),
   ): Promise<WorkflowRunState> {
     if (state.stage !== request.returnStage) {
       throw new AppError(
@@ -396,6 +472,7 @@ export function createWorkflowEngine(deps: {
           startedAt: now().toISOString(),
         },
       ),
+      emitFromIndex,
     );
   }
 
@@ -456,6 +533,19 @@ export function createWorkflowEngine(deps: {
       data,
       now: now(),
     }) as WorkflowRunState;
+  }
+
+  function withModuleStarted(state: WorkflowRunState, moduleId: string, message: string): WorkflowRunState {
+    return withEvent(state, 'module.started', message, { moduleId });
+  }
+
+  function withModuleCompleted(
+    state: WorkflowRunState,
+    moduleId: string,
+    message: string,
+    data: Record<string, unknown> = {},
+  ): WorkflowRunState {
+    return withEvent(state, 'module.completed', message, { moduleId, ...data });
   }
 
   return {

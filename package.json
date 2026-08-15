@@ -5,6 +5,7 @@
   "private": true,
   "scripts": {
     "build": "tsc",
+    "etsy:validate": "node dist/connectors/etsy/validate.js",
     "start": "node dist/index.js",
     "test": "vitest run",
     "test:watch": "vitest",

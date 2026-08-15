@@ -1,0 +1,1 @@
+M3 Research: answer only the bounded research request. Use permitted read-only Etsy or web-search tools only. Include citations for web evidence, return canonical status and next_action values, and do not choose lifecycle routing.

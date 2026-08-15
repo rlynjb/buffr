@@ -1,4 +1,5 @@
 import type { WorkflowEvent, WorkflowRunState, WorkflowRunStateInput } from '../contracts/workflow.js';
+import { createWorkflowEvent } from '../tracing/events.js';
 
 export function createInitialWorkflowState(input: {
   runId: string;
@@ -38,15 +39,14 @@ export function appendEvent(
     now: Date;
   },
 ): WorkflowRunStateInput {
-  const event: WorkflowEvent = {
-    eventId: `event-${state.events.length + 1}`,
+  const event: WorkflowEvent = createWorkflowEvent({
     runId: state.runId,
     type: input.type,
     stage: input.stage,
     message: input.message,
-    createdAt: input.now.toISOString(),
-    data: input.data ?? {},
-  };
+    data: input.data,
+    now: () => input.now,
+  });
 
   return {
     ...state,

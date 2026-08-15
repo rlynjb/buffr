@@ -8,6 +8,32 @@
 
 **Tech Stack:** TypeScript + Node.js; OpenAI Agents SDK for judgment-heavy module calls behind a local adapter; Zod for contracts, validation, and structured outputs; Etsy Open API v3 through a read-only OAuth connector; OpenAI hosted web search for cited M3 research; local-file persistence for runs, evidence, experiment plans, and learning records; Vitest with mocked Etsy/OpenAI tools; structured workflow events plus Agents SDK tracing hooks.
 
+## How to read this plan as a junior developer
+
+Read this plan in task order, because each task creates a small foundation that the next task uses.
+The project was built with a strict TDD rhythm:
+
+1. Write a focused failing test that names the behavior.
+2. Run that test and confirm the failure is for the intended missing behavior.
+3. Add the smallest production code needed to pass.
+4. Run the task-specific tests, then the broader verification commands.
+
+Recommended reading order:
+
+- Start with `src/tests/` for a task, because the tests show the intended behavior in executable form.
+- Read the contract files in `src/contracts/` before reading workflow or agent code; they define the shapes everything else must obey.
+- Read `src/workflow/routes.ts`, `guards.ts`, `state.ts`, and `engine.ts` together to understand deterministic routing.
+- Read each `src/agents/<role>/README.md` before that module's `agent.ts`; the README explains why the module exists.
+- Read connector code last. Etsy credentials and endpoint details stay at the edge, never inside workflow modules.
+
+Safety invariants to keep in mind while reading:
+
+- The workflow engine owns lifecycle routing; LLM modules never choose the business-process route.
+- Raw credentials never enter workflow state, module input, persisted run artifacts, or trace events.
+- Etsy connector behavior is read-only; no listing changes are automated.
+- M3 research is bounded by tool-call/time/cost controls and returns only to its requester.
+- Terminal chat is deliberately deferred until the engine is proven by mocked end-to-end tests.
+
 ## Global Constraints
 
 - No automated Etsy listing writes. Recommendations and experiments are manual-only.
@@ -232,6 +258,16 @@ Real credentials are needed only after the mocked connector and engine pass:
 
 ### Task 1: Tooling, Test Runner, And Project Skeleton
 
+#### What this task taught / What was completed
+
+- Purpose: establish the TypeScript/Vitest foundation and a shared `AppError` type used by every later layer.
+- Build order: this task comes first because later contracts, storage, workflow, agents, and connectors all need the same scripts and error vocabulary.
+- Principal files: `package.json`, `tsconfig.json`, `src/index.ts`, `src/core/errors.ts`, `src/tests/smoke.test.ts`, and `src/tests/fixtures/listing.ts`.
+- Tests to read: `src/tests/smoke.test.ts` shows the smallest proof that Vitest can load TypeScript modules and instantiate `AppError`.
+- Completed status: complete in current source; the full suite now runs through `npm test`, `npm run typecheck`, and `npm run build`.
+- Safety note: the temporary entry point does not start workflows, read `.env`, or touch credentials.
+
+
 **Files:**
 - Modify: `package.json`
 - Modify: `tsconfig.json`
@@ -354,6 +390,16 @@ Expected: all commands exit 0.
 ---
 
 ### Task 2: Contracts And Contract Tests
+
+#### What this task taught / What was completed
+
+- Purpose: define the shared data language before building storage, routing, or agents.
+- Build order: Task 2 depends on Task 1's tooling and produces schemas consumed by Tasks 3-12.
+- Principal files: `src/contracts/evidence.ts`, `src/contracts/experiments.ts`, `src/contracts/modules.ts`, `src/contracts/workflow.ts`, and `src/tests/contracts/contracts.test.ts`.
+- Tests to read: `src/tests/contracts/contracts.test.ts` shows how normalized listing evidence, module outputs, workflow state, and validation errors are expected to behave.
+- Completed status: complete in current source; contract tests pass as part of the full suite.
+- Safety note: contract schemas are the first defense against invalid workflow state and malformed module output.
+
 
 **Files:**
 - Create: `src/contracts/evidence.ts`
@@ -792,6 +838,16 @@ Expected: both commands exit 0.
 
 ### Task 3: Local File Storage With Tests
 
+#### What this task taught / What was completed
+
+- Purpose: create the engine-facing persistence port and the first local JSON adapter.
+- Build order: Task 3 consumes `WorkflowRunState` from Task 2 and gives Task 4 a repository interface instead of direct file access.
+- Principal files: `src/storage/runs.ts` and `src/tests/storage/runs.test.ts`.
+- Tests to read: `src/tests/storage/runs.test.ts` covers create/load, save/reload, corrupt JSON, schema-invalid JSON, path-safe run ids, and temp-file cleanup.
+- Completed status: complete in current source; later Task 11 extended the same adapter to persist `run.json`, evidence snapshots, `experiment-plan.json`, and `events.jsonl`.
+- Safety note: callers depend on the `RunRepository` port; JSON files are an adapter detail, not a workflow-engine dependency.
+
+
 **Files:**
 - Create: `src/storage/runs.ts`
 - Create: `src/tests/storage/runs.test.ts`
@@ -853,6 +909,16 @@ Expected: both commands exit 0.
 ---
 
 ### Task 4: Deterministic Routes, Guards, State Engine
+
+#### What this task taught / What was completed
+
+- Purpose: build the finite-state-machine workflow shell that owns stages, allowed transitions, waits, resumes, and completion.
+- Build order: Task 4 consumes contracts from Task 2 and the repository port from Task 3.
+- Principal files: `src/workflow/routes.ts`, `src/workflow/guards.ts`, `src/workflow/state.ts`, `src/workflow/engine.ts`, `src/tests/workflow/routes.test.ts`, `src/tests/workflow/guards.test.ts`, and `src/tests/workflow/engine.test.ts`.
+- Tests to read: route tests explain decisions, guard tests explain evidence gates, and engine tests show persisted one-step-at-a-time execution.
+- Completed status: complete in current source; later tasks expanded engine behavior with module execution, post-experiment flow, tracing, and E2E persistence.
+- Safety note: lifecycle routing remains deterministic TypeScript; agent output can influence structured route inputs but cannot choose arbitrary next states.
+
 
 **Files:**
 - Create: `src/workflow/routes.ts`
@@ -1014,6 +1080,16 @@ Expected: both commands exit 0.
 
 ### Task 5: Agent Runner Adapter, M0 Policy, And Module Wrapper Tests
 
+#### What this task taught / What was completed
+
+- Purpose: create the shared policy/runtime boundary for all agent modules and a fakeable structured-output runner.
+- Build order: Task 5 depends on module contracts from Task 2 and prepares the wrapper pattern used by M1-M7 in Tasks 6-8.
+- Principal files: `src/agents/core/policy.md`, `src/agents/core/policy.ts`, `src/agents/core/README.md`, `src/agents/runner.ts`, `src/tests/agents/policy.test.ts`, and `src/tests/agents/runner.test.ts`.
+- Tests to read: policy tests show the M0 safety rules; runner tests show schema validation, fake runner behavior, and error handling.
+- Completed status: complete in current source; later Task 6 added credential-like-key sanitization to `src/agents/runner.ts`.
+- Safety note: M0 is shared policy, not a workflow turn; module wrappers use it without giving LLMs lifecycle-routing control.
+
+
 **Files:**
 - Create: `src/agents/core/policy.ts`
 - Create: `src/agents/core/policy.md`
@@ -1123,6 +1199,16 @@ Expected: both commands exit 0.
 ---
 
 ### Task 6: M1, Deterministic M2 Metrics, M4, M5, M6 Initial Lifecycle
+
+#### What this task taught / What was completed
+
+- Purpose: implement the first useful analysis path from M1 context through M6 test plan and a manual experiment wait.
+- Build order: Task 6 uses the runner from Task 5, contracts from Task 2, and deterministic engine stages from Task 4.
+- Principal files: `src/agents/context/`, `src/agents/metrics/`, `src/agents/diagnosis/`, `src/agents/hypothesis/`, `src/agents/test-definition/`, `src/tests/agents/context.test.ts`, `src/tests/agents/metrics.test.ts`, and `src/tests/agents/initial-lifecycle.test.ts`.
+- Tests to read: `metrics.test.ts` shows deterministic M2 calculations; `context.test.ts` shows the M1 wrapper boundary; `initial-lifecycle.test.ts` shows `m1_context -> m2_metrics_initial -> m4_diagnosis -> m5_hypothesis -> m6_test_plan -> experiment_wait`.
+- Completed status: complete in current source; all listed role folders contain `agent.ts`, `prompt.md`, and `README.md`.
+- Safety note: M2 arithmetic is deterministic, while M1/M4/M5/M6 use structured outputs and sanitized module input; Etsy changes remain manual.
+
 
 **Files:**
 - Create: `src/agents/context/agent.ts`
@@ -1255,6 +1341,16 @@ Expected: both commands exit 0.
 
 ### Task 7: M3 Bounded Research And Tool Policy
 
+#### What this task taught / What was completed
+
+- Purpose: add the conditional M3 research side loop without making it part of the main lifecycle route.
+- Build order: Task 7 depends on M0 limits from Task 5, contracts from Task 2, and engine return-to-requester semantics from Task 4.
+- Principal files: `src/agents/research/agent.ts`, `src/agents/research/prompt.md`, `src/agents/research/README.md`, and `src/tests/agents/research.test.ts`.
+- Tests to read: `src/tests/agents/research.test.ts` covers continue/stop loops, default 3-call cap, 120-second time cap, web citation URLs, permitted tools, and rejection of `status: blocked`.
+- Completed status: complete in current source; M3 accepts only canonical `resolved`, `partly_resolved`, and `unresolved` statuses.
+- Safety note: M3 may choose among permitted read-only tools inside limits, but it returns structured results only to the original requester and never selects lifecycle routing.
+
+
 **Files:**
 - Create: `src/agents/research/agent.ts`
 - Create: `src/agents/research/prompt.md`
@@ -1361,6 +1457,16 @@ Expected: both commands exit 0.
 
 ### Task 8: M2 Results And M7 Post-Experiment Lifecycle
 
+#### What this task taught / What was completed
+
+- Purpose: close the learning loop after the user manually applies an experiment and supplies result evidence.
+- Build order: Task 8 extends M2 from Task 6 and adds M7 so the Task 4 engine can complete a full post-experiment path.
+- Principal files: `src/agents/metrics/agent.ts`, `src/agents/metrics/README.md`, `src/agents/evaluation/agent.ts`, `src/agents/evaluation/prompt.md`, `src/agents/evaluation/README.md`, and `src/tests/agents/post-experiment.test.ts`.
+- Tests to read: `src/tests/agents/post-experiment.test.ts` shows `experiment_wait -> m2_metrics_results -> m7_learning -> cycle_complete`.
+- Completed status: complete in current source; M2 result metrics reuse the frozen M6 baseline instead of choosing a new baseline after seeing results.
+- Safety note: M7 captures learning and next action; it does not start a new cycle or automate Etsy listing changes.
+
+
 **Files:**
 - Modify: `src/agents/metrics/agent.ts`
 - Modify: `src/agents/metrics/README.md`
@@ -1438,6 +1544,16 @@ Expected: both commands exit 0.
 
 ### Task 9: Tracing And Structured Workflow Events
 
+#### What this task taught / What was completed
+
+- Purpose: make workflow execution observable through structured events.
+- Build order: Task 9 builds on the engine from Task 4 and the module lifecycle from Tasks 6-8.
+- Principal files: `src/tracing/events.ts`, `src/tests/tracing/events.test.ts`, `src/workflow/engine.ts`, and `src/workflow/state.ts`.
+- Tests to read: `src/tests/tracing/events.test.ts` shows event creation, engine emitted event order, and credential-like-key rejection in event data.
+- Completed status: complete in current source; engine emits workflow, module, route, and waiting events through its existing `emit` hook.
+- Safety note: trace events are checked for credential-like keys before emission, so observability does not become a credential leak.
+
+
 **Files:**
 - Create: `src/tracing/events.ts`
 - Create: `src/tests/tracing/events.test.ts`
@@ -1494,6 +1610,16 @@ Expected: both commands exit 0.
 ---
 
 ### Task 10: Etsy Connector Configuration, OAuth Boundary, And Read-Only Mapping
+
+#### What this task taught / What was completed
+
+- Purpose: add the Etsy edge adapter while preserving the workflow engine's credential-free boundary.
+- Build order: Task 10 uses normalized evidence contracts from Task 2 and keeps connector details outside Tasks 4 and 6-9.
+- Principal files: `src/core/config.ts`, `src/connectors/etsy/auth.ts`, `src/connectors/etsy/client.ts`, `src/connectors/etsy/mapper.ts`, `src/connectors/etsy/repository.ts`, `src/connectors/etsy/validate.ts`, `src/tests/connectors/etsy-config.test.ts`, `src/tests/connectors/etsy-mapper.test.ts`, and `src/tests/connectors/etsy-client.test.ts`.
+- Tests to read: config tests show sanitized env loading; mapper tests show Etsy payload normalization; client tests show read-only GET behavior, token headers, repository reads, and mocked connection validation.
+- Completed status: complete in current source; `package.json` includes `etsy:validate` for a later local credential check.
+- Safety note: the connector may know Etsy API details, but the workflow engine never imports config loading, reads `.env`, receives raw credentials, or performs Etsy writes.
+
 
 **Files:**
 - Create: `src/core/config.ts`
@@ -1636,6 +1762,16 @@ Expected with real credentials and a configured listing id: command exits 0 and 
 
 ### Task 11: Full Mocked End-To-End Lifecycle Test
 
+#### What this task taught / What was completed
+
+- Purpose: prove the whole workflow works with fakes before any terminal UI or real API-backed run.
+- Build order: Task 11 composes Tasks 1-10 into one representative run using `JsonFileRunRepository` and fake agent outputs.
+- Principal files: `src/tests/workflow/end-to-end.test.ts`, `src/storage/runs.ts`, `src/contracts/workflow.ts`, and `src/workflow/engine.ts`.
+- Tests to read: `src/tests/workflow/end-to-end.test.ts` shows `start -> M1 -> M2 initial -> M4 -> M5 -> M6 -> experiment_wait -> resume -> M2 results -> M7 -> cycle_complete`.
+- Completed status: complete in current source; the test asserts `run.json`, `evidence/initial.json`, `evidence/result.json`, `experiment-plan.json`, and `events.jsonl` artifacts.
+- Safety note: persisted state and events are checked for credential-like key names; the E2E path uses fakes and no network calls.
+
+
 **Files:**
 - Create: `src/tests/workflow/end-to-end.test.ts`
 - Modify: `src/workflow/engine.ts`
@@ -1691,6 +1827,16 @@ Expected: all commands exit 0.
 
 ### Task 12: Terminal-Chat Adapter Deferral And Acceptance Gate
 
+#### What this task taught / What was completed
+
+- Purpose: make the UI deferral explicit and testable without building a terminal-chat adapter.
+- Build order: Task 12 follows Task 11 because the mocked end-to-end lifecycle is the acceptance gate for future UI work.
+- Principal files: `src/tests/workflow/ui-deferral.test.ts` and `README.md`.
+- Tests to read: `src/tests/workflow/ui-deferral.test.ts` verifies the engine API is importable, `src/chat/` is absent, and README documents the terminal-chat acceptance gate.
+- Completed status: complete in current source; README states that terminal chat starts only after a mocked E2E lifecycle proves inputs, waits, resume behavior, outputs, traces, and persisted evidence.
+- Safety note: no terminal UI, chat adapter, HTTP adapter, MCP adapter, dependency, or engine behavior was added by this task.
+
+
 **Files:**
 - Create: `src/tests/workflow/ui-deferral.test.ts`
 - Modify: `README.md`
@@ -1737,6 +1883,28 @@ npm run typecheck
 Expected: `test ! -d src/chat` exits 0; tests and typecheck exit 0.
 
 ---
+
+## Completed Build Sequence Recap
+
+Tasks 1-5 built the base layer: project tooling, shared contracts, JSON run storage,
+deterministic workflow control, M0 policy, and the fakeable agent runner. These tasks
+make later behavior testable without real OpenAI or Etsy calls.
+
+Tasks 6-8 built the agent lifecycle: M1 context, deterministic M2 metrics, M4 diagnosis,
+M5 hypothesis, M6 test plan, M3 bounded research, post-experiment M2 results, and M7
+learning. The important design lesson is separation of responsibilities: deterministic
+TypeScript owns routing and calculations, while bounded modules return validated structured
+outputs.
+
+Tasks 9-11 proved operational behavior: structured trace events, read-only Etsy connector
+boundaries, and a full mocked lifecycle with persisted run/evidence/plan/event artifacts.
+These tasks show how ports-and-adapters keep file storage, connector calls, and tracing at
+the edges.
+
+Task 12 deliberately stops before UI work. The next implementation phase can start a
+terminal-chat adapter only after reviewing the mocked E2E evidence and preserving the same
+invariants: deterministic routing, no raw credentials in workflow data, read-only Etsy access,
+manual-only listing changes, bounded M3 research, and no lifecycle routing by LLM modules.
 
 ## Implementation Order And Review Gates
 

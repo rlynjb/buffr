@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { AppError } from '../core/errors.js';
+import { NormalizedListingEvidenceSchema } from './evidence.js';
 import {
   ContextOutputSchema,
   DiagnosisOutputSchema,
@@ -55,6 +56,13 @@ export const WorkflowRunStateSchema = z
     createdAt: z.string().datetime(),
     updatedAt: z.string().datetime(),
     evidenceRefs: z.array(z.string()),
+    evidenceSnapshots: z
+      .object({
+        initial: NormalizedListingEvidenceSchema.optional(),
+        result: NormalizedListingEvidenceSchema.optional(),
+      })
+      .strict()
+      .optional(),
     moduleOutputs: z
       .object({
         m1: ContextOutputSchema.optional(),

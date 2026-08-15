@@ -23,6 +23,8 @@ Agent modules will live in self-documenting folders under `src/agents/<role>/`
 with `agent.ts`, co-located Markdown prompts, and a concise module `README.md`;
 shared contract definitions remain in `src/contracts/`.
 
+- Terminal chat starts only after a mocked end-to-end lifecycle proves engine inputs, waits, resume behavior, outputs, traces, and persisted evidence.
+
 Original high-level diagram:
 
 ```

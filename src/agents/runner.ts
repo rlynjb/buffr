@@ -80,7 +80,7 @@ export async function runStructuredModule<TOutput>(
     const result = await input.runner.runStructured({
       moduleId: input.moduleId,
       instructions,
-      input: input.input,
+      input: sanitizeModuleInput(input.input),
       outputSchema: input.outputSchema,
       trace: input.trace,
     });
@@ -97,4 +97,22 @@ export async function runStructuredModule<TOutput>(
     void error;
     throw new AppError('connector_failed', `${input.moduleId} runner failed`);
   }
+}
+
+const CREDENTIAL_KEY_PATTERN = /api[_-]?key|secret|token|refresh/i;
+
+export function sanitizeModuleInput(value: unknown): unknown {
+  if (!value || typeof value !== 'object') {
+    return value;
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizeModuleInput(item));
+  }
+
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .filter(([key]) => !CREDENTIAL_KEY_PATTERN.test(key))
+      .map(([key, child]) => [key, sanitizeModuleInput(child)]),
+  );
 }
