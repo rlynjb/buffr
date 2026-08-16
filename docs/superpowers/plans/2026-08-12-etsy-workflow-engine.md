@@ -258,6 +258,10 @@ Real credentials are needed only after the mocked connector and engine pass:
 
 ### Task 1: Tooling, Test Runner, And Project Skeleton
 
+#### Industry practice / standard
+
+This task applies standard Node/TypeScript package tooling and an automated test runner. The scripts for test, typecheck, and build act as CI-ready quality gates: they make the project repeatable locally now and easy to run in automation later.
+
 #### What this task taught / What was completed
 
 - Purpose: establish the TypeScript/Vitest foundation and a shared `AppError` type used by every later layer.
@@ -390,6 +394,10 @@ Expected: all commands exit 0.
 ---
 
 ### Task 2: Contracts And Contract Tests
+
+#### Industry practice / standard
+
+This task applies typed contracts, runtime schema validation, and contract testing. TypeScript describes intended shapes at compile time, while Zod checks real runtime data before it crosses module boundaries; the tests prove those contracts reject malformed workflow data.
 
 #### What this task taught / What was completed
 
@@ -838,6 +846,10 @@ Expected: both commands exit 0.
 
 ### Task 3: Local File Storage With Tests
 
+#### Industry practice / standard
+
+This task applies the repository pattern and atomic file replacement. The workflow engine depends on a `RunRepository` port rather than file paths, while the JSON adapter writes a temporary file and renames it to reduce partial-write risk. Atomic replacement improves durability for one writer; it is not the same thing as multi-writer concurrency control.
+
 #### What this task taught / What was completed
 
 - Purpose: create the engine-facing persistence port and the first local JSON adapter.
@@ -909,6 +921,10 @@ Expected: both commands exit 0.
 ---
 
 ### Task 4: Deterministic Routes, Guards, State Engine
+
+#### Industry practice / standard
+
+This task applies a finite-state machine with guard clauses and explicit state transitions. Instead of letting arbitrary code or an LLM choose the next step, the engine names allowed stages, validates readiness, and moves through a controlled graph with clear wait, resume, stop, and complete states.
 
 #### What this task taught / What was completed
 
@@ -1080,6 +1096,10 @@ Expected: both commands exit 0.
 
 ### Task 5: Agent Runner Adapter, M0 Policy, And Module Wrapper Tests
 
+#### Industry practice / standard
+
+This task applies a port/adapter boundary for the LLM runner, dependency injection, and test doubles. Production code can later call the Agents SDK through the adapter, while unit tests inject fakes; M0 shared policy keeps common safety rules in one place instead of duplicating them across modules.
+
 #### What this task taught / What was completed
 
 - Purpose: create the shared policy/runtime boundary for all agent modules and a fakeable structured-output runner.
@@ -1199,6 +1219,10 @@ Expected: both commands exit 0.
 ---
 
 ### Task 6: M1, Deterministic M2 Metrics, M4, M5, M6 Initial Lifecycle
+
+#### Industry practice / standard
+
+This task applies strategy-like specialist modules and separates deterministic calculation from judgment-heavy interpretation. Each module has a focused role and structured output, while M2 metric math stays deterministic TypeScript so core calculations remain repeatable and easy to test.
 
 #### What this task taught / What was completed
 
@@ -1341,6 +1365,10 @@ Expected: both commands exit 0.
 
 ### Task 7: M3 Bounded Research And Tool Policy
 
+#### Industry practice / standard
+
+This task applies bounded tool-use, a ReAct-style research loop, and circuit-breaker practices. M3 may decide whether another permitted lookup is useful, but call count, wall-clock time, budget, read-only tools, requester return rules, and citation requirements keep the agentic behavior bounded and auditable.
+
 #### What this task taught / What was completed
 
 - Purpose: add the conditional M3 research side loop without making it part of the main lifecycle route.
@@ -1457,6 +1485,10 @@ Expected: both commands exit 0.
 
 ### Task 8: M2 Results And M7 Post-Experiment Lifecycle
 
+#### Industry practice / standard
+
+This task applies an outcome feedback loop for experiment evaluation. It keeps observed metrics separate from interpretation: M2 calculates post-experiment signals against the frozen baseline, then M7 interprets what those results mean for learning and next action.
+
 #### What this task taught / What was completed
 
 - Purpose: close the learning loop after the user manually applies an experiment and supplies result evidence.
@@ -1544,6 +1576,10 @@ Expected: both commands exit 0.
 
 ### Task 9: Tracing And Structured Workflow Events
 
+#### Industry practice / standard
+
+This task applies structured logging/events and trace correlation. Instead of relying on ad hoc console output, workflow actions emit typed events with stable names and metadata so runs can be inspected, tested, and correlated with future agent or connector traces.
+
 #### What this task taught / What was completed
 
 - Purpose: make workflow execution observable through structured events.
@@ -1610,6 +1646,10 @@ Expected: both commands exit 0.
 ---
 
 ### Task 10: Etsy Connector Configuration, OAuth Boundary, And Read-Only Mapping
+
+#### Industry practice / standard
+
+This task applies OAuth/client credential isolation, least-privilege read-only API access, secret configuration, and anti-corruption adapter mapping. The connector owns Etsy-specific auth and endpoint details, maps raw responses into Buffr evidence contracts, and keeps raw credentials out of workflow state and module context.
 
 #### What this task taught / What was completed
 
@@ -1762,6 +1802,10 @@ Expected with real credentials and a configured listing id: command exits 0 and 
 
 ### Task 11: Full Mocked End-To-End Lifecycle Test
 
+#### Industry practice / standard
+
+This task applies integration and end-to-end testing with mocked external systems and representative fixtures. It proves the main workflow components compose correctly without depending on real Etsy or OpenAI calls, making failures faster, deterministic, and safer to debug.
+
 #### What this task taught / What was completed
 
 - Purpose: prove the whole workflow works with fakes before any terminal UI or real API-backed run.
@@ -1826,6 +1870,10 @@ Expected: all commands exit 0.
 ---
 
 ### Task 12: Terminal-Chat Adapter Deferral And Acceptance Gate
+
+#### Industry practice / standard
+
+This task applies an acceptance gate, incremental delivery, and an adapter boundary. The terminal UI is deferred until the core engine proves its inputs, waits, resumes, outputs, traces, and persisted evidence, so the interface can later adapt a known workflow instead of shaping unfinished core behavior.
 
 #### What this task taught / What was completed
 
