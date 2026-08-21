@@ -27,6 +27,11 @@ The collection boundary belongs in Buffr. MerchGrid remains the operational
 Shopify product and privacy-filtered telemetry producer. It will not gain an
 analytics dashboard, a reporting database, or cross-source connectors.
 
+This document is the first **MerchGrid source pack**: a concrete bundle of
+source adapters, metric definitions, and report rules used to understand one
+operational product. It exercises, but does not define the full scope of,
+Buffr's future shared aggregation core.
+
 ## Non-goals
 
 - Copying raw PostHog events, Shopify catalog records, Fly logs, or personal
@@ -38,6 +43,74 @@ analytics dashboard, a reporting database, or cross-source connectors.
 - Replacing the source dashboards as their systems of record.
 
 ## Architecture
+
+### Terms and design patterns
+
+The **aggregation layer** is the general data-integration boundary inside
+Buffr. In industry terms, it is a small analytics ingestion or ETL pipeline:
+it extracts bounded source data, transforms it into a stable internal shape,
+and loads it into Buffr evidence storage. It is not a Shopify-specific
+component and is not a separate dashboard product.
+
+A **source pack** is Buffr's name for a product- or platform-specific bundle
+that uses that shared core. The name is local to this project; the established
+patterns within it are:
+
+| Pattern | How this design applies it |
+| --- | --- |
+| Ports and adapters | One adapter owns each external API or import format. |
+| Adapter pattern | Each adapter converts a source's access method and response shape into Buffr inputs. |
+| Anti-corruption layer | Source-specific names, credentials, and payloads stop at the adapter/normalizer seam rather than leaking into the work engine. |
+| Plugin-like vertical slice | A source pack bundles the adapters, metric allowlist, and report rules for one product or workflow. |
+| Functional core, imperative shell | I/O occurs in adapters; normalization, validation, comparisons, and summary construction are deterministic Buffr logic. |
+
+The shared core and the source packs have separate responsibilities:
+
+```text
+                   BUFFR: SHARED AGGREGATION CORE
++-------------------------------------------------------------------+
+| Adapter ports -> normalizer -> snapshot repository -> summaries   |
+|                                                    -> work engine  |
+|                                                                   |
+| Owns contracts, collection lifecycle, validation, persistence,    |
+| freshness, failure states, comparisons, and reusable reports.     |
++-------------------------------------------------------------------+
+             ^                         ^                         ^
+             |                         |                         |
+  +----------+-----------+  +----------+-----------+  +----------+-----------+
+  | MerchGrid pack       |  | Etsy pack (future)   |  | Meta pack (future)   |
+  | PostHog              |  | Etsy API             |  | Meta API/data export |
+  | Fly Metrics          |  | product telemetry*   |  | product telemetry*   |
+  | Shopify Partner      |  | reliability*         |  | reliability*         |
+  +----------------------+  +----------------------+  +----------------------+
+
+*Included only when that product or platform has a relevant source.
+```
+
+The MerchGrid pack is not the same thing as MerchGrid itself. MerchGrid is the
+operational Shopify app. The pack is Buffr's description of the evidence
+needed to review that app:
+
+```text
+MerchGrid operational product
+     | emits safe usage events
+     v
+PostHog -----------+
+Fly Metrics -------+--> MerchGrid source-pack adapters
+Shopify Partner ---+              |
+                                 | adapter / anti-corruption seam
+                                 v
+                      shared normalized evidence contract
+                                 |
+                                 v
+                      Buffr summaries and work engine
+```
+
+Grafana is not a separate source in this flow. It is the visualization UI for
+Fly's managed metrics; the Fly adapter queries the Prometheus-compatible Fly
+metrics API directly.
+
+### MerchGrid pack architecture
 
 Buffr follows its existing ports-and-adapters direction: connectors isolate
 external API details; the deterministic core consumes normalized evidence.
@@ -66,6 +139,35 @@ The proposed components are:
 5. **Workflow integration** treats snapshots and summaries as normalized
    evidence. Buffr's deterministic workflow remains responsible for routing,
    evidence gates, waits, and any later agent-assisted interpretation.
+
+### Daily and weekly data flow
+
+```text
+[scheduler or manual backfill]
+              | supplies a completed UTC date
+              v
+   [MerchGrid source-pack coordinator]
+              | invokes each source independently
+              +--> PostHog adapter -------+
+              +--> Fly Metrics adapter ---+--> [normalizer + validator]
+              +--> Shopify Partner adapter+              |
+                                                     v
+                                   [daily metric snapshots: source + date]
+                                                     |
+                       +-----------------------------+------------------------------+
+                       |                                                            |
+                       v                                                            v
+          [daily health summary]                                [weekly review builder]
+              completed day + freshness                              two completed 7-day windows
+                       |                                                            |
+                       +------------------> [Buffr evidence / work engine] <-------+
+```
+
+The source-pack coordinator knows which adapters and metric allowlists belong
+to MerchGrid. The shared core knows how to validate, persist, compare, and
+surface their normalized evidence. A future Etsy or Meta pack supplies a
+different adapter set and typed metrics through the same seams; it does not
+duplicate the shared core.
 
 ## Data contract
 
