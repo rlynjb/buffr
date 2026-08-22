@@ -4,7 +4,10 @@ import {
   loadPosthogMetricsConfig,
   loadShopifyPartnerCsvConfig,
 } from '../../core/config.js';
-import { classifyMetricSourceFailure } from '../../connectors/merchgrid/source.js';
+import {
+  classifyMetricSourceFailure,
+  createMetricSourceFailureSnapshot,
+} from '../../connectors/merchgrid/source.js';
 
 describe('MerchGrid metric source boundary', () => {
   it('loads PostHog query config without exposing its API key in configuration errors', () => {
@@ -48,5 +51,38 @@ describe('MerchGrid metric source boundary', () => {
     expect(classifyMetricSourceFailure({ status: 401 })).toBe('authentication');
     expect(classifyMetricSourceFailure({ malformed: true })).toBe('schema');
     expect(classifyMetricSourceFailure({})).toBe('transport');
+  });
+
+  it('classifies HTTP 403 as an authentication failure', () => {
+    expect(classifyMetricSourceFailure({ status: 403 })).toBe('authentication');
+  });
+
+  it('classifies an unrecognized status-bearing response as unknown', () => {
+    expect(classifyMetricSourceFailure({ status: 500 })).toBe('unknown');
+  });
+
+  it('normalizes a provider error into a bounded failed snapshot', () => {
+    const providerError = new Error('provider rejected credential: secret');
+
+    const snapshot = createMetricSourceFailureSnapshot({
+      source: 'posthog',
+      window: {
+        date: '2026-08-21',
+        startInclusive: '2026-08-21T00:00:00.000Z',
+        endExclusive: '2026-08-22T00:00:00.000Z',
+      },
+      failure: providerError,
+      collectedAt: '2026-08-22T00:05:00.000Z',
+    });
+
+    expect(snapshot).toEqual({
+      source: 'posthog',
+      date: '2026-08-21',
+      collectedAt: '2026-08-22T00:05:00.000Z',
+      status: 'failed',
+      metrics: {},
+      notes: ['transport'],
+    });
+    expect(JSON.stringify(snapshot)).not.toContain(providerError.message);
   });
 });
