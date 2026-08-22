@@ -42,6 +42,20 @@ export type MetricSourceAdapter = {
   collect(window: CollectionWindow): Promise<DailyMetricSnapshot>;
 };
 
+export abstract class MetricSourceAdapterBase implements MetricSourceAdapter {
+  abstract readonly source: MetricSource;
+
+  async collect(window: CollectionWindow): Promise<DailyMetricSnapshot> {
+    try {
+      return await this.collectMetrics(window);
+    } catch (failure) {
+      return createMetricSourceFailureSnapshot({ source: this.source, window, failure });
+    }
+  }
+
+  protected abstract collectMetrics(window: CollectionWindow): Promise<DailyMetricSnapshot>;
+}
+
 export function classifyMetricSourceFailure(failure: unknown): MetricSourceFailureKind {
   if (!isMetricSourceFailure(failure)) {
     return 'transport';

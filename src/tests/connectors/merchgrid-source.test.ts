@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import type { DailyMetricSnapshot } from '../../contracts/metrics.js';
 import {
   loadFlyMetricsConfig,
   loadPosthogMetricsConfig,
@@ -7,6 +8,7 @@ import {
 import {
   classifyMetricSourceFailure,
   createMetricSourceFailureSnapshot,
+  MetricSourceAdapterBase,
 } from '../../connectors/merchgrid/source.js';
 
 describe('MerchGrid metric source boundary', () => {
@@ -84,5 +86,31 @@ describe('MerchGrid metric source boundary', () => {
       notes: ['transport'],
     });
     expect(JSON.stringify(snapshot)).not.toContain(providerError.message);
+  });
+
+  it('resolves a bounded failed snapshot when an adapter provider operation throws', async () => {
+    class ThrowingPosthogAdapter extends MetricSourceAdapterBase {
+      readonly source = 'posthog';
+
+      protected async collectMetrics(): Promise<DailyMetricSnapshot> {
+        throw { status: 401, body: { providerMessage: 'credential secret' } };
+      }
+    }
+
+    const snapshot = await new ThrowingPosthogAdapter().collect({
+      date: '2026-08-21',
+      startInclusive: '2026-08-21T00:00:00.000Z',
+      endExclusive: '2026-08-22T00:00:00.000Z',
+    });
+
+    expect(snapshot).toEqual({
+      source: 'posthog',
+      date: '2026-08-21',
+      collectedAt: expect.any(String),
+      status: 'failed',
+      metrics: {},
+      notes: ['authentication'],
+    });
+    expect(JSON.stringify(snapshot)).not.toContain('credential secret');
   });
 });
