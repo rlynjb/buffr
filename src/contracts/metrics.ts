@@ -10,6 +10,7 @@ export const OperationalNoteSchema = z.enum([
   'transport',
   'schema',
   'unknown',
+  'no_metrics',
   'manual_import',
   'backfill',
 ]);

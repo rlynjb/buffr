@@ -64,9 +64,9 @@ describe('metric contracts', () => {
     expect(
       DailyMetricSnapshotSchema.parse({
         ...completePosthogSnapshot,
-        notes: ['authentication', 'manual_import'],
+        notes: ['authentication', 'manual_import', 'no_metrics'],
       }).notes,
-    ).toEqual(['authentication', 'manual_import']);
+    ).toEqual(['authentication', 'manual_import', 'no_metrics']);
     expect(() =>
       DailyMetricSnapshotSchema.parse({ ...completePosthogSnapshot, notes: ['merchant@example.com'] }),
     ).toThrow();
