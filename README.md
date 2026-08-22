@@ -10,6 +10,13 @@ implementation; current files are named `2026-08-09-buffr-reset-scaffold-*`,
 while archived specs and plans are dated earlier. Prior implementation is
 available in git history before the reset commit.
 
+## Shopify Partner aggregate import
+
+Place a manually exported, aggregate-only Shopify Partner CSV in the ignored
+`.local/` directory (for example, `.local/shopify-partner-aggregates.csv`). The
+import accepts only `date`, `active_merchants`, `installs`, `uninstalls`, and
+`earnings_amount`; do not include raw merchant, shop, or customer data.
+
 ## Current architecture direction
 
 The approved Etsy workflow engine pattern is a **deterministic workflow orchestrator with bounded agentic workers**.
