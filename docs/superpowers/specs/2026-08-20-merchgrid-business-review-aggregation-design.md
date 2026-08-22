@@ -20,7 +20,7 @@ Buffr will collect small daily aggregates from three existing sources:
 | Source | What it contributes | Initial collection mode |
 | --- | --- | --- |
 | PostHog | `app_opened`, `scan_started`, `scan_completed`, and `scan_failed` counts and scan-completion funnel rates | Automated read-only query |
-| Fly Metrics / Grafana | availability, request/error signals, and machine/reliability aggregates | Automated read-only Prometheus query |
+| Fly Metrics / Grafana | measured request/error signals and machine/reliability aggregates | Automated read-only Prometheus query |
 | Shopify Partner data | active merchants, installs, uninstalls, and earnings when available | Capability-checked connector; CSV import fallback |
 
 The collection boundary belongs in Buffr. MerchGrid remains the operational
@@ -204,7 +204,7 @@ The initial metric names are deliberately small:
 | Source | Metrics |
 | --- | --- |
 | PostHog | `app_opened_count`, `scan_started_count`, `scan_completed_count`, `scan_failed_count`, `scan_completion_rate` |
-| Fly Metrics | `request_count`, `error_response_count`, `error_rate`, `availability_status` |
+| Fly Metrics | `request_count`, `error_response_count`, `error_rate` |
 | Shopify Partner | `active_merchants`, `installs`, `uninstalls`, `earnings_amount` |
 
 `scan_completion_rate` is `scan_completed_count / scan_started_count` when at
@@ -276,7 +276,7 @@ stored in a snapshot.
 The **daily health summary** contains:
 
 - date and source freshness;
-- availability and error-rate status from Fly Metrics;
+- measured request counts and an error rate from Fly Metrics when requests exist;
 - scan queue outcome counts from PostHog;
 - an explicit list of unavailable or partial sources.
 

@@ -272,11 +272,11 @@ git commit -m "feat: collect PostHog aggregate metrics"
 
 #### Build with intent
 
-**Purpose:** Collect the operational health signals that explain whether MerchGrid was reachable and serving requests reliably.
+**Purpose:** Collect measured operational request and error signals that help explain whether MerchGrid was serving requests reliably.
 
-**Why now:** Product usage alone cannot distinguish “merchants did not use the app” from “the app had availability or error problems.” Reliability evidence provides that separate operational view.
+**Why now:** Product usage alone cannot distinguish “merchants did not use the app” from “the app received requests that failed.” Reliability evidence provides that separate operational view without inventing an availability value.
 
-**How:** Query Fly's Prometheus-compatible metrics endpoint for total edge responses and 5xx responses over the same completed day; derive an error rate only when a denominator exists. An empty response remains unavailable rather than being mistaken for zero traffic.
+**How:** Query Fly's Prometheus-compatible metrics endpoint for total edge responses and 5xx responses over the same completed day; derive an error rate only when a denominator exists. An empty response remains unavailable rather than being mistaken for zero traffic. Do not emit an `availability_status`: response counts alone cannot prove uptime or availability.
 
 > **DDIA lens — observability and missing-data semantics:** Metrics are measurements, not guaranteed facts. “No metric returned” is different from a measured value of zero. Preserving that distinction prevents a dashboard or review from making an overconfident claim about reliability.
 

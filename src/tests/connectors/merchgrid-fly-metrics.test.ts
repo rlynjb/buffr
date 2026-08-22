@@ -18,7 +18,7 @@ describe('Fly reliability metrics adapter', () => {
       date: '2026-08-21',
       collectedAt: '2026-08-22T00:05:00.000Z',
       status: 'complete',
-      metrics: { request_count: 100, error_response_count: 3, error_rate: 0.03, availability_status: 1 },
+      metrics: { request_count: 100, error_response_count: 3, error_rate: 0.03 },
       notes: [],
     });
     expect(fakeHttp.requests).toEqual([{
@@ -71,9 +71,22 @@ describe('Fly reliability metrics adapter', () => {
 
     expect(snapshot).toMatchObject({
       status: 'complete',
-      metrics: { request_count: 0, error_response_count: 0, availability_status: 1 },
+      metrics: { request_count: 0, error_response_count: 0 },
     });
     expect(snapshot).not.toHaveProperty('metrics.error_rate');
+  });
+
+  it('reports only measured response counts and error rate for an all-5xx day', async () => {
+    const fakeHttp = new SequentialFakeHttpClient();
+    fakeHttp.respond(prometheusStatusVector([['503', 12]]));
+
+    const snapshot = await adapterFor(fakeHttp).collect(completedMerchGridWindow);
+
+    expect(snapshot).toMatchObject({
+      status: 'complete',
+      metrics: { request_count: 12, error_response_count: 12, error_rate: 1 },
+    });
+    expect(snapshot).not.toHaveProperty('metrics.availability_status');
   });
 
   it('resolves a bounded failed snapshot when the Prometheus provider fails', async () => {
