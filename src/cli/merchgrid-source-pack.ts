@@ -22,6 +22,18 @@ export type MerchGridSourcePackCliInput = {
   writeLine: (line: string) => void;
 };
 
+export type MerchGridSourcePackRuntimeDependenciesOptions = {
+  env?: NodeJS.ProcessEnv;
+  http?: HttpClient;
+};
+
+export type MerchGridSourcePackEntrypointInput = {
+  args: readonly string[];
+  env?: NodeJS.ProcessEnv;
+  writeLine: (line: string) => void;
+  writeError: (line: string) => void;
+};
+
 /** Runs one explicit collection or review command and emits only its artifact path and source states. */
 export async function runMerchGridSourcePackCli(input: MerchGridSourcePackCliInput): Promise<void> {
   const [command, ...options] = input.args;
@@ -43,10 +55,11 @@ export async function runMerchGridSourcePackCli(input: MerchGridSourcePackCliInp
 
 /** Builds the runtime-only dependency graph; tests supply their own fakes instead. */
 export function createMerchGridSourcePackDependencies(
-  env: NodeJS.ProcessEnv = process.env,
+  options: MerchGridSourcePackRuntimeDependenciesOptions = {},
 ): MerchGridSourcePackDependencies {
+  const env = options.env ?? process.env;
   const dataDir = requiredSetting(env, 'MERCHGRID_METRICS_DATA_DIR');
-  const http = new FetchHttpClient();
+  const http = options.http ?? new FetchHttpClient();
   return {
     adapters: [
       new PosthogMetricSourceAdapter({
@@ -72,6 +85,19 @@ export function createMerchGridSourcePackDependencies(
     repository: new JsonFileMetricSnapshotRepository({ rootDir: join(dataDir, 'snapshots') }),
     artifacts: new JsonFileMerchGridReviewArtifactRepository({ rootDir: join(dataDir, 'artifacts') }),
   };
+}
+
+/** Catches runtime setup and command failures so CLI errors remain bounded. */
+export async function runMerchGridSourcePackEntrypoint(input: MerchGridSourcePackEntrypointInput): Promise<void> {
+  try {
+    await runMerchGridSourcePackCli({
+      args: input.args,
+      dependencies: createMerchGridSourcePackDependencies({ env: input.env }),
+      writeLine: input.writeLine,
+    });
+  } catch (error) {
+    input.writeError(error instanceof AppError ? error.code : 'unexpected_error');
+  }
 }
 
 class FetchHttpClient implements HttpClient {
@@ -110,16 +136,16 @@ function requiredSetting(env: NodeJS.ProcessEnv, name: string): string {
 }
 
 function flyMetricsUrl(organization: string): string {
-  return `https://api.fly.io/prometheus/${encodeURIComponent(organization)}`;
+  return `https://api.fly.io/prometheus/${encodeURIComponent(organization)}/api/v1/query`;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  void runMerchGridSourcePackCli({
+  void runMerchGridSourcePackEntrypoint({
     args: process.argv.slice(2),
-    dependencies: createMerchGridSourcePackDependencies(),
     writeLine: (line) => process.stdout.write(`${line}\n`),
-  }).catch((error: unknown) => {
-    process.stderr.write(`${error instanceof AppError ? error.code : 'unexpected_error'}\n`);
-    process.exitCode = 1;
+    writeError: (line) => {
+      process.stderr.write(`${line}\n`);
+      process.exitCode = 1;
+    },
   });
 }

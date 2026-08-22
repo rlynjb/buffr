@@ -3,8 +3,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { CollectionWindow, DailyMetricSnapshot, MetricSource } from '../../contracts/metrics.js';
-import { runMerchGridSourcePackCli } from '../../cli/merchgrid-source-pack.js';
-import type { MetricSourceAdapter } from '../../connectors/merchgrid/source.js';
+import {
+  createMerchGridSourcePackDependencies,
+  runMerchGridSourcePackCli,
+  runMerchGridSourcePackEntrypoint,
+} from '../../cli/merchgrid-source-pack.js';
+import type { HttpClient, HttpRequest, MetricSourceAdapter } from '../../connectors/merchgrid/source.js';
 import {
   JsonFileMerchGridReviewArtifactRepository,
   runDailyCollection,
@@ -148,6 +152,47 @@ describe('MerchGrid source-pack jobs', () => {
     ]);
   });
 
+  it('configures the Fly adapter with the Prometheus query endpoint', async () => {
+    const requestedUrls: string[] = [];
+    const http: HttpClient = {
+      async request<T>(request: HttpRequest) {
+        requestedUrls.push(request.url);
+        return {
+          status: 200,
+          body: {
+            status: 'success',
+            data: { resultType: 'vector', result: [] },
+          } as T,
+        };
+      },
+    };
+    const dependencies = createMerchGridSourcePackDependencies({ env: fakeRuntimeEnvironment(), http });
+    const fly = dependencies.adapters.find((adapter) => adapter.source === 'fly_metrics')!;
+
+    await fly.collect({
+      date: '2026-08-21',
+      startInclusive: '2026-08-21T00:00:00.000Z',
+      endExclusive: '2026-08-22T00:00:00.000Z',
+    });
+
+    expect(requestedUrls).toEqual(['https://api.fly.io/prometheus/buffr-test/api/v1/query']);
+  });
+
+  it('reports missing runtime configuration through the bounded CLI error channel', async () => {
+    const output: string[] = [];
+    const errors: string[] = [];
+
+    await runMerchGridSourcePackEntrypoint({
+      args: ['collect', '--date', '2026-08-21'],
+      env: {},
+      writeLine: (line) => output.push(line),
+      writeError: (line) => errors.push(line),
+    });
+
+    expect(output).toEqual([]);
+    expect(errors).toEqual(['configuration_failed']);
+  });
+
   async function fakeDependencies(): Promise<MerchGridSourcePackDependencies> {
     const rootDir = await mkdtemp(join(tmpdir(), 'merchgrid-source-pack-job-'));
     temporaryDirectories.push(rootDir);
@@ -163,6 +208,19 @@ describe('MerchGrid source-pack jobs', () => {
     };
   }
 });
+
+function fakeRuntimeEnvironment(): NodeJS.ProcessEnv {
+  return {
+    POSTHOG_PROJECT_ID: 'test-project',
+    POSTHOG_PERSONAL_API_KEY: 'test-key',
+    POSTHOG_BASE_URL: 'https://posthog.example.test',
+    FLY_ORG_SLUG: 'buffr-test',
+    FLY_ACCESS_TOKEN: 'test-token',
+    FLY_APP_NAME: 'buffr-test-app',
+    MERCHGRID_METRICS_DATA_DIR: '/tmp/merchgrid-test-data',
+    SHOPIFY_PARTNER_AGGREGATES_CSV_PATH: '/tmp/merchgrid-test.csv',
+  };
+}
 
 function completeAdapter(source: MetricSource, metrics: Record<string, number>): MetricSourceAdapter {
   return {
