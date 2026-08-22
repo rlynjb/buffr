@@ -42,6 +42,11 @@ Buffr's future shared aggregation core.
   collection lifecycle.
 - Replacing the source dashboards as their systems of record.
 
+> **DDIA lens — system of record:** PostHog, Fly Metrics, and Shopify Partner
+> remain authoritative for their own data. Buffr reads bounded aggregates and
+> creates its own derived evidence; it does not overwrite or replace a source
+> system's dashboard.
+
 ## Architecture
 
 ### Terms and design patterns
@@ -169,28 +174,10 @@ surface their normalized evidence. A future Etsy or Meta pack supplies a
 different adapter set and typed metrics through the same seams; it does not
 duplicate the shared core.
 
-### DDIA concepts used in this design
-
-The terms below are included because they name concrete choices in this design;
-they do not require Buffr to become a large distributed-data platform.
-
-| DDIA concept | Meaning in this design |
-| --- | --- |
-| **Dataflow** | The defined path from a source system, through its adapter and the normalizer, into a stored Buffr snapshot and then a summary or workflow run. |
-| **System of record** | PostHog, Fly Metrics, and Shopify Partner remain authoritative for their own data. Buffr does not overwrite or replace their dashboards. |
-| **Derived data** | Buffr's daily snapshots, daily health summary, and weekly business review are computed from source aggregates rather than entered manually. |
-| **Materialized view** | A persisted daily or weekly summary is a query-friendly stored representation of a completed period, built from normalized snapshots. |
-| **Data contract** | `DailyMetricSnapshot` is the stable interface between source adapters and the Buffr core. It lets the core work without knowing a provider's raw response shape. |
-| **Schema evolution** | An adapter absorbs a provider API or export-format change and maps it to the existing contract, or explicitly records an unavailable/failed source; it does not silently reinterpret historical metrics. |
-| **Idempotence** | Re-running collection for an already successful source/date produces the same stored result rather than a duplicate observation. |
-| **Backfill** | A controlled manual run can collect a missed completed date, retaining its actual collection time and a backfill note. |
-| **Data lineage / provenance** | Every snapshot records its source, UTC date window, collection time, status, and bounded notes so a review can show where each number came from. |
-| **Batch processing** | The first collector processes completed daily windows and builds a weekly review from completed seven-day windows; it is not a real-time stream processor. |
-| **Retention** | Buffr keeps compact derived snapshots because source retention can be shorter than the comparisons the review needs; Fly's managed metrics are the current example. |
-
-The first version intentionally does **not** claim exactly-once delivery,
-event-sourcing, or stream processing. Those concepts would add guarantees and
-operational complexity that this daily aggregate design does not need.
+> **DDIA lens — dataflow:** This diagram is the system's dataflow: a defined
+> path from each source through an adapter and normalizer, into a stored Buffr
+> snapshot, and then into a summary or workflow run. The source pack owns its
+> inputs; the shared core owns what happens after those inputs cross the seam.
 
 ## Data contract
 
@@ -206,6 +193,11 @@ type DailyMetricSnapshot = {
   notes: string[]; // bounded operational labels, never source payloads
 };
 ```
+
+> **DDIA lens — data contract and schema evolution:** `DailyMetricSnapshot` is
+> the stable contract between external adapters and Buffr. When a provider API
+> or CSV format changes, its adapter absorbs that change or records the source
+> as unavailable; it does not silently reinterpret a historical metric.
 
 The initial metric names are deliberately small:
 
@@ -223,6 +215,10 @@ Snapshots record `partial`, `unavailable`, or `failed` rather than inventing a
 zero. The summaries must display source freshness and omit comparisons that
 would make an incomplete source look healthy.
 
+> **DDIA lens — lineage (or provenance):** The `source`, UTC `date`,
+> `collectedAt`, `status`, and bounded `notes` fields make each number
+> traceable: a review can say where a metric came from and how fresh it is.
+
 ## Collection and scheduling
 
 The initial job is deterministic and idempotent:
@@ -236,6 +232,12 @@ The initial job is deterministic and idempotent:
 The daily job must not query a still-open day. It may be run manually for a
 specified past date to backfill a missed snapshot, but it must retain the
 original collection timestamp and mark the backfill in notes.
+
+> **DDIA lens — batch processing, idempotence, and backfill:** The first
+> collector processes completed daily windows in batches; it is not a
+> real-time stream processor. *Idempotence* means re-running a successful
+> source/date does not create a duplicate observation. A *backfill* is the
+> controlled collection of a missed historical date.
 
 The weekly review is a scheduled Sunday-after-close summary by default. It is
 not an LLM-authored operational decision: the deterministic layer calculates
@@ -253,6 +255,10 @@ using a least-privilege Fly access token scoped to the relevant organization.
 Fly retains managed metrics for about 15 days, so daily snapshotting is required
 for week-over-week history beyond that window. Grafana remains a visualization
 surface, not the connector target.
+
+> **DDIA lens — retention:** A source may keep data for less time than Buffr
+> needs for comparison. Buffr therefore retains compact, derived daily
+> snapshots, rather than attempting to copy Fly's raw monitoring data.
 
 **Shopify Partner.** The connector begins with a capability check against the
 Partner API for the defined aggregate metrics. If a required metric is not
@@ -285,6 +291,11 @@ The **weekly business review** contains:
 
 Neither output is a dashboard requirement. The first delivery surface is a
 persisted Buffr evidence artifact that the existing workflow can read.
+
+> **DDIA lens — derived data and materialized views:** These summaries are
+> *derived data*: they are computed from source aggregates. When persisted for
+> a completed day or week, they act as small *materialized views*—stored,
+> query-friendly representations of a reporting period.
 
 ## Failure handling and observability
 
