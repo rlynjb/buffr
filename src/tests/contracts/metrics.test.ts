@@ -45,6 +45,21 @@ describe('metric contracts', () => {
     ).toThrow();
   });
 
+  it('allows only the approved response aggregate metric key', () => {
+    expect(
+      DailyMetricSnapshotSchema.parse({
+        ...completePosthogSnapshot,
+        metrics: { request_count: 100, error_response_count: 3 },
+      }).metrics,
+    ).toEqual({ request_count: 100, error_response_count: 3 });
+    expect(() =>
+      DailyMetricSnapshotSchema.parse({
+        ...completePosthogSnapshot,
+        metrics: { response_count: 8 },
+      }),
+    ).toThrow();
+  });
+
   it('rejects overlong notes and sensitive keys in aggregate metadata', () => {
     expect(() =>
       DailyMetricSnapshotSchema.parse({
@@ -52,12 +67,7 @@ describe('metric contracts', () => {
         notes: Array.from({ length: 13 }, () => 'bounded'),
       }),
     ).toThrow();
-    expect(() =>
-      DailyMetricSnapshotSchema.parse({
-        ...completePosthogSnapshot,
-        metrics: { response_count: 8 },
-      }),
-    ).toThrow();
+    expect(() => DailyMetricSnapshotSchema.parse({ ...completePosthogSnapshot, payload_count: 8 })).toThrow();
   });
 
   it('rejects content-bearing note values while allowing bounded operational labels', () => {

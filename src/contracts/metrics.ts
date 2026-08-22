@@ -82,17 +82,21 @@ function isUtcCalendarDate(value: string): boolean {
   return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value;
 }
 
-function sensitiveKeys(value: unknown): string[] {
+function sensitiveKeys(value: unknown, path: readonly string[] = []): string[] {
   if (!value || typeof value !== 'object') {
     return [];
   }
 
   if (Array.isArray(value)) {
-    return value.flatMap(sensitiveKeys);
+    return value.flatMap((child) => sensitiveKeys(child, path));
   }
 
   return Object.entries(value as Record<string, unknown>).flatMap(([key, child]) => [
-    ...(SENSITIVE_KEY_PATTERN.test(key) ? [key] : []),
-    ...sensitiveKeys(child),
+    ...(SENSITIVE_KEY_PATTERN.test(key) && !isApprovedAggregateMetricKey(path, key) ? [key] : []),
+    ...sensitiveKeys(child, [...path, key]),
   ]);
+}
+
+function isApprovedAggregateMetricKey(path: readonly string[], key: string): boolean {
+  return path.length === 1 && path[0] === 'metrics' && key === 'error_response_count';
 }
