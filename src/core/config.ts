@@ -8,6 +8,22 @@ export type EtsyConnectorConfig = {
   scopes: readonly string[];
 };
 
+export type PosthogMetricsConfig = {
+  projectId: string;
+  personalApiKey: string;
+  apiBaseUrl: string;
+};
+
+export type FlyMetricsConfig = {
+  accessToken: string;
+  appName: string;
+  metricsUrl: string;
+};
+
+export type ShopifyPartnerCsvConfig = {
+  csvPath: string;
+};
+
 export function loadEtsyConnectorConfig(env: NodeJS.ProcessEnv): EtsyConnectorConfig {
   return {
     apiKey: required(env, 'ETSY_API_KEY'),
@@ -18,10 +34,41 @@ export function loadEtsyConnectorConfig(env: NodeJS.ProcessEnv): EtsyConnectorCo
   };
 }
 
+export function loadPosthogMetricsConfig(env: NodeJS.ProcessEnv): PosthogMetricsConfig {
+  return {
+    projectId: requiredMerchGridMetrics(env, 'POSTHOG_PROJECT_ID'),
+    personalApiKey: requiredMerchGridMetrics(env, 'POSTHOG_PERSONAL_API_KEY'),
+    apiBaseUrl: env.POSTHOG_API_BASE_URL || 'https://us.posthog.com',
+  };
+}
+
+export function loadFlyMetricsConfig(env: NodeJS.ProcessEnv): FlyMetricsConfig {
+  return {
+    accessToken: requiredMerchGridMetrics(env, 'FLY_ACCESS_TOKEN'),
+    appName: requiredMerchGridMetrics(env, 'FLY_APP_NAME'),
+    metricsUrl: requiredMerchGridMetrics(env, 'FLY_METRICS_URL'),
+  };
+}
+
+export function loadShopifyPartnerCsvConfig(env: NodeJS.ProcessEnv): ShopifyPartnerCsvConfig {
+  return {
+    csvPath: requiredMerchGridMetrics(env, 'SHOPIFY_PARTNER_CSV_PATH'),
+  };
+}
+
 function required(env: NodeJS.ProcessEnv, name: string): string {
   const value = env[name];
   if (!value) {
     throw new AppError('configuration_failed', `Missing required Etsy connector configuration: ${name}`);
+  }
+
+  return value;
+}
+
+function requiredMerchGridMetrics(env: NodeJS.ProcessEnv, name: string): string {
+  const value = env[name];
+  if (!value) {
+    throw new AppError('configuration_failed', `Missing required MerchGrid metrics configuration: ${name}`);
   }
 
   return value;
