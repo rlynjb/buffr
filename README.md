@@ -26,8 +26,11 @@ through the final completed UTC day with
 only the persisted artifact path and source statuses; the artifacts contain
 aggregate evidence only.
 
-Configure these variable names in the execution environment, never in a
-committed `.env` file:
+For local commands, copy `.env.example` to the ignored local `.env` file and
+fill in the credentials. The commands load that file automatically; shell or
+deployment-provided variables may override it. Never commit the real `.env`.
+
+Configure these variable names:
 
 - `POSTHOG_PROJECT_ID`
 - `POSTHOG_PERSONAL_API_KEY`
