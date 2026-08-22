@@ -6,6 +6,7 @@ import { PosthogMetricSourceAdapter } from '../connectors/merchgrid/posthog.js';
 import { ShopifyPartnerCsvMetricSource } from '../connectors/merchgrid/shopify-partner-csv.js';
 import { FetchHttpClient, type HttpClient } from '../connectors/merchgrid/source.js';
 import { AppError } from '../core/errors.js';
+import { loadLocalEnvironment } from '../core/local-env.js';
 import {
   JsonFileMerchGridReviewArtifactRepository,
   runDailyCollection,
@@ -57,7 +58,7 @@ export async function runMerchGridSourcePackCli(input: MerchGridSourcePackCliInp
 export function createMerchGridSourcePackDependencies(
   options: MerchGridSourcePackRuntimeDependenciesOptions = {},
 ): MerchGridSourcePackDependencies {
-  const env = options.env ?? process.env;
+  const env = options.env ?? loadLocalEnvironment();
   const dataDir = requiredSetting(env, 'MERCHGRID_METRICS_DATA_DIR');
   const http = options.http ?? new FetchHttpClient();
   return {
