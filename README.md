@@ -17,6 +17,31 @@ Place a manually exported, aggregate-only Shopify Partner CSV in the ignored
 import accepts only `date`, `active_merchants`, `installs`, `uninstalls`, and
 `earnings_amount`; do not include raw merchant, shop, or customer data.
 
+## MerchGrid source-pack operations
+
+After building, collect one completed UTC day with
+`npm run merchgrid:collect -- --date YYYY-MM-DD`. Build a weekly comparison
+through the final completed UTC day with
+`npm run merchgrid:weekly-review -- --through YYYY-MM-DD`. Both commands print
+only the persisted artifact path and source statuses; the artifacts contain
+aggregate evidence only.
+
+Configure these variable names in the execution environment, never in a
+committed `.env` file:
+
+- `POSTHOG_PROJECT_ID`
+- `POSTHOG_PERSONAL_API_KEY`
+- `POSTHOG_BASE_URL`
+- `FLY_ORG_SLUG`
+- `FLY_ACCESS_TOKEN`
+- `FLY_APP_NAME`
+- `MERCHGRID_METRICS_DATA_DIR`
+- `SHOPIFY_PARTNER_AGGREGATES_CSV_PATH`
+
+Use an external scheduler after UTC midnight for daily collection and after
+Sunday closes for the weekly review. This repository does not run or activate
+an in-process scheduler.
+
 ## Current architecture direction
 
 The approved Etsy workflow engine pattern is a **deterministic workflow orchestrator with bounded agentic workers**.
