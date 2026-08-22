@@ -4,6 +4,15 @@ const SENSITIVE_KEY_PATTERN = /token|secret|authorization|email|shop|domain|cust
 
 export const MetricSourceSchema = z.enum(['posthog', 'fly_metrics', 'shopify_partner']);
 export const SnapshotStatusSchema = z.enum(['complete', 'partial', 'unavailable', 'failed']);
+export const OperationalNoteSchema = z.enum([
+  'authentication',
+  'rate_limit',
+  'transport',
+  'schema',
+  'unknown',
+  'manual_import',
+  'backfill',
+]);
 
 export const UtcDateSchema = z
   .string()
@@ -25,7 +34,7 @@ const DailyMetricSnapshotDataSchema = z
     collectedAt: z.string().datetime(),
     status: SnapshotStatusSchema,
     metrics: z.record(z.string().min(1).max(100), z.number().finite().nonnegative()),
-    notes: z.array(z.string().min(1).max(240)).max(12),
+    notes: z.array(OperationalNoteSchema).max(12),
   })
   .strict();
 
@@ -48,6 +57,9 @@ export type DailyMetricSnapshot = z.infer<typeof DailyMetricSnapshotSchema>;
 
 export function createCompletedUtcWindow(date: string): CollectionWindow {
   const validDate = UtcDateSchema.parse(date);
+  if (!isCompletedUtcDate(validDate)) {
+    throw new RangeError(`Metric window date must be before today in UTC: ${validDate}`);
+  }
   const start = new Date(`${validDate}T00:00:00.000Z`);
   const end = new Date(start);
   end.setUTCDate(end.getUTCDate() + 1);
@@ -57,6 +69,11 @@ export function createCompletedUtcWindow(date: string): CollectionWindow {
     startInclusive: start.toISOString(),
     endExclusive: end.toISOString(),
   };
+}
+
+export function isCompletedUtcDate(date: string, now: Date = new Date()): boolean {
+  const validDate = UtcDateSchema.safeParse(date);
+  return validDate.success && validDate.data < now.toISOString().slice(0, 10);
 }
 
 function isUtcCalendarDate(value: string): boolean {

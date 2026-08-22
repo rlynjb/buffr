@@ -1,7 +1,8 @@
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { DailyMetricSnapshot } from '../../contracts/metrics.js';
 import { AppError } from '../../core/errors.js';
 import {
   JsonFileMetricSnapshotRepository,
@@ -24,6 +25,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  vi.useRealTimers();
   await rm(rootDir, { recursive: true, force: true });
 });
 
@@ -79,6 +81,58 @@ describe('JsonFileMetricSnapshotRepository', () => {
       name: 'AppError',
       code: 'storage_failed',
     } satisfies Partial<AppError>);
+  });
+
+  it('does not persist a content-bearing note', async () => {
+    const repository = new JsonFileMetricSnapshotRepository({ rootDir });
+    const invalidSnapshot = {
+      ...completePosthogSnapshot,
+      notes: ['merchant@example.com'],
+    } as unknown as DailyMetricSnapshot;
+
+    await expect(repository.save(invalidSnapshot)).rejects.toMatchObject({
+      name: 'AppError',
+      code: 'validation_failed',
+    } satisfies Partial<AppError>);
+    await expect(repository.load('posthog', '2026-08-21')).resolves.toBeUndefined();
+  });
+
+  it('rejects current and future snapshots while allowing past-date backfills', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-22T12:00:00.000Z'));
+    const repository = new JsonFileMetricSnapshotRepository({ rootDir });
+
+    await expect(
+      repository.save({ ...completePosthogSnapshot, date: '2026-08-22' }),
+    ).rejects.toMatchObject({ name: 'AppError', code: 'validation_failed' } satisfies Partial<AppError>);
+    await expect(
+      repository.save({ ...completePosthogSnapshot, date: '2026-08-23' }),
+    ).rejects.toMatchObject({ name: 'AppError', code: 'validation_failed' } satisfies Partial<AppError>);
+    await expect(repository.save(completePosthogSnapshot)).resolves.toBe('created');
+  });
+
+  it('serializes concurrent complete saves for the same source/date', async () => {
+    const repository = new JsonFileMetricSnapshotRepository({ rootDir });
+    const conflictingSnapshot = {
+      ...completePosthogSnapshot,
+      metrics: { app_opened_count: 9 },
+    };
+
+    const results = await Promise.allSettled([
+      repository.save(completePosthogSnapshot),
+      repository.save(conflictingSnapshot),
+    ]);
+
+    expect(results[0]).toEqual({ status: 'fulfilled', value: 'created' });
+    expect(results[1]).toMatchObject({
+      status: 'rejected',
+      reason: {
+        name: 'AppError',
+        code: 'storage_failed',
+        message: 'Completed metric snapshot is immutable: posthog/2026-08-21',
+      },
+    });
+    await expect(repository.load('posthog', '2026-08-21')).resolves.toEqual(completePosthogSnapshot);
   });
 });
 
