@@ -19,6 +19,7 @@ import {
   type WeeklyBusinessReview,
 } from '../metrics/summaries.js';
 import type { MetricSnapshotRepository } from '../storage/metric-snapshots.js';
+import type { TraceSink } from '../tracing/events.js';
 
 const SOURCES: readonly MetricSource[] = ['posthog', 'fly_metrics', 'shopify_partner'];
 
@@ -93,6 +94,8 @@ export type MerchGridSourcePackDependencies = {
   repository: MetricSnapshotRepository;
   artifacts: MerchGridReviewArtifactRepository;
   now?: () => Date;
+  sourceTimeoutMs?: number;
+  emit?: TraceSink['emit'];
 };
 
 export type DailyCollectionResult = {
@@ -112,7 +115,8 @@ export async function runDailyCollection(input: {
   date: string;
   dependencies: MerchGridSourcePackDependencies;
 }): Promise<DailyCollectionResult> {
-  const window = completedUtcWindow(input.date, now(input.dependencies));
+  const currentTime = now(input.dependencies);
+  const window = completedUtcWindow(input.date, currentTime);
   const storedSnapshots = await Promise.all(
     input.dependencies.adapters.map((adapter) => input.dependencies.repository.load(adapter.source, window.date)),
   );
@@ -123,6 +127,11 @@ export async function runDailyCollection(input: {
     adapters: input.dependencies.adapters.filter((adapter) => !reusableSnapshots.has(adapter.source)),
     repository: input.dependencies.repository,
     window,
+    sourceTimeoutMs: input.dependencies.sourceTimeoutMs,
+    runId: `merchgrid-source-pack:${window.date}`,
+    emit: input.dependencies.emit,
+    now: () => currentTime,
+    backfill: isBackfillDate(window.date, currentTime),
   });
   const snapshotsBySource = new Map([
     ...reusableSnapshots.entries(),
@@ -187,6 +196,14 @@ function previousUtcDate(date: string): string {
   const previous = new Date(`${parseDate(date)}T00:00:00.000Z`);
   previous.setUTCDate(previous.getUTCDate() - 1);
   return previous.toISOString().slice(0, 10);
+}
+
+function isBackfillDate(date: string, currentTime: Date): boolean {
+  const previousCompletedDay = new Date(
+    Date.UTC(currentTime.getUTCFullYear(), currentTime.getUTCMonth(), currentTime.getUTCDate()),
+  );
+  previousCompletedDay.setUTCDate(previousCompletedDay.getUTCDate() - 1);
+  return date < previousCompletedDay.toISOString().slice(0, 10);
 }
 
 function weeklySourceStatuses(review: WeeklyBusinessReview): Record<MetricSource, SourceStatus> {

@@ -18,7 +18,7 @@ describe('Fly reliability metrics adapter', () => {
       date: '2026-08-21',
       collectedAt: '2026-08-22T00:05:00.000Z',
       status: 'complete',
-      metrics: { request_count: 100, error_response_count: 3, error_rate: 0.03 },
+      metrics: { request_count: 100, error_response_count: 3, error_rate: 0.03, availability_status: 1 },
       notes: [],
     });
     expect(fakeHttp.requests).toEqual([{
@@ -71,7 +71,7 @@ describe('Fly reliability metrics adapter', () => {
 
     expect(snapshot).toMatchObject({
       status: 'complete',
-      metrics: { request_count: 0, error_response_count: 0 },
+      metrics: { request_count: 0, error_response_count: 0, availability_status: 1 },
     });
     expect(snapshot).not.toHaveProperty('metrics.error_rate');
   });

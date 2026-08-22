@@ -79,6 +79,7 @@ export class FlyMetricsSourceAdapter extends MetricSourceAdapterBase {
     const metrics: Record<string, number> = {
       request_count: counts.requestCount,
       error_response_count: counts.errorResponseCount,
+      availability_status: 1,
     };
     if (counts.requestCount > 0) {
       metrics.error_rate = counts.errorResponseCount / counts.requestCount;

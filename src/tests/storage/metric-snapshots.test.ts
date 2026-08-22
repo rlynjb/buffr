@@ -112,19 +112,21 @@ describe('JsonFileMetricSnapshotRepository', () => {
   });
 
   it('serializes concurrent complete saves for the same source/date', async () => {
-    const repository = new JsonFileMetricSnapshotRepository({ rootDir });
+    const firstRepository = new JsonFileMetricSnapshotRepository({ rootDir });
+    const secondRepository = new JsonFileMetricSnapshotRepository({ rootDir });
     const conflictingSnapshot = {
       ...completePosthogSnapshot,
       metrics: { app_opened_count: 9 },
     };
 
     const results = await Promise.allSettled([
-      repository.save(completePosthogSnapshot),
-      repository.save(conflictingSnapshot),
+      firstRepository.save(completePosthogSnapshot),
+      secondRepository.save(conflictingSnapshot),
     ]);
 
-    expect(results[0]).toEqual({ status: 'fulfilled', value: 'created' });
-    expect(results[1]).toMatchObject({
+    expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+    expect(results.filter((result) => result.status === 'rejected')).toHaveLength(1);
+    expect(results.find((result) => result.status === 'rejected')).toMatchObject({
       status: 'rejected',
       reason: {
         name: 'AppError',
@@ -132,7 +134,27 @@ describe('JsonFileMetricSnapshotRepository', () => {
         message: 'Completed metric snapshot is immutable: posthog/2026-08-21',
       },
     });
-    await expect(repository.load('posthog', '2026-08-21')).resolves.toEqual(completePosthogSnapshot);
+    const expectedWinner = results[0]?.status === 'fulfilled' ? completePosthogSnapshot : conflictingSnapshot;
+    await expect(firstRepository.load('posthog', '2026-08-21')).resolves.toEqual(expectedWinner);
+  });
+
+  it('fails safely without writing when another process holds the snapshot filesystem lock', async () => {
+    const snapshotDirectory = join(rootDir, 'posthog');
+    const snapshotPath = join(snapshotDirectory, '2026-08-21.json');
+    await mkdir(snapshotDirectory, { recursive: true });
+    await mkdir(`${snapshotPath}.lock`);
+    const repository = new JsonFileMetricSnapshotRepository({
+      rootDir,
+      lockTimeoutMs: 0,
+      lockRetryMs: 1,
+    });
+
+    await expect(repository.save(completePosthogSnapshot)).rejects.toMatchObject({
+      name: 'AppError',
+      code: 'storage_failed',
+      message: 'Metric snapshot is locked by another writer: posthog/2026-08-21',
+    } satisfies Partial<AppError>);
+    await expect(repository.load('posthog', '2026-08-21')).resolves.toBeUndefined();
   });
 });
 

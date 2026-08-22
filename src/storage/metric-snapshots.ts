@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rename, rm, rmdir, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { AppError } from '../core/errors.js';
@@ -12,8 +12,6 @@ import {
   type MetricSource,
 } from '../contracts/metrics.js';
 
-const snapshotWriteLocks = new Map<string, Promise<void>>();
-
 export type MetricSnapshotRepository = {
   load(source: MetricSource, date: string): Promise<DailyMetricSnapshot | undefined>;
   save(snapshot: DailyMetricSnapshot): Promise<'created' | 'unchanged' | 'replaced_noncomplete'>;
@@ -22,13 +20,25 @@ export type MetricSnapshotRepository = {
 
 export type JsonFileMetricSnapshotRepositoryOptions = {
   rootDir: string;
+  lockTimeoutMs?: number;
+  lockRetryMs?: number;
 };
 
 export class JsonFileMetricSnapshotRepository implements MetricSnapshotRepository {
   private readonly rootDir: string;
+  private readonly lockTimeoutMs: number;
+  private readonly lockRetryMs: number;
 
   constructor(options: JsonFileMetricSnapshotRepositoryOptions) {
     this.rootDir = options.rootDir;
+    this.lockTimeoutMs = options.lockTimeoutMs ?? 5_000;
+    this.lockRetryMs = options.lockRetryMs ?? 10;
+    if (!Number.isFinite(this.lockTimeoutMs) || this.lockTimeoutMs < 0) {
+      throw new RangeError('Snapshot lock timeout must be a finite nonnegative duration');
+    }
+    if (!Number.isFinite(this.lockRetryMs) || this.lockRetryMs < 0) {
+      throw new RangeError('Snapshot lock retry must be a finite nonnegative duration');
+    }
   }
 
   async load(source: MetricSource, date: string): Promise<DailyMetricSnapshot | undefined> {
@@ -71,32 +81,38 @@ export class JsonFileMetricSnapshotRepository implements MetricSnapshotRepositor
     const validSnapshot = parseSnapshot(snapshot, 'metric snapshot');
     assertCompletedSnapshotDate(validSnapshot.date);
 
-    return withSnapshotWriteLock(this.snapshotLockKey(validSnapshot), async () => {
-      const existing = await this.load(validSnapshot.source, validSnapshot.date);
+    const file = this.snapshotFilePath(validSnapshot.source, validSnapshot.date);
+    return withSnapshotFileLock(
+      file,
+      `${validSnapshot.source}/${validSnapshot.date}`,
+      this.lockTimeoutMs,
+      this.lockRetryMs,
+      async () => {
+        const existing = await this.load(validSnapshot.source, validSnapshot.date);
 
-      if (existing?.status === 'complete') {
-        if (isDeepStrictEqual(existing, validSnapshot)) {
-          return 'unchanged';
+        if (existing?.status === 'complete') {
+          if (isDeepStrictEqual(existing, validSnapshot)) {
+            return 'unchanged';
+          }
+          throw new AppError(
+            'storage_failed',
+            `Completed metric snapshot is immutable: ${validSnapshot.source}/${validSnapshot.date}`,
+          );
         }
-        throw new AppError(
-          'storage_failed',
-          `Completed metric snapshot is immutable: ${validSnapshot.source}/${validSnapshot.date}`,
-        );
-      }
 
-      const file = this.snapshotFilePath(validSnapshot.source, validSnapshot.date);
-      try {
-        await writeAtomic(file, `${JSON.stringify(validSnapshot, null, 2)}\n`);
-      } catch (error) {
-        throw new AppError(
-          'storage_failed',
-          `Metric snapshot could not be saved: ${validSnapshot.source}/${validSnapshot.date}`,
-          { cause: error },
-        );
-      }
+        try {
+          await writeAtomic(file, `${JSON.stringify(validSnapshot, null, 2)}\n`);
+        } catch (error) {
+          throw new AppError(
+            'storage_failed',
+            `Metric snapshot could not be saved: ${validSnapshot.source}/${validSnapshot.date}`,
+            { cause: error },
+          );
+        }
 
-      return existing ? 'replaced_noncomplete' : 'created';
-    });
+        return existing ? 'replaced_noncomplete' : 'created';
+      },
+    );
   }
 
   async list(source: MetricSource, fromDate: string, throughDate: string): Promise<DailyMetricSnapshot[]> {
@@ -135,17 +151,17 @@ export class JsonFileMetricSnapshotRepository implements MetricSnapshotRepositor
   private sourceDirPath(source: MetricSource): string {
     return join(this.rootDir, source);
   }
-
-  private snapshotLockKey(snapshot: DailyMetricSnapshot): string {
-    return `${this.rootDir}\u0000${snapshot.source}\u0000${snapshot.date}`;
-  }
 }
 
 async function writeAtomic(path: string, value: string): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
   const tempFile = `${path}.${process.pid}.${randomUUID()}.tmp`;
-  await writeFile(tempFile, value, 'utf8');
-  await rename(tempFile, path);
+  try {
+    await writeFile(tempFile, value, 'utf8');
+    await rename(tempFile, path);
+  } finally {
+    await rm(tempFile, { force: true });
+  }
 }
 
 function assertCompletedSnapshotDate(date: string): void {
@@ -154,23 +170,48 @@ function assertCompletedSnapshotDate(date: string): void {
   }
 }
 
-async function withSnapshotWriteLock<T>(key: string, operation: () => Promise<T>): Promise<T> {
-  const previous = snapshotWriteLocks.get(key) ?? Promise.resolve();
-  let release: () => void;
-  const current = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  snapshotWriteLocks.set(key, current);
+async function withSnapshotFileLock<T>(
+  snapshotPath: string,
+  label: string,
+  timeoutMs: number,
+  retryMs: number,
+  operation: () => Promise<T>,
+): Promise<T> {
+  await mkdir(dirname(snapshotPath), { recursive: true });
+  const lockPath = `${snapshotPath}.lock`;
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    try {
+      await mkdir(lockPath);
+      break;
+    } catch (error) {
+      if (!isNodeError(error) || error.code !== 'EEXIST') {
+        throw new AppError('storage_failed', `Metric snapshot lock could not be acquired: ${label}`, {
+          cause: error,
+        });
+      }
+      if (Date.now() >= deadline) {
+        throw new AppError('storage_failed', `Metric snapshot is locked by another writer: ${label}`);
+      }
+      await wait(retryMs);
+    }
+  }
 
-  await previous;
   try {
     return await operation();
   } finally {
-    release!();
-    if (snapshotWriteLocks.get(key) === current) {
-      snapshotWriteLocks.delete(key);
+    try {
+      await rmdir(lockPath);
+    } catch (error) {
+      throw new AppError('storage_failed', `Metric snapshot lock could not be released: ${label}`, {
+        cause: error,
+      });
     }
   }
+}
+
+function wait(durationMs: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, durationMs));
 }
 
 function parseSource(value: unknown): MetricSource {

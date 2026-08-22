@@ -4,7 +4,7 @@ import type { MetricSource } from '../contracts/metrics.js';
 import { FlyMetricsSourceAdapter } from '../connectors/merchgrid/fly-metrics.js';
 import { PosthogMetricSourceAdapter } from '../connectors/merchgrid/posthog.js';
 import { ShopifyPartnerCsvMetricSource } from '../connectors/merchgrid/shopify-partner-csv.js';
-import type { HttpClient, HttpRequest, HttpResponse } from '../connectors/merchgrid/source.js';
+import { FetchHttpClient, type HttpClient } from '../connectors/merchgrid/source.js';
 import { AppError } from '../core/errors.js';
 import {
   JsonFileMerchGridReviewArtifactRepository,
@@ -97,17 +97,6 @@ export async function runMerchGridSourcePackEntrypoint(input: MerchGridSourcePac
     });
   } catch (error) {
     input.writeError(error instanceof AppError ? error.code : 'unexpected_error');
-  }
-}
-
-class FetchHttpClient implements HttpClient {
-  async request<T>(request: HttpRequest): Promise<HttpResponse<T>> {
-    const response = await fetch(request.url, {
-      method: request.method,
-      headers: request.headers,
-      body: request.body === undefined ? undefined : typeof request.body === 'string' ? request.body : JSON.stringify(request.body),
-    });
-    return { status: response.status, body: (await response.json()) as T };
   }
 }
 

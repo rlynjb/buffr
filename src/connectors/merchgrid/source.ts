@@ -16,6 +16,53 @@ export type HttpClient = {
   request<T>(request: HttpRequest): Promise<HttpResponse<T>>;
 };
 
+export type FetchHttpClientOptions = {
+  fetch?: typeof globalThis.fetch;
+  timeoutMs?: number;
+};
+
+/** Native-fetch boundary with a finite deadline and status-preserving error handling. */
+export class FetchHttpClient implements HttpClient {
+  private readonly fetch: typeof globalThis.fetch;
+  private readonly timeoutMs: number;
+
+  constructor(options: FetchHttpClientOptions = {}) {
+    this.fetch = options.fetch ?? globalThis.fetch;
+    this.timeoutMs = options.timeoutMs ?? 15_000;
+    if (!Number.isFinite(this.timeoutMs) || this.timeoutMs < 0) {
+      throw new RangeError('HTTP timeout must be a finite nonnegative duration');
+    }
+  }
+
+  async request<T>(request: HttpRequest): Promise<HttpResponse<T>> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+    try {
+      const response = await this.fetch(request.url, {
+        method: request.method,
+        headers: request.headers,
+        body:
+          request.body === undefined
+            ? undefined
+            : typeof request.body === 'string'
+              ? request.body
+              : JSON.stringify(request.body),
+        signal: controller.signal,
+      });
+      if (response.status < 200 || response.status >= 300) {
+        return { status: response.status, body: undefined as T };
+      }
+      try {
+        return { status: response.status, body: (await response.json()) as T };
+      } catch {
+        throw { status: response.status, malformed: true };
+      }
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+}
+
 export type MetricSourceFailureKind = 'authentication' | 'rate_limit' | 'transport' | 'schema' | 'unknown';
 
 export type MetricSourceFailure = {

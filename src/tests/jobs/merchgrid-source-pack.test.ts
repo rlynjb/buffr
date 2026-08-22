@@ -1,8 +1,9 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { CollectionWindow, DailyMetricSnapshot, MetricSource } from '../../contracts/metrics.js';
+import type { WorkflowEvent } from '../../contracts/workflow.js';
 import {
   createMerchGridSourcePackDependencies,
   runMerchGridSourcePackCli,
@@ -21,6 +22,7 @@ describe('MerchGrid source-pack jobs', () => {
   const temporaryDirectories: string[] = [];
 
   afterEach(async () => {
+    vi.useRealTimers();
     await Promise.all(temporaryDirectories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
   });
 
@@ -37,6 +39,26 @@ describe('MerchGrid source-pack jobs', () => {
     await expect(dependencies.artifacts.loadDailyHealth('2026-08-21')).resolves.toEqual({
       period: { kind: 'daily', date: '2026-08-21' },
       sourceCoverage: result.sourceStatuses,
+      sourceFreshness: {
+        posthog: {
+          date: '2026-08-21',
+          collectedAt: '2026-08-22T00:05:00.000Z',
+          status: 'complete',
+          notes: [],
+        },
+        fly_metrics: {
+          date: '2026-08-21',
+          collectedAt: '2026-08-22T00:05:00.000Z',
+          status: 'complete',
+          notes: [],
+        },
+        shopify_partner: {
+          date: '2026-08-21',
+          collectedAt: '2026-08-22T00:05:00.000Z',
+          status: 'complete',
+          notes: [],
+        },
+      },
       aggregateMetrics: {
         posthog: { app_opened_count: 8 },
         fly_metrics: { request_count: 100 },
@@ -85,6 +107,93 @@ describe('MerchGrid source-pack jobs', () => {
     await runDailyCollection({ date: '2026-08-21', dependencies });
 
     expect(posthogCollections).toBe(1);
+  });
+
+  it('marks newly collected historical snapshots as backfills while retaining source provenance', async () => {
+    const baseDependencies = await fakeDependencies();
+    const dependencies: MerchGridSourcePackDependencies = {
+      ...baseDependencies,
+      adapters: [
+        completeAdapter('posthog', { app_opened_count: 8 }),
+        completeAdapter('fly_metrics', { request_count: 100 }),
+        completeAdapter('shopify_partner', { installs: 2 }, ['manual_import']),
+      ],
+    };
+
+    const result = await runDailyCollection({ date: '2026-08-20', dependencies });
+
+    await expect(dependencies.repository.load('posthog', '2026-08-20')).resolves.toMatchObject({
+      collectedAt: '2026-08-22T00:05:00.000Z',
+      notes: ['backfill'],
+    });
+    await expect(dependencies.repository.load('shopify_partner', '2026-08-20')).resolves.toMatchObject({
+      notes: ['manual_import', 'backfill'],
+    });
+    expect(result.health.sourceFreshness.shopify_partner?.notes).toEqual(['manual_import', 'backfill']);
+  });
+
+  it('does not rewrite an existing complete historical snapshot merely to add backfill provenance', async () => {
+    const dependencies = await fakeDependencies();
+    const historical: DailyMetricSnapshot = {
+      source: 'posthog',
+      date: '2026-08-20',
+      collectedAt: '2026-08-21T00:05:00.000Z',
+      status: 'complete',
+      metrics: { app_opened_count: 7 },
+      notes: [],
+    };
+    await dependencies.repository.save(historical);
+
+    await runDailyCollection({ date: '2026-08-20', dependencies });
+
+    await expect(dependencies.repository.load('posthog', '2026-08-20')).resolves.toEqual(historical);
+  });
+
+  it('writes partial daily evidence and emits later-source events after an adapter stalls', async () => {
+    const baseDependencies = await fakeDependencies();
+    const events: WorkflowEvent[] = [];
+    const dependencies: MerchGridSourcePackDependencies = {
+      ...baseDependencies,
+      adapters: [
+        {
+          source: 'posthog',
+          async collect() {
+            return new Promise<DailyMetricSnapshot>(() => undefined);
+          },
+        },
+        completeAdapter('fly_metrics', { request_count: 100 }),
+        completeAdapter('shopify_partner', { installs: 2 }),
+      ],
+      sourceTimeoutMs: 0,
+      emit: (event) => {
+        events.push(event);
+      },
+    };
+
+    const result = await runDailyCollection({ date: '2026-08-21', dependencies });
+
+    expect(result.sourceStatuses).toEqual({
+      posthog: 'failed',
+      fly_metrics: 'complete',
+      shopify_partner: 'complete',
+    });
+    await expect(dependencies.artifacts.loadDailyHealth('2026-08-21')).resolves.toMatchObject({
+      sourceCoverage: {
+        posthog: 'failed',
+        fly_metrics: 'complete',
+        shopify_partner: 'complete',
+      },
+      limitations: ['posthog:failed'],
+    });
+    expect(events.map((event) => event.type)).toContain('merchgrid.source.failed');
+    expect(events.map((event) => event.data.source)).toEqual([
+      'posthog',
+      'posthog',
+      'fly_metrics',
+      'fly_metrics',
+      'shopify_partner',
+      'shopify_partner',
+    ]);
   });
 
   it('derives adjacent seven-day windows, loads stored snapshots, and writes a weekly review', async () => {
@@ -222,7 +331,11 @@ function fakeRuntimeEnvironment(): NodeJS.ProcessEnv {
   };
 }
 
-function completeAdapter(source: MetricSource, metrics: Record<string, number>): MetricSourceAdapter {
+function completeAdapter(
+  source: MetricSource,
+  metrics: Record<string, number>,
+  notes: DailyMetricSnapshot['notes'] = [],
+): MetricSourceAdapter {
   return {
     source,
     async collect(window: CollectionWindow): Promise<DailyMetricSnapshot> {
@@ -232,7 +345,7 @@ function completeAdapter(source: MetricSource, metrics: Record<string, number>):
         collectedAt: '2026-08-22T00:05:00.000Z',
         status: 'complete',
         metrics,
-        notes: [],
+        notes,
       };
     },
   };
