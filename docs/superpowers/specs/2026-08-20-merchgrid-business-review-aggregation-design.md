@@ -169,6 +169,29 @@ surface their normalized evidence. A future Etsy or Meta pack supplies a
 different adapter set and typed metrics through the same seams; it does not
 duplicate the shared core.
 
+### DDIA concepts used in this design
+
+The terms below are included because they name concrete choices in this design;
+they do not require Buffr to become a large distributed-data platform.
+
+| DDIA concept | Meaning in this design |
+| --- | --- |
+| **Dataflow** | The defined path from a source system, through its adapter and the normalizer, into a stored Buffr snapshot and then a summary or workflow run. |
+| **System of record** | PostHog, Fly Metrics, and Shopify Partner remain authoritative for their own data. Buffr does not overwrite or replace their dashboards. |
+| **Derived data** | Buffr's daily snapshots, daily health summary, and weekly business review are computed from source aggregates rather than entered manually. |
+| **Materialized view** | A persisted daily or weekly summary is a query-friendly stored representation of a completed period, built from normalized snapshots. |
+| **Data contract** | `DailyMetricSnapshot` is the stable interface between source adapters and the Buffr core. It lets the core work without knowing a provider's raw response shape. |
+| **Schema evolution** | An adapter absorbs a provider API or export-format change and maps it to the existing contract, or explicitly records an unavailable/failed source; it does not silently reinterpret historical metrics. |
+| **Idempotence** | Re-running collection for an already successful source/date produces the same stored result rather than a duplicate observation. |
+| **Backfill** | A controlled manual run can collect a missed completed date, retaining its actual collection time and a backfill note. |
+| **Data lineage / provenance** | Every snapshot records its source, UTC date window, collection time, status, and bounded notes so a review can show where each number came from. |
+| **Batch processing** | The first collector processes completed daily windows and builds a weekly review from completed seven-day windows; it is not a real-time stream processor. |
+| **Retention** | Buffr keeps compact derived snapshots because source retention can be shorter than the comparisons the review needs; Fly's managed metrics are the current example. |
+
+The first version intentionally does **not** claim exactly-once delivery,
+event-sourcing, or stream processing. Those concepts would add guarantees and
+operational complexity that this daily aggregate design does not need.
+
 ## Data contract
 
 Every stored metric observation has this shape conceptually:
