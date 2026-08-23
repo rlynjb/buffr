@@ -2,6 +2,11 @@ import { z } from 'zod';
 
 const CuratedTextPattern = /^[\p{L}\p{N}][\p{L}\p{N} &'(),./-]*$/u;
 const UncuratedDataPattern = /(?:\b(?:api[ _-]?key|access[ _-]?token|authorization|buyer|credential|customer[ _-]?(?:list|record|history)|domain|email|event(?:s)?|export(?:s|ed|ing)?|history|internal|listing[ _-]?data|order(?:s)?|password|payload|person(?:al)?|private|profile|provider|purchase(?:s|d|ing)?|raw|record(?:s)?|secret|shop[ _-]?domain|source|token)\b|(?:^|[\s"'`])[\w.-]+\.myshopify\.com\b)/iu;
+const SensitiveProseValuePatterns = [
+  /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/iu,
+  /(?:^|\D)(?:\d[ -]?){12,18}\d(?:$|\D)/u,
+  /(?:^|\D)(?:\+?1[ .-]?)?(?:\(\d{3}\)|\d{3})[ .-]\d{3}[ .-]\d{4}(?:$|\D)/u,
+];
 const LocalArtifactRefPattern = /^\.local\/[A-Za-z0-9][A-Za-z0-9._/-]*$/u;
 const SubjectRefPattern = /^(?:merchgrid:visibility:\d{4}-\d{2}-\d{2}|etsy:visibility:listing-[a-z0-9-]+)$/iu;
 
@@ -10,7 +15,11 @@ function safeMarketplaceText(max: number): z.ZodType<string> {
     .min(1)
     .max(max)
     .regex(CuratedTextPattern, 'must be curated plain text')
-    .refine((value) => !UncuratedDataPattern.test(value), 'must not include private or source data markers');
+    .refine((value) => !UncuratedDataPattern.test(value), 'must not include private or source data markers')
+    .refine(
+      (value) => !SensitiveProseValuePatterns.some((pattern) => pattern.test(value)),
+      'must not include PII or payment-card-looking values',
+    );
 }
 
 const MarketplaceVisibilitySubjectRefSchema = z.string()

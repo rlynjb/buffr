@@ -213,6 +213,33 @@ describe('marketplace visibility evidence contract', () => {
     });
   });
 
+  it.each([
+    ['card details in a summary', (evidence: ReturnType<typeof sparseEvidence>) => ({
+      ...evidence,
+      marketplaceContext: {
+        ...evidence.marketplaceContext,
+        currentSurfaceSummary: 'Jane Doe credit card 4111111111111111',
+      },
+    })],
+    ['a bare payment card number', (evidence: ReturnType<typeof sparseEvidence>) => ({
+      ...evidence,
+      limitations: ['4111111111111111'],
+    })],
+    ['an email address', (evidence: ReturnType<typeof sparseEvidence>) => ({
+      ...evidence,
+      marketplaceContext: {
+        ...evidence.marketplaceContext,
+        targetAudience: 'Contact Jane Doe at jane@example.com',
+      },
+    })],
+    ['a phone number', (evidence: ReturnType<typeof sparseEvidence>) => ({
+      ...evidence,
+      prohibitedClaims: ['Contact Jane Doe at 415-555-0123'],
+    })],
+  ])('rejects PII or payment-card-looking prose: %s', (_case, unsafeEvidence) => {
+    expect(() => MarketplaceVisibilityEvidenceSchema.parse(unsafeEvidence(sparseEvidence()))).toThrow();
+  });
+
   it('rejects provider URLs as artifact references', () => {
     expect(() => MarketplaceVisibilityEvidenceSchema.parse({
       product: 'marketplace_visibility',
