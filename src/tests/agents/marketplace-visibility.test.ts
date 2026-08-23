@@ -73,6 +73,71 @@ describe('marketplace visibility modules', () => {
     await expect(executor.runM5(state)).resolves.toMatchObject({ primaryVariable: 'listing message' });
     await expect(executor.runM6(state)).resolves.toMatchObject({ primaryMetric: 'posthog.app_opened_count' });
   });
+
+  it('keeps research-producing module outputs on the provider-free visibility path', async () => {
+    const executor = createMarketplaceVisibilityModuleExecutor({
+      agentRunner: new FakeAgentRunner({
+        m4: {
+          performancePath: 'discovery',
+          primaryBottleneck: 'The listing needs more context.',
+          confidence: 'low',
+          decision: 'research_domain_knowledge',
+          researchQuestion: 'Which listing phrases improve discovery?',
+          notes: [],
+        },
+        m5: {
+          hypothesis: 'A clearer listing message may improve discovery.',
+          primaryVariable: 'listing message',
+          recommendedRevision: 'Lead with the audit outcome.',
+          keepConstant: ['pricing'],
+          expectedSignal: 'Later evidence becomes available.',
+          researchNeed: 'Research marketplace listing phrasing.',
+          notes: [],
+        },
+        m6: {
+          primaryMetric: 'posthog.app_opened_count',
+          secondaryMetrics: [],
+          baselineValue: 0,
+          baselinePeriod: 'sparse initial evidence',
+          qualificationRequirements: [],
+          expectedSupportingSignal: 'A later signal is available.',
+          expectedWeakeningSignal: 'A later signal stays flat.',
+          inconclusiveCondition: 'Traffic is sparse.',
+          contextToMonitor: [],
+          unresolvedMeasurementRules: ['Research whether the listing changed.'],
+          researchNeed: 'Research the marketplace.',
+        },
+        m7: {
+          outcome: 'inconclusive',
+          hypothesisEvaluation: 'inconclusive',
+          evidence: [],
+          contextualFactors: [],
+          learning: 'Sparse evidence cannot establish an outcome.',
+          confidence: 'low',
+          knowledgeSource: 'product_data',
+          nextAction: 'research',
+          researchQuestion: 'Research marketplace visibility.',
+          nextActionRationale: 'More context would be useful.',
+        },
+      }),
+    });
+    const state = workflowState({ evidence: visibilityEvidence() });
+
+    await expect(executor.runM4(state)).resolves.toMatchObject({ decision: 'collect_more_data' });
+    await expect(executor.runM5(state)).resolves.not.toHaveProperty('researchNeed');
+    await expect(executor.runM6(state)).resolves.toMatchObject({ unresolvedMeasurementRules: [] });
+    await expect(executor.runM6(state)).resolves.not.toHaveProperty('researchNeed');
+    await expect(executor.runM7(state)).resolves.toMatchObject({ nextAction: 'wait' });
+    await expect(executor.runM3(state, {
+      requester: 'm4',
+      returnStage: 'm4_diagnosis',
+      question: 'Research marketplace visibility.',
+    })).resolves.toMatchObject({
+      status: 'unresolved',
+      next_action: 'stop',
+      confidence: 'low',
+    });
+  });
 });
 
 function visibilityEvidence(): MarketplaceVisibilityEvidence {

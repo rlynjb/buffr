@@ -4,13 +4,19 @@ import {
   DiagnosisOutputSchema,
   EvaluationOutputSchema,
   HypothesisOutputSchema,
+  ResearchOutputSchema,
   TestPlanOutputSchema,
   type ContextOutput,
+  type DiagnosisOutput,
+  type EvaluationOutput,
+  type HypothesisOutput,
   type MetricsOutput,
+  type ResearchOutput,
+  type TestPlanOutput,
 } from '../../contracts/modules.js';
 import type { WorkflowRunState } from '../../contracts/workflow.js';
 import { runStructuredModule, type AgentRunner } from '../runner.js';
-import type { ModuleExecutor } from '../../workflow/engine.js';
+import type { ModuleExecutor, ResearchRequest } from '../../workflow/engine.js';
 
 const VISIBILITY_DIAGNOSIS_PROMPT = [
   'M4 Marketplace Visibility Diagnosis.',
@@ -45,8 +51,8 @@ export function createMarketplaceVisibilityModuleExecutor(deps: { agentRunner: A
     async runM2Initial(state) {
       return metricsFromMarketplaceVisibilityEvidence(requireInitialEvidence(state));
     },
-    async runM3() {
-      throw new AppError('route_not_allowed', 'Marketplace visibility reviews do not run external research');
+    async runM3(_state, request) {
+      return unavailableResearchResult(request);
     },
     async runM4(state) {
       const result = await runStructuredModule({
@@ -57,7 +63,7 @@ export function createMarketplaceVisibilityModuleExecutor(deps: { agentRunner: A
         outputSchema: DiagnosisOutputSchema,
         trace: trace(state),
       });
-      return result.output;
+      return normalizeDiagnosis(result.output);
     },
     async runM5(state) {
       const result = await runStructuredModule({
@@ -68,7 +74,7 @@ export function createMarketplaceVisibilityModuleExecutor(deps: { agentRunner: A
         outputSchema: HypothesisOutputSchema,
         trace: trace(state),
       });
-      return result.output;
+      return normalizeHypothesis(result.output);
     },
     async runM6(state) {
       const result = await runStructuredModule({
@@ -79,7 +85,7 @@ export function createMarketplaceVisibilityModuleExecutor(deps: { agentRunner: A
         outputSchema: TestPlanOutputSchema,
         trace: trace(state),
       });
-      return result.output;
+      return normalizeTestPlan(result.output);
     },
     async runM2Results(state) {
       return metricsFromMarketplaceVisibilityEvidence(requireResultEvidence(state));
@@ -93,7 +99,7 @@ export function createMarketplaceVisibilityModuleExecutor(deps: { agentRunner: A
         outputSchema: EvaluationOutputSchema,
         trace: trace(state),
       });
-      return result.output;
+      return normalizeEvaluation(result.output);
     },
   };
 }
@@ -166,4 +172,38 @@ function marketplaceName(marketplace: MarketplaceVisibilityEvidence['marketplace
 
 function trace(state: WorkflowRunState) {
   return { runId: state.runId, stage: state.stage };
+}
+
+function normalizeDiagnosis(output: DiagnosisOutput): DiagnosisOutput {
+  if (output.decision !== 'research_domain_knowledge') return output;
+  const { researchQuestion: _researchQuestion, ...withoutResearchQuestion } = output;
+  return { ...withoutResearchQuestion, decision: 'collect_more_data' };
+}
+
+function normalizeHypothesis(output: HypothesisOutput): HypothesisOutput {
+  const { researchNeed: _researchNeed, ...withoutResearchNeed } = output;
+  return withoutResearchNeed;
+}
+
+function normalizeTestPlan(output: TestPlanOutput): TestPlanOutput {
+  const { researchNeed: _researchNeed, ...withoutResearchNeed } = output;
+  return { ...withoutResearchNeed, unresolvedMeasurementRules: [] };
+}
+
+function normalizeEvaluation(output: EvaluationOutput): EvaluationOutput {
+  if (output.nextAction !== 'research') return output;
+  const { researchQuestion: _researchQuestion, ...withoutResearchQuestion } = output;
+  return { ...withoutResearchQuestion, nextAction: 'wait' };
+}
+
+function unavailableResearchResult(request: ResearchRequest): ResearchOutput {
+  return ResearchOutputSchema.parse({
+    status: 'unresolved',
+    next_action: 'stop',
+    requester: request.requester,
+    question: request.question,
+    evidence: [],
+    confidence: 'low',
+    limitations: ['External research is unavailable for marketplace visibility reviews.'],
+  });
 }
