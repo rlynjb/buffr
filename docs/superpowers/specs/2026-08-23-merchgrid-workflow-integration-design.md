@@ -118,6 +118,12 @@ all lifecycle transitions, wait states, run persistence, and approval state.
 > these responsibilities separate means a provider outage cannot be mistaken
 > for an agent conclusion, and an agent cannot silently alter historical facts.
 
+> **Fundamentals of Data Engineering lens — data integration lifecycle:** This
+> boundary separates ingestion from consumption. The source pack acquires and
+> validates data; the workflow uses curated evidence. Coverage, freshness, and
+> limitations travel with the artifact as data-quality metadata, so the
+> downstream recommendation process can judge whether an input is fit for use.
+
 ### Shared core and product-specific modules
 
 The existing engine has reusable mechanics but listing-specific input types and
@@ -253,6 +259,12 @@ contract: they receive qualified metrics and provenance, not raw sources.
 > computations before any model interprets them, so an LLM cannot invent or
 > rewrite the business measurement.
 
+> **Fundamentals of Data Engineering lens — batch orchestration and data
+> quality:** The weekly review is a batch-derived analytical product, built only
+> after its upstream daily observations close. The readiness gate is a quality
+> check at the consumer boundary: incomplete coverage is preserved as a
+> limitation instead of being transformed into a confident-looking metric.
+
 ## Workflow Behavior
 
 ### Daily investigation path
@@ -327,6 +339,11 @@ The approval checkpoint is a human-in-the-loop governance boundary. Approval
 records an intent to manually perform a change or test; it never gives Buffr
 write access to MerchGrid, Shopify, Fly, PostHog, or production infrastructure.
 
+> **AI Agents in Action lens — human control at an action boundary:** The agent
+> can help form a hypothesis and a test plan, but its output is a proposal, not
+> an action. Human approval separates reasoning from effectful change and gives
+> the owner a clear point to reject, revise, or defer the recommendation.
+
 > **Release It! lens — fail-safe operations:** Reliability evidence can block a
 > recommendation when it is incomplete or materially unhealthy. This favors a
 > controlled wait over a plausible but unsafe product change made during an
@@ -347,6 +364,13 @@ write access to MerchGrid, Shopify, Fly, PostHog, or production infrastructure.
 M1, M4, M5, M6, and M7 may be LLM-backed structured modules. M2 remains
 deterministic for metric qualification. Every output remains validated against
 the existing module schemas or a narrowly extended product-neutral equivalent.
+
+> **AI Agents in Action lens — deterministic orchestration with bounded
+> specialists:** The workflow engine is the orchestrator, while M1–M7 are
+> focused workers with typed inputs and outputs. M2 retains deterministic
+> measurement work; agent-backed modules interpret that prepared evidence. This
+> division prevents a general-purpose agent from becoming both data pipeline,
+> decision-maker, and lifecycle controller.
 
 ## Persistence, Tracing, and Idempotence
 
