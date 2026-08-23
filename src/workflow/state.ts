@@ -1,9 +1,11 @@
-import type { WorkflowEvent, WorkflowRunState, WorkflowRunStateInput } from '../contracts/workflow.js';
+import type { WorkflowEvent, WorkflowEvidence, WorkflowKind, WorkflowRunState, WorkflowRunStateInput } from '../contracts/workflow.js';
 import { createWorkflowEvent } from '../tracing/events.js';
 
 export function createInitialWorkflowState(input: {
   runId: string;
-  listingId: string;
+  listingId?: string;
+  subjectRef: string;
+  workflowKind: WorkflowKind;
   initialEvidenceRef: string;
   now: Date;
 }): WorkflowRunStateInput {
@@ -11,6 +13,8 @@ export function createInitialWorkflowState(input: {
   const state: WorkflowRunStateInput = {
     runId: input.runId,
     listingId: input.listingId,
+    subjectRef: input.subjectRef,
+    workflowKind: input.workflowKind,
     status: 'analyzing',
     stage: 'm1_context',
     createdAt,
@@ -55,8 +59,11 @@ export function appendEvent(
   };
 }
 
-export function evidenceRef(kind: 'initial' | 'result', input: { listingId: string; observedAt: string }): string {
-  return `${kind}:${input.listingId}:${input.observedAt}`;
+export function evidenceRef(kind: 'initial' | 'result', input: WorkflowEvidence): string {
+  if (input.product === 'etsy') {
+    return `${kind}:${input.evidence.listingId}:${input.evidence.observedAt}`;
+  }
+  return `${kind}:${input.kind}:${input.artifactRef}`;
 }
 
 export function toWorkflowRunStateInput(state: WorkflowRunState): WorkflowRunStateInput {

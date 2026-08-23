@@ -107,6 +107,8 @@ function experimentWaitState(): WorkflowRunState {
   return {
     runId: 'run-123',
     listingId: 'listing-123',
+    subjectRef: 'listing:listing-123',
+    workflowKind: 'etsy_listing',
     status: 'ready_for_experiment',
     stage: 'experiment_wait',
     createdAt: '2026-08-12T00:00:00.000Z',

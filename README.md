@@ -45,6 +45,21 @@ Use an external scheduler after UTC midnight for daily collection and after
 Sunday closes for the weekly review. This repository does not run or activate
 an in-process scheduler.
 
+## MerchGrid workflow commands
+
+Once a saved daily-health or weekly-review artifact exists, these commands
+translate it into the existing workflow lifecycle. They read local aggregate
+artifacts only; they do not call Shopify, Fly, or PostHog directly.
+
+- `npm run merchgrid:daily-investigate -- --date YYYY-MM-DD --run-id RUN_ID`
+- `npm run merchgrid:weekly-recommend -- --through YYYY-MM-DD --run-id RUN_ID`
+- `npm run merchgrid:approve -- --run-id RUN_ID`
+- `npm run merchgrid:record-result -- --through YYYY-MM-DD --run-id RUN_ID`
+
+The weekly recommendation flow uses the OpenAI-backed bounded modules, so its
+local `.env` also needs `OPENAI_API_KEY`. The command stops at the approval
+gate; it never applies a real-world change by itself.
+
 ## Current architecture direction
 
 The approved Etsy workflow engine pattern is a **deterministic workflow orchestrator with bounded agentic workers**.

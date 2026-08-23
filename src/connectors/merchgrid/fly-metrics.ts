@@ -51,7 +51,7 @@ export class FlyMetricsSourceAdapter extends MetricSourceAdapterBase {
       method: 'POST',
       url: this.config.metricsUrl,
       headers: {
-        authorization: `Bearer ${this.config.accessToken}`,
+        authorization: flyAuthorizationHeader(this.config.accessToken),
         'content-type': 'application/x-www-form-urlencoded',
       },
       body: new URLSearchParams({
@@ -93,6 +93,10 @@ export class FlyMetricsSourceAdapter extends MetricSourceAdapterBase {
       notes: [],
     };
   }
+}
+
+function flyAuthorizationHeader(accessToken: string): string {
+  return accessToken.startsWith('FlyV1 ') ? accessToken : `Bearer ${accessToken}`;
 }
 
 function aggregateQuery(appName: string): string {

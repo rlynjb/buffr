@@ -71,6 +71,8 @@ function stateWithCredentialLikeEvent(): WorkflowRunState {
   return {
     runId: 'run-123',
     listingId: 'listing-123',
+    subjectRef: 'listing:listing-123',
+    workflowKind: 'etsy_listing',
     status: 'analyzing',
     stage: 'm1_context',
     createdAt: '2026-08-12T00:00:00.000Z',

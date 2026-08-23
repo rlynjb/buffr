@@ -44,7 +44,8 @@ describe('mocked workflow end to end', () => {
     const afterM2Initial = await engine.step(started.runId);
     const afterM4 = await engine.step(started.runId);
     const afterM5 = await engine.step(started.runId);
-    const waiting = await engine.step(started.runId);
+    const awaitingApproval = await engine.step(started.runId);
+    const waiting = await engine.approveExperiment(started.runId);
     const resumed = await engine.resumeWithExperimentResults({
       runId: started.runId,
       resultEvidence: resultEvidence(),
@@ -58,6 +59,7 @@ describe('mocked workflow end to end', () => {
       afterM2Initial.stage,
       afterM4.stage,
       afterM5.stage,
+      awaitingApproval.stage,
       waiting.stage,
       resumed.stage,
       afterM2Results.stage,
@@ -68,6 +70,7 @@ describe('mocked workflow end to end', () => {
       'm4_diagnosis',
       'm5_hypothesis',
       'm6_test_plan',
+      'approval_wait',
       'experiment_wait',
       'm2_metrics_results',
       'm7_learning',
@@ -94,8 +97,14 @@ describe('mocked workflow end to end', () => {
     const eventsJsonl = await readFile(join(rootDir, 'run-123', 'events.jsonl'), 'utf8');
     const events = eventsJsonl.trim().split('\n').map((line) => JSON.parse(line) as unknown);
 
-    expect(JSON.parse(initialJson)).toMatchObject({ listingId: 'listing-123', source: 'etsy' });
-    expect(JSON.parse(resultJson)).toMatchObject({ listingId: 'listing-123', source: 'etsy' });
+    expect(JSON.parse(initialJson)).toMatchObject({
+      product: 'etsy',
+      evidence: { listingId: 'listing-123', source: 'etsy' },
+    });
+    expect(JSON.parse(resultJson)).toMatchObject({
+      product: 'etsy',
+      evidence: { listingId: 'listing-123', source: 'etsy' },
+    });
     expect(JSON.parse(experimentPlanJson)).toMatchObject({ primaryMetric: 'conversion_rate' });
     expect(events.length).toBeGreaterThanOrEqual(8);
     expect(`${runJson}\n${eventsJsonl}`).not.toMatch(/apiKey|secret|token|refresh/iu);

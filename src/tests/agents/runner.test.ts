@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { AppError } from '../../core/errors.js';
 import { buildModuleInstructions } from '../../agents/core/policy.js';
-import { FakeAgentRunner, runStructuredModule } from '../../agents/runner.js';
+import { FakeAgentRunner, OpenAiAgentRunner, runStructuredModule } from '../../agents/runner.js';
 
 const OutputSchema = z
   .object({
@@ -80,5 +80,49 @@ describe('agent runner seam', () => {
       } satisfies Partial<AppError>);
       expect((error as AppError).cause).toBeUndefined();
     }
+  });
+
+  it('uses a configured OpenAI runner through the same structured-output port', async () => {
+    const calls: Array<{ instructions: string; input: unknown }> = [];
+    const runner = new OpenAiAgentRunner({
+      apiKey: 'test-key',
+      model: 'gpt-5.4',
+      execute: async (input) => {
+        calls.push(input);
+        return { summary: 'The weekly evidence is qualified.', confidence: 'high' };
+      },
+    });
+
+    const result = await runner.runStructured({
+      moduleId: 'm4',
+      instructions: 'Return only the requested structured output.',
+      input: { product: 'MerchGrid' },
+      outputSchema: OutputSchema,
+      trace: { runId: 'run-123', stage: 'm4_diagnosis' },
+    });
+
+    expect(result).toMatchObject({
+      output: { summary: 'The weekly evidence is qualified.', confidence: 'high' },
+      model: 'gpt-5.4',
+    });
+    expect(calls).toEqual([{ instructions: 'Return only the requested structured output.', input: { product: 'MerchGrid' } }]);
+  });
+
+  it('rejects an OpenAI runner without a configured API key before any model call', async () => {
+    const runner = new OpenAiAgentRunner({ apiKey: '' });
+
+    await expect(
+      runner.runStructured({
+        moduleId: 'm4',
+        instructions: 'Return structured output.',
+        input: {},
+        outputSchema: OutputSchema,
+        trace: { runId: 'run-123' },
+      }),
+    ).rejects.toMatchObject({
+      name: 'AppError',
+      code: 'configuration_failed',
+      message: 'Missing required OpenAI configuration: OPENAI_API_KEY',
+    } satisfies Partial<AppError>);
   });
 });

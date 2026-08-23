@@ -10,6 +10,8 @@ let rootDir: string;
 const baseState = {
   runId: 'run-123',
   listingId: 'listing-123',
+  subjectRef: 'listing:listing-123',
+  workflowKind: 'etsy_listing' as const,
   status: 'analyzing' as const,
   stage: 'm1_context' as const,
   createdAt: '2026-08-12T00:00:00.000Z',

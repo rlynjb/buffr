@@ -7,6 +7,7 @@ import type {
   TestPlanOutput,
 } from '../contracts/modules.js';
 import type { WorkflowStage } from '../contracts/workflow.js';
+import type { WorkflowKind } from '../contracts/workflow.js';
 
 export type ResearchRequester = Extract<ModuleId, 'm2' | 'm4' | 'm5' | 'm6' | 'm7'>;
 
@@ -51,6 +52,19 @@ export function routeAfterM4(output: DiagnosisOutput): RouteDecision {
   return { type: 'wait', reason: 'diagnosis requires more data' };
 }
 
+export function routeAfterM4ForWorkflowKind(workflowKind: WorkflowKind, output: DiagnosisOutput): RouteDecision {
+  if (workflowKind !== 'merchgrid_daily') {
+    return routeAfterM4(output);
+  }
+  if (output.decision === 'research_domain_knowledge') {
+    return routeAfterM4(output);
+  }
+  if (output.decision === 'collect_more_data') {
+    return { type: 'wait', reason: 'daily diagnosis requires more data' };
+  }
+  return { type: 'wait', reason: 'manual triage required' };
+}
+
 export function routeAfterM5(output: HypothesisOutput): RouteDecision {
   if (output.researchNeed) {
     return {
@@ -83,11 +97,7 @@ export function routeAfterM6(output: TestPlanOutput): RouteDecision {
     };
   }
 
-  return {
-    type: 'wait',
-    reason: 'experiment plan ready for manual execution',
-    nextStage: 'experiment_wait',
-  };
+  return { type: 'advance', nextStage: 'approval_wait' };
 }
 
 export function routeAfterM2Results(output: MetricsOutput): RouteDecision {

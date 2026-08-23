@@ -10,6 +10,7 @@ import {
   routeAfterM2Initial,
   routeAfterM2Results,
   routeAfterM4,
+  routeAfterM4ForWorkflowKind,
   routeAfterM5,
   routeAfterM6,
   routeAfterM7,
@@ -77,6 +78,17 @@ describe('workflow routes', () => {
     });
   });
 
+  it('keeps a MerchGrid daily investigation out of hypothesis and test planning', () => {
+    expect(routeAfterM4ForWorkflowKind('merchgrid_daily', diagnosisOutput({ decision: 'proceed_to_hypothesis' }))).toEqual({
+      type: 'wait',
+      reason: 'manual triage required',
+    });
+    expect(routeAfterM4ForWorkflowKind('merchgrid_daily', diagnosisOutput({ decision: 'collect_more_data' }))).toEqual({
+      type: 'wait',
+      reason: 'daily diagnosis requires more data',
+    });
+  });
+
   it('routes M5 research needs as a side-route and otherwise advances to test planning', () => {
     expect(routeAfterM5(hypothesisOutput({ researchNeed: 'Check buyer wording' }))).toEqual({
       type: 'research',
@@ -87,11 +99,10 @@ describe('workflow routes', () => {
     expect(routeAfterM5(hypothesisOutput())).toEqual({ type: 'advance', nextStage: 'm6_test_plan' });
   });
 
-  it('routes M6 to experiment wait only when no research or unresolved rules remain', () => {
+  it('routes M6 to explicit approval only when no research or unresolved rules remain', () => {
     expect(routeAfterM6(testPlanOutput())).toEqual({
-      type: 'wait',
-      reason: 'experiment plan ready for manual execution',
-      nextStage: 'experiment_wait',
+      type: 'advance',
+      nextStage: 'approval_wait',
     });
     expect(routeAfterM6(testPlanOutput({ unresolvedMeasurementRules: ['Need baseline window'] }))).toEqual({
       type: 'research',

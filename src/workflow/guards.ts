@@ -49,6 +49,11 @@ export function assertCanRunStage(state: WorkflowRunState, stage: WorkflowStage)
         throw routeError('Cannot run m6_test_plan before M5 hypothesis is present');
       }
       return;
+    case 'approval_wait':
+      if (!state.moduleOutputs.m6) {
+        throw routeError('Cannot enter approval_wait before M6 test plan is present');
+      }
+      return;
     case 'experiment_wait':
       if (!state.moduleOutputs.m6) {
         throw routeError('Cannot enter experiment_wait before M6 test plan is present');

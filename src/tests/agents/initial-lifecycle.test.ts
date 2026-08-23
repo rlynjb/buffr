@@ -12,7 +12,7 @@ import type { RunRepository } from '../../storage/runs.js';
 import { makeFixtureListingEvidence } from '../fixtures/listing.js';
 
 describe('initial M1-M6 module lifecycle', () => {
-  it('runs from M1 context through deterministic M2 metrics to a manual experiment wait', async () => {
+  it('runs from M1 context through deterministic M2 metrics to an explicit approval wait', async () => {
     const repository = new InMemoryRunRepository();
     const engine = createWorkflowEngine({
       repository,
@@ -37,11 +37,11 @@ describe('initial M1-M6 module lifecycle', () => {
       'm4_diagnosis',
       'm5_hypothesis',
       'm6_test_plan',
-      'experiment_wait',
+      'approval_wait',
     ]);
     expect(waiting).toMatchObject({
-      status: 'ready_for_experiment',
-      stage: 'experiment_wait',
+      status: 'awaiting_approval',
+      stage: 'approval_wait',
       moduleOutputs: {
         m1: { product: 'Printable Weekly Planner' },
         m2Initial: { comparisonQuality: 'limited' },
@@ -56,7 +56,7 @@ describe('initial M1-M6 module lifecycle', () => {
       'm4_diagnosis',
       'm5_hypothesis',
       'm6_test_plan',
-      'experiment_wait',
+      'approval_wait',
     ]);
   });
 });

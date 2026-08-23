@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { Agent, run, setDefaultOpenAIKey } from '@openai/agents';
 import { AppError } from '../core/errors.js';
 import type { ModuleId } from '../contracts/modules.js';
 import { parseWithSchema } from '../contracts/workflow.js';
@@ -64,10 +65,58 @@ export class FakeAgentRunner implements AgentRunner {
   }
 }
 
+export type OpenAiAgentRunnerOptions = {
+  apiKey?: string;
+  model?: string;
+  execute?: (input: { instructions: string; input: unknown }) => Promise<unknown>;
+};
+
+/** Production adapter for the AgentRunner port; tests inject execute and never call the network. */
 export class OpenAiAgentRunner implements AgentRunner {
+  private readonly apiKey: string | undefined;
+  private readonly model: string;
+  private readonly execute: OpenAiAgentRunnerOptions['execute'];
+
+  constructor(options: OpenAiAgentRunnerOptions = {}) {
+    this.apiKey = options.apiKey ?? process.env.OPENAI_API_KEY;
+    this.model = options.model ?? process.env.OPENAI_MODEL ?? 'gpt-5.4';
+    this.execute = options.execute;
+  }
+
   async runStructured<TOutput>(input: AgentRunInput<TOutput>): Promise<AgentRunResult<TOutput>> {
-    void input;
-    throw new AppError('connector_failed', 'OpenAiAgentRunner is not wired for real model calls yet');
+    if (!this.apiKey) {
+      throw new AppError('configuration_failed', 'Missing required OpenAI configuration: OPENAI_API_KEY');
+    }
+
+    try {
+      const output = this.execute
+        ? await this.execute({ instructions: input.instructions, input: input.input })
+        : await this.runWithSdk(input);
+      return {
+        output: parseWithSchema(input.outputSchema, output, `${input.moduleId} output`),
+        model: this.model,
+      };
+    } catch (error) {
+      if (error instanceof AppError) {
+        throw error;
+      }
+      throw new AppError('connector_failed', `${input.moduleId} OpenAI runner failed`);
+    }
+  }
+
+  private async runWithSdk<TOutput>(input: AgentRunInput<TOutput>): Promise<unknown> {
+    setDefaultOpenAIKey(this.apiKey!);
+    const agent = new Agent<any, any>({
+      name: `Buffr ${input.moduleId}`,
+      model: this.model,
+      instructions: input.instructions,
+      outputType: input.outputSchema as any,
+    });
+    const result = await run(agent, JSON.stringify(input.input));
+    if (result.finalOutput === undefined) {
+      throw new AppError('connector_failed', `${input.moduleId} OpenAI runner returned no structured output`);
+    }
+    return result.finalOutput;
   }
 }
 

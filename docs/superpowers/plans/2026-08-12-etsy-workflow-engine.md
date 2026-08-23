@@ -262,10 +262,12 @@ Real credentials are needed only after the mocked connector and engine pass:
 
 This task applies standard Node/TypeScript package tooling and an automated test runner. The scripts for test, typecheck, and build act as CI-ready quality gates: they make the project repeatable locally now and easy to run in automation later.
 
-#### What this task taught / What was completed
+#### Build with intent
 
 - Purpose: establish the TypeScript/Vitest foundation and a shared `AppError` type used by every later layer.
 - Build order: this task comes first because later contracts, storage, workflow, agents, and connectors all need the same scripts and error vocabulary.
+- How: define one repeatable local toolchain and a stable application-error vocabulary before any application behavior exists.
+> **DDIA lens — operational reproducibility:** A system is easier to trust when the same source and commands produce the same test, typecheck, and build results on every machine. These scripts are the first small reliability boundary.
 - Principal files: `package.json`, `tsconfig.json`, `src/index.ts`, `src/core/errors.ts`, `src/tests/smoke.test.ts`, and `src/tests/fixtures/listing.ts`.
 - Tests to read: `src/tests/smoke.test.ts` shows the smallest proof that Vitest can load TypeScript modules and instantiate `AppError`.
 - Completed status: complete in current source; the full suite now runs through `npm test`, `npm run typecheck`, and `npm run build`.
@@ -399,10 +401,12 @@ Expected: all commands exit 0.
 
 This task applies typed contracts, runtime schema validation, and contract testing. TypeScript describes intended shapes at compile time, while Zod checks real runtime data before it crosses module boundaries; the tests prove those contracts reject malformed workflow data.
 
-#### What this task taught / What was completed
+#### Build with intent
 
 - Purpose: define the shared data language before building storage, routing, or agents.
 - Build order: Task 2 depends on Task 1's tooling and produces schemas consumed by Tasks 3-12.
+- How: define Zod-validated runtime schemas alongside TypeScript types, then prove malformed evidence and module output cannot cross a contract boundary.
+> **DDIA lens — data models and schema validation:** A data model is the shared language through which independent parts of a system exchange facts. Runtime validation prevents invalid external or agent-produced data from silently becoming workflow state.
 - Principal files: `src/contracts/evidence.ts`, `src/contracts/experiments.ts`, `src/contracts/modules.ts`, `src/contracts/workflow.ts`, and `src/tests/contracts/contracts.test.ts`.
 - Tests to read: `src/tests/contracts/contracts.test.ts` shows how normalized listing evidence, module outputs, workflow state, and validation errors are expected to behave.
 - Completed status: complete in current source; contract tests pass as part of the full suite.
@@ -850,10 +854,12 @@ Expected: both commands exit 0.
 
 This task applies the repository pattern and atomic file replacement. The workflow engine depends on a `RunRepository` port rather than file paths, while the JSON adapter writes a temporary file and renames it to reduce partial-write risk. Atomic replacement improves durability for one writer; it is not the same thing as multi-writer concurrency control.
 
-#### What this task taught / What was completed
+#### Build with intent
 
 - Purpose: create the engine-facing persistence port and the first local JSON adapter.
 - Build order: Task 3 consumes `WorkflowRunState` from Task 2 and gives Task 4 a repository interface instead of direct file access.
+- How: keep the workflow dependent on a `RunRepository` port, while a JSON-file adapter validates data and uses temporary-write-plus-rename persistence.
+> **DDIA lens — durability and storage abstraction:** Persisted state must survive a process ending, but the workflow should not be coupled to one storage mechanism. The repository separates the logical state model from its current local-file representation.
 - Principal files: `src/storage/runs.ts` and `src/tests/storage/runs.test.ts`.
 - Tests to read: `src/tests/storage/runs.test.ts` covers create/load, save/reload, corrupt JSON, schema-invalid JSON, path-safe run ids, and temp-file cleanup.
 - Completed status: complete in current source; later Task 11 extended the same adapter to persist `run.json`, evidence snapshots, `experiment-plan.json`, and `events.jsonl`.
@@ -926,10 +932,12 @@ Expected: both commands exit 0.
 
 This task applies a finite-state machine with guard clauses and explicit state transitions. Instead of letting arbitrary code or an LLM choose the next step, the engine names allowed stages, validates readiness, and moves through a controlled graph with clear wait, resume, stop, and complete states.
 
-#### What this task taught / What was completed
+#### Build with intent
 
 - Purpose: build the finite-state-machine workflow shell that owns stages, allowed transitions, waits, resumes, and completion.
 - Build order: Task 4 consumes contracts from Task 2 and the repository port from Task 3.
+- How: encode valid lifecycle moves as explicit routes and guards, then persist each state transition through the repository rather than relying on an agent or incidental control flow.
+> **DDIA lens — state machines and correctness:** Correctness often comes from making invalid states or transitions impossible to represent. Explicit workflow state is more auditable and recoverable than an implicit sequence of function calls.
 - Principal files: `src/workflow/routes.ts`, `src/workflow/guards.ts`, `src/workflow/state.ts`, `src/workflow/engine.ts`, `src/tests/workflow/routes.test.ts`, `src/tests/workflow/guards.test.ts`, and `src/tests/workflow/engine.test.ts`.
 - Tests to read: route tests explain decisions, guard tests explain evidence gates, and engine tests show persisted one-step-at-a-time execution.
 - Completed status: complete in current source; later tasks expanded engine behavior with module execution, post-experiment flow, tracing, and E2E persistence.
@@ -1100,10 +1108,12 @@ Expected: both commands exit 0.
 
 This task applies a port/adapter boundary for the LLM runner, dependency injection, and test doubles. Production code can later call the Agents SDK through the adapter, while unit tests inject fakes; M0 shared policy keeps common safety rules in one place instead of duplicating them across modules.
 
-#### What this task taught / What was completed
+#### Build with intent
 
 - Purpose: create the shared policy/runtime boundary for all agent modules and a fakeable structured-output runner.
 - Build order: Task 5 depends on module contracts from Task 2 and prepares the wrapper pattern used by M1-M7 in Tasks 6-8.
+- How: place the Agents SDK behind a fakeable runner interface and centralize M0 policy so each specialist module receives the same safety constraints without duplicating them.
+> **DDIA lens — isolation at an unreliable boundary:** Model calls are an external, nondeterministic dependency. A narrow adapter and dependency injection let the deterministic workflow test the boundary without treating an LLM as a routing authority.
 - Principal files: `src/agents/core/policy.md`, `src/agents/core/policy.ts`, `src/agents/core/README.md`, `src/agents/runner.ts`, `src/tests/agents/policy.test.ts`, and `src/tests/agents/runner.test.ts`.
 - Tests to read: policy tests show the M0 safety rules; runner tests show schema validation, fake runner behavior, and error handling.
 - Completed status: complete in current source; later Task 6 added credential-like-key sanitization to `src/agents/runner.ts`.
@@ -1224,10 +1234,12 @@ Expected: both commands exit 0.
 
 This task applies strategy-like specialist modules and separates deterministic calculation from judgment-heavy interpretation. Each module has a focused role and structured output, while M2 metric math stays deterministic TypeScript so core calculations remain repeatable and easy to test.
 
-#### What this task taught / What was completed
+#### Build with intent
 
 - Purpose: implement the first useful analysis path from M1 context through M6 test plan and a manual experiment wait.
 - Build order: Task 6 uses the runner from Task 5, contracts from Task 2, and deterministic engine stages from Task 4.
+- How: run M1, M4, M5, and M6 through structured wrappers, while calculating M2 rates in ordinary TypeScript and stopping at a manual experiment wait.
+> **DDIA lens — deterministic computation versus interpretation:** Keep repeatable arithmetic close to the data and isolate judgment-heavy interpretation. This makes results reproducible and lets tests distinguish a calculation error from an interpretive recommendation.
 - Principal files: `src/agents/context/`, `src/agents/metrics/`, `src/agents/diagnosis/`, `src/agents/hypothesis/`, `src/agents/test-definition/`, `src/tests/agents/context.test.ts`, `src/tests/agents/metrics.test.ts`, and `src/tests/agents/initial-lifecycle.test.ts`.
 - Tests to read: `metrics.test.ts` shows deterministic M2 calculations; `context.test.ts` shows the M1 wrapper boundary; `initial-lifecycle.test.ts` shows `m1_context -> m2_metrics_initial -> m4_diagnosis -> m5_hypothesis -> m6_test_plan -> experiment_wait`.
 - Completed status: complete in current source; all listed role folders contain `agent.ts`, `prompt.md`, and `README.md`.
@@ -1369,10 +1381,12 @@ Expected: both commands exit 0.
 
 This task applies bounded tool-use, a ReAct-style research loop, and circuit-breaker practices. M3 may decide whether another permitted lookup is useful, but call count, wall-clock time, budget, read-only tools, requester return rules, and citation requirements keep the agentic behavior bounded and auditable.
 
-#### What this task taught / What was completed
+#### Build with intent
 
 - Purpose: add the conditional M3 research side loop without making it part of the main lifecycle route.
 - Build order: Task 7 depends on M0 limits from Task 5, contracts from Task 2, and engine return-to-requester semantics from Task 4.
+- How: permit M3 to call only named read-only tools within hard call and time limits, validate cited structured output, and return it to the requesting module instead of altering lifecycle state.
+> **DDIA lens — bounded work and failure containment:** External research can be slow, costly, or inconclusive. Explicit resource limits and a return seam prevent this optional loop from turning into an unbounded dependency for the main workflow.
 - Principal files: `src/agents/research/agent.ts`, `src/agents/research/prompt.md`, `src/agents/research/README.md`, and `src/tests/agents/research.test.ts`.
 - Tests to read: `src/tests/agents/research.test.ts` covers continue/stop loops, default 3-call cap, 120-second time cap, web citation URLs, permitted tools, and rejection of `status: blocked`.
 - Completed status: complete in current source; M3 accepts only canonical `resolved`, `partly_resolved`, and `unresolved` statuses.
@@ -1489,10 +1503,12 @@ Expected: both commands exit 0.
 
 This task applies an outcome feedback loop for experiment evaluation. It keeps observed metrics separate from interpretation: M2 calculates post-experiment signals against the frozen baseline, then M7 interprets what those results mean for learning and next action.
 
-#### What this task taught / What was completed
+#### Build with intent
 
 - Purpose: close the learning loop after the user manually applies an experiment and supplies result evidence.
 - Build order: Task 8 extends M2 from Task 6 and adds M7 so the Task 4 engine can complete a full post-experiment path.
+- How: compare result evidence against the M6-frozen baseline with deterministic M2 calculations, then let structured M7 evaluation record learning and a manual next action.
+> **DDIA lens — feedback loops and immutable baselines:** A comparison is meaningful only when its reference point does not shift after the outcome is known. Freezing the baseline preserves the lineage needed to explain why a result was called a win, loss, or inconclusive.
 - Principal files: `src/agents/metrics/agent.ts`, `src/agents/metrics/README.md`, `src/agents/evaluation/agent.ts`, `src/agents/evaluation/prompt.md`, `src/agents/evaluation/README.md`, and `src/tests/agents/post-experiment.test.ts`.
 - Tests to read: `src/tests/agents/post-experiment.test.ts` shows `experiment_wait -> m2_metrics_results -> m7_learning -> cycle_complete`.
 - Completed status: complete in current source; M2 result metrics reuse the frozen M6 baseline instead of choosing a new baseline after seeing results.
@@ -1580,10 +1596,12 @@ Expected: both commands exit 0.
 
 This task applies structured logging/events and trace correlation. Instead of relying on ad hoc console output, workflow actions emit typed events with stable names and metadata so runs can be inspected, tested, and correlated with future agent or connector traces.
 
-#### What this task taught / What was completed
+#### Build with intent
 
 - Purpose: make workflow execution observable through structured events.
 - Build order: Task 9 builds on the engine from Task 4 and the module lifecycle from Tasks 6-8.
+- How: emit typed, credential-sanitized events at lifecycle boundaries and correlate them to a run, rather than relying on ad hoc console output.
+> **DDIA lens — observability:** Observability is the ability to infer what a system did from the evidence it leaves behind. Structured events provide stable, machine-readable history without turning tracing into a data-leak path.
 - Principal files: `src/tracing/events.ts`, `src/tests/tracing/events.test.ts`, `src/workflow/engine.ts`, and `src/workflow/state.ts`.
 - Tests to read: `src/tests/tracing/events.test.ts` shows event creation, engine emitted event order, and credential-like-key rejection in event data.
 - Completed status: complete in current source; engine emits workflow, module, route, and waiting events through its existing `emit` hook.
@@ -1651,10 +1669,12 @@ Expected: both commands exit 0.
 
 This task applies OAuth/client credential isolation, least-privilege read-only API access, secret configuration, and anti-corruption adapter mapping. The connector owns Etsy-specific auth and endpoint details, maps raw responses into Buffr evidence contracts, and keeps raw credentials out of workflow state and module context.
 
-#### What this task taught / What was completed
+#### Build with intent
 
 - Purpose: add the Etsy edge adapter while preserving the workflow engine's credential-free boundary.
 - Build order: Task 10 uses normalized evidence contracts from Task 2 and keeps connector details outside Tasks 4 and 6-9.
+- How: isolate OAuth, endpoint access, and Etsy response mapping in a read-only connector, then expose only normalized evidence to the workflow.
+> **DDIA lens — anti-corruption layer and systems of record:** Etsy remains authoritative for Etsy data. The connector absorbs Etsy-specific credentials and payload shapes so changes at that external boundary do not corrupt Buffr's internal workflow model.
 - Principal files: `src/core/config.ts`, `src/connectors/etsy/auth.ts`, `src/connectors/etsy/client.ts`, `src/connectors/etsy/mapper.ts`, `src/connectors/etsy/repository.ts`, `src/connectors/etsy/validate.ts`, `src/tests/connectors/etsy-config.test.ts`, `src/tests/connectors/etsy-mapper.test.ts`, and `src/tests/connectors/etsy-client.test.ts`.
 - Tests to read: config tests show sanitized env loading; mapper tests show Etsy payload normalization; client tests show read-only GET behavior, token headers, repository reads, and mocked connection validation.
 - Completed status: complete in current source; `package.json` includes `etsy:validate` for a later local credential check.
@@ -1806,10 +1826,12 @@ Expected with real credentials and a configured listing id: command exits 0 and 
 
 This task applies integration and end-to-end testing with mocked external systems and representative fixtures. It proves the main workflow components compose correctly without depending on real Etsy or OpenAI calls, making failures faster, deterministic, and safer to debug.
 
-#### What this task taught / What was completed
+#### Build with intent
 
 - Purpose: prove the whole workflow works with fakes before any terminal UI or real API-backed run.
 - Build order: Task 11 composes Tasks 1-10 into one representative run using `JsonFileRunRepository` and fake agent outputs.
+- How: exercise the complete lifecycle through real internal components and controlled fakes at the Etsy/OpenAI boundaries, then inspect the persisted artifacts and event trail.
+> **DDIA lens — integration testing and end-to-end dataflow:** Unit tests prove local behavior; this test proves that data can move across the full pipeline without violating contracts, persistence, routing, or privacy boundaries.
 - Principal files: `src/tests/workflow/end-to-end.test.ts`, `src/storage/runs.ts`, `src/contracts/workflow.ts`, and `src/workflow/engine.ts`.
 - Tests to read: `src/tests/workflow/end-to-end.test.ts` shows `start -> M1 -> M2 initial -> M4 -> M5 -> M6 -> experiment_wait -> resume -> M2 results -> M7 -> cycle_complete`.
 - Completed status: complete in current source; the test asserts `run.json`, `evidence/initial.json`, `evidence/result.json`, `experiment-plan.json`, and `events.jsonl` artifacts.
@@ -1875,10 +1897,12 @@ Expected: all commands exit 0.
 
 This task applies an acceptance gate, incremental delivery, and an adapter boundary. The terminal UI is deferred until the core engine proves its inputs, waits, resumes, outputs, traces, and persisted evidence, so the interface can later adapt a known workflow instead of shaping unfinished core behavior.
 
-#### What this task taught / What was completed
+#### Build with intent
 
 - Purpose: make the UI deferral explicit and testable without building a terminal-chat adapter.
 - Build order: Task 12 follows Task 11 because the mocked end-to-end lifecycle is the acceptance gate for future UI work.
+- How: document and test the absence of a chat adapter while confirming the engine API is usable, so a future interface adapts a proven core rather than forcing premature workflow choices.
+> **DDIA lens — incremental delivery and stable interfaces:** Build and validate the dataflow and state model before attaching another interaction boundary. This keeps interface work reversible and prevents a UI from becoming an accidental system of record.
 - Principal files: `src/tests/workflow/ui-deferral.test.ts` and `README.md`.
 - Tests to read: `src/tests/workflow/ui-deferral.test.ts` verifies the engine API is importable, `src/chat/` is absent, and README documents the terminal-chat acceptance gate.
 - Completed status: complete in current source; README states that terminal chat starts only after a mocked E2E lifecycle proves inputs, waits, resume behavior, outputs, traces, and persisted evidence.

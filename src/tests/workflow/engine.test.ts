@@ -4,6 +4,7 @@ import type { WorkflowRunState, WorkflowRunStateInput } from '../../contracts/wo
 import type { RunRepository } from '../../storage/runs.js';
 import { makeFixtureListingEvidence } from '../fixtures/listing.js';
 import { createWorkflowEngine, type ModuleExecutor } from '../../workflow/engine.js';
+import { parseMerchGridWorkflowEvidence } from '../../contracts/merchgrid-workflow.js';
 
 describe('workflow engine', () => {
   it('starts a run through RunRepository and advances one deterministic stage at a time', async () => {
@@ -25,6 +26,8 @@ describe('workflow engine', () => {
     expect(started).toMatchObject({
       runId: 'run-123',
       listingId: 'listing-123',
+      subjectRef: 'listing:listing-123',
+      workflowKind: 'etsy_listing',
       status: 'analyzing',
       stage: 'm1_context',
       evidenceRefs: ['initial:listing-123:2026-08-12T00:00:00.000Z'],
@@ -37,6 +40,66 @@ describe('workflow engine', () => {
       'm2_metrics_initial',
       'm4_diagnosis',
     ]);
+  });
+
+  it('starts a MerchGrid run with its own evidence contract instead of a fake Etsy listing', async () => {
+    const repository = new InMemoryRunRepository();
+    const engine = createWorkflowEngine({ repository, modules: moduleExecutor(), now: fixedNow });
+
+    const started = await engine.startMerchGrid({
+      runId: 'merchgrid-weekly-1',
+      workflowKind: 'merchgrid_weekly',
+      subjectRef: 'merchgrid:weekly:2026-08-21',
+      initialEvidence: weeklyMerchGridEvidence(),
+    });
+
+    expect(started).toMatchObject({
+      listingId: undefined,
+      subjectRef: 'merchgrid:weekly:2026-08-21',
+      workflowKind: 'merchgrid_weekly',
+      evidenceSnapshots: { initial: { product: 'merchgrid', kind: 'weekly_review' } },
+    });
+  });
+
+  it('holds an M6 test plan for explicit approval before experiment wait', async () => {
+    const repository = new InMemoryRunRepository();
+    const engine = createWorkflowEngine({ repository, modules: moduleExecutor(), now: fixedNow });
+
+    await engine.start({ runId: 'run-approval', listingId: 'listing-123', initialEvidence: makeFixtureListingEvidence() });
+    await engine.step('run-approval');
+    await engine.step('run-approval');
+    await engine.step('run-approval');
+    await engine.step('run-approval');
+    const awaitingApproval = await engine.step('run-approval');
+
+    expect(awaitingApproval).toMatchObject({ stage: 'approval_wait', status: 'awaiting_approval' });
+
+    const approved = await engine.approveExperiment('run-approval');
+    expect(approved).toMatchObject({
+      stage: 'experiment_wait',
+      status: 'ready_for_experiment',
+      approval: { status: 'approved' },
+    });
+  });
+
+  it('records rejection without advancing a proposal into experiment wait', async () => {
+    const repository = new InMemoryRunRepository();
+    const engine = createWorkflowEngine({ repository, modules: moduleExecutor(), now: fixedNow });
+    await repository.create({
+      ...baseState(),
+      stage: 'approval_wait',
+      status: 'awaiting_approval',
+      moduleOutputs: { m3: [], m6: testPlanOutput() },
+    });
+
+    const rejected = await engine.rejectExperiment({ runId: 'run-123', reason: 'not enough confidence' });
+
+    expect(rejected).toMatchObject({
+      stage: 'approval_wait',
+      status: 'stopped',
+      approval: { status: 'rejected', reason: 'not enough confidence' },
+    });
+    expect(rejected.events).toContainEqual(expect.objectContaining({ type: 'workflow.experiment_rejected' }));
   });
 
   it('pauses deterministically when M2 reports missing evidence', async () => {
@@ -269,6 +332,8 @@ function baseState(): WorkflowRunState {
   return {
     runId: 'run-123',
     listingId: 'listing-123',
+    subjectRef: 'listing:listing-123',
+    workflowKind: 'etsy_listing',
     status: 'analyzing',
     stage: 'm1_context',
     createdAt: '2026-08-12T00:00:00.000Z',
@@ -277,6 +342,27 @@ function baseState(): WorkflowRunState {
     moduleOutputs: { m3: [] },
     events: [],
   };
+}
+
+function weeklyMerchGridEvidence() {
+  return parseMerchGridWorkflowEvidence({
+    period: {
+      kind: 'weekly',
+      previous: { startDate: '2026-08-08', endDate: '2026-08-14' },
+      current: { startDate: '2026-08-15', endDate: '2026-08-21' },
+    },
+    sourceCoverage: {
+      previous: { posthog: { complete: 7 }, fly_metrics: { complete: 7 }, shopify_partner: { complete: 7 } },
+      current: { posthog: { complete: 7 }, fly_metrics: { complete: 7 }, shopify_partner: { complete: 7 } },
+    },
+    sourceFreshness: { previous: {}, current: {} },
+    aggregateMetrics: {
+      previous: { posthog: { app_opened_count: 8 } },
+      current: { posthog: { app_opened_count: 10 } },
+      change: { posthog: { app_opened_count: 2 } },
+    },
+    limitations: [],
+  }, '.local/artifacts/weekly-reviews/2026-08-21.json');
 }
 
 function moduleExecutor(overrides: Partial<ModuleExecutor> = {}): ModuleExecutor {
@@ -319,18 +405,7 @@ function moduleExecutor(overrides: Partial<ModuleExecutor> = {}): ModuleExecutor
       expectedSignal: 'Conversion improves',
       notes: [],
     }),
-    runM6: async () => ({
-      primaryMetric: 'conversion_rate',
-      secondaryMetrics: [],
-      baselineValue: 0.02,
-      baselinePeriod: 'last 30 days',
-      qualificationRequirements: [],
-      expectedSupportingSignal: 'Conversion improves',
-      expectedWeakeningSignal: 'Conversion declines',
-      inconclusiveCondition: 'Traffic too low',
-      contextToMonitor: [],
-      unresolvedMeasurementRules: [],
-    }),
+    runM6: async () => testPlanOutput(),
     runM2Results: async () => ({
       phase: 'post_experiment',
       comparisonQuality: 'valid',
@@ -359,6 +434,21 @@ function moduleExecutor(overrides: Partial<ModuleExecutor> = {}): ModuleExecutor
       nextActionRationale: 'Keep the change.',
     }),
     ...overrides,
+  };
+}
+
+function testPlanOutput() {
+  return {
+    primaryMetric: 'conversion_rate',
+    secondaryMetrics: [],
+    baselineValue: 0.02,
+    baselinePeriod: 'last 30 days',
+    qualificationRequirements: [],
+    expectedSupportingSignal: 'Conversion improves',
+    expectedWeakeningSignal: 'Conversion declines',
+    inconclusiveCondition: 'Traffic too low',
+    contextToMonitor: [],
+    unresolvedMeasurementRules: [],
   };
 }
 

@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { AppError } from '../core/errors.js';
 import { NormalizedListingEvidenceSchema } from './evidence.js';
+import { MerchGridWorkflowEvidenceSchema } from './merchgrid-workflow.js';
 import {
   ContextOutputSchema,
   DiagnosisOutputSchema,
@@ -18,6 +19,7 @@ export const WorkflowStageSchema = z.enum([
   'm4_diagnosis',
   'm5_hypothesis',
   'm6_test_plan',
+  'approval_wait',
   'experiment_wait',
   'm2_metrics_results',
   'm7_learning',
@@ -28,11 +30,29 @@ export const WorkflowStatusSchema = z.enum([
   'analyzing',
   'researching',
   'waiting_for_data',
+  'awaiting_approval',
   'ready_for_experiment',
   'experiment_running',
   'ready_for_evaluation',
   'cycle_complete',
   'stopped',
+]);
+
+export const WorkflowKindSchema = z.enum(['etsy_listing', 'merchgrid_daily', 'merchgrid_weekly']);
+
+const EtsyWorkflowEvidenceSchema = z.object({
+  product: z.literal('etsy'),
+  evidence: NormalizedListingEvidenceSchema,
+}).strict();
+
+export const WorkflowEvidenceSchema = z.union([
+  EtsyWorkflowEvidenceSchema,
+  MerchGridWorkflowEvidenceSchema,
+]);
+
+export const WorkflowApprovalSchema = z.discriminatedUnion('status', [
+  z.object({ status: z.literal('approved'), decidedAt: z.string().datetime() }).strict(),
+  z.object({ status: z.literal('rejected'), decidedAt: z.string().datetime(), reason: z.string().min(1).max(500) }).strict(),
 ]);
 
 export const WorkflowEventSchema = z
@@ -50,7 +70,9 @@ export const WorkflowEventSchema = z
 export const WorkflowRunStateSchema = z
   .object({
     runId: z.string().min(1),
-    listingId: z.string().min(1),
+    subjectRef: z.string().min(1).optional(),
+    workflowKind: WorkflowKindSchema.default('etsy_listing'),
+    listingId: z.string().min(1).optional(),
     status: WorkflowStatusSchema,
     stage: WorkflowStageSchema,
     createdAt: z.string().datetime(),
@@ -58,11 +80,12 @@ export const WorkflowRunStateSchema = z
     evidenceRefs: z.array(z.string()),
     evidenceSnapshots: z
       .object({
-        initial: NormalizedListingEvidenceSchema.optional(),
-        result: NormalizedListingEvidenceSchema.optional(),
+        initial: WorkflowEvidenceSchema.optional(),
+        result: WorkflowEvidenceSchema.optional(),
       })
       .strict()
       .optional(),
+    approval: WorkflowApprovalSchema.optional(),
     moduleOutputs: z
       .object({
         m1: ContextOutputSchema.optional(),
@@ -81,6 +104,9 @@ export const WorkflowRunStateSchema = z
 
 export type WorkflowStage = z.infer<typeof WorkflowStageSchema>;
 export type WorkflowStatus = z.infer<typeof WorkflowStatusSchema>;
+export type WorkflowKind = z.infer<typeof WorkflowKindSchema>;
+export type WorkflowEvidence = z.infer<typeof WorkflowEvidenceSchema>;
+export type WorkflowApproval = z.infer<typeof WorkflowApprovalSchema>;
 export type WorkflowEvent = z.infer<typeof WorkflowEventSchema>;
 export type WorkflowRunStateInput = z.input<typeof WorkflowRunStateSchema>;
 export type WorkflowRunState = z.infer<typeof WorkflowRunStateSchema>;

@@ -48,6 +48,15 @@ describe('workflow guards', () => {
     );
   });
 
+  it('refuses to enter approval wait unless M6 produced a test plan', () => {
+    const state = workflowState({ stage: 'approval_wait' });
+
+    expect(canRunStage(state, 'approval_wait')).toBe(false);
+    expect(() => assertCanRunStage(state, 'approval_wait')).toThrow(
+      'Cannot enter approval_wait before M6 test plan is present',
+    );
+  });
+
   it('rejects credential-like keys anywhere in state or evidence objects', () => {
     expect(() =>
       assertNoCredentialKeys({
@@ -64,6 +73,8 @@ function workflowState(overrides: Partial<WorkflowRunState> = {}): WorkflowRunSt
   return {
     runId: 'run-123',
     listingId: 'listing-123',
+    subjectRef: 'listing:listing-123',
+    workflowKind: 'etsy_listing',
     status: 'analyzing',
     stage: 'm1_context',
     createdAt: '2026-08-12T00:00:00.000Z',

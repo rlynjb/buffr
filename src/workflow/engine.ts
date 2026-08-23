@@ -4,6 +4,10 @@ import {
   type NormalizedListingEvidence,
 } from '../contracts/evidence.js';
 import {
+  MerchGridWorkflowEvidenceSchema,
+  type MerchGridWorkflowEvidence,
+} from '../contracts/merchgrid-workflow.js';
+import {
   ContextOutputSchema,
   DiagnosisOutputSchema,
   EvaluationOutputSchema,
@@ -23,6 +27,8 @@ import {
 import {
   parseWithSchema,
   type WorkflowEvent,
+  type WorkflowEvidence,
+  type WorkflowKind,
   type WorkflowRunState,
   type WorkflowStage,
   type WorkflowStatus,
@@ -32,7 +38,7 @@ import { assertCanRunStage, assertNoCredentialKeys } from './guards.js';
 import {
   routeAfterM2Initial,
   routeAfterM2Results,
-  routeAfterM4,
+  routeAfterM4ForWorkflowKind,
   routeAfterM5,
   routeAfterM6,
   routeAfterM7,
@@ -49,7 +55,14 @@ export type StartWorkflowInput = {
 
 export type ResumeExperimentInput = {
   runId: string;
-  resultEvidence: NormalizedListingEvidence;
+  resultEvidence: NormalizedListingEvidence | MerchGridWorkflowEvidence;
+};
+
+export type StartMerchGridWorkflowInput = {
+  runId: string;
+  subjectRef: string;
+  workflowKind: Extract<WorkflowKind, 'merchgrid_daily' | 'merchgrid_weekly'>;
+  initialEvidence: MerchGridWorkflowEvidence;
 };
 
 export type ResearchRequest = {
@@ -83,8 +96,12 @@ export type TraceSink = (event: WorkflowEvent) => void | Promise<void>;
 
 export type WorkflowEngine = {
   start(input: StartWorkflowInput): Promise<WorkflowRunState>;
+  startMerchGrid(input: StartMerchGridWorkflowInput): Promise<WorkflowRunState>;
   step(runId: string): Promise<WorkflowRunState>;
   resumeWithExperimentResults(input: ResumeExperimentInput): Promise<WorkflowRunState>;
+  approveExperiment(runId: string): Promise<WorkflowRunState>;
+  rejectExperiment(input: { runId: string; reason: string }): Promise<WorkflowRunState>;
+  waitForMoreData(input: { runId: string; reason: string }): Promise<WorkflowRunState>;
   requestResearch(runId: string, request: ResearchRequest): Promise<WorkflowRunState>;
   completeResearch(runId: string, output: ResearchOutput): Promise<WorkflowRunState>;
 };
@@ -115,14 +132,17 @@ export function createWorkflowEngine(deps: {
 
   async function start(input: StartWorkflowInput): Promise<WorkflowRunState> {
     assertNoCredentialKeys(input.initialEvidence);
-    const evidence = parseWithSchema(
+    const listingEvidence = parseWithSchema(
       NormalizedListingEvidenceSchema,
       input.initialEvidence,
       'initial listing evidence',
     );
+    const evidence: WorkflowEvidence = { product: 'etsy', evidence: listingEvidence };
     const state = createInitialWorkflowState({
       runId: input.runId,
       listingId: input.listingId,
+      subjectRef: `listing:${input.listingId}`,
+      workflowKind: 'etsy_listing',
       initialEvidenceRef: evidenceRef('initial', evidence),
       now: now(),
     });
@@ -130,6 +150,34 @@ export function createWorkflowEngine(deps: {
       ...state,
       evidenceSnapshots: { initial: evidence },
     };
+
+    await deps.repository.create(stateWithEvidence);
+    const created = await deps.repository.load(input.runId);
+    for (const event of created.events) {
+      await deps.emit?.(event);
+    }
+    return created;
+  }
+
+  async function startMerchGrid(input: StartMerchGridWorkflowInput): Promise<WorkflowRunState> {
+    assertNoCredentialKeys(input.initialEvidence);
+    const evidence = parseWithSchema(
+      MerchGridWorkflowEvidenceSchema,
+      input.initialEvidence,
+      'initial MerchGrid evidence',
+    );
+    const expectedEvidenceKind = input.workflowKind === 'merchgrid_daily' ? 'daily_health' : 'weekly_review';
+    if (evidence.kind !== expectedEvidenceKind) {
+      throw new AppError('validation_failed', `Workflow kind ${input.workflowKind} does not match ${evidence.kind} evidence`);
+    }
+    const state = createInitialWorkflowState({
+      runId: input.runId,
+      subjectRef: input.subjectRef,
+      workflowKind: input.workflowKind,
+      initialEvidenceRef: evidenceRef('initial', evidence),
+      now: now(),
+    });
+    const stateWithEvidence = { ...state, evidenceSnapshots: { initial: evidence } };
 
     await deps.repository.create(stateWithEvidence);
     const created = await deps.repository.load(input.runId);
@@ -160,6 +208,8 @@ export function createWorkflowEngine(deps: {
         return runM2Results(state);
       case 'm7_learning':
         return runM7(state);
+      case 'approval_wait':
+        throw new AppError('route_not_allowed', 'Cannot step approval_wait before an owner approves or rejects the experiment');
       case 'experiment_wait':
         throw new AppError('route_not_allowed', 'Cannot step experiment_wait before result evidence is supplied');
       case 'm3_research':
@@ -176,11 +226,7 @@ export function createWorkflowEngine(deps: {
     }
 
     assertNoCredentialKeys(input.resultEvidence);
-    const evidence = parseWithSchema(
-      NormalizedListingEvidenceSchema,
-      input.resultEvidence,
-      'result listing evidence',
-    );
+    const evidence = parseResultEvidence(state, input.resultEvidence);
     const next = withEvent(
       {
         ...state,
@@ -196,6 +242,62 @@ export function createWorkflowEngine(deps: {
 
     assertCanRunStage(next, 'm2_metrics_results');
     return persist(next);
+  }
+
+  async function approveExperiment(runId: string): Promise<WorkflowRunState> {
+    const state = await deps.repository.load(runId);
+    if (state.stage !== 'approval_wait' || state.status !== 'awaiting_approval') {
+      throw new AppError('route_not_allowed', 'Experiment approval is only allowed while awaiting approval');
+    }
+    const next = withEvent(
+      {
+        ...state,
+        stage: 'experiment_wait',
+        status: 'ready_for_experiment',
+        approval: { status: 'approved', decidedAt: now().toISOString() },
+      },
+      'workflow.experiment_approved',
+      'Experiment plan approved for manual execution',
+    );
+    assertCanRunStage(next, 'experiment_wait');
+    return persist(next);
+  }
+
+  async function rejectExperiment(input: { runId: string; reason: string }): Promise<WorkflowRunState> {
+    const state = await deps.repository.load(input.runId);
+    if (state.stage !== 'approval_wait' || state.status !== 'awaiting_approval') {
+      throw new AppError('route_not_allowed', 'Experiment rejection is only allowed while awaiting approval');
+    }
+    const reason = input.reason.trim();
+    if (!reason || reason.length > 500) {
+      throw new AppError('validation_failed', 'Experiment rejection reason must be between 1 and 500 characters');
+    }
+    return persist(
+      withEvent(
+        {
+          ...state,
+          status: 'stopped',
+          approval: { status: 'rejected', decidedAt: now().toISOString(), reason },
+        },
+        'workflow.experiment_rejected',
+        'Experiment plan rejected',
+        { reason },
+      ),
+    );
+  }
+
+  async function waitForMoreData(input: { runId: string; reason: string }): Promise<WorkflowRunState> {
+    const state = await deps.repository.load(input.runId);
+    if (state.stage !== 'experiment_wait') {
+      throw new AppError('route_not_allowed', `Cannot wait for data from ${state.stage}`);
+    }
+    return persist(
+      withEvent(
+        { ...state, status: 'waiting_for_data' },
+        'workflow.waiting_for_data',
+        input.reason,
+      ),
+    );
   }
 
   async function requestResearch(runId: string, request: ResearchRequest): Promise<WorkflowRunState> {
@@ -311,7 +413,7 @@ export function createWorkflowEngine(deps: {
       'M4 diagnosis completed',
     );
 
-    return applyRoute(completed, routeAfterM4(output), emitFromIndex);
+    return applyRoute(completed, routeAfterM4ForWorkflowKind(state.workflowKind, output), emitFromIndex);
   }
 
   async function runM5(state: WorkflowRunState): Promise<WorkflowRunState> {
@@ -550,8 +652,12 @@ export function createWorkflowEngine(deps: {
 
   return {
     start,
+    startMerchGrid,
     step,
     resumeWithExperimentResults,
+    approveExperiment,
+    rejectExperiment,
+    waitForMoreData,
     requestResearch,
     completeResearch,
   };
@@ -564,6 +670,25 @@ const ALL_RESEARCH_TOOLS: readonly ResearchToolName[] = [
   'hosted_web_search',
 ];
 
+function parseResultEvidence(
+  state: WorkflowRunState,
+  value: NormalizedListingEvidence | MerchGridWorkflowEvidence,
+): WorkflowEvidence {
+  if (state.workflowKind === 'etsy_listing') {
+    return {
+      product: 'etsy',
+      evidence: parseWithSchema(NormalizedListingEvidenceSchema, value, 'result listing evidence'),
+    };
+  }
+
+  const evidence = parseWithSchema(MerchGridWorkflowEvidenceSchema, value, 'result MerchGrid evidence');
+  const expectedEvidenceKind = state.workflowKind === 'merchgrid_daily' ? 'daily_health' : 'weekly_review';
+  if (evidence.kind !== expectedEvidenceKind) {
+    throw new AppError('validation_failed', `Workflow kind ${state.workflowKind} does not match ${evidence.kind} result evidence`);
+  }
+  return evidence;
+}
+
 const WORKFLOW_STAGES: readonly WorkflowStage[] = [
   'm1_context',
   'm2_metrics_initial',
@@ -571,6 +696,7 @@ const WORKFLOW_STAGES: readonly WorkflowStage[] = [
   'm4_diagnosis',
   'm5_hypothesis',
   'm6_test_plan',
+  'approval_wait',
   'experiment_wait',
   'm2_metrics_results',
   'm7_learning',
@@ -584,6 +710,9 @@ function assertCurrentStage(state: WorkflowRunState, expected: WorkflowStage): v
 }
 
 function statusForStage(stage: WorkflowStage): WorkflowStatus {
+  if (stage === 'approval_wait') {
+    return 'awaiting_approval';
+  }
   if (stage === 'm2_metrics_results' || stage === 'm7_learning') {
     return 'ready_for_evaluation';
   }

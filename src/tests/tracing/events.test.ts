@@ -47,7 +47,7 @@ describe('workflow tracing events', () => {
     ).toThrow('Credential-like key is not allowed in workflow data: apiKey');
   });
 
-  it('emits started, module, route, and waiting events during the initial lifecycle', async () => {
+  it('emits started, module, route, and approval-gate events during the initial lifecycle', async () => {
     const emitted: WorkflowEvent[] = [];
     const engine = createWorkflowEngine({
       repository: new InMemoryRunRepository(),
@@ -90,8 +90,7 @@ describe('workflow tracing events', () => {
       'module.started',
       'module.completed',
       'route.decided',
-      'workflow.waiting',
-      'workflow.waiting_for_experiment',
+      'workflow.advanced',
     ]);
     expect(JSON.stringify(emitted)).not.toMatch(/apiKey|secret|token|refresh/iu);
   });

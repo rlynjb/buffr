@@ -33,6 +33,16 @@ describe('Fly reliability metrics adapter', () => {
     }]);
   });
 
+  it('uses FlyV1 authorization for a scoped Fly access token', async () => {
+    const fakeHttp = new SequentialFakeHttpClient();
+    fakeHttp.respond(prometheusStatusVector([['200', 1]]));
+
+    await adapterFor(fakeHttp, 'FlyV1 scoped-readonly-token').collect(completedMerchGridWindow);
+
+    expect(fakeHttp.requests).toHaveLength(1);
+    expect(fakeHttp.requests[0]!.headers?.authorization).toBe('FlyV1 scoped-readonly-token');
+  });
+
   it('produces a complete snapshot accepted by the schema and repository', async () => {
     const fakeHttp = new SequentialFakeHttpClient();
     fakeHttp.respond(prometheusStatusVector([['200', 97], ['503', 3]]));
@@ -107,11 +117,11 @@ describe('Fly reliability metrics adapter', () => {
   });
 });
 
-function adapterFor(http: SequentialFakeHttpClient): FlyMetricsSourceAdapter {
+function adapterFor(http: SequentialFakeHttpClient, accessToken = 'fly-access-token'): FlyMetricsSourceAdapter {
   return new FlyMetricsSourceAdapter({
     http,
     config: {
-      accessToken: 'fly-access-token',
+      accessToken,
       appName: 'merchgrid',
       metricsUrl: 'https://api.fly.example.test/prometheus/acme/api/v1/query',
     },
