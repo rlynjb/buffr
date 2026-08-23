@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -222,6 +222,15 @@ describe('MerchGrid source-pack jobs', () => {
       sourceCoverage: result.review.sourceCoverage,
     });
     expect(result.artifactPath).toContain('weekly-reviews');
+  });
+
+  it('rejects a saved artifact that does not satisfy the aggregate evidence schema', async () => {
+    const dependencies = await fakeDependencies();
+    const result = await runDailyCollection({ date: '2026-08-21', dependencies });
+
+    await writeFile(result.artifactPath, JSON.stringify({ rawEvents: [{ event: 'scan_started' }] }), 'utf8');
+
+    await expect(dependencies.artifacts.loadDailyHealth('2026-08-21')).rejects.toThrow();
   });
 
   it('prints only the daily artifact path and normalized source statuses', async () => {

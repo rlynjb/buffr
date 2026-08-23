@@ -10,7 +10,11 @@ import {
 import type { MetricSourceAdapter } from '../connectors/merchgrid/source.js';
 import { AppError } from '../core/errors.js';
 import { collectSourcePack } from '../metrics/coordinator.js';
-import { toMerchGridReviewEvidence, type MerchGridReviewEvidence } from '../metrics/evidence.js';
+import {
+  MerchGridReviewEvidenceSchema,
+  toMerchGridReviewEvidence,
+  type MerchGridReviewEvidence,
+} from '../metrics/evidence.js';
 import {
   buildDailyHealthSummary,
   buildWeeklyBusinessReview,
@@ -82,7 +86,7 @@ export class JsonFileMerchGridReviewArtifactRepository implements MerchGridRevie
     }
 
     try {
-      return JSON.parse(raw) as MerchGridReviewEvidence;
+      return MerchGridReviewEvidenceSchema.parse(JSON.parse(raw));
     } catch (error) {
       throw new AppError('storage_failed', 'MerchGrid review artifact JSON is corrupt', { cause: error });
     }
