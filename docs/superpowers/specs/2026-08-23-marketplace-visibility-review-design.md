@@ -142,6 +142,68 @@ propose, but they do not query providers or apply changes.
 > allowed action boundary. The agent only turns approved context into a
 > structured visibility hypothesis and test plan.
 
+### Data-Flow Boundaries
+
+```text
+External systems                 Local source pack / artifacts             Shared workflow core                  Human action
+----------------                 -----------------------------             --------------------                  ------------
+
+PostHog safe events       \
+Fly metrics                \      +--------------------------+
+Shopify Partner CSV        +----> | MerchGrid source pack    |
+manual product context    /       | collect daily aggregates |
+                               -> | write local JSON only    |
+                                  +------------+-------------+
+                                               |
+                                               v
+                                  +--------------------------+
+                                  | Visibility profile       |
+                                  | read safe artifacts      |
+                                  | read local context       |
+                                  | label evidence: sparse   |
+                                  +------------+-------------+
+                                               |
+                                               v
+                                  +--------------------------+
+                                  | MarketplaceVisibility    |
+                                  | Evidence contract        |
+                                  | strict, local, no raw    |
+                                  | provider payloads        |
+                                  +------------+-------------+
+                                               |
+                                               v
+                                  +--------------------------+
+                                  | Existing workflow engine |
+                                  | M1 -> M2 -> M4 -> M5     |
+                                  | -> M6 -> approval_wait   |
+                                  +------------+-------------+
+                                               |
+                                               v
+                                  +--------------------------+
+                                  | Owner reviews hypothesis |
+                                  | and manually applies or  |
+                                  | rejects marketplace test |
+                                  +------------+-------------+
+                                               |
+                                               v
+                                  +--------------------------+
+                                  | Later evidence loop      |
+                                  | collect again -> compare |
+                                  | -> M7 learning           |
+                                  +--------------------------+
+```
+
+The seam is `MarketplaceVisibilityEvidence`. Everything to the left of that
+contract is product/source-specific. Everything to the right is shared Buffr
+workflow behavior. That is what lets MerchGrid work first without making the
+core Shopify-only.
+
+> **DDIA lens — batch pipeline:** This is a small batch ETL flow: extract safe
+> aggregate facts and local context, transform them into one evidence contract,
+> then load that contract into the existing workflow run repository. The
+> workflow engine consumes the normalized evidence, not provider-specific
+> payloads.
+
 ## Contracts and Data Flow
 
 The workflow-facing contract is conceptually:
