@@ -59,6 +59,40 @@ describe('marketplace visibility evidence contract', () => {
     })).toThrow();
   });
 
+  it.each([
+    {
+      marketplaceContext: {
+        marketplace: 'shopify_app_store' as const,
+        productName: 'MerchGrid',
+        currentSurfaceSummary: 'Observed shop at my-shop.myshopify.com',
+      },
+    },
+    { limitations: ['POSTHOG_PERSONAL_API_KEY=secret'] },
+    { marketplaceContext: {
+      marketplace: 'shopify_app_store' as const,
+      productName: 'MerchGrid',
+      currentSurfaceSummary: 'Provider response https://api.posthog.com/query: {"events":[]}',
+    } },
+  ])('rejects unsafe provider or private data embedded in allowed strings', (unsafeValues) => {
+    expect(() => MarketplaceVisibilityEvidenceSchema.parse({
+      product: 'marketplace_visibility',
+      profile: 'merchgrid_shopify_app_store',
+      subjectRef: 'merchgrid:visibility:2026-08-22',
+      artifactRef: '.local/artifacts/daily-health/2026-08-22.json',
+      evidenceLevel: 'sparse',
+      recommendationType: 'visibility_hypothesis',
+      marketplaceContext: {
+        marketplace: 'shopify_app_store',
+        productName: 'MerchGrid',
+        currentSurfaceSummary: 'Shopify app listing',
+      },
+      measuredSignals: {},
+      limitations: [],
+      prohibitedClaims: [],
+      ...unsafeValues,
+    })).toThrow();
+  });
+
   it('rejects provider URLs as artifact references', () => {
     expect(() => MarketplaceVisibilityEvidenceSchema.parse({
       product: 'marketplace_visibility',

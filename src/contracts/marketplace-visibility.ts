@@ -1,6 +1,7 @@
 import { z } from 'zod';
 
 const UnsafeKeyPattern = /(token|secret|authorization|password|email|shopDomain|rawEvents|payload|providerUrl)/iu;
+const UnsafeValuePattern = /(https?:\/\/|(?:^|[\s"'`])[\w.-]+\.myshopify\.com\b|(?:api[_ -]?key|access[_ -]?token|personal[_ -]?api[_ -]?key)\s*[:=]|raw[_ -]?(?:events?|payload)|\{\s*["']?(?:events?|payload|data)["']?\s*:)/iu;
 
 export const MarketplaceVisibilityProfileSchema = z.enum([
   'merchgrid_shopify_app_store',
@@ -39,6 +40,12 @@ export function parseMarketplaceVisibilityEvidence(value: unknown): MarketplaceV
 }
 
 function assertNoUnsafeKeys(value: unknown, ctx: z.RefinementCtx, path: (string | number)[] = []): void {
+  if (typeof value === 'string') {
+    if (UnsafeValuePattern.test(value)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path, message: 'unsafe value' });
+    }
+    return;
+  }
   if (!value || typeof value !== 'object') return;
   for (const [key, child] of Object.entries(value)) {
     if (UnsafeKeyPattern.test(key)) {
