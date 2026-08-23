@@ -22,7 +22,7 @@ describe('workflow evidence references', () => {
     };
 
     expect(evidenceRef('initial', evidence)).toBe(
-      'initial:merchgrid:visibility:2026-08-22:.local/merchgrid-metrics/artifacts/daily-health/2026-08-22.json',
+      'initial:marketplace_visibility:merchgrid_shopify_app_store:merchgrid:visibility:2026-08-22',
     );
   });
 });

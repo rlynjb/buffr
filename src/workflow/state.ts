@@ -64,7 +64,7 @@ export function evidenceRef(kind: 'initial' | 'result', input: WorkflowEvidence)
     return `${kind}:${input.evidence.listingId}:${input.evidence.observedAt}`;
   }
   if (input.product === 'marketplace_visibility') {
-    return `${kind}:${input.subjectRef}:${input.artifactRef}`;
+    return `${kind}:marketplace_visibility:${input.profile}:${input.subjectRef}`;
   }
   return `${kind}:${input.kind}:${input.artifactRef}`;
 }

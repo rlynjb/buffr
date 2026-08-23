@@ -8,6 +8,10 @@ import {
   type MerchGridWorkflowEvidence,
 } from '../contracts/merchgrid-workflow.js';
 import {
+  MarketplaceVisibilityEvidenceSchema,
+  type MarketplaceVisibilityEvidence,
+} from '../contracts/marketplace-visibility.js';
+import {
   ContextOutputSchema,
   DiagnosisOutputSchema,
   EvaluationOutputSchema,
@@ -55,7 +59,7 @@ export type StartWorkflowInput = {
 
 export type ResumeExperimentInput = {
   runId: string;
-  resultEvidence: NormalizedListingEvidence | MerchGridWorkflowEvidence;
+  resultEvidence: NormalizedListingEvidence | MerchGridWorkflowEvidence | MarketplaceVisibilityEvidence;
 };
 
 export type StartMerchGridWorkflowInput = {
@@ -63,6 +67,12 @@ export type StartMerchGridWorkflowInput = {
   subjectRef: string;
   workflowKind: Extract<WorkflowKind, 'merchgrid_daily' | 'merchgrid_weekly'>;
   initialEvidence: MerchGridWorkflowEvidence;
+};
+
+export type StartMarketplaceVisibilityInput = {
+  runId: string;
+  subjectRef: string;
+  initialEvidence: MarketplaceVisibilityEvidence;
 };
 
 export type ResearchRequest = {
@@ -97,6 +107,7 @@ export type TraceSink = (event: WorkflowEvent) => void | Promise<void>;
 export type WorkflowEngine = {
   start(input: StartWorkflowInput): Promise<WorkflowRunState>;
   startMerchGrid(input: StartMerchGridWorkflowInput): Promise<WorkflowRunState>;
+  startMarketplaceVisibility(input: StartMarketplaceVisibilityInput): Promise<WorkflowRunState>;
   step(runId: string): Promise<WorkflowRunState>;
   resumeWithExperimentResults(input: ResumeExperimentInput): Promise<WorkflowRunState>;
   approveExperiment(runId: string): Promise<WorkflowRunState>;
@@ -174,6 +185,30 @@ export function createWorkflowEngine(deps: {
       runId: input.runId,
       subjectRef: input.subjectRef,
       workflowKind: input.workflowKind,
+      initialEvidenceRef: evidenceRef('initial', evidence),
+      now: now(),
+    });
+    const stateWithEvidence = { ...state, evidenceSnapshots: { initial: evidence } };
+
+    await deps.repository.create(stateWithEvidence);
+    const created = await deps.repository.load(input.runId);
+    for (const event of created.events) {
+      await deps.emit?.(event);
+    }
+    return created;
+  }
+
+  async function startMarketplaceVisibility(input: StartMarketplaceVisibilityInput): Promise<WorkflowRunState> {
+    assertNoCredentialKeys(input.initialEvidence);
+    const evidence = parseWithSchema(
+      MarketplaceVisibilityEvidenceSchema,
+      input.initialEvidence,
+      'initial marketplace visibility evidence',
+    );
+    const state = createInitialWorkflowState({
+      runId: input.runId,
+      subjectRef: input.subjectRef,
+      workflowKind: 'marketplace_visibility_review',
       initialEvidenceRef: evidenceRef('initial', evidence),
       now: now(),
     });
@@ -653,6 +688,7 @@ export function createWorkflowEngine(deps: {
   return {
     start,
     startMerchGrid,
+    startMarketplaceVisibility,
     step,
     resumeWithExperimentResults,
     approveExperiment,
@@ -672,13 +708,17 @@ const ALL_RESEARCH_TOOLS: readonly ResearchToolName[] = [
 
 function parseResultEvidence(
   state: WorkflowRunState,
-  value: NormalizedListingEvidence | MerchGridWorkflowEvidence,
+  value: NormalizedListingEvidence | MerchGridWorkflowEvidence | MarketplaceVisibilityEvidence,
 ): WorkflowEvidence {
   if (state.workflowKind === 'etsy_listing') {
     return {
       product: 'etsy',
       evidence: parseWithSchema(NormalizedListingEvidenceSchema, value, 'result listing evidence'),
     };
+  }
+
+  if (state.workflowKind === 'marketplace_visibility_review') {
+    return parseWithSchema(MarketplaceVisibilityEvidenceSchema, value, 'result marketplace visibility evidence');
   }
 
   const evidence = parseWithSchema(MerchGridWorkflowEvidenceSchema, value, 'result MerchGrid evidence');
