@@ -60,6 +60,32 @@ The weekly recommendation flow uses the OpenAI-backed bounded modules, so its
 local `.env` also needs `OPENAI_API_KEY`. The command stops at the approval
 gate; it never applies a real-world change by itself.
 
+## Marketplace visibility review commands
+
+These local commands turn sparse, aggregate-only evidence into a manual
+marketplace visibility recommendation. They do not query marketplace providers
+and stop for owner approval before any experiment wait; they never apply a
+marketplace edit.
+
+- `npm run marketplace:visibility-review -- --profile merchgrid_shopify_app_store --date YYYY-MM-DD --run-id RUN_ID --context .local/merchgrid-visibility-context.json`
+- `npm run marketplace:approve -- --run-id RUN_ID`
+- `npm run marketplace:reject -- --run-id RUN_ID --reason "Reason"`
+- `npm run marketplace:record-result -- --profile merchgrid_shopify_app_store --run-id RUN_ID --through YYYY-MM-DD`
+
+The `--context` argument overrides `MERCHGRID_VISIBILITY_CONTEXT_PATH`; use a
+local, curated JSON file with only the product-facing context required for the
+sparse recommendation. For example:
+
+```json
+{
+  "marketplace": "shopify_app_store",
+  "productName": "MerchGrid",
+  "currentSurfaceSummary": "Shopify app listing for a catalog audit app that helps merchants find catalog quality issues.",
+  "targetAudience": "Shopify merchants who want a fast catalog audit before fixing product data.",
+  "knownDiscoverySurface": "Shopify App Store search, category browsing, listing screenshots, and app onboarding."
+}
+```
+
 ## Current architecture direction
 
 The approved Etsy workflow engine pattern is a **deterministic workflow orchestrator with bounded agentic workers**.
