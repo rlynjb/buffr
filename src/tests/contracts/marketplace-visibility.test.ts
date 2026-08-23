@@ -52,6 +52,21 @@ describe('marketplace visibility evidence contract', () => {
     });
   });
 
+  it('accepts the fixture-backed Etsy profile limitation', () => {
+    expect(parseMarketplaceVisibilityEvidence({
+      ...sparseEvidence(),
+      profile: 'etsy_listing',
+      subjectRef: 'etsy:visibility:listing-123',
+      artifactRef: '.local/etsy-visibility-context.json',
+      marketplaceContext: {
+        marketplace: 'etsy',
+        productName: 'Printable Weekly Planner',
+        currentSurfaceSummary: 'Etsy listing with printable planner title and tags',
+      },
+      limitations: ['etsy runtime profile is fixture-backed in this slice'],
+    })).toMatchObject({ profile: 'etsy_listing' });
+  });
+
   it.each([
     { POSTHOG_PERSONAL_API_KEY: 'secret' },
     { FLY_ACCESS_TOKEN: 'secret' },

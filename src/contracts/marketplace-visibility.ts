@@ -1,7 +1,7 @@
 import { z } from 'zod';
 
 const CuratedTextPattern = /^[\p{L}\p{N}][\p{L}\p{N} &'(),./-]*$/u;
-const UncuratedDataPattern = /(?:\b(?:api[ _-]?key|access[ _-]?token|authorization|buyer|credential|customer[ _-]?(?:list|record|history)|domain|email|event(?:s)?|export(?:s|ed|ing)?|history|internal|listing[ _-]?data|order(?:s)?|password|payload|person(?:al)?|private|profile|provider|purchase(?:s|d|ing)?|raw|record(?:s)?|secret|shop[ _-]?domain|source|token)\b|(?:^|[\s"'`])[\w.-]+\.myshopify\.com\b)/iu;
+const UncuratedDataPattern = /(?:\b(?:api[ _-]?key|access[ _-]?token|authorization|buyer|credential|customer[ _-]?(?:list|record|history)|domain|email|event(?:s)?|export(?:s|ed|ing)?|history|internal|listing[ _-]?data|order(?:s)?|password|payload|person(?:al)?|private|provider|purchase(?:s|d|ing)?|raw|record(?:s)?|secret|shop[ _-]?domain|source|token)\b|(?:^|[\s"'`])[\w.-]+\.myshopify\.com\b)/iu;
 const SensitiveProseValuePatterns = [
   /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/iu,
   /(?:^|\D)(?:\d[ -]?){12,18}\d(?:$|\D)/u,
