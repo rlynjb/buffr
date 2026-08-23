@@ -101,7 +101,10 @@ The exact TypeScript definitions must be Zod-backed and `.strict()`. `artifactRe
 
 **How:** Add strict Zod schemas for the source-pack projection and workflow-facing evidence. Validate on artifact save/load, allowlist only aggregate metrics, and derive the workflow evidence from the validated artifact plus its local path.
 
-**Lenses:** DDIA’s dataflow boundary and provenance; FDE’s curated-consumption boundary; APOSD information hiding.
+**Learning lenses:**
+- **DDIA lens — dataflow boundary and provenance:** validate the artifact where it crosses from storage into decision-making, so every recommendation can name its historical input.
+- **FODE lens — curated consumption:** treat the source-pack artifact as a data product with an explicit quality contract, rather than allowing every consumer to reinterpret raw inputs.
+- **AIAIA lens — bounded agent context:** give downstream agents only safe, validated aggregate evidence; the agent never receives credentials or provider payloads.
 
 **Files:**
 - Create: `src/contracts/merchgrid-workflow.ts`
@@ -180,7 +183,10 @@ git commit -m "feat: validate MerchGrid workflow evidence"
 
 **How:** Build pure readiness functions. Daily policy uses only complete Fly request/error aggregates and the explicit `20` request / `5%` error-rate policy. Weekly policy validates adjacent seven-day periods, produces comparison metrics only when each required numerator/denominator is complete, and waits when no metric is interpretable.
 
-**Lenses:** DDIA missing-data semantics and deterministic derived data; FDE data-quality gates; Release It! fail-safe operations.
+**Learning lenses:**
+- **DDIA lens — missing-data semantics and derived data:** distinguish missing, zero, and measured error values before deriving a workflow outcome.
+- **FODE lens — data-quality gate:** block an analytical consumer when completeness and denominator rules are not met; record limitations rather than manufacturing certainty.
+- **AIAIA lens — deterministic orchestration:** readiness is code, not an agent judgment, so a model cannot escalate an outage or weak signal into a recommendation.
 
 **Files:**
 - Create: `src/workflow/merchgrid-readiness.ts`
@@ -250,7 +256,10 @@ git commit -m "feat: add MerchGrid workflow readiness policies"
 
 **How:** Add a product evidence union and a stable `subjectRef` while retaining `listingId` on listing runs. Add `approval_wait` stage, `awaiting_approval` status, and explicit approve/reject methods. Etsy routes remain valid but now also wait for an owner decision after M6.
 
-**Lenses:** APOSD deep shared module; DDIA immutable run provenance; AI Agents in Action governance at an effectful boundary.
+**Learning lenses:**
+- **DDIA lens — immutable run provenance:** persist the evidence kind, reference, and approval decision with the run so later learning has a stable history.
+- **FODE lens — separation of analytical concerns:** keep evidence-model evolution isolated from collection and from product-specific interpretation.
+- **AIAIA lens — human-in-the-loop governance:** a generated test plan stays a proposal until an owner explicitly approves it; approval never grants provider write authority.
 
 **Files:**
 - Modify: `src/contracts/workflow.ts`
@@ -334,7 +343,10 @@ git commit -m "feat: add workflow evidence profiles and approval gate"
 
 **How:** Create a profile service that loads a validated artifact, evaluates readiness, builds `ContextOutput` and `MetricsOutput` from immutable evidence, and composes `ModuleExecutor`. Reuse the existing structured agent runner for M1/M4–M7 schemas; pass only the normalized workflow state and never credential-bearing configuration.
 
-**Lenses:** AI Agents in Action’s bounded specialist pattern; DDIA stable derived data; FDE separation of data preparation from consumption.
+**Learning lenses:**
+- **DDIA lens — stable derived data:** M1/M2 consume the saved aggregate artifact, not a mutable dashboard or live provider response.
+- **FODE lens — preparation before consumption:** deterministic context and metric qualification prepare clean analytical inputs before any interpretive module runs.
+- **AIAIA lens — bounded specialist pattern:** the engine routes work, deterministic code measures, and typed agent modules interpret; no one component owns every responsibility.
 
 **Files:**
 - Create: `src/agents/merchgrid/modules.ts`
@@ -408,7 +420,10 @@ git commit -m "feat: add MerchGrid workflow profile"
 
 **How:** Add `supplyWeeklyResult`, verify the run is in `experiment_wait`, validate a weekly artifact, require the M6 baseline period and primary metric to be comparable, then hand the result to the engine’s existing result lifecycle.
 
-**Lenses:** DDIA immutable history and idempotent derived data; FDE batch comparison; AI Agents in Action feedback loop under human control.
+**Learning lenses:**
+- **DDIA lens — immutable history and idempotent derived data:** compare a later closed weekly artifact with the M6 baseline frozen at approval time.
+- **FODE lens — batch comparison:** evaluate two well-defined analytical windows instead of comparing against a live, shifting dashboard.
+- **AIAIA lens — controlled feedback loop:** the system can learn from a human-approved experiment, but it cannot retroactively alter the measured evidence or its baseline.
 
 **Files:**
 - Modify: `src/workflow/merchgrid-profile.ts`
@@ -477,7 +492,10 @@ git commit -m "feat: evaluate MerchGrid weekly results"
 
 **How:** Add one separate CLI with explicit verbs. It loads source-pack and run repositories from the existing local data directory, has no provider client of its own, prints only run IDs/status/artifact references, and maps failures to existing bounded error codes.
 
-**Lenses:** APOSD deep module API; DDIA explicit batch boundaries; Release It! operationally safe manual control.
+**Learning lenses:**
+- **DDIA lens — explicit batch boundaries:** each command consumes one completed UTC date or review period and writes an auditable local artifact/run.
+- **FODE lens — operationalized pipeline:** explicit collect, review, recommend, and result commands make each stage observable before scheduling is introduced.
+- **AIAIA lens — human-controlled execution:** the CLI records approval and evidence; it never performs the external production change on the user’s behalf.
 
 **Files:**
 - Create: `src/cli/merchgrid-workflow.ts`
@@ -547,7 +565,10 @@ git commit -m "feat: add MerchGrid workflow commands"
 
 **How:** Run all tests, static checks, and a focused artifact scan. Review persisted fake run files for the allowed evidence fields, then commit only documentation corrections discovered during verification.
 
-**Lenses:** DDIA end-to-end correctness; Release It! production readiness; AI Agents in Action control boundaries.
+**Learning lenses:**
+- **DDIA lens — end-to-end correctness:** verify the whole dataflow from persisted artifact to run state to later learning, including failure states.
+- **FODE lens — data observability:** inspect the persisted artifacts and quality metadata to ensure data remains usable, explainable, and bounded.
+- **AIAIA lens — control-boundary verification:** prove tests and runtime artifacts contain no credential values and that approval produces no provider write.
 
 **Files:**
 - Modify only if verification finds a concrete documentation inconsistency: `README.md`
