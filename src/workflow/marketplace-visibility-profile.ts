@@ -9,6 +9,7 @@ import type { WorkflowRunState } from '../contracts/workflow.js';
 import { AppError } from '../core/errors.js';
 import type { MerchGridReviewArtifactRepository } from '../jobs/merchgrid-source-pack.js';
 import type { MerchGridReviewEvidence } from '../metrics/evidence.js';
+import type { RunRepository } from '../storage/runs.js';
 
 const PROHIBITED_CLAIMS = [
   'Do not claim sparse evidence proves a marketplace visibility bottleneck',
@@ -22,6 +23,11 @@ export type MarketplaceVisibilityEngine = {
     subjectRef: string;
     initialEvidence: MarketplaceVisibilityEvidence;
   }): Promise<WorkflowRunState>;
+  resumeWithExperimentResults(input: {
+    runId: string;
+    resultEvidence: MarketplaceVisibilityEvidence;
+  }): Promise<WorkflowRunState>;
+  waitForMoreData(input: { runId: string; reason: string }): Promise<WorkflowRunState>;
 };
 
 export type MarketplaceVisibilityService = {
@@ -38,6 +44,7 @@ export type MarketplaceVisibilityService = {
 export function createMarketplaceVisibilityService(deps: {
   engine: MarketplaceVisibilityEngine;
   merchgridArtifacts: MerchGridReviewArtifactRepository;
+  runRepository: RunRepository;
   loadContext: (path: string) => Promise<MarketplaceVisibilityContext>;
 }): MarketplaceVisibilityService {
   return {
@@ -55,7 +62,38 @@ export function createMarketplaceVisibilityService(deps: {
     },
 
     async supplyVisibilityResult(input) {
-      throw new AppError('route_not_allowed', `Visibility result support for ${input.profile} is added in Task 6`);
+      if (input.profile !== 'merchgrid_shopify_app_store') {
+        throw new AppError('route_not_allowed', `Visibility result support for ${input.profile} is unavailable`);
+      }
+      const through = UtcDateSchema.parse(input.through);
+      const state = await deps.runRepository.load(input.runId);
+      const initial = requireInitialVisibilityEvidence(state, input.profile);
+      const artifact = await deps.merchgridArtifacts.loadWeeklyReview(through);
+      if (!artifact) {
+        throw new AppError('storage_failed', `MerchGrid weekly review artifact not found: ${through}`);
+      }
+
+      const measuredSignals = numericMarketplaceSignals(artifact);
+      if (Object.keys(measuredSignals).length === 0) {
+        return deps.engine.waitForMoreData({
+          runId: input.runId,
+          reason: 'visibility result evidence has no measured signals',
+        });
+      }
+
+      const evidence = MarketplaceVisibilityEvidenceSchema.parse({
+        product: 'marketplace_visibility',
+        profile: 'merchgrid_shopify_app_store',
+        subjectRef: initial.subjectRef,
+        artifactRef: `.local/merchgrid-metrics/artifacts/weekly-reviews/${through}.json`,
+        evidenceLevel: 'sparse',
+        recommendationType: 'visibility_hypothesis',
+        marketplaceContext: initial.marketplaceContext,
+        measuredSignals,
+        limitations: artifact.limitations,
+        prohibitedClaims: initial.prohibitedClaims,
+      });
+      return deps.engine.resumeWithExperimentResults({ runId: input.runId, resultEvidence: evidence });
     },
   };
 }
@@ -112,11 +150,23 @@ function buildEtsyVisibilityEvidence(input: {
 }
 
 function numericMarketplaceSignals(artifact: MerchGridReviewEvidence): Record<string, number> {
-  if (artifact.period.kind !== 'daily') return {};
-  if ('current' in artifact.aggregateMetrics) return {};
+  const metrics = 'current' in artifact.aggregateMetrics
+    ? artifact.aggregateMetrics.current
+    : artifact.aggregateMetrics;
   return Object.fromEntries(
-    [artifact.aggregateMetrics.posthog, artifact.aggregateMetrics.fly_metrics]
+    [metrics.posthog, metrics.fly_metrics]
       .flatMap((metrics) => Object.entries(metrics ?? {}))
       .filter((entry): entry is [string, number] => typeof entry[1] === 'number' && Number.isFinite(entry[1])),
   );
+}
+
+function requireInitialVisibilityEvidence(
+  state: WorkflowRunState,
+  profile: MarketplaceVisibilityProfile,
+): MarketplaceVisibilityEvidence {
+  const initial = state.evidenceSnapshots?.initial;
+  if (!initial || initial.product !== 'marketplace_visibility' || initial.profile !== profile) {
+    throw new AppError('validation_failed', 'Visibility result requires matching initial marketplace visibility evidence');
+  }
+  return initial;
 }

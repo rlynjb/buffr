@@ -88,7 +88,7 @@ export function createMarketplaceVisibilityModuleExecutor(deps: { agentRunner: A
       return normalizeTestPlan(result.output);
     },
     async runM2Results(state) {
-      return metricsFromMarketplaceVisibilityEvidence(requireResultEvidence(state));
+      return metricsFromMarketplaceVisibilityResult(state, requireResultEvidence(state));
     },
     async runM7(state) {
       const result = await runStructuredModule({
@@ -150,6 +150,33 @@ export function metricsFromMarketplaceVisibilityEvidence(evidence: MarketplaceVi
   };
 }
 
+export function metricsFromMarketplaceVisibilityResult(
+  state: WorkflowRunState,
+  evidence: MarketplaceVisibilityEvidence,
+): MetricsOutput {
+  const plan = state.moduleOutputs.m6;
+  if (!plan) return missingVisibilityResult('visibility result requires an approved M6 plan');
+
+  const current = evidence.measuredSignals[plan.primaryMetric];
+  if (current === undefined) return missingVisibilityResult(`visibility result does not contain ${plan.primaryMetric}`);
+
+  const absoluteChange = current - plan.baselineValue;
+  return {
+    phase: 'post_experiment',
+    metrics: [{
+      name: plan.primaryMetric,
+      baseline: plan.baselineValue,
+      current,
+      absoluteChange,
+      percentageChange: plan.baselineValue === 0 ? null : absoluteChange / plan.baselineValue,
+      qualification: current === plan.baselineValue ? 'stable' : current > plan.baselineValue ? 'improved' : 'declined',
+      confidence: 'low',
+    }],
+    comparisonQuality: 'limited',
+    unresolvedQualificationNeeds: ['visibility result remains sparse and exploratory'],
+  };
+}
+
 function requireInitialEvidence(state: WorkflowRunState): MarketplaceVisibilityEvidence {
   const evidence = state.evidenceSnapshots?.initial;
   if (!evidence || evidence.product !== 'marketplace_visibility') {
@@ -164,6 +191,15 @@ function requireResultEvidence(state: WorkflowRunState): MarketplaceVisibilityEv
     throw new AppError('validation_failed', 'Marketplace visibility result metrics require persisted result visibility evidence');
   }
   return evidence;
+}
+
+function missingVisibilityResult(reason: string): MetricsOutput {
+  return {
+    phase: 'post_experiment',
+    metrics: [],
+    comparisonQuality: 'missing',
+    unresolvedQualificationNeeds: [reason],
+  };
 }
 
 function marketplaceName(marketplace: MarketplaceVisibilityEvidence['marketplaceContext']['marketplace']): string {

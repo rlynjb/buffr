@@ -104,6 +104,7 @@ export function createMarketplaceVisibilityDependencies(
     service: createMarketplaceVisibilityService({
       engine,
       merchgridArtifacts: new JsonFileMerchGridReviewArtifactRepository({ rootDir: join(dataDir, 'artifacts') }),
+      runRepository: runs,
       loadContext: loadMarketplaceVisibilityContext,
     }),
     defaultContextPath: env.MERCHGRID_VISIBILITY_CONTEXT_PATH,
