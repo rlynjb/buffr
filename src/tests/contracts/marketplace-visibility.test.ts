@@ -132,6 +132,29 @@ describe('marketplace visibility evidence contract', () => {
     })).toThrow();
   });
 
+  it.each([
+    { currentSurfaceSummary: 'Customer Jane Doe order #ABC' },
+    { currentSurfaceSummary: 'Merchant acme-shop customer list' },
+    { currentSurfaceSummary: 'Raw marketplace listing: Buy now' },
+  ])('rejects unsafe data variants in permitted summary strings', (unsafeSummary) => {
+    expect(() => MarketplaceVisibilityEvidenceSchema.parse({
+      product: 'marketplace_visibility',
+      profile: 'merchgrid_shopify_app_store',
+      subjectRef: 'merchgrid:visibility:2026-08-22',
+      artifactRef: '.local/artifacts/daily-health/2026-08-22.json',
+      evidenceLevel: 'sparse',
+      recommendationType: 'visibility_hypothesis',
+      marketplaceContext: {
+        marketplace: 'shopify_app_store',
+        productName: 'MerchGrid',
+        ...unsafeSummary,
+      },
+      measuredSignals: {},
+      limitations: [],
+      prohibitedClaims: [],
+    })).toThrow();
+  });
+
   it('rejects provider URLs as artifact references', () => {
     expect(() => MarketplaceVisibilityEvidenceSchema.parse({
       product: 'marketplace_visibility',
