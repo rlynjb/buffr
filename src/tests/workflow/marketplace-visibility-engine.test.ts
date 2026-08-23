@@ -65,6 +65,35 @@ describe('marketplace visibility workflow engine entry', () => {
       'result:marketplace_visibility:merchgrid_shopify_app_store:merchgrid:visibility:2026-08-22',
     );
   });
+
+  it('rejects result evidence from a different marketplace visibility subject', async () => {
+    const repository = new InMemoryRunRepository();
+    const engine = createWorkflowEngine({ repository, modules: moduleExecutor(), now: fixedNow });
+    await engine.startMarketplaceVisibility({
+      runId: 'visibility-mismatched-results',
+      subjectRef: 'marketplace_visibility:merchgrid_shopify_app_store:2026-08-22',
+      initialEvidence: visibilityEvidence(),
+    });
+    for (let index = 0; index < 5; index += 1) await engine.step('visibility-mismatched-results');
+    await engine.approveExperiment('visibility-mismatched-results');
+
+    await expect(engine.resumeWithExperimentResults({
+      runId: 'visibility-mismatched-results',
+      resultEvidence: visibilityEvidence({
+        profile: 'etsy_listing',
+        subjectRef: 'etsy:visibility:listing-123',
+        artifactRef: '.local/visibility/results/etsy-listing-123.json',
+        marketplaceContext: {
+          marketplace: 'etsy',
+          productName: 'Weekly Planner',
+          currentSurfaceSummary: 'Etsy listing for a printable weekly planner',
+        },
+      }),
+    })).rejects.toMatchObject({
+      code: 'validation_failed',
+      message: 'Result marketplace visibility evidence must match the initial profile and subject',
+    });
+  });
 });
 
 class InMemoryRunRepository implements RunRepository {

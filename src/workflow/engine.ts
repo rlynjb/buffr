@@ -718,7 +718,18 @@ function parseResultEvidence(
   }
 
   if (state.workflowKind === 'marketplace_visibility_review') {
-    return parseWithSchema(MarketplaceVisibilityEvidenceSchema, value, 'result marketplace visibility evidence');
+    const evidence = parseWithSchema(MarketplaceVisibilityEvidenceSchema, value, 'result marketplace visibility evidence');
+    const initialEvidence = state.evidenceSnapshots?.initial;
+    if (
+      initialEvidence?.product === 'marketplace_visibility'
+      && (initialEvidence.profile !== evidence.profile || initialEvidence.subjectRef !== evidence.subjectRef)
+    ) {
+      throw new AppError(
+        'validation_failed',
+        'Result marketplace visibility evidence must match the initial profile and subject',
+      );
+    }
+    return evidence;
   }
 
   const evidence = parseWithSchema(MerchGridWorkflowEvidenceSchema, value, 'result MerchGrid evidence');
