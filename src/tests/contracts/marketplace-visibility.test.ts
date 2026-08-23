@@ -5,6 +5,25 @@ import {
 } from '../../contracts/marketplace-visibility.js';
 
 describe('marketplace visibility evidence contract', () => {
+  const sparseEvidence = () => ({
+    product: 'marketplace_visibility' as const,
+    profile: 'merchgrid_shopify_app_store' as const,
+    subjectRef: 'merchgrid:visibility:2026-08-22',
+    artifactRef: '.local/artifacts/daily-health/2026-08-22.json',
+    evidenceLevel: 'sparse' as const,
+    recommendationType: 'visibility_hypothesis' as const,
+    marketplaceContext: {
+      marketplace: 'shopify_app_store' as const,
+      productName: 'MerchGrid',
+      currentSurfaceSummary: 'Shopify app listing for a catalog audit app',
+      targetAudience: 'Shopify merchants auditing catalog quality',
+      knownDiscoverySurface: 'Shopify App Store search and category pages',
+    },
+    measuredSignals: {},
+    limitations: ['low request volume'],
+    prohibitedClaims: ['Do not claim the listing caused low traffic'],
+  });
+
   it('accepts sparse MerchGrid marketplace evidence', () => {
     expect(parseMarketplaceVisibilityEvidence({
       product: 'marketplace_visibility',
@@ -153,6 +172,45 @@ describe('marketplace visibility evidence contract', () => {
       limitations: [],
       prohibitedClaims: [],
     })).toThrow();
+  });
+
+  it.each([
+    ['productName', (evidence: ReturnType<typeof sparseEvidence>) => ({
+      ...evidence,
+      marketplaceContext: { ...evidence.marketplaceContext, productName: 'Buyer Jane Doe purchase history' },
+    })],
+    ['currentSurfaceSummary', (evidence: ReturnType<typeof sparseEvidence>) => ({
+      ...evidence,
+      marketplaceContext: { ...evidence.marketplaceContext, currentSurfaceSummary: 'Marketplace listing data: title and price' },
+    })],
+    ['targetAudience', (evidence: ReturnType<typeof sparseEvidence>) => ({
+      ...evidence,
+      marketplaceContext: { ...evidence.marketplaceContext, targetAudience: 'Buyer Jane Doe purchase history' },
+    })],
+    ['knownDiscoverySurface', (evidence: ReturnType<typeof sparseEvidence>) => ({
+      ...evidence,
+      marketplaceContext: { ...evidence.marketplaceContext, knownDiscoverySurface: 'Marketplace listing data: title and price' },
+    })],
+    ['subjectRef', (evidence: ReturnType<typeof sparseEvidence>) => ({ ...evidence, subjectRef: 'Buyer Jane Doe purchase history' })],
+    ['limitations', (evidence: ReturnType<typeof sparseEvidence>) => ({ ...evidence, limitations: ['Buyer Jane Doe purchase history'] })],
+    ['prohibitedClaims', (evidence: ReturnType<typeof sparseEvidence>) => ({ ...evidence, prohibitedClaims: ['Marketplace listing data: title and price'] })],
+  ])('rejects uncurated marketplace data in %s', (_field, unsafeEvidence) => {
+    expect(() => MarketplaceVisibilityEvidenceSchema.parse(unsafeEvidence(sparseEvidence()))).toThrow();
+  });
+
+  it.each([
+    ['currentSurfaceSummary', (evidence: ReturnType<typeof sparseEvidence>) => ({
+      ...evidence,
+      marketplaceContext: { ...evidence.marketplaceContext, currentSurfaceSummary: 'Customer-facing catalog app' },
+    })],
+    ['targetAudience', (evidence: ReturnType<typeof sparseEvidence>) => ({
+      ...evidence,
+      marketplaceContext: { ...evidence.marketplaceContext, targetAudience: 'Merchant data quality tools' },
+    })],
+  ])('accepts ordinary marketplace descriptions in %s', (_field, safeEvidence) => {
+    expect(MarketplaceVisibilityEvidenceSchema.parse(safeEvidence(sparseEvidence()))).toMatchObject({
+      product: 'marketplace_visibility',
+    });
   });
 
   it('rejects provider URLs as artifact references', () => {

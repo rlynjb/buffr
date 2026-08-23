@@ -1,7 +1,30 @@
 import { z } from 'zod';
 
-const UnsafeKeyPattern = /(token|secret|authorization|password|email|shopDomain|rawEvents|payload|providerUrl)/iu;
-const UnsafeValuePattern = /(https?:\/\/|(?:^|[\s"'`])[\w.-]+\.myshopify\.com\b|(?:api[_ -]?key|access[_ -]?token|personal[_ -]?api[_ -]?key)\s*[:=]|(?:raw|provider)[_ -]?(?:marketplace\s+)?(?:events?|listing|payload)|\{\s*["']?(?:events?|payload|data)["']?\s*:|\bcustomer\b|\border\s+(?:#\w+|id\b)|\bmerchant\b.{0,80}\b(?:internal|private|export|list|data)\b)/iu;
+const CuratedTextPattern = /^[\p{L}\p{N}][\p{L}\p{N} &'(),./-]*$/u;
+const UncuratedDataPattern = /(?:\b(?:api[ _-]?key|access[ _-]?token|authorization|buyer|credential|customer[ _-]?(?:list|record|history)|domain|email|event(?:s)?|export(?:s|ed|ing)?|history|internal|listing[ _-]?data|order(?:s)?|password|payload|person(?:al)?|private|profile|provider|purchase(?:s|d|ing)?|raw|record(?:s)?|secret|shop[ _-]?domain|source|token)\b|(?:^|[\s"'`])[\w.-]+\.myshopify\.com\b)/iu;
+const LocalArtifactRefPattern = /^\.local\/[A-Za-z0-9][A-Za-z0-9._/-]*$/u;
+const SubjectRefPattern = /^(?:merchgrid:visibility:\d{4}-\d{2}-\d{2}|etsy:visibility:listing-[a-z0-9-]+)$/iu;
+
+function safeMarketplaceText(max: number): z.ZodType<string> {
+  return z.string()
+    .min(1)
+    .max(max)
+    .regex(CuratedTextPattern, 'must be curated plain text')
+    .refine((value) => !UncuratedDataPattern.test(value), 'must not include private or source data markers');
+}
+
+const MarketplaceVisibilitySubjectRefSchema = z.string()
+  .regex(SubjectRefPattern, 'must identify a supported visibility review subject');
+
+const MarketplaceVisibilityArtifactRefSchema = z.string()
+  .max(500)
+  .regex(LocalArtifactRefPattern, 'artifactRef must be a local artifact path')
+  .refine((value) => !value.includes('..'), 'artifactRef must not traverse directories')
+  .refine((value) => !UncuratedDataPattern.test(value), 'artifactRef must not name private or source data');
+
+const MarketplaceVisibilitySignalKeySchema = z.string()
+  .regex(/^[a-z][a-z0-9_]{0,63}$/u, 'must be a normalized signal name')
+  .refine((value) => !UncuratedDataPattern.test(value), 'must not name private or source data');
 
 export const MarketplaceVisibilityProfileSchema = z.enum([
   'merchgrid_shopify_app_store',
@@ -10,25 +33,34 @@ export const MarketplaceVisibilityProfileSchema = z.enum([
 
 export const MarketplaceVisibilityContextSchema = z.object({
   marketplace: z.enum(['shopify_app_store', 'etsy']),
-  productName: z.string().min(1).max(120),
-  currentSurfaceSummary: z.string().min(1).max(1_000),
-  targetAudience: z.string().min(1).max(300).optional(),
-  knownDiscoverySurface: z.string().min(1).max(300).optional(),
+  productName: safeMarketplaceText(120),
+  currentSurfaceSummary: safeMarketplaceText(1_000),
+  targetAudience: safeMarketplaceText(300).optional(),
+  knownDiscoverySurface: safeMarketplaceText(300).optional(),
 }).strict();
 
 export const MarketplaceVisibilityEvidenceSchema = z.object({
   product: z.literal('marketplace_visibility'),
   profile: MarketplaceVisibilityProfileSchema,
-  subjectRef: z.string().min(1).max(200),
-  artifactRef: z.string().min(1).max(500).refine((value) => !value.includes('://'), 'artifactRef must be local'),
+  subjectRef: MarketplaceVisibilitySubjectRefSchema,
+  artifactRef: MarketplaceVisibilityArtifactRefSchema,
   evidenceLevel: z.literal('sparse'),
   recommendationType: z.literal('visibility_hypothesis'),
   marketplaceContext: MarketplaceVisibilityContextSchema,
-  measuredSignals: z.record(z.string().min(1), z.number().finite()),
-  limitations: z.array(z.string().min(1).max(300)),
-  prohibitedClaims: z.array(z.string().min(1).max(300)),
+  measuredSignals: z.record(MarketplaceVisibilitySignalKeySchema, z.number().finite()),
+  limitations: z.array(safeMarketplaceText(300)),
+  prohibitedClaims: z.array(safeMarketplaceText(300)),
 }).strict().superRefine((value, ctx) => {
-  assertNoUnsafeKeys(value, ctx);
+  const expectedSubjectPrefix = value.profile === 'merchgrid_shopify_app_store'
+    ? 'merchgrid:visibility:'
+    : 'etsy:visibility:listing-';
+  if (!value.subjectRef.startsWith(expectedSubjectPrefix)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['subjectRef'],
+      message: 'subjectRef must match the marketplace profile',
+    });
+  }
 });
 
 export type MarketplaceVisibilityEvidence = z.infer<typeof MarketplaceVisibilityEvidenceSchema>;
@@ -37,20 +69,4 @@ export type MarketplaceVisibilityContext = z.infer<typeof MarketplaceVisibilityC
 
 export function parseMarketplaceVisibilityEvidence(value: unknown): MarketplaceVisibilityEvidence {
   return MarketplaceVisibilityEvidenceSchema.parse(value);
-}
-
-function assertNoUnsafeKeys(value: unknown, ctx: z.RefinementCtx, path: (string | number)[] = []): void {
-  if (typeof value === 'string') {
-    if (UnsafeValuePattern.test(value)) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, path, message: 'unsafe value' });
-    }
-    return;
-  }
-  if (!value || typeof value !== 'object') return;
-  for (const [key, child] of Object.entries(value)) {
-    if (UnsafeKeyPattern.test(key)) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, path: [...path, key], message: `unsafe key: ${key}` });
-    }
-    assertNoUnsafeKeys(child, ctx, [...path, key]);
-  }
 }
