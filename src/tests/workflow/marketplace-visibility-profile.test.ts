@@ -1,10 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import { FakeAgentRunner } from '../../agents/runner.js';
+import type { DailyMetricSnapshot } from '../../contracts/metrics.js';
 import { createMarketplaceVisibilityModuleExecutor } from '../../agents/marketplace-visibility/modules.js';
 import type { MarketplaceVisibilityEvidence } from '../../contracts/marketplace-visibility.js';
 import { WorkflowRunStateSchema, type WorkflowRunState, type WorkflowRunStateInput } from '../../contracts/workflow.js';
 import type { MerchGridReviewArtifactRepository } from '../../jobs/merchgrid-source-pack.js';
 import { MerchGridReviewEvidenceSchema, type MerchGridReviewEvidence } from '../../metrics/evidence.js';
+import { toMerchGridReviewEvidence } from '../../metrics/evidence.js';
+import { buildDailyHealthSummary } from '../../metrics/summaries.js';
 import type { RunRepository } from '../../storage/runs.js';
 import { createWorkflowEngine } from '../../workflow/engine.js';
 import {
@@ -49,11 +52,7 @@ describe('marketplace visibility profile', () => {
   it('projects Fly numeric signals when the daily artifact has no PostHog metrics', async () => {
     const service = createService({
       dailyArtifact: flyOnlyDailyArtifact(),
-      context: {
-        marketplace: 'shopify_app_store',
-        productName: 'MerchGrid',
-        currentSurfaceSummary: 'Shopify app listing for catalog audits',
-      },
+      context: readyContext(),
     });
 
     const state = await service.startVisibilityReview({
@@ -65,6 +64,79 @@ describe('marketplace visibility profile', () => {
 
     expect(state.evidenceSnapshots?.initial).toMatchObject({
       measuredSignals: { request_count: 18, error_rate: 0.1 },
+    });
+  });
+
+  it('curates real source-pack limitation tokens before validating visibility evidence', async () => {
+    const artifact = toMerchGridReviewEvidence(buildDailyHealthSummary({
+      date: '2026-08-22',
+      snapshots: [
+        dailySnapshot('posthog', 'complete', { app_opened_count: 2 }),
+        dailySnapshot('fly_metrics', 'complete', { request_count: 7 }),
+        dailySnapshot('shopify_partner', 'unavailable'),
+      ],
+    }));
+    const service = createService({
+      dailyArtifact: artifact,
+      context: readyContext(),
+    });
+
+    const state = await service.startVisibilityReview({
+      profile: 'merchgrid_shopify_app_store',
+      runId: 'visibility-source-pack-unavailable',
+      date: '2026-08-22',
+      contextPath: '.local/merchgrid-visibility-context.json',
+    });
+
+    expect(state.evidenceSnapshots?.initial).toMatchObject({
+      limitations: ['Shopify Partner metrics unavailable'],
+    });
+  });
+
+  it('rejects thin product context before starting the workflow', async () => {
+    const engine = new FakeMarketplaceVisibilityEngine();
+    const service = createMarketplaceVisibilityService({
+      engine,
+      merchgridArtifacts: new InMemoryArtifacts(dailyArtifact()),
+      runRepository: new InMemoryRunRepository(),
+      loadContext: async () => ({
+        marketplace: 'shopify_app_store',
+        productName: 'MerchGrid',
+        currentSurfaceSummary: 'Shopify app listing for catalog audits',
+      }),
+    });
+
+    await expect(service.startVisibilityReview({
+      profile: 'merchgrid_shopify_app_store',
+      runId: 'visibility-thin-context',
+      date: '2026-08-22',
+      contextPath: '.local/merchgrid-visibility-context.json',
+    })).rejects.toMatchObject({
+      code: 'validation_failed',
+      message: 'visibility_context_missing',
+    });
+    expect(engine.startCalls).toBe(0);
+  });
+
+  it('derives artifact references from the configured artifact root', async () => {
+    const engine = new FakeMarketplaceVisibilityEngine();
+    const service = createMarketplaceVisibilityService({
+      engine,
+      merchgridArtifacts: new InMemoryArtifacts(dailyArtifact()),
+      merchgridArtifactRootRef: '.local/custom-merchgrid/artifacts',
+      runRepository: new InMemoryRunRepository(),
+      loadContext: async () => readyContext(),
+    });
+
+    const state = await service.startVisibilityReview({
+      profile: 'merchgrid_shopify_app_store',
+      runId: 'visibility-custom-root',
+      date: '2026-08-22',
+      contextPath: '.local/merchgrid-visibility-context.json',
+    });
+
+    expect(state.evidenceSnapshots?.initial).toMatchObject({
+      artifactRef: '.local/custom-merchgrid/artifacts/daily-health/2026-08-22.json',
     });
   });
 
@@ -118,6 +190,10 @@ describe('marketplace visibility profile', () => {
           subjectRef: 'merchgrid:visibility:2026-08-22',
           artifactRef: '.local/merchgrid-metrics/artifacts/weekly-reviews/2026-09-04.json',
           measuredSignals: { app_opened_count: 4, scan_started_count: 1 },
+          limitations: [
+            'Previous period Shopify Partner metrics unavailable for 7 days',
+            'Current period Shopify Partner metrics unavailable for 7 days',
+          ],
         },
       },
     });
@@ -215,6 +291,28 @@ describe('marketplace visibility profile', () => {
       message: 'Visibility result through date must be later than the initial visibility date',
     });
   });
+
+  it('rejects a result window that starts on the approval boundary', async () => {
+    const service = createResultService({
+      dailyArtifact: dailyArtifact(),
+      weeklyArtifacts: {
+        '2026-08-29': weeklyArtifact(
+          { app_opened_count: 4 },
+          { previous: { startDate: '2026-08-16', endDate: '2026-08-22' }, current: { startDate: '2026-08-23', endDate: '2026-08-29' } },
+        ),
+      },
+    });
+    await startApprovedVisibilityReview(service, 'visibility-overlapping-result');
+
+    await expect(service.supplyVisibilityResult({
+      runId: 'visibility-overlapping-result',
+      profile: 'merchgrid_shopify_app_store',
+      through: '2026-08-29',
+    })).rejects.toMatchObject({
+      code: 'validation_failed',
+      message: 'Visibility result current window must begin after the approval boundary',
+    });
+  });
 });
 
 function createService(input: {
@@ -250,11 +348,7 @@ function createResultService(input: {
     engine,
     merchgridArtifacts: new InMemoryArtifacts(input.dailyArtifact, input.weeklyArtifacts),
     runRepository: runs,
-    loadContext: async () => ({
-      marketplace: 'shopify_app_store',
-      productName: 'MerchGrid',
-      currentSurfaceSummary: 'Shopify app listing for catalog audits',
-    }),
+    loadContext: async () => readyContext(),
   });
   return { ...service, engine };
 }
@@ -274,11 +368,14 @@ async function startApprovedVisibilityReview(
 }
 
 class FakeMarketplaceVisibilityEngine implements MarketplaceVisibilityEngine {
+  startCalls = 0;
+
   async startMarketplaceVisibility(input: {
     runId: string;
     subjectRef: string;
     initialEvidence: MarketplaceVisibilityEvidence;
   }): Promise<WorkflowRunState> {
+    this.startCalls += 1;
     return WorkflowRunStateSchema.parse({
       runId: input.runId,
       subjectRef: input.subjectRef,
@@ -296,6 +393,31 @@ class FakeMarketplaceVisibilityEngine implements MarketplaceVisibilityEngine {
 
   async resumeWithExperimentResults(): Promise<WorkflowRunState> { throw new Error('not used'); }
   async waitForMoreData(): Promise<WorkflowRunState> { throw new Error('not used'); }
+}
+
+function readyContext() {
+  return {
+    marketplace: 'shopify_app_store' as const,
+    productName: 'MerchGrid',
+    currentSurfaceSummary: 'Shopify app listing for catalog audits',
+    targetAudience: 'Shopify merchants auditing catalog quality',
+    knownDiscoverySurface: 'Shopify App Store search and category pages',
+  };
+}
+
+function dailySnapshot(
+  source: DailyMetricSnapshot['source'],
+  status: DailyMetricSnapshot['status'],
+  metrics: Record<string, number> = {},
+): DailyMetricSnapshot {
+  return {
+    source,
+    date: '2026-08-22',
+    collectedAt: '2026-08-23T00:05:00.000Z',
+    status,
+    metrics,
+    notes: [],
+  };
 }
 
 class InMemoryArtifacts implements MerchGridReviewArtifactRepository {
@@ -371,7 +493,7 @@ function weeklyArtifact(
     },
     sourceFreshness: { previous: {}, current: {} },
     aggregateMetrics: { previous: {}, current: { posthog }, change: {} },
-    limitations: ['Shopify partner metrics unavailable'],
+    limitations: ['previous:shopify_partner:unavailable:7', 'current:shopify_partner:unavailable:7'],
   });
 }
 

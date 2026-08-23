@@ -1,3 +1,4 @@
+import { join } from 'node:path';
 import {
   MarketplaceVisibilityEvidenceSchema,
   type MarketplaceVisibilityContext,
@@ -44,14 +45,21 @@ export type MarketplaceVisibilityService = {
 export function createMarketplaceVisibilityService(deps: {
   engine: MarketplaceVisibilityEngine;
   merchgridArtifacts: MerchGridReviewArtifactRepository;
+  merchgridArtifactRootRef?: string;
   runRepository: RunRepository;
   loadContext: (path: string) => Promise<MarketplaceVisibilityContext>;
 }): MarketplaceVisibilityService {
   return {
     async startVisibilityReview(input) {
       const context = await deps.loadContext(input.contextPath);
+      assertVisibilityContextReady(context);
       const evidence = input.profile === 'merchgrid_shopify_app_store'
-        ? await buildMerchGridVisibilityEvidence({ input, context, artifacts: deps.merchgridArtifacts })
+        ? await buildMerchGridVisibilityEvidence({
+            input,
+            context,
+            artifacts: deps.merchgridArtifacts,
+            artifactRootRef: deps.merchgridArtifactRootRef,
+          })
         : buildEtsyVisibilityEvidence({ input, context });
 
       return deps.engine.startMarketplaceVisibility({
@@ -72,7 +80,12 @@ export function createMarketplaceVisibilityService(deps: {
       if (!artifact) {
         throw new AppError('storage_failed', `MerchGrid weekly review artifact not found: ${through}`);
       }
-      assertValidMerchGridResultArtifact({ artifact, through, initialSubjectRef: initial.subjectRef });
+      assertValidMerchGridResultArtifact({
+        artifact,
+        through,
+        initialSubjectRef: initial.subjectRef,
+        approvalDate: state.approval?.status === 'approved' ? state.approval.decidedAt.slice(0, 10) : undefined,
+      });
 
       const measuredSignals = numericMarketplaceSignals(artifact);
       if (Object.keys(measuredSignals).length === 0) {
@@ -86,12 +99,12 @@ export function createMarketplaceVisibilityService(deps: {
         product: 'marketplace_visibility',
         profile: 'merchgrid_shopify_app_store',
         subjectRef: initial.subjectRef,
-        artifactRef: `.local/merchgrid-metrics/artifacts/weekly-reviews/${through}.json`,
+        artifactRef: merchgridArtifactRef(deps.merchgridArtifactRootRef, 'weekly-reviews', through),
         evidenceLevel: 'sparse',
         recommendationType: 'visibility_hypothesis',
         marketplaceContext: initial.marketplaceContext,
         measuredSignals,
-        limitations: artifact.limitations,
+        limitations: curatedMerchGridLimitations(artifact.limitations),
         prohibitedClaims: initial.prohibitedClaims,
       });
       return deps.engine.resumeWithExperimentResults({ runId: input.runId, resultEvidence: evidence });
@@ -103,6 +116,7 @@ async function buildMerchGridVisibilityEvidence(input: {
   input: { date?: string; contextPath: string };
   context: MarketplaceVisibilityContext;
   artifacts: MerchGridReviewArtifactRepository;
+  artifactRootRef?: string;
 }): Promise<MarketplaceVisibilityEvidence> {
   if (input.context.marketplace !== 'shopify_app_store') {
     throw new AppError('validation_failed', 'MerchGrid visibility profile requires Shopify App Store context');
@@ -117,12 +131,12 @@ async function buildMerchGridVisibilityEvidence(input: {
     product: 'marketplace_visibility',
     profile: 'merchgrid_shopify_app_store',
     subjectRef: `merchgrid:visibility:${date}`,
-    artifactRef: `.local/merchgrid-metrics/artifacts/daily-health/${date}.json`,
+    artifactRef: merchgridArtifactRef(input.artifactRootRef, 'daily-health', date),
     evidenceLevel: 'sparse',
     recommendationType: 'visibility_hypothesis',
     marketplaceContext: input.context,
     measuredSignals: numericMarketplaceSignals(artifact),
-    limitations: artifact.limitations,
+    limitations: curatedMerchGridLimitations(artifact.limitations),
     prohibitedClaims: PROHIBITED_CLAIMS,
   });
 }
@@ -176,6 +190,7 @@ function assertValidMerchGridResultArtifact(input: {
   artifact: MerchGridReviewEvidence;
   through: string;
   initialSubjectRef: string;
+  approvalDate?: string;
 }): void {
   if (input.artifact.period.kind !== 'weekly') {
     throw new AppError('validation_failed', 'MerchGrid visibility result requires a weekly review artifact');
@@ -187,4 +202,35 @@ function assertValidMerchGridResultArtifact(input: {
   if (input.through <= initialDate) {
     throw new AppError('validation_failed', 'Visibility result through date must be later than the initial visibility date');
   }
+  const boundary = input.approvalDate && input.approvalDate > initialDate ? input.approvalDate : initialDate;
+  if (input.artifact.period.current.startDate <= boundary) {
+    throw new AppError('validation_failed', 'Visibility result current window must begin after the approval boundary');
+  }
+}
+
+function assertVisibilityContextReady(context: MarketplaceVisibilityContext): void {
+  if (!context.targetAudience && !context.knownDiscoverySurface) {
+    throw new AppError('validation_failed', 'visibility_context_missing');
+  }
+}
+
+function merchgridArtifactRef(
+  rootRef: string | undefined,
+  collection: 'daily-health' | 'weekly-reviews',
+  date: string,
+): string {
+  return join(rootRef ?? '.local/merchgrid-metrics/artifacts', collection, `${date}.json`);
+}
+
+function curatedMerchGridLimitations(limitations: readonly string[]): string[] {
+  return limitations.map((limitation) => {
+    const token = /^(?:(previous|current):)?(posthog|fly_metrics|shopify_partner):(missing|partial|unavailable|failed)(?::([1-7]))?$/u.exec(limitation);
+    if (!token) return limitation;
+
+    const [, period, source, status, days] = token;
+    const sourceLabel = source === 'posthog' ? 'PostHog' : source === 'fly_metrics' ? 'Fly' : 'Shopify Partner';
+    const periodLabel = period === 'previous' ? 'Previous period ' : period === 'current' ? 'Current period ' : '';
+    const coverageLabel = days ? ` for ${days} ${days === '1' ? 'day' : 'days'}` : '';
+    return `${periodLabel}${sourceLabel} metrics ${status}${coverageLabel}`;
+  });
 }

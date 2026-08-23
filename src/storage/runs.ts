@@ -26,7 +26,25 @@ export class JsonFileRunRepository implements RunRepository {
   }
 
   async create(state: WorkflowRunStateInput): Promise<void> {
-    await this.writeRun(state);
+    const validState = parseRunState(state, state.runId);
+    assertNoCredentialKeys(validState);
+    const runDir = this.runDirPath(validState.runId);
+
+    try {
+      await mkdir(this.rootDir, { recursive: true });
+      await mkdir(runDir);
+    } catch (error) {
+      if (isNodeError(error) && error.code === 'EEXIST') {
+        throw new AppError('storage_failed', `Workflow run already exists: ${validState.runId}`, { cause: error });
+      }
+      throw new AppError('storage_failed', `Workflow run could not be created: ${validState.runId}`, { cause: error });
+    }
+
+    try {
+      await this.writeRunFiles(runDir, validState);
+    } catch (error) {
+      throw new AppError('storage_failed', `Workflow run could not be saved: ${validState.runId}`, { cause: error });
+    }
   }
 
   async load(runId: string): Promise<WorkflowRunState> {
@@ -60,18 +78,19 @@ export class JsonFileRunRepository implements RunRepository {
     const validState = parseRunState(state, state.runId);
     assertNoCredentialKeys(validState);
     const runDir = this.runDirPath(validState.runId);
-    const file = join(runDir, 'run.json');
-    const json = `${JSON.stringify(validState, null, 2)}\n`;
-
     try {
       await mkdir(runDir, { recursive: true });
-      await writeAtomic(file, json);
-      await this.writeArtifacts(runDir, validState);
+      await this.writeRunFiles(runDir, validState);
     } catch (error) {
       throw new AppError('storage_failed', `Workflow run could not be saved: ${validState.runId}`, {
         cause: error,
       });
     }
+  }
+
+  private async writeRunFiles(runDir: string, state: WorkflowRunState): Promise<void> {
+    await writeAtomic(join(runDir, 'run.json'), `${JSON.stringify(state, null, 2)}\n`);
+    await this.writeArtifacts(runDir, state);
   }
 
   private async writeArtifacts(runDir: string, state: WorkflowRunState): Promise<void> {

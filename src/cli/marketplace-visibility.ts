@@ -78,11 +78,15 @@ export async function runMarketplaceVisibilityCli(input: {
 
   if (command === 'record-result') {
     assertOptions(options, ['--profile', '--run-id'], ['--through']);
-    const state = await requireService(input.dependencies.service, 'supplyVisibilityResult')({
+    const runId = option(options, '--run-id');
+    let state = await requireService(input.dependencies.service, 'supplyVisibilityResult')({
       profile: parseProfile(option(options, '--profile')),
-      runId: option(options, '--run-id'),
+      runId,
       through: optionalOption(options, '--through'),
     });
+    while (['m2_metrics_results', 'm7_learning'].includes(state.stage)) {
+      state = await requireEngine(input.dependencies.engine, 'step')(runId);
+    }
     return printRun(input.writeLine, state);
   }
 
@@ -104,6 +108,7 @@ export function createMarketplaceVisibilityDependencies(
     service: createMarketplaceVisibilityService({
       engine,
       merchgridArtifacts: new JsonFileMerchGridReviewArtifactRepository({ rootDir: join(dataDir, 'artifacts') }),
+      merchgridArtifactRootRef: join(dataDir, 'artifacts'),
       runRepository: runs,
       loadContext: loadMarketplaceVisibilityContext,
     }),

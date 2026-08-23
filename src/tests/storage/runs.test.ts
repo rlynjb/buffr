@@ -60,6 +60,26 @@ describe('JsonFileRunRepository', () => {
     });
   });
 
+  it('rejects a duplicate create without overwriting the existing run', async () => {
+    const repository = new JsonFileRunRepository({ rootDir });
+    await repository.create(baseState);
+
+    await expect(repository.create({
+      ...baseState,
+      status: 'ready_for_experiment',
+      stage: 'experiment_wait',
+      updatedAt: '2026-08-12T00:10:00.000Z',
+    })).rejects.toMatchObject({
+      code: 'storage_failed',
+      message: 'Workflow run already exists: run-123',
+    });
+    await expect(repository.load('run-123')).resolves.toMatchObject({
+      status: 'analyzing',
+      stage: 'm1_context',
+      updatedAt: '2026-08-12T00:00:00.000Z',
+    });
+  });
+
   it('throws a clear AppError for a missing run', async () => {
     const repository = new JsonFileRunRepository({ rootDir });
 

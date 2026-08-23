@@ -77,4 +77,36 @@ describe('marketplace visibility CLI', () => {
       through: '2026-08-22',
     }]);
   });
+
+  it('steps result metrics and learning before printing the result outcome', async () => {
+    const steppedStages: string[] = [];
+    const lines: string[] = [];
+
+    await runMarketplaceVisibilityCli({
+      args: [
+        'record-result',
+        '--profile', 'merchgrid_shopify_app_store',
+        '--run-id', 'visibility-1',
+        '--through', '2026-09-04',
+      ],
+      dependencies: {
+        service: {
+          supplyVisibilityResult: async () => ({
+            runId: 'visibility-1', status: 'ready_for_evaluation', stage: 'm2_metrics_results', evidenceRefs: ['result-ref'],
+          }),
+        },
+        engine: {
+          step: async () => {
+            const stage = steppedStages.length === 0 ? 'm7_learning' : 'cycle_complete';
+            steppedStages.push(stage);
+            return { runId: 'visibility-1', status: stage === 'cycle_complete' ? 'cycle_complete' : 'ready_for_evaluation', stage, evidenceRefs: ['result-ref'] };
+          },
+        },
+      },
+      writeLine: (line) => lines.push(line),
+    });
+
+    expect(steppedStages).toEqual(['m7_learning', 'cycle_complete']);
+    expect(lines).toContain('stage: cycle_complete');
+  });
 });
