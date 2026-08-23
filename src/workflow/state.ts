@@ -63,6 +63,9 @@ export function evidenceRef(kind: 'initial' | 'result', input: WorkflowEvidence)
   if (input.product === 'etsy') {
     return `${kind}:${input.evidence.listingId}:${input.evidence.observedAt}`;
   }
+  if (input.product === 'marketplace_visibility') {
+    return `${kind}:${input.subjectRef}:${input.artifactRef}`;
+  }
   return `${kind}:${input.kind}:${input.artifactRef}`;
 }
 
