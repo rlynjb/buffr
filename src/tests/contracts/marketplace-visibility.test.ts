@@ -93,6 +93,45 @@ describe('marketplace visibility evidence contract', () => {
     })).toThrow();
   });
 
+  it.each([
+    { marketplaceContext: {
+      marketplace: 'shopify_app_store' as const,
+      productName: 'MerchGrid',
+      currentSurfaceSummary: 'Customer Jane Doe order #123',
+    } },
+    { marketplaceContext: {
+      marketplace: 'shopify_app_store' as const,
+      productName: 'MerchGrid',
+      currentSurfaceSummary: 'Merchant acme-shop internal catalog export',
+    } },
+    { marketplaceContext: {
+      marketplace: 'shopify_app_store' as const,
+      productName: 'MerchGrid',
+      currentSurfaceSummary: 'Raw marketplace listing text: Buy now, free shipping',
+    } },
+  ])('rejects merchant, customer, catalog, or raw listing text in allowed strings', (unsafeValues) => {
+    const baseEvidence = {
+      product: 'marketplace_visibility' as const,
+      profile: 'merchgrid_shopify_app_store' as const,
+      subjectRef: 'merchgrid:visibility:2026-08-22',
+      artifactRef: '.local/artifacts/daily-health/2026-08-22.json',
+      evidenceLevel: 'sparse' as const,
+      recommendationType: 'visibility_hypothesis' as const,
+      marketplaceContext: {
+        marketplace: 'shopify_app_store' as const,
+        productName: 'MerchGrid',
+        currentSurfaceSummary: 'Shopify app listing',
+      },
+      measuredSignals: {},
+      limitations: [],
+      prohibitedClaims: [],
+    };
+    expect(() => MarketplaceVisibilityEvidenceSchema.parse({
+      ...baseEvidence,
+      ...unsafeValues,
+    })).toThrow();
+  });
+
   it('rejects provider URLs as artifact references', () => {
     expect(() => MarketplaceVisibilityEvidenceSchema.parse({
       product: 'marketplace_visibility',

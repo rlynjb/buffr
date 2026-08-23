@@ -1,7 +1,7 @@
 import { z } from 'zod';
 
 const UnsafeKeyPattern = /(token|secret|authorization|password|email|shopDomain|rawEvents|payload|providerUrl)/iu;
-const UnsafeValuePattern = /(https?:\/\/|(?:^|[\s"'`])[\w.-]+\.myshopify\.com\b|(?:api[_ -]?key|access[_ -]?token|personal[_ -]?api[_ -]?key)\s*[:=]|raw[_ -]?(?:events?|payload)|\{\s*["']?(?:events?|payload|data)["']?\s*:)/iu;
+const UnsafeValuePattern = /(https?:\/\/|(?:^|[\s"'`])[\w.-]+\.myshopify\.com\b|(?:api[_ -]?key|access[_ -]?token|personal[_ -]?api[_ -]?key)\s*[:=]|raw[_ -]?(?:events?|payload)|\{\s*["']?(?:events?|payload|data)["']?\s*:|customer\s+.+?\s+order\s*#?\d+|merchant\s+\S+\s+internal\s+catalog\s+export|raw\s+marketplace\s+listing)/iu;
 
 export const MarketplaceVisibilityProfileSchema = z.enum([
   'merchgrid_shopify_app_store',
