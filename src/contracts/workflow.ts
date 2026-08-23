@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { AppError } from '../core/errors.js';
 import { NormalizedListingEvidenceSchema } from './evidence.js';
 import { MerchGridWorkflowEvidenceSchema } from './merchgrid-workflow.js';
+import { MarketplaceVisibilityEvidenceSchema } from './marketplace-visibility.js';
 import {
   ContextOutputSchema,
   DiagnosisOutputSchema,
@@ -38,7 +39,12 @@ export const WorkflowStatusSchema = z.enum([
   'stopped',
 ]);
 
-export const WorkflowKindSchema = z.enum(['etsy_listing', 'merchgrid_daily', 'merchgrid_weekly']);
+export const WorkflowKindSchema = z.enum([
+  'etsy_listing',
+  'merchgrid_daily',
+  'merchgrid_weekly',
+  'marketplace_visibility_review',
+]);
 
 const EtsyWorkflowEvidenceSchema = z.object({
   product: z.literal('etsy'),
@@ -48,6 +54,7 @@ const EtsyWorkflowEvidenceSchema = z.object({
 export const WorkflowEvidenceSchema = z.union([
   EtsyWorkflowEvidenceSchema,
   MerchGridWorkflowEvidenceSchema,
+  MarketplaceVisibilityEvidenceSchema,
 ]);
 
 export const WorkflowApprovalSchema = z.discriminatedUnion('status', [
