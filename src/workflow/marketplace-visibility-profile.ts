@@ -72,6 +72,7 @@ export function createMarketplaceVisibilityService(deps: {
       if (!artifact) {
         throw new AppError('storage_failed', `MerchGrid weekly review artifact not found: ${through}`);
       }
+      assertValidMerchGridResultArtifact({ artifact, through, initialSubjectRef: initial.subjectRef });
 
       const measuredSignals = numericMarketplaceSignals(artifact);
       if (Object.keys(measuredSignals).length === 0) {
@@ -169,4 +170,21 @@ function requireInitialVisibilityEvidence(
     throw new AppError('validation_failed', 'Visibility result requires matching initial marketplace visibility evidence');
   }
   return initial;
+}
+
+function assertValidMerchGridResultArtifact(input: {
+  artifact: MerchGridReviewEvidence;
+  through: string;
+  initialSubjectRef: string;
+}): void {
+  if (input.artifact.period.kind !== 'weekly') {
+    throw new AppError('validation_failed', 'MerchGrid visibility result requires a weekly review artifact');
+  }
+  if (input.artifact.period.current.endDate !== input.through) {
+    throw new AppError('validation_failed', 'MerchGrid weekly review artifact period does not match through date');
+  }
+  const initialDate = input.initialSubjectRef.slice('merchgrid:visibility:'.length);
+  if (input.through <= initialDate) {
+    throw new AppError('validation_failed', 'Visibility result through date must be later than the initial visibility date');
+  }
 }

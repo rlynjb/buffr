@@ -154,6 +154,67 @@ describe('marketplace visibility profile', () => {
 
     expect(result).toMatchObject({ stage: 'experiment_wait', status: 'waiting_for_data' });
   });
+
+  it('rejects a daily artifact supplied as a visibility result', async () => {
+    const service = createResultService({
+      dailyArtifact: dailyArtifact(),
+      weeklyArtifacts: { '2026-09-04': dailyArtifact() },
+    });
+    await startApprovedVisibilityReview(service, 'visibility-non-weekly');
+
+    await expect(service.supplyVisibilityResult({
+      runId: 'visibility-non-weekly',
+      profile: 'merchgrid_shopify_app_store',
+      through: '2026-09-04',
+    })).rejects.toMatchObject({
+      code: 'validation_failed',
+      message: 'MerchGrid visibility result requires a weekly review artifact',
+    });
+  });
+
+  it('rejects a weekly artifact whose end date does not match through', async () => {
+    const service = createResultService({
+      dailyArtifact: dailyArtifact(),
+      weeklyArtifacts: {
+        '2026-09-04': weeklyArtifact(
+          { app_opened_count: 4 },
+          { previous: { startDate: '2026-08-21', endDate: '2026-08-27' }, current: { startDate: '2026-08-28', endDate: '2026-09-03' } },
+        ),
+      },
+    });
+    await startApprovedVisibilityReview(service, 'visibility-mismatched-through');
+
+    await expect(service.supplyVisibilityResult({
+      runId: 'visibility-mismatched-through',
+      profile: 'merchgrid_shopify_app_store',
+      through: '2026-09-04',
+    })).rejects.toMatchObject({
+      code: 'validation_failed',
+      message: 'MerchGrid weekly review artifact period does not match through date',
+    });
+  });
+
+  it('rejects coterminous visibility result evidence', async () => {
+    const service = createResultService({
+      dailyArtifact: dailyArtifact(),
+      weeklyArtifacts: {
+        '2026-08-22': weeklyArtifact(
+          { app_opened_count: 4 },
+          { previous: { startDate: '2026-08-09', endDate: '2026-08-15' }, current: { startDate: '2026-08-16', endDate: '2026-08-22' } },
+        ),
+      },
+    });
+    await startApprovedVisibilityReview(service, 'visibility-coterminous');
+
+    await expect(service.supplyVisibilityResult({
+      runId: 'visibility-coterminous',
+      profile: 'merchgrid_shopify_app_store',
+      through: '2026-08-22',
+    })).rejects.toMatchObject({
+      code: 'validation_failed',
+      message: 'Visibility result through date must be later than the initial visibility date',
+    });
+  });
 });
 
 function createService(input: {
@@ -291,12 +352,18 @@ function flyOnlyDailyArtifact(): MerchGridReviewEvidence {
   });
 }
 
-function weeklyArtifact(posthog: Record<string, number>): MerchGridReviewEvidence {
+function weeklyArtifact(
+  posthog: Record<string, number>,
+  period = {
+    previous: { startDate: '2026-08-22', endDate: '2026-08-28' },
+    current: { startDate: '2026-08-29', endDate: '2026-09-04' },
+  },
+): MerchGridReviewEvidence {
   return MerchGridReviewEvidenceSchema.parse({
     period: {
       kind: 'weekly',
-      previous: { startDate: '2026-08-22', endDate: '2026-08-28' },
-      current: { startDate: '2026-08-29', endDate: '2026-09-04' },
+      previous: period.previous,
+      current: period.current,
     },
     sourceCoverage: {
       previous: { posthog: { complete: 7 }, fly_metrics: { complete: 7 }, shopify_partner: { unavailable: 7 } },
