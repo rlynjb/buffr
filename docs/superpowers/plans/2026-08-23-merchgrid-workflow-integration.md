@@ -48,6 +48,100 @@ src/tests/cli/merchgrid-workflow.test.ts
 
 > **DDIA lens — schema evolution:** A discriminated evidence union lets Buffr add one new immutable input type without corrupting the meaning of historical Etsy runs. A persisted run always says what kind of evidence informed it.
 
+## End-to-End Execution Flow
+
+This **execution flow**—also called a **system flow** or **dataflow**—shows how
+the implementation-plan tasks connect when Buffr is used. Each numbered box
+maps directly to a task below.
+
+```text
+                         EXTERNAL SYSTEMS
+ ┌─────────────────────────────────────────────────────────────────┐
+ │ PostHog            Fly Metrics / Grafana        Shopify Partner │
+ │ in-app usage       reliability aggregates       installs/earnings│
+ └────────┬────────────────────┬──────────────────────────┬────────┘
+          │                    │                          │
+          └────────────────────┴──────────────────────────┘
+                               │
+                               v
+       ┌──────────────────────────────────────────────────┐
+       │ MerchGrid source pack (already built)             │
+       │ Collect approved aggregate metrics only           │
+       └──────────────────────┬───────────────────────────┘
+                              v
+              Local daily snapshots and review-artifact JSON
+                              │
+                              v
+       ┌──────────────────────────────────────────────────┐
+       │ [Task 1] Validate persisted evidence              │
+       │ Zod validates JSON; reject secrets, raw payloads, │
+       │ unknown fields, and unsafe metric shapes          │
+       └──────────────────────┬───────────────────────────┘
+                              v
+                 Validated MerchGrid workflow evidence
+                              │
+       ┌──────────────────────────────────────────────────┐
+       │ [Task 2] Apply deterministic readiness policy     │
+       │ Daily: measured reliability concern?              │
+       │ Weekly: two closed, comparable weekly windows?    │
+       └───────────────┬──────────────────────┬───────────┘
+                       │                      │
+                 daily path               weekly path
+                       │                      │
+       healthy / incomplete / investigate     incomplete / qualified
+                       │                      │
+                       └──────────────┬───────┘
+                                      v
+       ┌──────────────────────────────────────────────────┐
+       │ [Task 3] Enter the shared workflow-engine seam    │
+       │ Persist evidence provenance, run kind, and        │
+       │ approval state without changing Etsy semantics    │
+       └──────────────────────┬───────────────────────────┘
+                                      │
+       ┌──────────────────────┴───────────────────────────┐
+       v                                                  v
+ [Task 4] Daily MerchGrid profile                [Task 4] Weekly profile
+ M1 context → M2 metrics → M4 diagnosis          M1 → M2 → M4 → M5 → M6
+ stop at triage / wait                            proposed test plan
+                                                          │
+                                                          v
+                                      [Task 3] Human approval gate
+                                      reject / defer        approve
+                                              │                │
+                                              v                v
+                                       stop or wait      experiment_wait
+                                                               │
+                                                               v
+                                 Human manually makes the approved external change
+                                                               │
+                                                               v
+       ┌──────────────────────────────────────────────────┐
+       │ [Task 5] Supply later weekly result evidence      │
+       │ Compare with frozen M6 baseline → M2 results → M7 │
+       │ learning                                          │
+       └──────────────────────┬───────────────────────────┘
+                              v
+       ┌──────────────────────────────────────────────────┐
+       │ [Task 6] Explicit local commands                  │
+       │ collect → review → recommend → approve → result   │
+       └──────────────────────┬───────────────────────────┘
+                              v
+       ┌──────────────────────────────────────────────────┐
+       │ [Task 7] Full compatibility and safety checks     │
+       │ Etsy regression, privacy scan, no provider writes │
+       └──────────────────────────────────────────────────┘
+```
+
+The resulting decision loop is:
+
+```text
+Collect → validate → qualify → recommend → human approves
+        → manual external change → collect again → evaluate → learn
+```
+
+Buffr records and recommends; it does not automatically change MerchGrid,
+Shopify, Fly, PostHog, or another external system.
+
 ## Shared Interfaces
 
 ```ts
