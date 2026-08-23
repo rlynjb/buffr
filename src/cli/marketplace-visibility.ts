@@ -16,7 +16,7 @@ type RunState = { runId: string; status: string; stage: string; evidenceRefs: st
 export type MarketplaceVisibilityCliDependencies = {
   service: {
     startVisibilityReview?: (input: { profile: MarketplaceVisibilityProfile; runId: string; date?: string; contextPath: string }) => Promise<RunState>;
-    supplyVisibilityResult?: (input: { profile: MarketplaceVisibilityProfile }) => Promise<RunState>;
+    supplyVisibilityResult?: (input: { profile: MarketplaceVisibilityProfile; runId: string; through?: string }) => Promise<RunState>;
   };
   engine: {
     step?: (runId: string) => Promise<RunState>;
@@ -80,6 +80,8 @@ export async function runMarketplaceVisibilityCli(input: {
     assertOptions(options, ['--profile', '--run-id'], ['--through']);
     const state = await requireService(input.dependencies.service, 'supplyVisibilityResult')({
       profile: parseProfile(option(options, '--profile')),
+      runId: option(options, '--run-id'),
+      through: optionalOption(options, '--through'),
     });
     return printRun(input.writeLine, state);
   }

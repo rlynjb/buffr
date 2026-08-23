@@ -31,7 +31,7 @@ export type MarketplaceVisibilityService = {
     date?: string;
     contextPath: string;
   }): Promise<WorkflowRunState>;
-  supplyVisibilityResult(input: { profile: MarketplaceVisibilityProfile }): Promise<WorkflowRunState>;
+  supplyVisibilityResult(input: { profile: MarketplaceVisibilityProfile; runId: string; through?: string }): Promise<WorkflowRunState>;
 };
 
 /** Builds sparse, safe marketplace-visibility evidence without querying providers. */

@@ -48,4 +48,33 @@ describe('marketplace visibility CLI', () => {
 
     expect(lines).toContain('status: stopped');
   });
+
+  it('forwards the result identity and period to the visibility service', async () => {
+    const calls: unknown[] = [];
+
+    await runMarketplaceVisibilityCli({
+      args: [
+        'record-result',
+        '--profile', 'merchgrid_shopify_app_store',
+        '--run-id', 'visibility-1',
+        '--through', '2026-08-22',
+      ],
+      dependencies: {
+        service: {
+          supplyVisibilityResult: async (input) => {
+            calls.push(input);
+            return { runId: 'visibility-1', status: 'stopped', stage: 'approval_wait', evidenceRefs: [] };
+          },
+        },
+        engine: {},
+      },
+      writeLine: () => undefined,
+    });
+
+    expect(calls).toEqual([{
+      profile: 'merchgrid_shopify_app_store',
+      runId: 'visibility-1',
+      through: '2026-08-22',
+    }]);
+  });
 });
