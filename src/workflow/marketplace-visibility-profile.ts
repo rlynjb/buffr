@@ -113,7 +113,7 @@ function buildEtsyVisibilityEvidence(input: {
 
 function numericMarketplaceSignals(artifact: MerchGridReviewEvidence): Record<string, number> {
   if (artifact.period.kind !== 'daily') return {};
-  if (!('posthog' in artifact.aggregateMetrics)) return {};
+  if ('current' in artifact.aggregateMetrics) return {};
   return Object.fromEntries(
     [artifact.aggregateMetrics.posthog, artifact.aggregateMetrics.fly_metrics]
       .flatMap((metrics) => Object.entries(metrics ?? {}))

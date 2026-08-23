@@ -42,6 +42,28 @@ describe('marketplace visibility profile', () => {
     });
   });
 
+  it('projects Fly numeric signals when the daily artifact has no PostHog metrics', async () => {
+    const service = createService({
+      dailyArtifact: flyOnlyDailyArtifact(),
+      context: {
+        marketplace: 'shopify_app_store',
+        productName: 'MerchGrid',
+        currentSurfaceSummary: 'Shopify app listing for catalog audits',
+      },
+    });
+
+    const state = await service.startVisibilityReview({
+      profile: 'merchgrid_shopify_app_store',
+      runId: 'merchgrid-visibility-2026-08-22-fly',
+      date: '2026-08-22',
+      contextPath: '.local/merchgrid-visibility-context.json',
+    });
+
+    expect(state.evidenceSnapshots?.initial).toMatchObject({
+      measuredSignals: { request_count: 18, error_rate: 0.1 },
+    });
+  });
+
   it('builds Etsy visibility evidence without Shopify or Fly fields', async () => {
     const service = createService({
       context: {
@@ -122,5 +144,15 @@ function dailyArtifact(): MerchGridReviewEvidence {
       shopify_partner: { installs: 4 },
     },
     limitations: ['Shopify partner metrics unavailable'],
+  });
+}
+
+function flyOnlyDailyArtifact(): MerchGridReviewEvidence {
+  return MerchGridReviewEvidenceSchema.parse({
+    period: { kind: 'daily', date: '2026-08-22' },
+    sourceCoverage: { posthog: 'unavailable', fly_metrics: 'complete', shopify_partner: 'unavailable' },
+    sourceFreshness: {},
+    aggregateMetrics: { fly_metrics: { request_count: 18, error_rate: 0.1 } },
+    limitations: ['PostHog metrics unavailable'],
   });
 }
