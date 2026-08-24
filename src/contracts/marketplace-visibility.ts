@@ -40,13 +40,43 @@ export const MarketplaceVisibilityProfileSchema = z.enum([
   'etsy_listing',
 ]);
 
+export const MarketplaceVisibilityProductTypeSchema = z.enum([
+  'shopify_app',
+  'digital_product',
+  'physical_product',
+  'service',
+]);
+
 export const MarketplaceVisibilityContextSchema = z.object({
-  marketplace: z.enum(['shopify_app_store', 'etsy']),
+  marketplace: z.enum(['shopify_app_store', 'etsy', 'meta_marketplace']),
   productName: safeMarketplaceText(120),
+  productType: MarketplaceVisibilityProductTypeSchema,
+  targetCustomer: safeMarketplaceText(300),
+  customerProblem: safeMarketplaceText(500),
+  currentPromise: safeMarketplaceText(300),
   currentSurfaceSummary: safeMarketplaceText(1_000),
-  targetAudience: safeMarketplaceText(300).optional(),
-  knownDiscoverySurface: safeMarketplaceText(300).optional(),
+  primaryDiscoverySurface: safeMarketplaceText(300),
+  primaryActionWanted: safeMarketplaceText(300),
+  constraints: z.array(safeMarketplaceText(300)).max(12),
+  availableAssets: z.array(safeMarketplaceText(300)).max(12),
+  ownerGoal: safeMarketplaceText(300),
 }).strict();
+
+export const ExploratoryVisibilityReviewModeSchema = z.object({
+  mode: z.literal('exploratory_visibility_test'),
+  evidenceLevel: z.literal('sparse'),
+  confidenceBoundary: z.literal('low'),
+  reason: z.literal('metrics_sparse_context_sufficient'),
+}).strict();
+
+export const VisibilityReviewModeSchema = z.discriminatedUnion('mode', [
+  ExploratoryVisibilityReviewModeSchema,
+  z.object({
+    mode: z.literal('missing_context'),
+    missingFields: z.array(z.string().min(1)).min(1),
+    reason: z.literal('context_required_before_exploratory_test'),
+  }).strict(),
+]);
 
 export const MarketplaceVisibilityEvidenceSchema = z.object({
   product: z.literal('marketplace_visibility'),
@@ -55,6 +85,7 @@ export const MarketplaceVisibilityEvidenceSchema = z.object({
   artifactRef: MarketplaceVisibilityArtifactRefSchema,
   evidenceLevel: z.literal('sparse'),
   recommendationType: z.literal('visibility_hypothesis'),
+  reviewMode: ExploratoryVisibilityReviewModeSchema,
   marketplaceContext: MarketplaceVisibilityContextSchema,
   measuredSignals: z.record(MarketplaceVisibilitySignalKeySchema, z.number().finite()),
   limitations: z.array(safeMarketplaceText(300)),
@@ -75,6 +106,9 @@ export const MarketplaceVisibilityEvidenceSchema = z.object({
 export type MarketplaceVisibilityEvidence = z.infer<typeof MarketplaceVisibilityEvidenceSchema>;
 export type MarketplaceVisibilityProfile = z.infer<typeof MarketplaceVisibilityProfileSchema>;
 export type MarketplaceVisibilityContext = z.infer<typeof MarketplaceVisibilityContextSchema>;
+export type MarketplaceVisibilityProductType = z.infer<typeof MarketplaceVisibilityProductTypeSchema>;
+export type ExploratoryVisibilityReviewMode = z.infer<typeof ExploratoryVisibilityReviewModeSchema>;
+export type VisibilityReviewMode = z.infer<typeof VisibilityReviewModeSchema>;
 
 export function parseMarketplaceVisibilityEvidence(value: unknown): MarketplaceVisibilityEvidence {
   return MarketplaceVisibilityEvidenceSchema.parse(value);

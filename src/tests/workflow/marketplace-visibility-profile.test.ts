@@ -12,20 +12,40 @@ import type { RunRepository } from '../../storage/runs.js';
 import { createWorkflowEngine } from '../../workflow/engine.js';
 import {
   createMarketplaceVisibilityService,
+  selectMarketplaceVisibilityMode,
   type MarketplaceVisibilityEngine,
 } from '../../workflow/marketplace-visibility-profile.js';
 
 describe('marketplace visibility profile', () => {
+  it('selects exploratory mode for complete context even when signals are empty', () => {
+    expect(selectMarketplaceVisibilityMode({
+      context: readyContext(),
+      measuredSignals: {},
+      limitations: ['PostHog metrics unavailable'],
+    })).toEqual({
+      mode: 'exploratory_visibility_test',
+      evidenceLevel: 'sparse',
+      confidenceBoundary: 'low',
+      reason: 'metrics_sparse_context_sufficient',
+    });
+  });
+
+  it('returns missing context when the brief lacks required decision context', () => {
+    expect(selectMarketplaceVisibilityMode({
+      context: { ...readyContext(), constraints: [] },
+      measuredSignals: {},
+      limitations: [],
+    })).toEqual({
+      mode: 'missing_context',
+      missingFields: ['constraints'],
+      reason: 'context_required_before_exploratory_test',
+    });
+  });
+
   it('starts a MerchGrid visibility review from sparse daily evidence', async () => {
     const service = createService({
       dailyArtifact: dailyArtifact(),
-      context: {
-        marketplace: 'shopify_app_store',
-        productName: 'MerchGrid',
-        currentSurfaceSummary: 'Shopify app listing for catalog audits',
-        targetAudience: 'Shopify merchants',
-        knownDiscoverySurface: 'Shopify App Store',
-      },
+      context: readyContext(),
     });
 
     const state = await service.startVisibilityReview({
@@ -100,9 +120,8 @@ describe('marketplace visibility profile', () => {
       merchgridArtifacts: new InMemoryArtifacts(dailyArtifact()),
       runRepository: new InMemoryRunRepository(),
       loadContext: async () => ({
-        marketplace: 'shopify_app_store',
-        productName: 'MerchGrid',
-        currentSurfaceSummary: 'Shopify app listing for catalog audits',
+        ...readyContext(),
+        constraints: [],
       }),
     });
 
@@ -113,7 +132,7 @@ describe('marketplace visibility profile', () => {
       contextPath: '.local/merchgrid-visibility-context.json',
     })).rejects.toMatchObject({
       code: 'validation_failed',
-      message: 'visibility_context_missing',
+      message: 'visibility_context_missing:constraints',
     });
     expect(engine.startCalls).toBe(0);
   });
@@ -145,9 +164,16 @@ describe('marketplace visibility profile', () => {
       context: {
         marketplace: 'etsy',
         productName: 'Printable Weekly Planner',
+        productType: 'digital_product',
+        targetCustomer: 'Planner buyers organizing weekly routines',
+        customerProblem: 'Busy buyers need a simple printable weekly planning layout',
+        currentPromise: 'Plan the week with a clean printable planner',
         currentSurfaceSummary: 'Etsy listing with printable planner title and tags',
-        targetAudience: 'Planner buyers',
-        knownDiscoverySurface: 'Etsy search',
+        primaryDiscoverySurface: 'Etsy search and listing recommendations',
+        primaryActionWanted: 'Click the listing and save the printable planner',
+        constraints: ['manual listing changes only'],
+        availableAssets: ['listing title', 'listing images'],
+        ownerGoal: 'increase qualified listing clicks',
       },
     });
 
@@ -399,9 +425,16 @@ function readyContext() {
   return {
     marketplace: 'shopify_app_store' as const,
     productName: 'MerchGrid',
+    productType: 'shopify_app' as const,
+    targetCustomer: 'Shopify merchants auditing catalog quality',
+    customerProblem: 'Catalog issues can hurt trust before the merchant notices',
+    currentPromise: 'Find catalog issues before they hurt sales or trust',
     currentSurfaceSummary: 'Shopify app listing for catalog audits',
-    targetAudience: 'Shopify merchants auditing catalog quality',
-    knownDiscoverySurface: 'Shopify App Store search and category pages',
+    primaryDiscoverySurface: 'Shopify App Store search and category pages',
+    primaryActionWanted: 'Open the app and run the first catalog audit',
+    constraints: ['manual listing changes only'],
+    availableAssets: ['listing copy', 'screenshots'],
+    ownerGoal: 'increase qualified app opens and first scans',
   };
 }
 

@@ -74,15 +74,41 @@ marketplace edit.
 
 The `--context` argument overrides `MERCHGRID_VISIBILITY_CONTEXT_PATH`; use a
 local, curated JSON file with only the product-facing context required for the
-sparse recommendation. For example:
+sparse recommendation.
+
+Marketplace visibility reviews can run before there is enough traffic for a
+metric-backed diagnosis. Buffr requires a local visibility brief so the work
+engine can recommend one low-risk exploratory test without pretending the data
+proves the change. Copy
+`docs/examples/merchgrid-visibility-context.example.json` to
+`.local/merchgrid-visibility-context.json`, edit the product context, then run
+the visibility command.
+
+If the brief is complete, zero metrics can still produce an `approval_wait`
+recommendation. If required context is missing, the command stops with the
+specific missing fields. Example brief:
 
 ```json
 {
   "marketplace": "shopify_app_store",
   "productName": "MerchGrid",
-  "currentSurfaceSummary": "Shopify app listing for a catalog audit app that helps merchants find catalog quality issues.",
-  "targetAudience": "Shopify merchants who want a fast catalog audit before fixing product data.",
-  "knownDiscoverySurface": "Shopify App Store search, category browsing, listing screenshots, and app onboarding."
+  "productType": "shopify_app",
+  "targetCustomer": "Shopify merchants auditing catalog quality",
+  "customerProblem": "Catalog issues can hurt trust before the merchant notices",
+  "currentPromise": "Find catalog issues before they hurt sales or trust",
+  "currentSurfaceSummary": "Shopify App Store listing for a read-only catalog audit app",
+  "primaryDiscoverySurface": "Shopify App Store search and category browsing",
+  "primaryActionWanted": "Open the app and run the first catalog audit",
+  "constraints": [
+    "manual listing changes only",
+    "do not change app behavior"
+  ],
+  "availableAssets": [
+    "listing copy",
+    "screenshots",
+    "setup documentation"
+  ],
+  "ownerGoal": "increase qualified app opens and first scan starts"
 }
 ```
 

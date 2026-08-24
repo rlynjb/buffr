@@ -20,8 +20,10 @@ import type { ModuleExecutor, ResearchRequest } from '../../workflow/engine.js';
 
 const VISIBILITY_DIAGNOSIS_PROMPT = [
   'M4 Marketplace Visibility Diagnosis.',
-  'Use sparse evidence honestly. Identify one likely visibility bottleneck.',
-  'Do not claim proof. Choose proceed_to_hypothesis only for a manual exploratory test.',
+  'Use sparse evidence honestly. Do not claim proof.',
+  'If reviewMode.mode is exploratory_visibility_test, sparse or zero metrics alone are not a reason to stop.',
+  'Use product context and marketplace context to identify one likely visibility bottleneck hypothesis.',
+  'Choose proceed_to_hypothesis for one manual exploratory test unless the product context is contradictory or unsafe.',
 ].join('\n');
 
 const VISIBILITY_HYPOTHESIS_PROMPT = [
@@ -55,6 +57,7 @@ export function createMarketplaceVisibilityModuleExecutor(deps: { agentRunner: A
       return unavailableResearchResult(request);
     },
     async runM4(state) {
+      const evidence = requireInitialEvidence(state);
       const result = await runStructuredModule({
         runner: deps.agentRunner,
         moduleId: 'm4',
@@ -63,7 +66,7 @@ export function createMarketplaceVisibilityModuleExecutor(deps: { agentRunner: A
         outputSchema: DiagnosisOutputSchema,
         trace: trace(state),
       });
-      return normalizeDiagnosis(result.output);
+      return normalizeDiagnosis(result.output, evidence);
     },
     async runM5(state) {
       const result = await runStructuredModule({
@@ -107,7 +110,7 @@ export function createMarketplaceVisibilityModuleExecutor(deps: { agentRunner: A
 export function deterministicMarketplaceVisibilityContext(evidence: MarketplaceVisibilityEvidence): ContextOutput {
   return {
     product: evidence.marketplaceContext.productName,
-    likelyCustomer: evidence.marketplaceContext.targetAudience,
+    likelyCustomer: evidence.marketplaceContext.targetCustomer,
     positioning: `${marketplaceName(evidence.marketplaceContext.marketplace)} visibility review: ${evidence.marketplaceContext.currentSurfaceSummary}`,
     availableEvidence: [
       `profile: ${evidence.profile}`,
@@ -210,7 +213,22 @@ function trace(state: WorkflowRunState) {
   return { runId: state.runId, stage: state.stage };
 }
 
-function normalizeDiagnosis(output: DiagnosisOutput): DiagnosisOutput {
+function normalizeDiagnosis(output: DiagnosisOutput, evidence: MarketplaceVisibilityEvidence): DiagnosisOutput {
+  if (
+    evidence.reviewMode.mode === 'exploratory_visibility_test'
+    && output.decision === 'collect_more_data'
+  ) {
+    return {
+      ...output,
+      performancePath: 'discovery',
+      decision: 'proceed_to_hypothesis',
+      notes: [
+        ...output.notes,
+        'Sparse metrics do not block a human-approved exploratory visibility test.',
+        'Recommendation remains low-confidence and not metric-proven.',
+      ],
+    };
+  }
   if (output.decision !== 'research_domain_knowledge') return output;
   const { researchQuestion: _researchQuestion, ...withoutResearchQuestion } = output;
   return { ...withoutResearchQuestion, decision: 'collect_more_data' };
@@ -218,12 +236,31 @@ function normalizeDiagnosis(output: DiagnosisOutput): DiagnosisOutput {
 
 function normalizeHypothesis(output: HypothesisOutput): HypothesisOutput {
   const { researchNeed: _researchNeed, ...withoutResearchNeed } = output;
-  return withoutResearchNeed;
+  return {
+    ...withoutResearchNeed,
+    notes: uniqueStrings([
+      ...withoutResearchNeed.notes,
+      'Exploratory recommendation; not metric-proven.',
+      'Human approval required before changing any marketplace surface.',
+    ]),
+  };
 }
 
 function normalizeTestPlan(output: TestPlanOutput): TestPlanOutput {
   const { researchNeed: _researchNeed, ...withoutResearchNeed } = output;
-  return { ...withoutResearchNeed, unresolvedMeasurementRules: [] };
+  return {
+    ...withoutResearchNeed,
+    qualificationRequirements: uniqueStrings([
+      ...withoutResearchNeed.qualificationRequirements,
+      'Human approval and manual marketplace edit are required before measurement.',
+      'Later evidence must be compared as exploratory and low confidence.',
+    ]),
+    contextToMonitor: uniqueStrings([
+      ...withoutResearchNeed.contextToMonitor,
+      'manual marketplace change applied by owner',
+    ]),
+    unresolvedMeasurementRules: [],
+  };
 }
 
 function normalizeEvaluation(output: EvaluationOutput): EvaluationOutput {
@@ -242,4 +279,8 @@ function unavailableResearchResult(request: ResearchRequest): ResearchOutput {
     confidence: 'low',
     limitations: ['External research is unavailable for marketplace visibility reviews.'],
   });
+}
+
+function uniqueStrings(values: readonly string[]): string[] {
+  return [...new Set(values)];
 }

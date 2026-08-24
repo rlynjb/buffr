@@ -4,6 +4,7 @@ import {
   type MarketplaceVisibilityContext,
   type MarketplaceVisibilityEvidence,
   type MarketplaceVisibilityProfile,
+  type VisibilityReviewMode,
 } from '../contracts/marketplace-visibility.js';
 import { UtcDateSchema } from '../contracts/metrics.js';
 import type { WorkflowRunState } from '../contracts/workflow.js';
@@ -52,7 +53,6 @@ export function createMarketplaceVisibilityService(deps: {
   return {
     async startVisibilityReview(input) {
       const context = await deps.loadContext(input.contextPath);
-      assertVisibilityContextReady(context);
       const evidence = input.profile === 'merchgrid_shopify_app_store'
         ? await buildMerchGridVisibilityEvidence({
             input,
@@ -102,6 +102,7 @@ export function createMarketplaceVisibilityService(deps: {
         artifactRef: merchgridArtifactRef(deps.merchgridArtifactRootRef, 'weekly-reviews', through),
         evidenceLevel: 'sparse',
         recommendationType: 'visibility_hypothesis',
+        reviewMode: initial.reviewMode,
         marketplaceContext: initial.marketplaceContext,
         measuredSignals,
         limitations: curatedMerchGridLimitations(artifact.limitations),
@@ -126,6 +127,13 @@ async function buildMerchGridVisibilityEvidence(input: {
   if (!artifact) {
     throw new AppError('storage_failed', `MerchGrid daily health artifact not found: ${date}`);
   }
+  const measuredSignals = numericMarketplaceSignals(artifact);
+  const reviewMode = selectMarketplaceVisibilityMode({
+    context: input.context,
+    measuredSignals,
+    limitations: artifact.limitations,
+  });
+  assertExploratoryMode(reviewMode);
 
   return MarketplaceVisibilityEvidenceSchema.parse({
     product: 'marketplace_visibility',
@@ -134,8 +142,9 @@ async function buildMerchGridVisibilityEvidence(input: {
     artifactRef: merchgridArtifactRef(input.artifactRootRef, 'daily-health', date),
     evidenceLevel: 'sparse',
     recommendationType: 'visibility_hypothesis',
+    reviewMode,
     marketplaceContext: input.context,
-    measuredSignals: numericMarketplaceSignals(artifact),
+    measuredSignals,
     limitations: curatedMerchGridLimitations(artifact.limitations),
     prohibitedClaims: PROHIBITED_CLAIMS,
   });
@@ -149,6 +158,12 @@ function buildEtsyVisibilityEvidence(input: {
     throw new AppError('validation_failed', 'Etsy visibility profile requires Etsy context');
   }
   const listingRef = input.input.runId.replace(/^etsy-visibility-/u, '');
+  const reviewMode = selectMarketplaceVisibilityMode({
+    context: input.context,
+    measuredSignals: {},
+    limitations: ['etsy runtime profile is fixture-backed in this slice'],
+  });
+  assertExploratoryMode(reviewMode);
 
   return MarketplaceVisibilityEvidenceSchema.parse({
     product: 'marketplace_visibility',
@@ -157,6 +172,7 @@ function buildEtsyVisibilityEvidence(input: {
     artifactRef: input.input.contextPath,
     evidenceLevel: 'sparse',
     recommendationType: 'visibility_hypothesis',
+    reviewMode,
     marketplaceContext: input.context,
     measuredSignals: {},
     limitations: ['etsy runtime profile is fixture-backed in this slice'],
@@ -173,6 +189,46 @@ function numericMarketplaceSignals(artifact: MerchGridReviewEvidence): Record<st
       .flatMap((metrics) => Object.entries(metrics ?? {}))
       .filter((entry): entry is [string, number] => typeof entry[1] === 'number' && Number.isFinite(entry[1])),
   );
+}
+
+export function selectMarketplaceVisibilityMode(input: {
+  context: MarketplaceVisibilityContext;
+  measuredSignals: Record<string, number>;
+  limitations: readonly string[];
+}): VisibilityReviewMode {
+  const missingFields = [
+    input.context.productName ? undefined : 'productName',
+    input.context.productType ? undefined : 'productType',
+    input.context.targetCustomer ? undefined : 'targetCustomer',
+    input.context.customerProblem ? undefined : 'customerProblem',
+    input.context.currentPromise ? undefined : 'currentPromise',
+    input.context.currentSurfaceSummary ? undefined : 'currentSurfaceSummary',
+    input.context.primaryDiscoverySurface ? undefined : 'primaryDiscoverySurface',
+    input.context.primaryActionWanted ? undefined : 'primaryActionWanted',
+    input.context.constraints.length > 0 ? undefined : 'constraints',
+    input.context.ownerGoal ? undefined : 'ownerGoal',
+  ].filter((field): field is string => Boolean(field));
+
+  if (missingFields.length > 0) {
+    return {
+      mode: 'missing_context',
+      missingFields,
+      reason: 'context_required_before_exploratory_test',
+    };
+  }
+
+  return {
+    mode: 'exploratory_visibility_test',
+    evidenceLevel: 'sparse',
+    confidenceBoundary: 'low',
+    reason: 'metrics_sparse_context_sufficient',
+  };
+}
+
+function assertExploratoryMode(mode: VisibilityReviewMode): asserts mode is Extract<VisibilityReviewMode, { mode: 'exploratory_visibility_test' }> {
+  if (mode.mode === 'missing_context') {
+    throw new AppError('validation_failed', `visibility_context_missing:${mode.missingFields.join(',')}`);
+  }
 }
 
 function requireInitialVisibilityEvidence(
@@ -205,12 +261,6 @@ function assertValidMerchGridResultArtifact(input: {
   const boundary = input.approvalDate && input.approvalDate > initialDate ? input.approvalDate : initialDate;
   if (input.artifact.period.current.startDate <= boundary) {
     throw new AppError('validation_failed', 'Visibility result current window must begin after the approval boundary');
-  }
-}
-
-function assertVisibilityContextReady(context: MarketplaceVisibilityContext): void {
-  if (!context.targetAudience && !context.knownDiscoverySurface) {
-    throw new AppError('validation_failed', 'visibility_context_missing');
   }
 }
 

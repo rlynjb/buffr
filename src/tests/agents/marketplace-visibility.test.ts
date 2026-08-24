@@ -74,6 +74,65 @@ describe('marketplace visibility modules', () => {
     await expect(executor.runM6(state)).resolves.toMatchObject({ primaryMetric: 'posthog.app_opened_count' });
   });
 
+  it('does not stop at collect_more_data when exploratory mode has complete context', async () => {
+    const executor = createMarketplaceVisibilityModuleExecutor({
+      agentRunner: new FakeAgentRunner({
+        m4: {
+          performancePath: 'insufficient_data',
+          primaryBottleneck: 'Measured marketplace data is sparse.',
+          competingExplanation: 'The listing may not yet have marketplace exposure.',
+          confidence: 'low',
+          decision: 'collect_more_data',
+          notes: ['Metrics are sparse.'],
+        },
+      }),
+    });
+
+    await expect(executor.runM4(workflowState({ evidence: visibilityEvidence() }))).resolves.toMatchObject({
+      performancePath: 'discovery',
+      decision: 'proceed_to_hypothesis',
+      confidence: 'low',
+      notes: expect.arrayContaining([
+        'Sparse metrics do not block a human-approved exploratory visibility test.',
+      ]),
+    });
+  });
+
+  it('adds exploratory safety notes to M5 and M6 outputs', async () => {
+    const executor = createMarketplaceVisibilityModuleExecutor({
+      agentRunner: new FakeAgentRunner({
+        m5: {
+          hypothesis: 'Clearer first-scan positioning may improve qualified opens.',
+          primaryVariable: 'listing positioning',
+          recommendedRevision: 'Lead the listing with the first audit outcome.',
+          keepConstant: ['pricing', 'app behavior'],
+          expectedSignal: 'App opens or scan starts become observable.',
+          notes: [],
+        },
+        m6: {
+          primaryMetric: 'posthog_app_opened_count',
+          secondaryMetrics: ['posthog_scan_started_count'],
+          baselineValue: 0,
+          baselinePeriod: 'zero-data launch baseline',
+          qualificationRequirements: [],
+          expectedSupportingSignal: 'A later weekly review shows app opens.',
+          expectedWeakeningSignal: 'Signals remain absent after the manual change.',
+          inconclusiveCondition: 'Marketplace exposure remains too sparse to compare.',
+          contextToMonitor: [],
+          unresolvedMeasurementRules: [],
+        },
+      }),
+    });
+
+    await expect(executor.runM5(workflowState({ evidence: visibilityEvidence() }))).resolves.toMatchObject({
+      notes: expect.arrayContaining(['Exploratory recommendation; not metric-proven.']),
+    });
+    await expect(executor.runM6(workflowState({ evidence: visibilityEvidence() }))).resolves.toMatchObject({
+      qualificationRequirements: expect.arrayContaining(['Human approval and manual marketplace edit are required before measurement.']),
+      contextToMonitor: expect.arrayContaining(['manual marketplace change applied by owner']),
+    });
+  });
+
   it('keeps research-producing module outputs on the provider-free visibility path', async () => {
     const executor = createMarketplaceVisibilityModuleExecutor({
       agentRunner: new FakeAgentRunner({
@@ -148,11 +207,25 @@ function visibilityEvidence(): MarketplaceVisibilityEvidence {
     artifactRef: '.local/visibility/initial/2026-08-22.json',
     evidenceLevel: 'sparse',
     recommendationType: 'visibility_hypothesis',
+    reviewMode: {
+      mode: 'exploratory_visibility_test',
+      evidenceLevel: 'sparse',
+      confidenceBoundary: 'low',
+      reason: 'metrics_sparse_context_sufficient',
+    },
     marketplaceContext: {
       marketplace: 'shopify_app_store',
       productName: 'MerchGrid',
+      productType: 'shopify_app',
+      targetCustomer: 'Shopify merchants reviewing catalog quality',
+      customerProblem: 'Catalog issues can hurt trust before the merchant notices',
+      currentPromise: 'Find catalog issues before they hurt sales or trust',
       currentSurfaceSummary: 'Shopify App Store listing for catalog audits',
-      targetAudience: 'Shopify merchants reviewing catalog quality',
+      primaryDiscoverySurface: 'Shopify App Store search and category pages',
+      primaryActionWanted: 'Open the app and run the first catalog audit',
+      constraints: ['manual listing changes only'],
+      availableAssets: ['listing copy', 'screenshots'],
+      ownerGoal: 'increase qualified app opens and first scans',
     },
     measuredSignals: { posthog_app_opened_count: 0 },
     limitations: ['low request volume'],

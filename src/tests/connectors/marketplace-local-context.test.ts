@@ -11,9 +11,16 @@ describe('marketplace visibility local context loader', () => {
     await writeFile(file, JSON.stringify({
       marketplace: 'shopify_app_store',
       productName: 'MerchGrid',
+      productType: 'shopify_app',
+      targetCustomer: 'Shopify merchants auditing catalog quality',
+      customerProblem: 'Catalog issues can hurt trust before the merchant notices',
+      currentPromise: 'Find catalog issues before they hurt sales or trust',
       currentSurfaceSummary: 'Shopify app listing for catalog audits',
-      targetAudience: 'Shopify merchants',
-      knownDiscoverySurface: 'Shopify App Store',
+      primaryDiscoverySurface: 'Shopify App Store search and category pages',
+      primaryActionWanted: 'Open the app and run the first catalog audit',
+      constraints: ['manual listing changes only'],
+      availableAssets: ['listing copy', 'screenshots'],
+      ownerGoal: 'increase qualified app opens and first scans',
     }), 'utf8');
 
     await expect(loadMarketplaceVisibilityContext(file)).resolves.toMatchObject({

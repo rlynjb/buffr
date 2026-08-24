@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest';
+import { createMarketplaceVisibilityModuleExecutor } from '../../agents/marketplace-visibility/modules.js';
+import { FakeAgentRunner } from '../../agents/runner.js';
 import type { ModuleExecutor } from '../../workflow/engine.js';
 import { createWorkflowEngine } from '../../workflow/engine.js';
 import type { WorkflowRunState, WorkflowRunStateInput } from '../../contracts/workflow.js';
@@ -38,6 +40,71 @@ describe('marketplace visibility workflow engine entry', () => {
     const state = await repository.load('visibility-approval');
 
     expect(state).toMatchObject({ stage: 'approval_wait', status: 'awaiting_approval' });
+  });
+
+  it('routes zero-data exploratory visibility review to approval wait', async () => {
+    const repository = new InMemoryRunRepository();
+    const engine = createWorkflowEngine({
+      repository,
+      modules: createMarketplaceVisibilityModuleExecutor({
+        agentRunner: new FakeAgentRunner({
+          m4: {
+            performancePath: 'insufficient_data',
+            primaryBottleneck: 'Measured marketplace data is sparse.',
+            competingExplanation: 'The listing may not yet have marketplace exposure.',
+            confidence: 'low',
+            decision: 'collect_more_data',
+            notes: ['Metrics are sparse.'],
+          },
+          m5: {
+            hypothesis: 'Clearer first-scan positioning may improve qualified opens.',
+            primaryVariable: 'listing positioning',
+            recommendedRevision: 'Lead the listing with the first audit outcome.',
+            keepConstant: ['pricing', 'app behavior'],
+            expectedSignal: 'App opens or scan starts become observable.',
+            notes: [],
+          },
+          m6: {
+            primaryMetric: 'posthog_app_opened_count',
+            secondaryMetrics: ['posthog_scan_started_count'],
+            baselineValue: 0,
+            baselinePeriod: 'zero-data launch baseline',
+            qualificationRequirements: [],
+            expectedSupportingSignal: 'A later weekly review shows app opens.',
+            expectedWeakeningSignal: 'Signals remain absent after the manual change.',
+            inconclusiveCondition: 'Marketplace exposure remains too sparse to compare.',
+            contextToMonitor: [],
+            unresolvedMeasurementRules: [],
+          },
+        }),
+      }),
+      now: fixedNow,
+    });
+
+    await engine.startMarketplaceVisibility({
+      runId: 'visibility-zero-data',
+      subjectRef: 'marketplace_visibility:merchgrid_shopify_app_store:2026-08-24',
+      initialEvidence: visibilityEvidence({
+        subjectRef: 'merchgrid:visibility:2026-08-24',
+        measuredSignals: {},
+        limitations: ['PostHog metrics unavailable', 'Shopify Partner metrics sparse'],
+      }),
+    });
+
+    for (let index = 0; index < 5; index += 1) await engine.step('visibility-zero-data');
+    await expect(repository.load('visibility-zero-data')).resolves.toMatchObject({
+      status: 'awaiting_approval',
+      stage: 'approval_wait',
+      moduleOutputs: {
+        m4: { decision: 'proceed_to_hypothesis' },
+        m6: {
+          primaryMetric: 'posthog_app_opened_count',
+          qualificationRequirements: expect.arrayContaining([
+            'Human approval and manual marketplace edit are required before measurement.',
+          ]),
+        },
+      },
+    });
   });
 
   it('accepts sparse marketplace visibility evidence when an approved experiment resumes', async () => {
@@ -86,7 +153,16 @@ describe('marketplace visibility workflow engine entry', () => {
         marketplaceContext: {
           marketplace: 'etsy',
           productName: 'Weekly Planner',
+          productType: 'digital_product',
+          targetCustomer: 'Planner buyers organizing weekly routines',
+          customerProblem: 'Busy buyers need a simple printable weekly planning layout',
+          currentPromise: 'Plan the week with a clean printable planner',
           currentSurfaceSummary: 'Etsy listing for a printable weekly planner',
+          primaryDiscoverySurface: 'Etsy search and listing recommendations',
+          primaryActionWanted: 'Click the listing and save the printable planner',
+          constraints: ['manual listing changes only'],
+          availableAssets: ['listing title', 'listing images'],
+          ownerGoal: 'increase qualified listing clicks',
         },
       }),
     })).rejects.toMatchObject({
@@ -133,10 +209,25 @@ function visibilityEvidence(overrides: Partial<MarketplaceVisibilityEvidence> = 
     artifactRef: '.local/visibility/initial/2026-08-22.json',
     evidenceLevel: 'sparse',
     recommendationType: 'visibility_hypothesis',
+    reviewMode: {
+      mode: 'exploratory_visibility_test',
+      evidenceLevel: 'sparse',
+      confidenceBoundary: 'low',
+      reason: 'metrics_sparse_context_sufficient',
+    },
     marketplaceContext: {
       marketplace: 'shopify_app_store',
       productName: 'MerchGrid',
+      productType: 'shopify_app',
+      targetCustomer: 'Shopify merchants auditing catalog quality',
+      customerProblem: 'Catalog issues can hurt trust before the merchant notices',
+      currentPromise: 'Find catalog issues before they hurt sales or trust',
       currentSurfaceSummary: 'Shopify app listing for catalog audits',
+      primaryDiscoverySurface: 'Shopify App Store search and category pages',
+      primaryActionWanted: 'Open the app and run the first catalog audit',
+      constraints: ['manual listing changes only'],
+      availableAssets: ['listing copy', 'screenshots'],
+      ownerGoal: 'increase qualified app opens and first scans',
     },
     measuredSignals: { request_count: 18 },
     limitations: ['Evidence is sparse'],

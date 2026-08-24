@@ -1,10 +1,86 @@
 import { describe, expect, it } from 'vitest';
 import {
+  MarketplaceVisibilityContextSchema,
   MarketplaceVisibilityEvidenceSchema,
   parseMarketplaceVisibilityEvidence,
 } from '../../contracts/marketplace-visibility.js';
 
 describe('marketplace visibility evidence contract', () => {
+  const merchGridContext = (overrides: Record<string, unknown> = {}) => ({
+    marketplace: 'shopify_app_store' as const,
+    productName: 'MerchGrid',
+    productType: 'shopify_app' as const,
+    targetCustomer: 'Shopify merchants auditing catalog quality',
+    customerProblem: 'Catalog issues can hurt trust before the merchant notices',
+    currentPromise: 'Find catalog issues before they hurt sales or trust',
+    currentSurfaceSummary: 'Shopify app listing for a catalog audit app',
+    primaryDiscoverySurface: 'Shopify App Store search and category pages',
+    primaryActionWanted: 'Open the app and run the first catalog audit',
+    constraints: ['manual listing changes only'],
+    availableAssets: ['listing copy', 'screenshots'],
+    ownerGoal: 'increase qualified app opens and first scans',
+    ...overrides,
+  });
+
+  const etsyContext = (overrides: Record<string, unknown> = {}) => ({
+    marketplace: 'etsy' as const,
+    productName: 'Printable Weekly Planner',
+    productType: 'digital_product' as const,
+    targetCustomer: 'Planner buyers organizing weekly routines',
+    customerProblem: 'Busy buyers need a simple printable weekly planning layout',
+    currentPromise: 'Plan the week with a clean printable planner',
+    currentSurfaceSummary: 'Etsy listing with printable planner title and tags',
+    primaryDiscoverySurface: 'Etsy search and listing recommendations',
+    primaryActionWanted: 'Click the listing and save the printable planner',
+    constraints: ['manual listing changes only'],
+    availableAssets: ['listing title', 'listing images'],
+    ownerGoal: 'increase qualified listing clicks',
+    ...overrides,
+  });
+
+  const exploratoryReviewMode = () => ({
+    mode: 'exploratory_visibility_test' as const,
+    evidenceLevel: 'sparse' as const,
+    confidenceBoundary: 'low' as const,
+    reason: 'metrics_sparse_context_sufficient' as const,
+  });
+
+  it('accepts a complete MerchGrid visibility brief', () => {
+    expect(MarketplaceVisibilityContextSchema.parse({
+      marketplace: 'shopify_app_store',
+      productName: 'MerchGrid',
+      productType: 'shopify_app',
+      targetCustomer: 'Shopify merchants reviewing catalog quality',
+      customerProblem: 'Catalog issues can hurt trust before the merchant notices',
+      currentPromise: 'Find catalog issues before they hurt sales or trust',
+      currentSurfaceSummary: 'Shopify App Store listing for a catalog audit app',
+      primaryDiscoverySurface: 'Shopify App Store search and category browsing',
+      primaryActionWanted: 'Open the app and run the first catalog audit',
+      constraints: ['manual listing changes only'],
+      availableAssets: ['listing copy', 'screenshots'],
+      ownerGoal: 'increase qualified app opens and first scans',
+    })).toMatchObject({
+      productType: 'shopify_app',
+      primaryActionWanted: 'Open the app and run the first catalog audit',
+    });
+  });
+
+  it('rejects a visibility brief without a target customer', () => {
+    expect(() => MarketplaceVisibilityContextSchema.parse({
+      marketplace: 'shopify_app_store',
+      productName: 'MerchGrid',
+      productType: 'shopify_app',
+      customerProblem: 'Catalog issues can hurt trust',
+      currentPromise: 'Find catalog issues',
+      currentSurfaceSummary: 'Shopify listing',
+      primaryDiscoverySurface: 'Shopify App Store search',
+      primaryActionWanted: 'Run the first catalog audit',
+      constraints: ['manual listing changes only'],
+      availableAssets: ['listing copy'],
+      ownerGoal: 'increase qualified app opens',
+    })).toThrow();
+  });
+
   const sparseEvidence = () => ({
     product: 'marketplace_visibility' as const,
     profile: 'merchgrid_shopify_app_store' as const,
@@ -12,12 +88,9 @@ describe('marketplace visibility evidence contract', () => {
     artifactRef: '.local/artifacts/daily-health/2026-08-22.json',
     evidenceLevel: 'sparse' as const,
     recommendationType: 'visibility_hypothesis' as const,
+    reviewMode: exploratoryReviewMode(),
     marketplaceContext: {
-      marketplace: 'shopify_app_store' as const,
-      productName: 'MerchGrid',
-      currentSurfaceSummary: 'Shopify app listing for a catalog audit app',
-      targetAudience: 'Shopify merchants auditing catalog quality',
-      knownDiscoverySurface: 'Shopify App Store search and category pages',
+      ...merchGridContext(),
     },
     measuredSignals: {},
     limitations: ['low request volume'],
@@ -32,12 +105,14 @@ describe('marketplace visibility evidence contract', () => {
       artifactRef: '.local/merchgrid-metrics/artifacts/daily-health/2026-08-22.json',
       evidenceLevel: 'sparse',
       recommendationType: 'visibility_hypothesis',
+      reviewMode: {
+        mode: 'exploratory_visibility_test',
+        evidenceLevel: 'sparse',
+        confidenceBoundary: 'low',
+        reason: 'metrics_sparse_context_sufficient',
+      },
       marketplaceContext: {
-        marketplace: 'shopify_app_store',
-        productName: 'MerchGrid',
-        currentSurfaceSummary: 'Shopify app listing for a catalog audit app',
-        targetAudience: 'Shopify merchants auditing catalog quality',
-        knownDiscoverySurface: 'Shopify App Store search and category pages',
+        ...merchGridContext(),
       },
       measuredSignals: {
         app_opened_count: 0,
@@ -49,6 +124,7 @@ describe('marketplace visibility evidence contract', () => {
       product: 'marketplace_visibility',
       evidenceLevel: 'sparse',
       recommendationType: 'visibility_hypothesis',
+      reviewMode: { mode: 'exploratory_visibility_test' },
     });
   });
 
@@ -59,9 +135,7 @@ describe('marketplace visibility evidence contract', () => {
       subjectRef: 'etsy:visibility:listing-123',
       artifactRef: '.local/etsy-visibility-context.json',
       marketplaceContext: {
-        marketplace: 'etsy',
-        productName: 'Printable Weekly Planner',
-        currentSurfaceSummary: 'Etsy listing with printable planner title and tags',
+        ...etsyContext(),
       },
       limitations: ['etsy runtime profile is fixture-backed in this slice'],
     })).toMatchObject({ profile: 'etsy_listing' });
@@ -82,9 +156,7 @@ describe('marketplace visibility evidence contract', () => {
       evidenceLevel: 'sparse',
       recommendationType: 'visibility_hypothesis',
       marketplaceContext: {
-        marketplace: 'shopify_app_store',
-        productName: 'MerchGrid',
-        currentSurfaceSummary: 'Shopify app listing',
+        ...merchGridContext(),
       },
       measuredSignals: {},
       limitations: [],
@@ -116,9 +188,7 @@ describe('marketplace visibility evidence contract', () => {
       evidenceLevel: 'sparse',
       recommendationType: 'visibility_hypothesis',
       marketplaceContext: {
-        marketplace: 'shopify_app_store',
-        productName: 'MerchGrid',
-        currentSurfaceSummary: 'Shopify app listing',
+        ...merchGridContext(),
       },
       measuredSignals: {},
       limitations: [],
@@ -152,9 +222,7 @@ describe('marketplace visibility evidence contract', () => {
       evidenceLevel: 'sparse' as const,
       recommendationType: 'visibility_hypothesis' as const,
       marketplaceContext: {
-        marketplace: 'shopify_app_store' as const,
-        productName: 'MerchGrid',
-        currentSurfaceSummary: 'Shopify app listing',
+        ...merchGridContext(),
       },
       measuredSignals: {},
       limitations: [],
@@ -179,9 +247,7 @@ describe('marketplace visibility evidence contract', () => {
       evidenceLevel: 'sparse',
       recommendationType: 'visibility_hypothesis',
       marketplaceContext: {
-        marketplace: 'shopify_app_store',
-        productName: 'MerchGrid',
-        ...unsafeSummary,
+        ...merchGridContext(unsafeSummary),
       },
       measuredSignals: {},
       limitations: [],
@@ -198,13 +264,13 @@ describe('marketplace visibility evidence contract', () => {
       ...evidence,
       marketplaceContext: { ...evidence.marketplaceContext, currentSurfaceSummary: 'Marketplace listing data: title and price' },
     })],
-    ['targetAudience', (evidence: ReturnType<typeof sparseEvidence>) => ({
+    ['targetCustomer', (evidence: ReturnType<typeof sparseEvidence>) => ({
       ...evidence,
-      marketplaceContext: { ...evidence.marketplaceContext, targetAudience: 'Buyer Jane Doe purchase history' },
+      marketplaceContext: { ...evidence.marketplaceContext, targetCustomer: 'Buyer Jane Doe purchase history' },
     })],
-    ['knownDiscoverySurface', (evidence: ReturnType<typeof sparseEvidence>) => ({
+    ['primaryDiscoverySurface', (evidence: ReturnType<typeof sparseEvidence>) => ({
       ...evidence,
-      marketplaceContext: { ...evidence.marketplaceContext, knownDiscoverySurface: 'Marketplace listing data: title and price' },
+      marketplaceContext: { ...evidence.marketplaceContext, primaryDiscoverySurface: 'Marketplace listing data: title and price' },
     })],
     ['subjectRef', (evidence: ReturnType<typeof sparseEvidence>) => ({ ...evidence, subjectRef: 'Buyer Jane Doe purchase history' })],
     ['limitations', (evidence: ReturnType<typeof sparseEvidence>) => ({ ...evidence, limitations: ['Buyer Jane Doe purchase history'] })],
@@ -218,9 +284,9 @@ describe('marketplace visibility evidence contract', () => {
       ...evidence,
       marketplaceContext: { ...evidence.marketplaceContext, currentSurfaceSummary: 'Customer-facing catalog app' },
     })],
-    ['targetAudience', (evidence: ReturnType<typeof sparseEvidence>) => ({
+    ['targetCustomer', (evidence: ReturnType<typeof sparseEvidence>) => ({
       ...evidence,
-      marketplaceContext: { ...evidence.marketplaceContext, targetAudience: 'Merchant data quality tools' },
+      marketplaceContext: { ...evidence.marketplaceContext, targetCustomer: 'Merchant data quality tools' },
     })],
   ])('accepts ordinary marketplace descriptions in %s', (_field, safeEvidence) => {
     expect(MarketplaceVisibilityEvidenceSchema.parse(safeEvidence(sparseEvidence()))).toMatchObject({
@@ -244,7 +310,7 @@ describe('marketplace visibility evidence contract', () => {
       ...evidence,
       marketplaceContext: {
         ...evidence.marketplaceContext,
-        targetAudience: 'Contact Jane Doe at jane@example.com',
+        targetCustomer: 'Contact Jane Doe at jane@example.com',
       },
     })],
     ['a phone number', (evidence: ReturnType<typeof sparseEvidence>) => ({
@@ -264,9 +330,10 @@ describe('marketplace visibility evidence contract', () => {
       evidenceLevel: 'sparse',
       recommendationType: 'visibility_hypothesis',
       marketplaceContext: {
-        marketplace: 'etsy',
-        productName: 'Printable Planner',
-        currentSurfaceSummary: 'Etsy listing for a printable planner',
+        ...etsyContext({
+          productName: 'Printable Planner',
+          currentSurfaceSummary: 'Etsy listing for a printable planner',
+        }),
       },
       measuredSignals: {},
       limitations: [],
