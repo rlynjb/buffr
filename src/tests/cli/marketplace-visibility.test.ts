@@ -49,6 +49,48 @@ describe('marketplace visibility CLI', () => {
     expect(lines).toContain('status: stopped');
   });
 
+  it('stops stepping when a visibility review waits for more data', async () => {
+    const lines: string[] = [];
+    let stepCount = 0;
+
+    await runMarketplaceVisibilityCli({
+      args: [
+        'visibility-review',
+        '--profile', 'merchgrid_shopify_app_store',
+        '--date', '2026-08-22',
+        '--run-id', 'visibility-1',
+        '--context', '.local/merchgrid-visibility-context.json',
+      ],
+      dependencies: {
+        service: {
+          startVisibilityReview: async () => ({
+            runId: 'visibility-1',
+            status: 'analyzing',
+            stage: 'm4_diagnosis',
+            evidenceRefs: ['initial-ref'],
+          }),
+        },
+        engine: {
+          step: async () => {
+            stepCount += 1;
+            if (stepCount > 1) throw new Error('CLI should not step a waiting run');
+            return {
+              runId: 'visibility-1',
+              status: 'waiting_for_data',
+              stage: 'm4_diagnosis',
+              evidenceRefs: ['initial-ref'],
+            };
+          },
+        },
+      },
+      writeLine: (line) => lines.push(line),
+    });
+
+    expect(stepCount).toBe(1);
+    expect(lines).toContain('status: waiting_for_data');
+    expect(lines).toContain('stage: m4_diagnosis');
+  });
+
   it('forwards the result identity and period to the visibility service', async () => {
     const calls: unknown[] = [];
 

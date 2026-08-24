@@ -193,7 +193,7 @@ function normalizeToolCitation(citation: ReturnType<typeof parseCitation>): Tool
     throw new AppError('validation_failed', 'M3 tool citation source is not permitted: user');
   }
 
-  return { ...citation, source };
+  return { ...citation, source, url: citation.url ?? undefined };
 }
 
 function parseCitation(value: unknown) {

@@ -110,13 +110,41 @@ export class OpenAiAgentRunner implements AgentRunner {
       name: `Buffr ${input.moduleId}`,
       model: this.model,
       instructions: input.instructions,
-      outputType: input.outputSchema as any,
+      outputType: toOpenAiStructuredOutputSchema(input.outputSchema) as any,
     });
     const result = await run(agent, JSON.stringify(input.input));
     if (result.finalOutput === undefined) {
       throw new AppError('connector_failed', `${input.moduleId} OpenAI runner returned no structured output`);
     }
     return result.finalOutput;
+  }
+}
+
+export function toOpenAiStructuredOutputSchema<TOutput>(schema: z.ZodType<TOutput>): z.ZodTypeAny {
+  return makeStructuredOutputSchema(schema);
+}
+
+function makeStructuredOutputSchema(schema: z.ZodTypeAny): z.ZodTypeAny {
+  switch (schema._def.typeName) {
+    case z.ZodFirstPartyTypeKind.ZodOptional:
+      return makeStructuredOutputSchema(schema._def.innerType).nullable();
+    case z.ZodFirstPartyTypeKind.ZodNullable:
+      return makeStructuredOutputSchema(schema._def.innerType).nullable();
+    case z.ZodFirstPartyTypeKind.ZodDefault:
+      return makeStructuredOutputSchema(schema._def.innerType);
+    case z.ZodFirstPartyTypeKind.ZodArray:
+      return z.array(makeStructuredOutputSchema(schema._def.type));
+    case z.ZodFirstPartyTypeKind.ZodEffects:
+      return makeStructuredOutputSchema(schema._def.schema);
+    case z.ZodFirstPartyTypeKind.ZodObject: {
+      const shape = (schema as z.ZodObject<z.ZodRawShape>).shape;
+      const convertedShape = Object.fromEntries(
+        Object.entries(shape).map(([key, child]) => [key, makeStructuredOutputSchema(child as z.ZodTypeAny)]),
+      );
+      return z.object(convertedShape).strict();
+    }
+    default:
+      return schema;
   }
 }
 

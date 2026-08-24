@@ -15,7 +15,7 @@ export const CitationSchema = z
   .object({
     source: z.enum(['etsy', 'web', 'user', 'derived']),
     title: z.string().min(1),
-    url: z.string().url().optional(),
+    url: z.string().url().nullable().optional(),
     excerpt: z.string().min(1),
     fetchedAt: IsoDateSchema,
   })
@@ -46,6 +46,7 @@ export const ResearchOutputSchema = z
         input: z.record(z.unknown()).default({}),
       })
       .strict()
+      .nullable()
       .optional(),
   })
   .strict()
@@ -62,8 +63,8 @@ export const ResearchOutputSchema = z
 export const ContextOutputSchema = z
   .object({
     product: z.string().min(1),
-    likelyCustomer: z.string().optional(),
-    positioning: z.string().optional(),
+    likelyCustomer: z.string().nullable().optional(),
+    positioning: z.string().nullable().optional(),
     availableEvidence: z.array(z.string()),
     missingInformation: z.array(z.string()),
     notes: z.array(z.string()),
@@ -88,7 +89,7 @@ export const MetricsOutputSchema = z
     metrics: z.array(MetricValueSchema),
     comparisonQuality: z.enum(['valid', 'limited', 'invalid', 'missing']),
     unresolvedQualificationNeeds: z.array(z.string()),
-    researchNeed: z.string().optional(),
+    researchNeed: z.string().nullable().optional(),
   })
   .strict();
 
@@ -103,10 +104,10 @@ export const DiagnosisOutputSchema = z
       'insufficient_data',
     ]),
     primaryBottleneck: z.string(),
-    competingExplanation: z.string().optional(),
+    competingExplanation: z.string().nullable().optional(),
     confidence: ConfidenceSchema,
     decision: z.enum(['proceed_to_hypothesis', 'research_domain_knowledge', 'collect_more_data']),
-    researchQuestion: z.string().optional(),
+    researchQuestion: z.string().nullable().optional(),
     notes: z.array(z.string()),
   })
   .strict();
@@ -118,7 +119,7 @@ export const HypothesisOutputSchema = z
     recommendedRevision: z.string().min(1),
     keepConstant: z.array(z.string()),
     expectedSignal: z.string().min(1),
-    researchNeed: z.string().optional(),
+    researchNeed: z.string().nullable().optional(),
     notes: z.array(z.string()),
   })
   .strict();
@@ -135,7 +136,7 @@ export const TestPlanOutputSchema = z
     inconclusiveCondition: z.string().min(1),
     contextToMonitor: z.array(z.string()),
     unresolvedMeasurementRules: z.array(z.string()),
-    researchNeed: z.string().optional(),
+    researchNeed: z.string().nullable().optional(),
   })
   .strict();
 
@@ -149,7 +150,7 @@ export const EvaluationOutputSchema = z
     confidence: ConfidenceSchema,
     knowledgeSource: z.enum(['product_data', 'experiment', 'external_research', 'combination']),
     nextAction: z.enum(['keep', 'revert', 'iterate', 'new_test', 'research', 'wait']),
-    researchQuestion: z.string().optional(),
+    researchQuestion: z.string().nullable().optional(),
     nextActionRationale: z.string().min(1),
   })
   .strict();

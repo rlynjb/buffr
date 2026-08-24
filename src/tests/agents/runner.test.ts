@@ -2,7 +2,16 @@ import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { AppError } from '../../core/errors.js';
 import { buildModuleInstructions } from '../../agents/core/policy.js';
-import { FakeAgentRunner, OpenAiAgentRunner, runStructuredModule } from '../../agents/runner.js';
+import { FakeAgentRunner, OpenAiAgentRunner, runStructuredModule, toOpenAiStructuredOutputSchema } from '../../agents/runner.js';
+import {
+  ContextOutputSchema,
+  DiagnosisOutputSchema,
+  EvaluationOutputSchema,
+  HypothesisOutputSchema,
+  MetricsOutputSchema,
+  ResearchOutputSchema,
+  TestPlanOutputSchema,
+} from '../../contracts/modules.js';
 
 const OutputSchema = z
   .object({
@@ -125,4 +134,41 @@ describe('agent runner seam', () => {
       message: 'Missing required OpenAI configuration: OPENAI_API_KEY',
     } satisfies Partial<AppError>);
   });
+
+  it('converts agent output schemas to OpenAI-compatible structured-output schemas', () => {
+    const schemas = {
+      ContextOutputSchema,
+      DiagnosisOutputSchema,
+      EvaluationOutputSchema,
+      HypothesisOutputSchema,
+      MetricsOutputSchema,
+      ResearchOutputSchema,
+      TestPlanOutputSchema,
+    };
+
+    const optionalPaths = Object.entries(schemas).flatMap(([name, schema]) =>
+      findOptionalZodFields(toOpenAiStructuredOutputSchema(schema as z.ZodTypeAny), name),
+    );
+
+    expect(optionalPaths).toEqual([]);
+  });
 });
+
+function findOptionalZodFields(schema: z.ZodTypeAny, path: string): string[] {
+  if (schema._def.typeName === z.ZodFirstPartyTypeKind.ZodOptional) return [path];
+  if (schema._def.typeName === z.ZodFirstPartyTypeKind.ZodNullable) {
+    return findOptionalZodFields(schema._def.innerType, path);
+  }
+  if (schema._def.typeName === z.ZodFirstPartyTypeKind.ZodArray) {
+    return findOptionalZodFields(schema._def.type, `${path}[]`);
+  }
+  if (schema._def.typeName === z.ZodFirstPartyTypeKind.ZodObject) {
+    return Object.entries((schema as z.ZodObject<z.ZodRawShape>).shape).flatMap(([key, child]) =>
+      findOptionalZodFields(child as z.ZodTypeAny, `${path}.${key}`),
+    );
+  }
+  if (schema._def.typeName === z.ZodFirstPartyTypeKind.ZodEffects) {
+    return findOptionalZodFields(schema._def.schema, path);
+  }
+  return [];
+}

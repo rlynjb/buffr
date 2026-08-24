@@ -54,7 +54,7 @@ export async function runMarketplaceVisibilityCli(input: {
       date,
       contextPath,
     });
-    while (['m1_context', 'm2_metrics_initial', 'm4_diagnosis', 'm5_hypothesis', 'm6_test_plan'].includes(state.stage)) {
+    while (state.status === 'analyzing' && ['m1_context', 'm2_metrics_initial', 'm4_diagnosis', 'm5_hypothesis', 'm6_test_plan'].includes(state.stage)) {
       state = await requireEngine(input.dependencies.engine, 'step')(runId);
     }
     return printRun(input.writeLine, state);
