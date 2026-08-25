@@ -130,6 +130,45 @@ describe('marketplace visibility CLI', () => {
     }]);
   });
 
+  it('uses the default listing context path when the flag is omitted', async () => {
+    const calls: unknown[] = [];
+    const state = {
+      runId: 'visibility-1',
+      status: 'awaiting_approval',
+      stage: 'approval_wait',
+      evidenceRefs: ['initial-ref'],
+    };
+
+    await runMarketplaceVisibilityCli({
+      args: [
+        'visibility-review',
+        '--profile', 'merchgrid_shopify_app_store',
+        '--date', '2026-08-22',
+        '--run-id', 'visibility-1',
+        '--context', '.local/merchgrid-visibility-context.json',
+      ],
+      dependencies: {
+        service: {
+          startVisibilityReview: async (input) => {
+            calls.push(input);
+            return state;
+          },
+        },
+        engine: { step: async () => state },
+        defaultListingContextPath: '.local/merchgrid-listing-context.json',
+      },
+      writeLine: () => undefined,
+    });
+
+    expect(calls).toEqual([{
+      profile: 'merchgrid_shopify_app_store',
+      runId: 'visibility-1',
+      date: '2026-08-22',
+      contextPath: '.local/merchgrid-visibility-context.json',
+      listingContextPath: '.local/merchgrid-listing-context.json',
+    }]);
+  });
+
   it('forwards the result identity and period to the visibility service', async () => {
     const calls: unknown[] = [];
 

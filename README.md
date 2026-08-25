@@ -67,14 +67,18 @@ marketplace visibility recommendation. They do not query marketplace providers
 and stop for owner approval before any experiment wait; they never apply a
 marketplace edit.
 
-- `npm run marketplace:visibility-review -- --profile merchgrid_shopify_app_store --date YYYY-MM-DD --run-id RUN_ID --context .local/merchgrid-visibility-context.json`
+- `npm run marketplace:visibility-review -- --profile merchgrid_shopify_app_store --date YYYY-MM-DD --run-id RUN_ID --context .local/merchgrid-visibility-context.json --listing-context .local/merchgrid-listing-context.json`
 - `npm run marketplace:approve -- --run-id RUN_ID`
 - `npm run marketplace:reject -- --run-id RUN_ID --reason "Reason"`
 - `npm run marketplace:record-result -- --profile merchgrid_shopify_app_store --run-id RUN_ID --through YYYY-MM-DD`
 
 The `--context` argument overrides `MERCHGRID_VISIBILITY_CONTEXT_PATH`; use a
 local, curated JSON file with only the product-facing context required for the
-sparse recommendation.
+sparse recommendation. The optional `--listing-context` argument overrides
+`MERCHGRID_LISTING_CONTEXT_PATH`; use it for public marketplace listing
+observations such as headline, gallery count, trust signals, and visual-review
+notes. Do not put private dashboard pages, cookies, raw HTML, credentials, or
+merchant data in either file.
 
 Marketplace visibility reviews can run before there is enough traffic for a
 metric-backed diagnosis. Buffr requires a local visibility brief so the work
@@ -83,6 +87,12 @@ proves the change. Copy
 `docs/examples/merchgrid-visibility-context.example.json` to
 `.local/merchgrid-visibility-context.json`, edit the product context, then run
 the visibility command.
+
+For listing context, copy
+`docs/examples/merchgrid-listing-context.example.json` to
+`.local/merchgrid-listing-context.json`, refresh the `capturedAt` value after
+reviewing the public listing, then include `--listing-context` in the
+visibility review command.
 
 If the brief is complete, zero metrics can still produce an `approval_wait`
 recommendation. If required context is missing, the command stops with the
