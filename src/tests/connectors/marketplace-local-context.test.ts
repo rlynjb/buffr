@@ -94,4 +94,11 @@ describe('marketplace visibility local context loader', () => {
       message: 'Marketplace listing context path must be a local file',
     });
   });
+
+  it('loads the committed MerchGrid listing context example', async () => {
+    await expect(loadMarketplaceListingContext('docs/examples/merchgrid-listing-context.example.json')).resolves.toMatchObject({
+      productName: 'MerchGrid',
+      sourceUrl: 'https://apps.shopify.com/merchgrid-catalog-audit',
+    });
+  });
 });

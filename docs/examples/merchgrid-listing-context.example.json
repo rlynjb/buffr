@@ -30,7 +30,7 @@
     "positive": [
       "free pricing",
       "privacy policy visible",
-      "support provider visible"
+      "support channel visible"
     ],
     "friction": [
       "no reviews yet",
@@ -44,7 +44,7 @@
       "find duplicate and missing skus"
     ],
     "unclearClaims": [
-      "buyer trust outcome could be sharper",
+      "trust outcome could be sharper",
       "first scan action could be more explicit"
     ],
     "missingContext": [
