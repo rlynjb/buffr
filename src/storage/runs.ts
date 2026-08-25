@@ -103,7 +103,7 @@ export class JsonFileRunRepository implements RunRepository {
     }
 
     if (state.moduleOutputs.m6) {
-      await writeJsonArtifact(join(runDir, 'experiment-plan.json'), state.moduleOutputs.m6);
+      await writeJsonArtifact(join(runDir, 'experiment-plan.json'), experimentPlanArtifact(state));
     }
 
     if (state.events.length > 0) {
@@ -120,6 +120,29 @@ export class JsonFileRunRepository implements RunRepository {
     assertSafeRunId(runId);
     return join(this.rootDir, runId);
   }
+}
+
+function experimentPlanArtifact(state: WorkflowRunState): Record<string, unknown> {
+  return {
+    metadata: {
+      artifactKind: 'experiment_plan',
+      runId: state.runId,
+      workflowKind: state.workflowKind,
+      subjectRef: state.subjectRef,
+      status: state.status,
+      stage: state.stage,
+      evidenceDate: evidenceDateFromSubjectRef(state.subjectRef),
+      generatedAt: state.updatedAt,
+      runCreatedAt: state.createdAt,
+      evidenceRefs: state.evidenceRefs,
+    },
+    ...state.moduleOutputs.m6,
+  };
+}
+
+function evidenceDateFromSubjectRef(subjectRef: string | undefined): string | undefined {
+  const match = subjectRef?.match(/(?:^|:)(\d{4}-\d{2}-\d{2})$/);
+  return match?.[1];
 }
 
 async function writeJsonArtifact(path: string, value: unknown): Promise<void> {

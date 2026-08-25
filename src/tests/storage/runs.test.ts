@@ -128,6 +128,54 @@ describe('JsonFileRunRepository', () => {
     expect(files).toEqual(['run.json']);
   });
 
+  it('persists experiment plans with run metadata while preserving the plan fields', async () => {
+    const repository = new JsonFileRunRepository({ rootDir });
+
+    await repository.create({
+      ...baseState,
+      runId: 'visibility-2026-08-07',
+      subjectRef: 'merchgrid:visibility:2026-08-07',
+      workflowKind: 'marketplace_visibility_review',
+      status: 'awaiting_approval',
+      stage: 'approval_wait',
+      createdAt: '2026-08-25T13:46:22.431Z',
+      updatedAt: '2026-08-25T13:46:48.685Z',
+      evidenceRefs: ['initial:marketplace_visibility:merchgrid_shopify_app_store:merchgrid:visibility:2026-08-07'],
+      moduleOutputs: {
+        m6: {
+          primaryMetric: 'scan_started_count',
+          secondaryMetrics: ['app_opened_count'],
+          baselineValue: 0,
+          baselinePeriod: 'sparse pre-test snapshot captured by 2026-08-25 evidence',
+          qualificationRequirements: ['Record exact listing copy before the test'],
+          expectedSupportingSignal: 'More qualified app opens and scan starts appear after the listing copy change',
+          expectedWeakeningSignal: 'App opens or scan starts remain flat after the listing copy change',
+          inconclusiveCondition: 'Traffic remains too sparse to distinguish signal from noise',
+          contextToMonitor: ['listing copy changed only once'],
+          unresolvedMeasurementRules: [],
+        },
+      },
+    });
+
+    const experimentPlanJson = await readFile(join(rootDir, 'visibility-2026-08-07', 'experiment-plan.json'), 'utf8');
+
+    expect(JSON.parse(experimentPlanJson)).toMatchObject({
+      metadata: {
+        artifactKind: 'experiment_plan',
+        runId: 'visibility-2026-08-07',
+        workflowKind: 'marketplace_visibility_review',
+        subjectRef: 'merchgrid:visibility:2026-08-07',
+        status: 'awaiting_approval',
+        stage: 'approval_wait',
+        evidenceDate: '2026-08-07',
+        generatedAt: '2026-08-25T13:46:48.685Z',
+        runCreatedAt: '2026-08-25T13:46:22.431Z',
+        evidenceRefs: ['initial:marketplace_visibility:merchgrid_shopify_app_store:merchgrid:visibility:2026-08-07'],
+      },
+      primaryMetric: 'scan_started_count',
+    });
+  });
+
   it('rejects run ids that would escape the configured root', async () => {
     const repository = new JsonFileRunRepository({ rootDir });
 
