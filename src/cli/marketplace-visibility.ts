@@ -34,6 +34,7 @@ export type MarketplaceVisibilityCliDependencies = {
   };
   defaultContextPath?: string;
   defaultListingContextPath?: string;
+  now?: () => Date;
 };
 
 export async function runMarketplaceVisibilityCli(input: {
@@ -44,7 +45,7 @@ export async function runMarketplaceVisibilityCli(input: {
   const [command, ...options] = input.args;
 
   if (command === 'visibility-review') {
-    assertOptions(options, ['--profile', '--run-id'], ['--date', '--context', '--listing-context']);
+    assertOptions(options, ['--profile'], ['--run-id', '--date', '--context', '--listing-context']);
     const profile = parseProfile(option(options, '--profile'));
     const date = optionalOption(options, '--date');
     if (profile === 'merchgrid_shopify_app_store' && !date) {
@@ -58,7 +59,12 @@ export async function runMarketplaceVisibilityCli(input: {
     if (!contextPath) throw new AppError('configuration_failed', 'Missing required marketplace visibility context path');
     const listingContextPath = optionalOption(options, '--listing-context') ?? input.dependencies.defaultListingContextPath;
 
-    const runId = option(options, '--run-id');
+    const runId = optionalOption(options, '--run-id') ?? defaultVisibilityRunId({
+      profile,
+      date,
+      hasListingContext: Boolean(listingContextPath),
+      now: input.dependencies.now?.() ?? new Date(),
+    });
     let state = await requireService(input.dependencies.service, 'startVisibilityReview')({
       profile,
       runId,
@@ -177,6 +183,24 @@ function requireEngine<K extends keyof MarketplaceVisibilityCliDependencies['eng
 function required(env: NodeJS.ProcessEnv, name: string): string {
   if (!env[name]) throw new AppError('configuration_failed', `Missing required marketplace visibility configuration: ${name}`);
   return env[name]!;
+}
+
+function defaultVisibilityRunId(input: {
+  profile: MarketplaceVisibilityProfile;
+  date: string | undefined;
+  hasListingContext: boolean;
+  now: Date;
+}): string {
+  const createdDate = formatRunDate(input.now);
+  if (input.profile === 'merchgrid_shopify_app_store') {
+    const suffix = input.hasListingContext ? '-listing-context' : '';
+    return `${createdDate}-merchgrid-visibility-${input.date}${suffix}`;
+  }
+  return `${createdDate}-etsy-visibility-review`;
+}
+
+function formatRunDate(date: Date): string {
+  return date.toISOString().slice(0, 10);
 }
 
 function printRun(writeLine: (line: string) => void, state: RunState): void {

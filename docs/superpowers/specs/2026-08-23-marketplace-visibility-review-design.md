@@ -328,11 +328,12 @@ state, and the final experiment plan. It does not store provider credentials,
 raw marketplace pages, raw event payloads, shop domains, customer data, or
 catalog records.
 
-Run ids must remain explicit and safe, such as:
+Run ids must remain safe and chronologically scannable. New generated run ids
+put the run date first, then the workflow, then the evidence identity, such as:
 
 ```text
-merchgrid-visibility-2026-08-22
-etsy-visibility-listing-123
+2026-08-25-merchgrid-visibility-2026-08-22
+2026-08-25-etsy-visibility-review
 ```
 
 If the same visibility evidence is reviewed again with the same run id, the

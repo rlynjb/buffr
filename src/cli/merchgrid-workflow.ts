@@ -9,7 +9,7 @@ import { JsonFileRunRepository, type RunRepository } from '../storage/runs.js';
 import { createWorkflowEngine, type WorkflowEngine } from '../workflow/engine.js';
 import { createMerchGridWorkflowService, type MerchGridWorkflowService } from '../workflow/merchgrid-profile.js';
 
-export type MerchGridWorkflowCliDependencies = { service: MerchGridWorkflowService; engine: WorkflowEngine };
+export type MerchGridWorkflowCliDependencies = { service: MerchGridWorkflowService; engine: WorkflowEngine; now?: () => Date };
 
 export async function runMerchGridWorkflowCli(input: {
   args: readonly string[];
@@ -19,16 +19,18 @@ export async function runMerchGridWorkflowCli(input: {
   const [command, ...options] = input.args;
 
   if (command === 'daily-investigate') {
-    assertExactOptions(options, ['--date', '--run-id']);
-    const runId = option(options, '--run-id');
-    const result = await input.dependencies.service.startDailyInvestigation({ runId, date: option(options, '--date') });
+    assertOptions(options, ['--date'], ['--run-id']);
+    const date = option(options, '--date');
+    const runId = optionalOption(options, '--run-id') ?? defaultMerchGridRunId('daily', date, input.dependencies.now?.() ?? new Date());
+    const result = await input.dependencies.service.startDailyInvestigation({ runId, date });
     if ('outcome' in result) return input.writeLine(`status: ${result.outcome}`);
     return printRun(input.writeLine, result);
   }
   if (command === 'weekly-recommend') {
-    assertExactOptions(options, ['--through', '--run-id']);
-    const runId = option(options, '--run-id');
-    let state = await input.dependencies.service.startWeeklyRecommendation({ runId, through: option(options, '--through') });
+    assertOptions(options, ['--through'], ['--run-id']);
+    const through = option(options, '--through');
+    const runId = optionalOption(options, '--run-id') ?? defaultMerchGridRunId('weekly', through, input.dependencies.now?.() ?? new Date());
+    let state = await input.dependencies.service.startWeeklyRecommendation({ runId, through });
     while (['m1_context', 'm2_metrics_initial', 'm4_diagnosis', 'm5_hypothesis', 'm6_test_plan'].includes(state.stage)) {
       state = await input.dependencies.engine.step(runId);
     }
@@ -63,9 +65,14 @@ export function createMerchGridWorkflowDependencies(env: NodeJS.ProcessEnv = loa
 }
 
 function option(options: readonly string[], name: '--date' | '--through' | '--run-id'): string {
+  const value = optionalOption(options, name);
+  if (!value) throw new AppError('validation_failed', `Expected ${name} value`);
+  return value;
+}
+
+function optionalOption(options: readonly string[], name: '--date' | '--through' | '--run-id'): string | undefined {
   const index = options.indexOf(name);
-  if (index < 0 || !options[index + 1]) throw new AppError('validation_failed', `Expected ${name} value`);
-  return options[index + 1]!;
+  return index < 0 ? undefined : options[index + 1];
 }
 
 function assertExactOptions(options: readonly string[], names: readonly ('--date' | '--through' | '--run-id')[]): void {
@@ -74,9 +81,30 @@ function assertExactOptions(options: readonly string[], names: readonly ('--date
   }
 }
 
+function assertOptions(
+  options: readonly string[],
+  required: readonly ('--date' | '--through' | '--run-id')[],
+  optional: readonly ('--date' | '--through' | '--run-id')[],
+): void {
+  const names = [...required, ...optional];
+  if (options.length % 2 !== 0 || options.some((value, index) => index % 2 === 0 && !names.includes(value as typeof names[number]))
+    || names.some((name) => options.filter((value) => value === name).length > 1)
+    || required.some((name) => !options.includes(name))) {
+    throw new AppError('validation_failed', `Expected options: ${names.join(', ')}`);
+  }
+}
+
 function required(env: NodeJS.ProcessEnv, name: string): string {
   if (!env[name]) throw new AppError('configuration_failed', `Missing required MerchGrid workflow configuration: ${name}`);
   return env[name]!;
+}
+
+function defaultMerchGridRunId(kind: 'daily' | 'weekly', subjectDate: string, now: Date): string {
+  return `${formatRunDate(now)}-merchgrid-${kind}-${subjectDate}`;
+}
+
+function formatRunDate(date: Date): string {
+  return date.toISOString().slice(0, 10);
 }
 
 function printRun(writeLine: (line: string) => void, state: { runId: string; status: string; stage: string; evidenceRefs: string[] }): void {

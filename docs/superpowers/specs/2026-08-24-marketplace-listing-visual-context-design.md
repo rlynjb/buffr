@@ -302,7 +302,6 @@ The visibility command can accept the listing context explicitly:
 npm run marketplace:visibility-review -- \
   --profile merchgrid_shopify_app_store \
   --date 2026-08-07 \
-  --run-id merchgrid-visibility-2026-08-07-listing-context \
   --context .local/merchgrid-visibility-context.json \
   --listing-context .local/merchgrid-listing-context.json
 ```

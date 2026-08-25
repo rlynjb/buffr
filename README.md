@@ -56,6 +56,12 @@ artifacts only; they do not call Shopify, Fly, or PostHog directly.
 - `npm run merchgrid:approve -- --run-id RUN_ID`
 - `npm run merchgrid:record-result -- --through YYYY-MM-DD --run-id RUN_ID`
 
+For new daily and weekly runs, `--run-id` is optional. If omitted, Buffr writes
+the workflow run under a date-first folder such as
+`2026-08-25-merchgrid-daily-2026-08-21` or
+`2026-08-25-merchgrid-weekly-2026-08-21`, where the first date is the run date
+and the last date is the evidence window date.
+
 The weekly recommendation flow uses the OpenAI-backed bounded modules, so its
 local `.env` also needs `OPENAI_API_KEY`. The command stops at the approval
 gate; it never applies a real-world change by itself.
@@ -71,6 +77,12 @@ marketplace edit.
 - `npm run marketplace:approve -- --run-id RUN_ID`
 - `npm run marketplace:reject -- --run-id RUN_ID --reason "Reason"`
 - `npm run marketplace:record-result -- --profile merchgrid_shopify_app_store --run-id RUN_ID --through YYYY-MM-DD`
+
+For new visibility reviews, `--run-id` is optional. If omitted, Buffr writes the
+workflow run under a date-first folder such as
+`2026-08-25-merchgrid-visibility-2026-08-07-listing-context`, where the first
+date is the run date and `2026-08-07` is the evidence date being reviewed. Keep
+the printed run id because approval and result commands still need it.
 
 The `--context` argument overrides `MERCHGRID_VISIBILITY_CONTEXT_PATH`; use a
 local, curated JSON file with only the product-facing context required for the
