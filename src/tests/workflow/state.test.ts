@@ -8,7 +8,7 @@ describe('workflow evidence references', () => {
       product: 'marketplace_visibility',
       profile: 'merchgrid_shopify_app_store',
       subjectRef: 'merchgrid:visibility:2026-08-22',
-      artifactRef: '.local/merchgrid-metrics/artifacts/daily-health/2026-08-22.json',
+      artifactRef: 'artifacts/merchgrid/metrics/artifacts/daily-health/2026-08-22.json',
       evidenceLevel: 'sparse',
       recommendationType: 'visibility_hypothesis',
       reviewMode: {

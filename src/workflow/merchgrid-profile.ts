@@ -80,9 +80,9 @@ export function createMerchGridWorkflowService(deps: {
 }
 
 function dailyArtifactRef(date: string): string {
-  return `.local/merchgrid-metrics/artifacts/daily-health/${date}.json`;
+  return `artifacts/merchgrid/metrics/artifacts/daily-health/${date}.json`;
 }
 
 function weeklyArtifactRef(through: string): string {
-  return `.local/merchgrid-metrics/artifacts/weekly-reviews/${through}.json`;
+  return `artifacts/merchgrid/metrics/artifacts/weekly-reviews/${through}.json`;
 }

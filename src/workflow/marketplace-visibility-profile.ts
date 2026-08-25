@@ -287,7 +287,7 @@ function merchgridArtifactRef(
   collection: 'daily-health' | 'weekly-reviews',
   date: string,
 ): string {
-  return join(rootRef ?? '.local/merchgrid-metrics/artifacts', collection, `${date}.json`);
+  return join(rootRef ?? 'artifacts/merchgrid/metrics/artifacts', collection, `${date}.json`);
 }
 
 function curatedMerchGridLimitations(limitations: readonly string[]): string[] {

@@ -1,0 +1,537 @@
+{
+  "runId": "2026-08-25-merchgrid-visibility-2026-08-07-listing-context",
+  "subjectRef": "merchgrid:visibility:2026-08-07",
+  "workflowKind": "marketplace_visibility_review",
+  "status": "awaiting_approval",
+  "stage": "approval_wait",
+  "createdAt": "2026-08-25T13:46:22.431Z",
+  "updatedAt": "2026-08-25T13:46:48.685Z",
+  "evidenceRefs": [
+    "initial:marketplace_visibility:merchgrid_shopify_app_store:merchgrid:visibility:2026-08-07"
+  ],
+  "evidenceSnapshots": {
+    "initial": {
+      "product": "marketplace_visibility",
+      "profile": "merchgrid_shopify_app_store",
+      "subjectRef": "merchgrid:visibility:2026-08-07",
+      "artifactRef": "artifacts/merchgrid/metrics/artifacts/daily-health/2026-08-07.json",
+      "evidenceLevel": "sparse",
+      "recommendationType": "visibility_hypothesis",
+      "reviewMode": {
+        "mode": "exploratory_visibility_test",
+        "evidenceLevel": "sparse",
+        "confidenceBoundary": "low",
+        "reason": "metrics_sparse_context_sufficient"
+      },
+      "marketplaceContext": {
+        "marketplace": "shopify_app_store",
+        "productName": "MerchGrid",
+        "productType": "shopify_app",
+        "targetCustomer": "Shopify merchants auditing catalog quality",
+        "customerProblem": "Catalog issues can hurt trust before the merchant notices",
+        "currentPromise": "Find catalog issues before they hurt sales or trust",
+        "currentSurfaceSummary": "Shopify App Store listing for a read-only catalog audit app",
+        "primaryDiscoverySurface": "Shopify App Store search and category browsing",
+        "primaryActionWanted": "Open the app and run the first catalog audit",
+        "constraints": [
+          "manual listing changes only",
+          "do not change app behavior"
+        ],
+        "availableAssets": [
+          "listing copy",
+          "screenshots",
+          "setup documentation"
+        ],
+        "ownerGoal": "increase qualified app opens and first scan starts"
+      },
+      "listingContext": {
+        "marketplace": "shopify_app_store",
+        "profile": "merchgrid_shopify_app_store",
+        "productName": "MerchGrid",
+        "sourceUrl": "https://apps.shopify.com/merchgrid-catalog-audit",
+        "capturedAt": "2026-08-25T13:45:00.000Z",
+        "captureMode": "manual_visual_review",
+        "publicSurface": {
+          "title": "MerchGrid Catalog Audit",
+          "headline": "Scans your product catalog and shows exactly which items are priced below cost",
+          "category": "Analytics",
+          "pricingLabel": "Free",
+          "ratingSummary": "0 reviews",
+          "reviewCount": 0,
+          "launchDate": "August 7, 2026"
+        },
+        "gallery": {
+          "imageCount": 4,
+          "observedImageLabels": [
+            "main image",
+            "onboarding image",
+            "progress image",
+            "result image"
+          ],
+          "visualNotes": [
+            "screenshots show audit flow and result surface"
+          ]
+        },
+        "trustSignals": {
+          "positive": [
+            "free pricing",
+            "privacy policy visible",
+            "support channel visible"
+          ],
+          "friction": [
+            "no reviews yet",
+            "read only safety is not prominent near data access context"
+          ]
+        },
+        "copyNotes": {
+          "clearClaims": [
+            "detect below cost pricing",
+            "catch compare at price issues",
+            "find duplicate and missing skus"
+          ],
+          "unclearClaims": [
+            "trust outcome could be sharper",
+            "first scan action could be more explicit"
+          ],
+          "missingContext": [
+            "what happens after opening the app",
+            "why read only access is safe"
+          ]
+        },
+        "visibilityRubricNotes": {
+          "promiseClarity": "pricing issue promise is concrete",
+          "audienceSpecificity": "merchant role is implied but not explicit",
+          "problemActionFit": "catalog audit connects to first scan",
+          "discoveryFit": "analytics category may require clearer catalog audit keywords",
+          "trustAndRiskReduction": "read only safety should be easier to see",
+          "assetClarity": "gallery shows screens but outcome hierarchy may need review"
+        },
+        "limitations": [
+          "manual public page review only",
+          "listing may change after capturedAt"
+        ]
+      },
+      "measuredSignals": {
+        "app_opened_count": 0,
+        "scan_started_count": 0,
+        "scan_completed_count": 0,
+        "scan_failed_count": 0
+      },
+      "limitations": [
+        "Fly metrics unavailable"
+      ],
+      "prohibitedClaims": [
+        "Do not claim sparse evidence proves a marketplace visibility bottleneck",
+        "Do not claim a visibility change will increase installs",
+        "Do not recommend automatic marketplace edits"
+      ]
+    }
+  },
+  "moduleOutputs": {
+    "m1": {
+      "product": "MerchGrid",
+      "likelyCustomer": "Shopify merchants auditing catalog quality",
+      "positioning": "Shopify App Store visibility review: Shopify App Store listing for a read-only catalog audit app",
+      "availableEvidence": [
+        "profile: merchgrid_shopify_app_store",
+        "evidence level: sparse",
+        "artifact: artifacts/merchgrid/metrics/artifacts/daily-health/2026-08-07.json",
+        "listing url: https://apps.shopify.com/merchgrid-catalog-audit",
+        "listing headline: Scans your product catalog and shows exactly which items are priced below cost",
+        "listing category: Analytics",
+        "listing gallery images: 4",
+        "listing clear claim: detect below cost pricing",
+        "listing clear claim: catch compare at price issues",
+        "listing clear claim: find duplicate and missing skus"
+      ],
+      "missingInformation": [
+        "Fly metrics unavailable",
+        "listing friction: no reviews yet",
+        "listing friction: read only safety is not prominent near data access context",
+        "listing unclear claim: trust outcome could be sharper",
+        "listing unclear claim: first scan action could be more explicit",
+        "listing missing context: what happens after opening the app",
+        "listing missing context: why read only access is safe",
+        "listing limitation: manual public page review only",
+        "listing limitation: listing may change after capturedAt"
+      ],
+      "notes": [
+        "Do not claim sparse evidence proves a marketplace visibility bottleneck",
+        "Do not claim a visibility change will increase installs",
+        "Do not recommend automatic marketplace edits",
+        "Listing observations are qualitative context, not conversion proof.",
+        "listing captured at: 2026-08-25T13:45:00.000Z",
+        "promise clarity: pricing issue promise is concrete",
+        "trust and risk reduction: read only safety should be easier to see"
+      ]
+    },
+    "m2Initial": {
+      "phase": "initial",
+      "metrics": [
+        {
+          "name": "visibility.evidence_level",
+          "current": 1,
+          "baseline": null,
+          "absoluteChange": null,
+          "percentageChange": null,
+          "qualification": "inconclusive",
+          "confidence": "low"
+        },
+        {
+          "name": "app_opened_count",
+          "current": 0,
+          "baseline": null,
+          "absoluteChange": null,
+          "percentageChange": null,
+          "qualification": "inconclusive",
+          "confidence": "low"
+        },
+        {
+          "name": "scan_completed_count",
+          "current": 0,
+          "baseline": null,
+          "absoluteChange": null,
+          "percentageChange": null,
+          "qualification": "inconclusive",
+          "confidence": "low"
+        },
+        {
+          "name": "scan_failed_count",
+          "current": 0,
+          "baseline": null,
+          "absoluteChange": null,
+          "percentageChange": null,
+          "qualification": "inconclusive",
+          "confidence": "low"
+        },
+        {
+          "name": "scan_started_count",
+          "current": 0,
+          "baseline": null,
+          "absoluteChange": null,
+          "percentageChange": null,
+          "qualification": "inconclusive",
+          "confidence": "low"
+        }
+      ],
+      "comparisonQuality": "limited",
+      "unresolvedQualificationNeeds": [
+        "measured marketplace traffic is sparse",
+        "Fly metrics unavailable"
+      ]
+    },
+    "m3": [],
+    "m4": {
+      "performancePath": "discovery",
+      "primaryBottleneck": "Likely discovery bottleneck: the listing's searchable and category-level positioning appears too generic for a catalog-audit problem, because the category is Analytics while the most specific problem keywords and merchant role cues appear limited or implied rather than prominent.",
+      "competingExplanation": "A competing explanation is that trust friction after discovery is the bigger issue, since the listing has 0 reviews and read-only safety is not prominent near the access decision context.",
+      "confidence": "low",
+      "decision": "proceed_to_hypothesis",
+      "researchQuestion": "Would a manual listing test that makes catalog-audit intent, merchant audience, and read-only safety more explicit in top-of-listing copy improve qualified app opens and first scan starts relative to the current generic analytics framing?",
+      "notes": [
+        "observed fact: reviewMode is exploratory_visibility_test with sparse evidence, so zero measured counts alone are not sufficient reason to stop.",
+        "observed fact: primary discovery surface is Shopify App Store search and category browsing.",
+        "observed fact: listing category is Analytics.",
+        "observed fact: headline is 'Scans your product catalog and shows exactly which items are priced below cost'.",
+        "observed fact: audience specificity is noted as implied but not explicit.",
+        "observed fact: discoveryFit notes that the analytics category may require clearer catalog audit keywords.",
+        "observed fact: copy notes say what happens after opening the app and why read-only access is safe are missing.",
+        "observed fact: trust friction includes 0 reviews and read-only safety not being prominent.",
+        "calculated metric: measured signals show app_opened_count=0, scan_started_count=0, and scan_completed_count=0, but qualification is inconclusive due to sparse evidence.",
+        "interpretation: with no usable traffic diagnostics, the safest single diagnosis path is top-of-funnel discovery rather than click-through or conversion proof.",
+        "hypothesis: clearer catalog-audit keywording and merchant-role specificity may improve matching during Shopify App Store search/browse for qualified merchants.",
+        "hypothesis: if discovery is not the main issue, trust reassurance around read-only access is the next most plausible bottleneck."
+      ]
+    },
+    "m5": {
+      "hypothesis": "If the top-of-listing copy is manually revised to make the audience and first action more explicit while adding a short read-only safety cue, then more qualified Shopify merchants may recognize MerchGrid as a catalog audit tool they can safely try, compared with the current more generic analytics framing. This is a low-confidence exploratory hypothesis, not proof that outcomes will improve.",
+      "primaryVariable": "Top-of-listing messaging emphasis: revise the headline/subheadline or equivalent top copy to foreground 'catalog audit for Shopify merchants,' the first scan action, and 'read-only' safety.",
+      "recommendedRevision": "Test one manual copy revision at the top of the Shopify App Store listing such as: 'Catalog audit for Shopify merchants. Run a read-only scan to find below-cost prices, compare-at issues, duplicate SKUs, and missing SKUs before they hurt trust.' If the surface allows supporting text, add a short first-action cue like 'Open the app and run your first catalog scan.'",
+      "keepConstant": [
+        "app behavior",
+        "pricing label",
+        "category",
+        "gallery images",
+        "setup documentation",
+        "support and privacy links"
+      ],
+      "expectedSignal": "Exploratory directional signal only: after the copy change, qualified app opens and first scan starts would be the main signals to watch, especially whether scan_started_count begins to move relative to app_opened_count. With current sparse evidence, no outcome increase should be assumed in advance.",
+      "notes": [
+        "observed fact: the current headline emphasizes below-cost pricing specifically: 'Scans your product catalog and shows exactly which items are priced below cost.'",
+        "observed fact: clear claims also include compare-at price issues, duplicate SKUs, and missing SKUs.",
+        "observed fact: audience specificity is noted as implied rather than explicit.",
+        "observed fact: copy notes say the first scan action is not explicit and read-only safety is not prominent.",
+        "observed fact: primary discovery surface is Shopify App Store search and category browsing.",
+        "interpretation: in a broad Analytics category, stronger catalog-audit and merchant-role wording may better match discovery intent for qualified merchants.",
+        "hypothesis: adding a brief read-only safety cue near the top copy may reduce hesitation for merchants evaluating app access risk.",
+        "assumption: the Shopify App Store listing surface permits manual edits to top-of-listing copy without changing app behavior.",
+        "observed fact: measured counts are all zero but qualification is inconclusive because evidence is sparse and Fly metrics are unavailable.",
+        "constraint: this recommendation is manual-only and does not imply that the revision will improve installs or marketplace performance.",
+        "Exploratory recommendation; not metric-proven.",
+        "Human approval required before changing any marketplace surface."
+      ]
+    },
+    "m6": {
+      "primaryMetric": "scan_started_count",
+      "secondaryMetrics": [
+        "app_opened_count",
+        "scan_completed_count",
+        "scan_started_count per app_opened_count"
+      ],
+      "baselineValue": 0,
+      "baselinePeriod": "Current observed baseline is the sparse pre-test snapshot captured by 2026-08-25 evidence, with measuredSignals showing 0 app opens, 0 scan starts, and 0 scan completions; this is an observed fact but not a reliable traffic baseline.",
+      "qualificationRequirements": [
+        "Manual-only exploratory test on the Shopify App Store listing; do not change app behavior.",
+        "Change one listing element only: top-of-listing copy emphasis (headline/subheadline or equivalent top copy).",
+        "Keep constant during the test: pricing label, category, gallery images, setup documentation, support/privacy links, and app product behavior.",
+        "Record the exact pre-test copy and exact revised copy with timestamps so later measurement can be compared to a known change window.",
+        "Allow enough post-change time to accumulate non-zero exposure or visits before judging results; with sparse evidence, zero counts immediately after launch are inconclusive.",
+        "Treat any result as directional only unless qualified traffic and a clear measurement window are available.",
+        "Human approval and manual marketplace edit are required before measurement.",
+        "Later evidence must be compared as exploratory and low confidence."
+      ],
+      "expectedSupportingSignal": "A supporting signal would be the first emergence or directional increase of scan_started_count after the copy-only revision, ideally alongside app_opened_count moving above zero and without scan_completed_count collapsing relative to starts. Interpretation: if starts begin moving after the revised copy, that would be consistent with—though not proof of—the hypothesis that clearer catalog-audit intent, first-action clarity, and read-only safety messaging help qualified merchants self-select into trying the app.",
+      "expectedWeakeningSignal": "A weakening signal would be no directional movement in app_opened_count or scan_started_count after a reasonable observation window despite the copy change, or app_opened_count rising while scan_started_count remains flat, which would suggest discovery/click interest may not be the main issue and that downstream trust, onboarding, or product factors could matter more.",
+      "inconclusiveCondition": "Results are inconclusive if exposure remains too low to produce meaningful non-zero counts, if other listing elements or acquisition sources changed during the same window, if the exact change date is not logged, or if only zero values continue with no traffic context available.",
+      "contextToMonitor": [
+        "Whether the revised copy explicitly names the audience as Shopify merchants.",
+        "Whether the revised copy makes the first action explicit (open the app and run a scan).",
+        "Whether a short read-only safety cue is visible near the top of the listing.",
+        "Any concurrent manual changes to category, screenshots, pricing display, setup docs, or external promotion that would confound interpretation.",
+        "Any qualitative feedback from merchants or internal reviewers about clarity, trust, or relevance after the copy revision.",
+        "Whether Shopify App Store surface constraints limit how much top-of-listing copy can actually be changed.",
+        "manual marketplace change applied by owner"
+      ],
+      "unresolvedMeasurementRules": []
+    }
+  },
+  "events": [
+    {
+      "eventId": "7219fdc5-6f58-43c8-aaa1-7cf54ec15cc1",
+      "runId": "2026-08-25-merchgrid-visibility-2026-08-07-listing-context",
+      "type": "workflow.started",
+      "stage": "m1_context",
+      "message": "Workflow run started",
+      "createdAt": "2026-08-25T13:46:22.431Z",
+      "data": {
+        "initialEvidenceRef": "initial:marketplace_visibility:merchgrid_shopify_app_store:merchgrid:visibility:2026-08-07"
+      }
+    },
+    {
+      "eventId": "e678eff9-2b60-4c2d-8caa-e23fe38a4b9d",
+      "runId": "2026-08-25-merchgrid-visibility-2026-08-07-listing-context",
+      "type": "module.started",
+      "stage": "m1_context",
+      "message": "M1 context started",
+      "createdAt": "2026-08-25T13:46:22.434Z",
+      "data": {
+        "moduleId": "m1"
+      }
+    },
+    {
+      "eventId": "f4f9a6ad-c62d-4171-9092-fb74589bdd24",
+      "runId": "2026-08-25-merchgrid-visibility-2026-08-07-listing-context",
+      "type": "module.completed",
+      "stage": "m1_context",
+      "message": "M1 context completed",
+      "createdAt": "2026-08-25T13:46:22.434Z",
+      "data": {
+        "moduleId": "m1"
+      }
+    },
+    {
+      "eventId": "bd799465-cdbc-4786-adbe-f3ef2665f951",
+      "runId": "2026-08-25-merchgrid-visibility-2026-08-07-listing-context",
+      "type": "route.decided",
+      "stage": "m1_context",
+      "message": "Route decided: advance",
+      "createdAt": "2026-08-25T13:46:22.434Z",
+      "data": {
+        "decisionType": "advance",
+        "nextStage": "m2_metrics_initial"
+      }
+    },
+    {
+      "eventId": "955ab5d6-4c08-47d5-9d93-c975e5f69174",
+      "runId": "2026-08-25-merchgrid-visibility-2026-08-07-listing-context",
+      "type": "workflow.advanced",
+      "stage": "m2_metrics_initial",
+      "message": "Workflow advanced to m2_metrics_initial",
+      "createdAt": "2026-08-25T13:46:22.434Z",
+      "data": {}
+    },
+    {
+      "eventId": "fc540023-6120-403c-8e0d-5e57bb252870",
+      "runId": "2026-08-25-merchgrid-visibility-2026-08-07-listing-context",
+      "type": "module.started",
+      "stage": "m2_metrics_initial",
+      "message": "M2 initial metrics started",
+      "createdAt": "2026-08-25T13:46:22.436Z",
+      "data": {
+        "moduleId": "m2"
+      }
+    },
+    {
+      "eventId": "25de49ab-3dd4-4759-acfb-252ebc6f4a8d",
+      "runId": "2026-08-25-merchgrid-visibility-2026-08-07-listing-context",
+      "type": "module.completed",
+      "stage": "m2_metrics_initial",
+      "message": "M2 initial metrics completed",
+      "createdAt": "2026-08-25T13:46:22.441Z",
+      "data": {
+        "moduleId": "m2",
+        "phase": "initial"
+      }
+    },
+    {
+      "eventId": "142f3ffd-48d3-4265-a2d2-ef6fdb9e65e9",
+      "runId": "2026-08-25-merchgrid-visibility-2026-08-07-listing-context",
+      "type": "route.decided",
+      "stage": "m2_metrics_initial",
+      "message": "Route decided: advance",
+      "createdAt": "2026-08-25T13:46:22.441Z",
+      "data": {
+        "decisionType": "advance",
+        "nextStage": "m4_diagnosis"
+      }
+    },
+    {
+      "eventId": "cf62fc54-ebc0-4bb2-90ab-c013fa6faa57",
+      "runId": "2026-08-25-merchgrid-visibility-2026-08-07-listing-context",
+      "type": "workflow.advanced",
+      "stage": "m4_diagnosis",
+      "message": "Workflow advanced to m4_diagnosis",
+      "createdAt": "2026-08-25T13:46:22.441Z",
+      "data": {}
+    },
+    {
+      "eventId": "1acbad24-495f-46f7-be15-7356e7fd51dc",
+      "runId": "2026-08-25-merchgrid-visibility-2026-08-07-listing-context",
+      "type": "module.started",
+      "stage": "m4_diagnosis",
+      "message": "M4 diagnosis started",
+      "createdAt": "2026-08-25T13:46:22.442Z",
+      "data": {
+        "moduleId": "m4"
+      }
+    },
+    {
+      "eventId": "551f6234-b5af-4505-bfb8-07e98f6ae435",
+      "runId": "2026-08-25-merchgrid-visibility-2026-08-07-listing-context",
+      "type": "module.completed",
+      "stage": "m4_diagnosis",
+      "message": "M4 diagnosis completed",
+      "createdAt": "2026-08-25T13:46:31.207Z",
+      "data": {
+        "moduleId": "m4"
+      }
+    },
+    {
+      "eventId": "7eefc1f3-016c-49df-a25f-498e68449577",
+      "runId": "2026-08-25-merchgrid-visibility-2026-08-07-listing-context",
+      "type": "route.decided",
+      "stage": "m4_diagnosis",
+      "message": "Route decided: advance",
+      "createdAt": "2026-08-25T13:46:31.207Z",
+      "data": {
+        "decisionType": "advance",
+        "nextStage": "m5_hypothesis"
+      }
+    },
+    {
+      "eventId": "de79c9bf-e5cd-453a-9c54-b5af5d02316b",
+      "runId": "2026-08-25-merchgrid-visibility-2026-08-07-listing-context",
+      "type": "workflow.advanced",
+      "stage": "m5_hypothesis",
+      "message": "Workflow advanced to m5_hypothesis",
+      "createdAt": "2026-08-25T13:46:31.207Z",
+      "data": {}
+    },
+    {
+      "eventId": "2ac8c3e9-27e0-4436-86d6-f0ec889b8ab2",
+      "runId": "2026-08-25-merchgrid-visibility-2026-08-07-listing-context",
+      "type": "module.started",
+      "stage": "m5_hypothesis",
+      "message": "M5 hypothesis started",
+      "createdAt": "2026-08-25T13:46:31.213Z",
+      "data": {
+        "moduleId": "m5"
+      }
+    },
+    {
+      "eventId": "e4285f11-a63b-4eed-9e27-c4c9222c6f82",
+      "runId": "2026-08-25-merchgrid-visibility-2026-08-07-listing-context",
+      "type": "module.completed",
+      "stage": "m5_hypothesis",
+      "message": "M5 hypothesis completed",
+      "createdAt": "2026-08-25T13:46:37.979Z",
+      "data": {
+        "moduleId": "m5"
+      }
+    },
+    {
+      "eventId": "5d82bba7-e153-4828-9dcb-29aee1f0ff02",
+      "runId": "2026-08-25-merchgrid-visibility-2026-08-07-listing-context",
+      "type": "route.decided",
+      "stage": "m5_hypothesis",
+      "message": "Route decided: advance",
+      "createdAt": "2026-08-25T13:46:37.980Z",
+      "data": {
+        "decisionType": "advance",
+        "nextStage": "m6_test_plan"
+      }
+    },
+    {
+      "eventId": "0154b7ca-0210-493e-b5b4-19bfc7d5ef49",
+      "runId": "2026-08-25-merchgrid-visibility-2026-08-07-listing-context",
+      "type": "workflow.advanced",
+      "stage": "m6_test_plan",
+      "message": "Workflow advanced to m6_test_plan",
+      "createdAt": "2026-08-25T13:46:37.980Z",
+      "data": {}
+    },
+    {
+      "eventId": "edf51f58-e3e0-48d4-afa7-8fb7e4122282",
+      "runId": "2026-08-25-merchgrid-visibility-2026-08-07-listing-context",
+      "type": "module.started",
+      "stage": "m6_test_plan",
+      "message": "M6 test plan started",
+      "createdAt": "2026-08-25T13:46:37.987Z",
+      "data": {
+        "moduleId": "m6"
+      }
+    },
+    {
+      "eventId": "526da0e6-334f-4816-bbb0-0db1a86fc032",
+      "runId": "2026-08-25-merchgrid-visibility-2026-08-07-listing-context",
+      "type": "module.completed",
+      "stage": "m6_test_plan",
+      "message": "M6 test plan completed",
+      "createdAt": "2026-08-25T13:46:48.685Z",
+      "data": {
+        "moduleId": "m6"
+      }
+    },
+    {
+      "eventId": "00176b7a-c450-4b04-b8f7-0603d8e79782",
+      "runId": "2026-08-25-merchgrid-visibility-2026-08-07-listing-context",
+      "type": "route.decided",
+      "stage": "m6_test_plan",
+      "message": "Route decided: advance",
+      "createdAt": "2026-08-25T13:46:48.685Z",
+      "data": {
+        "decisionType": "advance",
+        "nextStage": "approval_wait"
+      }
+    },
+    {
+      "eventId": "1d5bc69b-cab2-4231-ad6c-511a918ddf86",
+      "runId": "2026-08-25-merchgrid-visibility-2026-08-07-listing-context",
+      "type": "workflow.advanced",
+      "stage": "approval_wait",
+      "message": "Workflow advanced to approval_wait",
+      "createdAt": "2026-08-25T13:46:48.685Z",
+      "data": {}
+    }
+  ]
+}

@@ -217,7 +217,7 @@ function visibilityEvidence(): MarketplaceVisibilityEvidence {
     product: 'marketplace_visibility',
     profile: 'merchgrid_shopify_app_store',
     subjectRef: 'merchgrid:visibility:2026-08-22',
-    artifactRef: '.local/visibility/initial/2026-08-22.json',
+    artifactRef: 'artifacts/visibility/initial/2026-08-22.json',
     evidenceLevel: 'sparse',
     recommendationType: 'visibility_hypothesis',
     reviewMode: {

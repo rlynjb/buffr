@@ -1,0 +1,15 @@
+{
+  "source": "posthog",
+  "date": "2026-08-07",
+  "collectedAt": "2026-08-24T00:36:51.421Z",
+  "status": "complete",
+  "metrics": {
+    "app_opened_count": 0,
+    "scan_started_count": 0,
+    "scan_completed_count": 0,
+    "scan_failed_count": 0
+  },
+  "notes": [
+    "backfill"
+  ]
+}

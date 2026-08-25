@@ -362,7 +362,7 @@ function weeklyMerchGridEvidence() {
       change: { posthog: { app_opened_count: 2 } },
     },
     limitations: [],
-  }, '.local/artifacts/weekly-reviews/2026-08-21.json');
+  }, 'artifacts/weekly-reviews/2026-08-21.json');
 }
 
 function moduleExecutor(overrides: Partial<ModuleExecutor> = {}): ModuleExecutor {

@@ -1,0 +1,33 @@
+{
+  "primaryMetric": "scan_started_count",
+  "secondaryMetrics": [
+    "app_opened_count",
+    "scan_completed_count",
+    "scan_started_count per app_opened_count"
+  ],
+  "baselineValue": 0,
+  "baselinePeriod": "Current observed baseline is the sparse pre-test snapshot captured by 2026-08-25 evidence, with measuredSignals showing 0 app opens, 0 scan starts, and 0 scan completions; this is an observed fact but not a reliable traffic baseline.",
+  "qualificationRequirements": [
+    "Manual-only exploratory test on the Shopify App Store listing; do not change app behavior.",
+    "Change one listing element only: top-of-listing copy emphasis (headline/subheadline or equivalent top copy).",
+    "Keep constant during the test: pricing label, category, gallery images, setup documentation, support/privacy links, and app product behavior.",
+    "Record the exact pre-test copy and exact revised copy with timestamps so later measurement can be compared to a known change window.",
+    "Allow enough post-change time to accumulate non-zero exposure or visits before judging results; with sparse evidence, zero counts immediately after launch are inconclusive.",
+    "Treat any result as directional only unless qualified traffic and a clear measurement window are available.",
+    "Human approval and manual marketplace edit are required before measurement.",
+    "Later evidence must be compared as exploratory and low confidence."
+  ],
+  "expectedSupportingSignal": "A supporting signal would be the first emergence or directional increase of scan_started_count after the copy-only revision, ideally alongside app_opened_count moving above zero and without scan_completed_count collapsing relative to starts. Interpretation: if starts begin moving after the revised copy, that would be consistent with—though not proof of—the hypothesis that clearer catalog-audit intent, first-action clarity, and read-only safety messaging help qualified merchants self-select into trying the app.",
+  "expectedWeakeningSignal": "A weakening signal would be no directional movement in app_opened_count or scan_started_count after a reasonable observation window despite the copy change, or app_opened_count rising while scan_started_count remains flat, which would suggest discovery/click interest may not be the main issue and that downstream trust, onboarding, or product factors could matter more.",
+  "inconclusiveCondition": "Results are inconclusive if exposure remains too low to produce meaningful non-zero counts, if other listing elements or acquisition sources changed during the same window, if the exact change date is not logged, or if only zero values continue with no traffic context available.",
+  "contextToMonitor": [
+    "Whether the revised copy explicitly names the audience as Shopify merchants.",
+    "Whether the revised copy makes the first action explicit (open the app and run a scan).",
+    "Whether a short read-only safety cue is visible near the top of the listing.",
+    "Any concurrent manual changes to category, screenshots, pricing display, setup docs, or external promotion that would confound interpretation.",
+    "Any qualitative feedback from merchants or internal reviewers about clarity, trust, or relevance after the copy revision.",
+    "Whether Shopify App Store surface constraints limit how much top-of-listing copy can actually be changed.",
+    "manual marketplace change applied by owner"
+  ],
+  "unresolvedMeasurementRules": []
+}

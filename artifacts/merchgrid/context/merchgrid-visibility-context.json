@@ -1,0 +1,21 @@
+{
+  "marketplace": "shopify_app_store",
+  "productName": "MerchGrid",
+  "productType": "shopify_app",
+  "targetCustomer": "Shopify merchants auditing catalog quality",
+  "customerProblem": "Catalog issues can hurt trust before the merchant notices",
+  "currentPromise": "Find catalog issues before they hurt sales or trust",
+  "currentSurfaceSummary": "Shopify App Store listing for a read-only catalog audit app",
+  "primaryDiscoverySurface": "Shopify App Store search and category browsing",
+  "primaryActionWanted": "Open the app and run the first catalog audit",
+  "constraints": [
+    "manual listing changes only",
+    "do not change app behavior"
+  ],
+  "availableAssets": [
+    "listing copy",
+    "screenshots",
+    "setup documentation"
+  ],
+  "ownerGoal": "increase qualified app opens and first scan starts"
+}

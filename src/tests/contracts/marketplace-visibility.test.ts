@@ -128,7 +128,7 @@ describe('marketplace visibility evidence contract', () => {
     product: 'marketplace_visibility' as const,
     profile: 'merchgrid_shopify_app_store' as const,
     subjectRef: 'merchgrid:visibility:2026-08-22',
-    artifactRef: '.local/artifacts/daily-health/2026-08-22.json',
+    artifactRef: 'artifacts/daily-health/2026-08-22.json',
     evidenceLevel: 'sparse' as const,
     recommendationType: 'visibility_hypothesis' as const,
     reviewMode: exploratoryReviewMode(),
@@ -145,7 +145,7 @@ describe('marketplace visibility evidence contract', () => {
       product: 'marketplace_visibility',
       profile: 'merchgrid_shopify_app_store',
       subjectRef: 'merchgrid:visibility:2026-08-22',
-      artifactRef: '.local/merchgrid-metrics/artifacts/daily-health/2026-08-22.json',
+      artifactRef: 'artifacts/merchgrid/metrics/artifacts/daily-health/2026-08-22.json',
       evidenceLevel: 'sparse',
       recommendationType: 'visibility_hypothesis',
       reviewMode: {
@@ -176,7 +176,7 @@ describe('marketplace visibility evidence contract', () => {
       ...sparseEvidence(),
       profile: 'etsy_listing',
       subjectRef: 'etsy:visibility:listing-123',
-      artifactRef: '.local/etsy-visibility-context.json',
+      artifactRef: 'artifacts/etsy/context/etsy-visibility-context.json',
       marketplaceContext: {
         ...etsyContext(),
       },
@@ -195,7 +195,7 @@ describe('marketplace visibility evidence contract', () => {
   it('allows marketplace visibility evidence to reference listing context', () => {
     expect(parseMarketplaceVisibilityEvidence({
       ...sparseEvidence(),
-      artifactRef: '.local/merchgrid-metrics/artifacts/daily-health/2026-08-22.json',
+      artifactRef: 'artifacts/merchgrid/metrics/artifacts/daily-health/2026-08-22.json',
       listingContext: merchGridListingContext(),
     })).toMatchObject({
       listingContext: {
@@ -230,7 +230,7 @@ describe('marketplace visibility evidence contract', () => {
       product: 'marketplace_visibility',
       profile: 'merchgrid_shopify_app_store',
       subjectRef: 'merchgrid:visibility:2026-08-22',
-      artifactRef: '.local/artifacts/daily-health/2026-08-22.json',
+      artifactRef: 'artifacts/daily-health/2026-08-22.json',
       evidenceLevel: 'sparse',
       recommendationType: 'visibility_hypothesis',
       marketplaceContext: {
@@ -262,7 +262,7 @@ describe('marketplace visibility evidence contract', () => {
       product: 'marketplace_visibility',
       profile: 'merchgrid_shopify_app_store',
       subjectRef: 'merchgrid:visibility:2026-08-22',
-      artifactRef: '.local/artifacts/daily-health/2026-08-22.json',
+      artifactRef: 'artifacts/daily-health/2026-08-22.json',
       evidenceLevel: 'sparse',
       recommendationType: 'visibility_hypothesis',
       marketplaceContext: {
@@ -296,7 +296,7 @@ describe('marketplace visibility evidence contract', () => {
       product: 'marketplace_visibility' as const,
       profile: 'merchgrid_shopify_app_store' as const,
       subjectRef: 'merchgrid:visibility:2026-08-22',
-      artifactRef: '.local/artifacts/daily-health/2026-08-22.json',
+      artifactRef: 'artifacts/daily-health/2026-08-22.json',
       evidenceLevel: 'sparse' as const,
       recommendationType: 'visibility_hypothesis' as const,
       marketplaceContext: {
@@ -321,7 +321,7 @@ describe('marketplace visibility evidence contract', () => {
       product: 'marketplace_visibility',
       profile: 'merchgrid_shopify_app_store',
       subjectRef: 'merchgrid:visibility:2026-08-22',
-      artifactRef: '.local/artifacts/daily-health/2026-08-22.json',
+      artifactRef: 'artifacts/daily-health/2026-08-22.json',
       evidenceLevel: 'sparse',
       recommendationType: 'visibility_hypothesis',
       marketplaceContext: {

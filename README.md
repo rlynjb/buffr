@@ -12,9 +12,10 @@ available in git history before the reset commit.
 
 ## Shopify Partner aggregate import
 
-Place a manually exported, aggregate-only Shopify Partner CSV in the ignored
-`.local/` directory (for example, `.local/shopify-partner-aggregates.csv`). The
-import accepts only `date`, `active_merchants`, `installs`, `uninstalls`, and
+Place a manually exported, aggregate-only Shopify Partner CSV under
+`artifacts/merchgrid/sources/` (for example,
+`artifacts/merchgrid/sources/shopify-partner-aggregates.csv`). The import
+accepts only `date`, `active_merchants`, `installs`, `uninstalls`, and
 `earnings_amount`; do not include raw merchant, shop, or customer data.
 
 ## MerchGrid source-pack operations
@@ -73,7 +74,7 @@ marketplace visibility recommendation. They do not query marketplace providers
 and stop for owner approval before any experiment wait; they never apply a
 marketplace edit.
 
-- `npm run marketplace:visibility-review -- --profile merchgrid_shopify_app_store --date YYYY-MM-DD --run-id RUN_ID --context .local/merchgrid-visibility-context.json --listing-context .local/merchgrid-listing-context.json`
+- `npm run marketplace:visibility-review -- --profile merchgrid_shopify_app_store --date YYYY-MM-DD --run-id RUN_ID --context artifacts/merchgrid/context/merchgrid-visibility-context.json --listing-context artifacts/merchgrid/context/merchgrid-listing-context.json`
 - `npm run marketplace:approve -- --run-id RUN_ID`
 - `npm run marketplace:reject -- --run-id RUN_ID --reason "Reason"`
 - `npm run marketplace:record-result -- --profile merchgrid_shopify_app_store --run-id RUN_ID --through YYYY-MM-DD`
@@ -97,12 +98,12 @@ metric-backed diagnosis. Buffr requires a local visibility brief so the work
 engine can recommend one low-risk exploratory test without pretending the data
 proves the change. Copy
 `docs/examples/merchgrid-visibility-context.example.json` to
-`.local/merchgrid-visibility-context.json`, edit the product context, then run
+`artifacts/merchgrid/context/merchgrid-visibility-context.json`, edit the product context, then run
 the visibility command.
 
 For listing context, copy
 `docs/examples/merchgrid-listing-context.example.json` to
-`.local/merchgrid-listing-context.json`, refresh the `capturedAt` value after
+`artifacts/merchgrid/context/merchgrid-listing-context.json`, refresh the `capturedAt` value after
 reviewing the public listing, then include `--listing-context` in the
 visibility review command.
 

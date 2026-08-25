@@ -1,0 +1,47 @@
+{
+  "metadata": {
+    "artifactKind": "experiment_plan",
+    "runId": "2026-08-25-merchgrid-visibility-2026-08-07-listing-context-metadata",
+    "workflowKind": "marketplace_visibility_review",
+    "subjectRef": "merchgrid:visibility:2026-08-07",
+    "status": "awaiting_approval",
+    "stage": "approval_wait",
+    "evidenceDate": "2026-08-07",
+    "generatedAt": "2026-08-25T13:58:12.182Z",
+    "runCreatedAt": "2026-08-25T13:57:48.175Z",
+    "evidenceRefs": [
+      "initial:marketplace_visibility:merchgrid_shopify_app_store:merchgrid:visibility:2026-08-07"
+    ]
+  },
+  "primaryMetric": "scan_started_count",
+  "secondaryMetrics": [
+    "app_opened_count",
+    "scan_completed_count",
+    "scan_failed_count"
+  ],
+  "baselineValue": 0,
+  "baselinePeriod": "Pre-change baseline from available sparse evidence snapshot captured by 2026-08-25, with current measured signals at 0 and no comparable historical traffic baseline available.",
+  "qualificationRequirements": [
+    "Manual change only: revise one listing element at a time, starting with headline copy only.",
+    "Keep app behavior, pricing, category, screenshots, setup documentation, support links, and privacy links unchanged during the first test window.",
+    "Record the exact before-and-after headline text and the calendar date/time when the manual listing change goes live.",
+    "Use a fixed observation window after the change that is long enough to capture at least some listing traffic; if traffic remains at zero throughout the window, the result is not qualifying evidence.",
+    "Treat any improvement as exploratory unless it is accompanied by more qualified app opens and at least one scan start.",
+    "Do not attribute any movement to the headline test if other marketplace-facing changes occur during the same observation window.",
+    "If later instrumentation allows, segment for qualified traffic where possible so low-intent opens are not mistaken for better discovery match.",
+    "Human approval and manual marketplace edit are required before measurement.",
+    "Later evidence must be compared as exploratory and low confidence."
+  ],
+  "expectedSupportingSignal": "After a manual headline-only revision that makes catalog-audit audience fit clearer while preserving the existing pricing proof point, app_opened_count should increase first, followed by scan_started_count. A stronger supporting signal is more app opens with at least one resulting scan start and no corresponding rise in scan_failed_count.",
+  "expectedWeakeningSignal": "Little or no change in app_opened_count and scan_started_count after the headline-only test window, or more opens without any scan starts, would weaken the discovery-clarity hypothesis and make trust or post-open friction more plausible competing explanations.",
+  "inconclusiveCondition": "The test is inconclusive if marketplace traffic remains effectively zero, if measurement remains unavailable or too sparse to observe pre/post differences, or if multiple listing elements are changed during the same period so the effect cannot be isolated.",
+  "contextToMonitor": [
+    "Whether the listing still shows 0 reviews during the test window, because trust friction may suppress opens or starts independently of discovery wording.",
+    "Whether read-only safety messaging remains absent near the access-risk context, because that could limit conversion from open to scan even if discovery improves.",
+    "Any Shopify App Store seasonality, placement shifts, or external promotion that could change exposure independently of the tested headline.",
+    "Whether the current title, category, screenshots, pricing label, and setup documentation remain unchanged so the test stays interpretable.",
+    "Any qualitative owner notes about merchant reactions or support questions after the copy change, especially questions about safety, access, or what happens after install.",
+    "manual marketplace change applied by owner"
+  ],
+  "unresolvedMeasurementRules": []
+}

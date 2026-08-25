@@ -46,8 +46,8 @@ describe('MerchGrid metric source boundary', () => {
       appName: 'merchgrid',
       metricsUrl: 'https://metrics.fly.example.test/api/v1/query',
     });
-    expect(loadShopifyPartnerCsvConfig({ SHOPIFY_PARTNER_CSV_PATH: '.local/partner.csv' })).toEqual({
-      csvPath: '.local/partner.csv',
+    expect(loadShopifyPartnerCsvConfig({ SHOPIFY_PARTNER_CSV_PATH: 'artifacts/merchgrid/sources/partner.csv' })).toEqual({
+      csvPath: 'artifacts/merchgrid/sources/partner.csv',
     });
   });
 

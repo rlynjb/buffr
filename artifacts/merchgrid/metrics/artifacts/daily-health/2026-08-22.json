@@ -1,0 +1,49 @@
+{
+  "period": {
+    "kind": "daily",
+    "date": "2026-08-22"
+  },
+  "sourceCoverage": {
+    "posthog": "complete",
+    "fly_metrics": "complete",
+    "shopify_partner": "failed"
+  },
+  "sourceFreshness": {
+    "posthog": {
+      "date": "2026-08-22",
+      "collectedAt": "2026-08-23T21:19:43.529Z",
+      "status": "complete",
+      "notes": []
+    },
+    "fly_metrics": {
+      "date": "2026-08-22",
+      "collectedAt": "2026-08-23T21:19:43.814Z",
+      "status": "complete",
+      "notes": []
+    },
+    "shopify_partner": {
+      "date": "2026-08-22",
+      "collectedAt": "2026-08-23T21:19:43.817Z",
+      "status": "failed",
+      "notes": [
+        "transport"
+      ]
+    }
+  },
+  "aggregateMetrics": {
+    "posthog": {
+      "app_opened_count": 0,
+      "scan_started_count": 0,
+      "scan_completed_count": 0,
+      "scan_failed_count": 0
+    },
+    "fly_metrics": {
+      "request_count": 2,
+      "error_response_count": 0,
+      "error_rate": 0
+    }
+  },
+  "limitations": [
+    "shopify_partner:failed"
+  ]
+}

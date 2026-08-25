@@ -221,7 +221,7 @@ The exact TypeScript definitions must be Zod-backed and `.strict()`. `artifactRe
 
 ```ts
 it('accepts a closed weekly aggregate artifact and preserves its local reference', () => {
-  const evidence = parseMerchGridWorkflowEvidence(validWeeklyArtifact, '.local/artifacts/weekly-reviews/2026-08-22.json');
+  const evidence = parseMerchGridWorkflowEvidence(validWeeklyArtifact, 'artifacts/weekly-reviews/2026-08-22.json');
   expect(evidence).toMatchObject({ product: 'merchgrid', kind: 'weekly_review' });
 });
 

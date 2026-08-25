@@ -66,7 +66,7 @@ function dailyEvidence(flyMetrics: Record<string, number>, flyStatus: 'complete'
   return MerchGridWorkflowEvidenceSchema.parse({
     product: 'merchgrid',
     kind: 'daily_health',
-    artifactRef: '.local/artifacts/daily-health/2026-08-21.json',
+    artifactRef: 'artifacts/daily-health/2026-08-21.json',
     observedPeriod: { kind: 'daily', date: '2026-08-21' },
     sourceCoverage: { posthog: 'complete', fly_metrics: flyStatus, shopify_partner: 'unavailable' },
     sourceFreshness: {},
@@ -80,7 +80,7 @@ function weeklyEvidence(posthogStatus: 'complete' | 'partial' = 'complete') {
   return MerchGridWorkflowEvidenceSchema.parse({
     product: 'merchgrid',
     kind: 'weekly_review',
-    artifactRef: '.local/artifacts/weekly-reviews/2026-08-21.json',
+    artifactRef: 'artifacts/weekly-reviews/2026-08-21.json',
     observedPeriod: {
       kind: 'weekly',
       previous: { startDate: '2026-08-08', endDate: '2026-08-14' },

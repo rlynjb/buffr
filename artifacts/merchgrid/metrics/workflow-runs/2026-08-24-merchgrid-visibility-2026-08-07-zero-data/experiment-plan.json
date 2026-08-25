@@ -1,0 +1,33 @@
+{
+  "primaryMetric": "app_opened_count",
+  "secondaryMetrics": [
+    "scan_started_count",
+    "scan_completed_count",
+    "scan_failed_count"
+  ],
+  "baselineValue": 0,
+  "baselinePeriod": "Pre-change baseline from sparse evidence snapshot dated 2026-08-07; current observed counts are zero and no comparison window is established.",
+  "qualificationRequirements": [
+    "observed fact: Treat this as a manual exploratory listing-copy test only; do not change app behavior.",
+    "observed fact: Keep pricing, install flow, screenshots, setup documentation, and non-copy listing fields constant for the first test.",
+    "hypothesis: Revise only the top-of-page Shopify App Store listing copy to make the user, problem, and read-only safety clearer.",
+    "assumption: The manual copy revision must remain live long enough to collect at least some post-change exposure; without exposure, result interpretation is not possible.",
+    "interpretation: A meaningful read requires at least one post-change app open or another confirmed post-change listing-traffic signal; otherwise the outcome remains inconclusive because the baseline is zero and traffic is sparse.",
+    "observed fact: Human approval is required before any marketplace listing change.",
+    "Human approval and manual marketplace edit are required before measurement.",
+    "Later evidence must be compared as exploratory and low confidence."
+  ],
+  "expectedSupportingSignal": "hypothesis: After the manual copy revision, any post-change increase from the zero baseline in app_opened_count would be the primary supporting signal, especially if accompanied by at least one scan_started_count event. Because evidence is sparse, this is directional only and not proof of causation.",
+  "expectedWeakeningSignal": "interpretation: The hypothesis is weakened if post-change exposure is confirmed but app_opened_count and scan_started_count remain at zero, or if app_opened_count rises without any scan_started_count increase, suggesting curiosity without qualified intent.",
+  "inconclusiveCondition": "observed fact + interpretation: Results are inconclusive if post-change counts stay at zero but marketplace exposure/traffic cannot be confirmed, if instrumentation remains sparse or unreliable, or if multiple listing elements are changed at once and the copy effect cannot be isolated.",
+  "contextToMonitor": [
+    "observed fact: Whether the only manual change made was the listing headline/first supporting copy.",
+    "observed fact: Date the revised copy went live and the date measurement began.",
+    "observed fact: Any manual notes about marketplace merchandising, category placement, or unusual exposure changes during the test window.",
+    "observed fact: Any parallel marketing activity that could influence app opens independently of the listing copy.",
+    "observed fact: Whether merchants who open the app can still reach and attempt the first catalog audit without product-side issues.",
+    "observed fact: Whether scan_failed_count changes materially after the test, since activation friction could mask listing-copy effects.",
+    "manual marketplace change applied by owner"
+  ],
+  "unresolvedMeasurementRules": []
+}

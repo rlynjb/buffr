@@ -120,7 +120,7 @@ describe('marketplace visibility workflow engine entry', () => {
 
     const resumed = await engine.resumeWithExperimentResults({
       runId: 'visibility-results',
-      resultEvidence: visibilityEvidence({ artifactRef: '.local/visibility/results/2026-08-23.json' }),
+      resultEvidence: visibilityEvidence({ artifactRef: 'artifacts/visibility/results/2026-08-23.json' }),
     });
 
     expect(resumed).toMatchObject({
@@ -149,7 +149,7 @@ describe('marketplace visibility workflow engine entry', () => {
       resultEvidence: visibilityEvidence({
         profile: 'etsy_listing',
         subjectRef: 'etsy:visibility:listing-123',
-        artifactRef: '.local/visibility/results/etsy-listing-123.json',
+        artifactRef: 'artifacts/visibility/results/etsy-listing-123.json',
         marketplaceContext: {
           marketplace: 'etsy',
           productName: 'Weekly Planner',
@@ -206,7 +206,7 @@ function visibilityEvidence(overrides: Partial<MarketplaceVisibilityEvidence> = 
     product: 'marketplace_visibility',
     profile: 'merchgrid_shopify_app_store',
     subjectRef: 'merchgrid:visibility:2026-08-22',
-    artifactRef: '.local/visibility/initial/2026-08-22.json',
+    artifactRef: 'artifacts/visibility/initial/2026-08-22.json',
     evidenceLevel: 'sparse',
     recommendationType: 'visibility_hypothesis',
     reviewMode: {

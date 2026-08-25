@@ -1,0 +1,16 @@
+{
+  "source": "shopify_partner",
+  "date": "2026-08-07",
+  "collectedAt": "2026-08-24T00:36:51.743Z",
+  "status": "complete",
+  "metrics": {
+    "active_merchants": 0,
+    "installs": 1,
+    "uninstalls": 1,
+    "earnings_amount": 0
+  },
+  "notes": [
+    "manual_import",
+    "backfill"
+  ]
+}

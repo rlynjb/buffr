@@ -7,7 +7,7 @@ const SensitiveProseValuePatterns = [
   /(?:^|\D)(?:\d[ -]?){12,18}\d(?:$|\D)/u,
   /(?:^|\D)(?:\+?1[ .-]?)?(?:\(\d{3}\)|\d{3})[ .-]\d{3}[ .-]\d{4}(?:$|\D)/u,
 ];
-const LocalArtifactRefPattern = /^\.local\/[A-Za-z0-9][A-Za-z0-9._/-]*$/u;
+const LocalArtifactRefPattern = /^(?:\.local|artifacts)\/[A-Za-z0-9][A-Za-z0-9._/-]*$/u;
 const SubjectRefPattern = /^(?:merchgrid:visibility:\d{4}-\d{2}-\d{2}|etsy:visibility:listing-[a-z0-9-]+)$/iu;
 
 function safeMarketplaceText(max: number): z.ZodType<string> {

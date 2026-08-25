@@ -219,7 +219,7 @@ describe('marketplace visibility evidence contract', () => {
       product: 'marketplace_visibility',
       profile: 'merchgrid_shopify_app_store',
       subjectRef: 'merchgrid:visibility:2026-08-22',
-      artifactRef: '.local/merchgrid-metrics/artifacts/daily-health/2026-08-22.json',
+      artifactRef: 'artifacts/merchgrid/metrics/artifacts/daily-health/2026-08-22.json',
       evidenceLevel: 'sparse',
       recommendationType: 'visibility_hypothesis',
       marketplaceContext: {
@@ -253,7 +253,7 @@ describe('marketplace visibility evidence contract', () => {
       product: 'marketplace_visibility',
       profile: 'merchgrid_shopify_app_store',
       subjectRef: 'merchgrid:visibility:2026-08-22',
-      artifactRef: '.local/artifacts/daily-health/2026-08-22.json',
+      artifactRef: 'artifacts/daily-health/2026-08-22.json',
       evidenceLevel: 'sparse',
       recommendationType: 'visibility_hypothesis',
       marketplaceContext: {
@@ -489,7 +489,7 @@ describe('marketplace visibility profile', () => {
       profile: 'merchgrid_shopify_app_store',
       runId: 'merchgrid-visibility-2026-08-22',
       date: '2026-08-22',
-      contextPath: '.local/merchgrid-visibility-context.json',
+      contextPath: 'artifacts/merchgrid/context/merchgrid-visibility-context.json',
     });
 
     expect(state).toMatchObject({
@@ -519,7 +519,7 @@ describe('marketplace visibility profile', () => {
     const state = await service.startVisibilityReview({
       profile: 'etsy_listing',
       runId: 'etsy-visibility-listing-123',
-      contextPath: '.local/etsy-visibility-context.json',
+      contextPath: 'artifacts/etsy/context/etsy-visibility-context.json',
     });
 
     expect(JSON.stringify(state.evidenceSnapshots?.initial)).not.toMatch(/fly_metrics|shopify_partner|posthog/i);
@@ -971,7 +971,7 @@ describe('marketplace visibility CLI', () => {
         '--profile', 'merchgrid_shopify_app_store',
         '--date', '2026-08-22',
         '--run-id', 'visibility-1',
-        '--context', '.local/merchgrid-visibility-context.json',
+        '--context', 'artifacts/merchgrid/context/merchgrid-visibility-context.json',
       ],
       dependencies: {
         service: { startVisibilityReview: async () => state },
@@ -1078,13 +1078,13 @@ Add to `.env.example`:
 
 ```text
 # Marketplace visibility review: local product context used for sparse-data recommendations.
-MERCHGRID_VISIBILITY_CONTEXT_PATH=.local/merchgrid-visibility-context.json
+MERCHGRID_VISIBILITY_CONTEXT_PATH=artifacts/merchgrid/context/merchgrid-visibility-context.json
 ```
 
 Add README commands:
 
 ```text
-npm run marketplace:visibility-review -- --profile merchgrid_shopify_app_store --date YYYY-MM-DD --run-id RUN_ID --context .local/merchgrid-visibility-context.json
+npm run marketplace:visibility-review -- --profile merchgrid_shopify_app_store --date YYYY-MM-DD --run-id RUN_ID --context artifacts/merchgrid/context/merchgrid-visibility-context.json
 npm run marketplace:approve -- --run-id RUN_ID
 npm run marketplace:reject -- --run-id RUN_ID --reason "Reason"
 npm run marketplace:record-result -- --profile merchgrid_shopify_app_store --run-id RUN_ID --through YYYY-MM-DD
@@ -1153,7 +1153,7 @@ it('records a later MerchGrid weekly artifact as visibility result evidence', as
     profile: 'merchgrid_shopify_app_store',
     runId: 'visibility-result',
     date: '2026-08-22',
-    contextPath: '.local/merchgrid-visibility-context.json',
+    contextPath: 'artifacts/merchgrid/context/merchgrid-visibility-context.json',
   });
   for (let index = 0; index < 5; index += 1) await service.engine.step('visibility-result');
   await service.engine.approveExperiment('visibility-result');
@@ -1195,7 +1195,7 @@ const evidence = MarketplaceVisibilityEvidenceSchema.parse({
   product: 'marketplace_visibility',
   profile: 'merchgrid_shopify_app_store',
   subjectRef: `marketplace_visibility:merchgrid_shopify_app_store:${through}`,
-  artifactRef: `.local/merchgrid-metrics/artifacts/weekly-reviews/${through}.json`,
+  artifactRef: `artifacts/merchgrid/metrics/artifacts/weekly-reviews/${through}.json`,
   evidenceLevel: 'sparse',
   recommendationType: 'visibility_hypothesis',
   marketplaceContext: initial.marketplaceContext,
@@ -1291,7 +1291,7 @@ After all tasks are implemented and built, use this local sequence:
 ```bash
 npm run build
 npm run merchgrid:collect -- --date 2026-08-22
-npm run marketplace:visibility-review -- --profile merchgrid_shopify_app_store --date 2026-08-22 --run-id merchgrid-visibility-2026-08-22 --context .local/merchgrid-visibility-context.json
+npm run marketplace:visibility-review -- --profile merchgrid_shopify_app_store --date 2026-08-22 --run-id merchgrid-visibility-2026-08-22 --context artifacts/merchgrid/context/merchgrid-visibility-context.json
 npm run marketplace:approve -- --run-id merchgrid-visibility-2026-08-22
 ```
 
@@ -1307,10 +1307,10 @@ artifact: initial:marketplace_visibility:merchgrid_shopify_app_store:marketplace
 Expected local files:
 
 ```text
-.local/merchgrid-metrics/workflow-runs/merchgrid-visibility-2026-08-22/run.json
-.local/merchgrid-metrics/workflow-runs/merchgrid-visibility-2026-08-22/evidence/initial.json
-.local/merchgrid-metrics/workflow-runs/merchgrid-visibility-2026-08-22/experiment-plan.json
-.local/merchgrid-metrics/workflow-runs/merchgrid-visibility-2026-08-22/events.jsonl
+artifacts/merchgrid/metrics/workflow-runs/merchgrid-visibility-2026-08-22/run.json
+artifacts/merchgrid/metrics/workflow-runs/merchgrid-visibility-2026-08-22/evidence/initial.json
+artifacts/merchgrid/metrics/workflow-runs/merchgrid-visibility-2026-08-22/experiment-plan.json
+artifacts/merchgrid/metrics/workflow-runs/merchgrid-visibility-2026-08-22/events.jsonl
 ```
 
 No command in this dry run edits Shopify, Etsy, MerchGrid, PostHog, Fly, or any marketplace.

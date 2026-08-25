@@ -52,7 +52,7 @@ describe('marketplace visibility profile', () => {
       profile: 'merchgrid_shopify_app_store',
       runId: 'merchgrid-visibility-2026-08-22',
       date: '2026-08-22',
-      contextPath: '.local/merchgrid-visibility-context.json',
+      contextPath: 'artifacts/merchgrid/context/merchgrid-visibility-context.json',
     });
 
     expect(state).toMatchObject({
@@ -82,8 +82,8 @@ describe('marketplace visibility profile', () => {
       profile: 'merchgrid_shopify_app_store',
       runId: 'visibility-with-listing-context',
       date: '2026-08-22',
-      contextPath: '.local/merchgrid-visibility-context.json',
-      listingContextPath: '.local/merchgrid-listing-context.json',
+      contextPath: 'artifacts/merchgrid/context/merchgrid-visibility-context.json',
+      listingContextPath: 'artifacts/merchgrid/context/merchgrid-listing-context.json',
     });
 
     expect(state.evidenceSnapshots?.initial).toMatchObject({
@@ -106,7 +106,7 @@ describe('marketplace visibility profile', () => {
       profile: 'merchgrid_shopify_app_store',
       runId: 'merchgrid-visibility-2026-08-22-fly',
       date: '2026-08-22',
-      contextPath: '.local/merchgrid-visibility-context.json',
+      contextPath: 'artifacts/merchgrid/context/merchgrid-visibility-context.json',
     });
 
     expect(state.evidenceSnapshots?.initial).toMatchObject({
@@ -132,7 +132,7 @@ describe('marketplace visibility profile', () => {
       profile: 'merchgrid_shopify_app_store',
       runId: 'visibility-source-pack-unavailable',
       date: '2026-08-22',
-      contextPath: '.local/merchgrid-visibility-context.json',
+      contextPath: 'artifacts/merchgrid/context/merchgrid-visibility-context.json',
     });
 
     expect(state.evidenceSnapshots?.initial).toMatchObject({
@@ -156,7 +156,7 @@ describe('marketplace visibility profile', () => {
       profile: 'merchgrid_shopify_app_store',
       runId: 'visibility-thin-context',
       date: '2026-08-22',
-      contextPath: '.local/merchgrid-visibility-context.json',
+      contextPath: 'artifacts/merchgrid/context/merchgrid-visibility-context.json',
     })).rejects.toMatchObject({
       code: 'validation_failed',
       message: 'visibility_context_missing:constraints',
@@ -169,7 +169,7 @@ describe('marketplace visibility profile', () => {
     const service = createMarketplaceVisibilityService({
       engine,
       merchgridArtifacts: new InMemoryArtifacts(dailyArtifact()),
-      merchgridArtifactRootRef: '.local/custom-merchgrid/artifacts',
+      merchgridArtifactRootRef: 'artifacts/custom-merchgrid/artifacts',
       runRepository: new InMemoryRunRepository(),
       loadContext: async () => readyContext(),
     });
@@ -178,11 +178,11 @@ describe('marketplace visibility profile', () => {
       profile: 'merchgrid_shopify_app_store',
       runId: 'visibility-custom-root',
       date: '2026-08-22',
-      contextPath: '.local/merchgrid-visibility-context.json',
+      contextPath: 'artifacts/merchgrid/context/merchgrid-visibility-context.json',
     });
 
     expect(state.evidenceSnapshots?.initial).toMatchObject({
-      artifactRef: '.local/custom-merchgrid/artifacts/daily-health/2026-08-22.json',
+      artifactRef: 'artifacts/custom-merchgrid/artifacts/daily-health/2026-08-22.json',
     });
   });
 
@@ -207,7 +207,7 @@ describe('marketplace visibility profile', () => {
     const state = await service.startVisibilityReview({
       profile: 'etsy_listing',
       runId: 'etsy-visibility-listing-123',
-      contextPath: '.local/etsy-visibility-context.json',
+      contextPath: 'artifacts/etsy/context/etsy-visibility-context.json',
     });
 
     expect(JSON.stringify(state.evidenceSnapshots?.initial)).not.toMatch(/fly_metrics|shopify_partner|posthog/i);
@@ -241,7 +241,7 @@ describe('marketplace visibility profile', () => {
           product: 'marketplace_visibility',
           evidenceLevel: 'sparse',
           subjectRef: 'merchgrid:visibility:2026-08-22',
-          artifactRef: '.local/merchgrid-metrics/artifacts/weekly-reviews/2026-09-04.json',
+          artifactRef: 'artifacts/merchgrid/metrics/artifacts/weekly-reviews/2026-09-04.json',
           measuredSignals: { app_opened_count: 4, scan_started_count: 1 },
           limitations: [
             'Previous period Shopify Partner metrics unavailable for 7 days',
@@ -414,7 +414,7 @@ async function startApprovedVisibilityReview(
     profile: 'merchgrid_shopify_app_store',
     runId,
     date: '2026-08-22',
-    contextPath: '.local/merchgrid-visibility-context.json',
+    contextPath: 'artifacts/merchgrid/context/merchgrid-visibility-context.json',
   });
   for (let index = 0; index < 5; index += 1) await service.engine.step(runId);
   await service.engine.approveExperiment(runId);

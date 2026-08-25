@@ -130,7 +130,7 @@ becomes another local evidence input before M4 diagnosis.
               v
 +---------------------------+        +---------------------------+
 | Local listing context     |        | Existing product brief    |
-| .local/*-listing-         |        | .local/*-visibility-      |
+| artifacts/.../listing-    |        | artifacts/.../visibility- |
 | context.json              |        | context.json              |
 +-------------+-------------+        +-------------+-------------+
               |                                    |
@@ -292,8 +292,8 @@ M6 should produce a manual test plan:
 For MerchGrid:
 
 ```text
-.local/merchgrid-visibility-context.json
-.local/merchgrid-listing-context.json
+artifacts/merchgrid/context/merchgrid-visibility-context.json
+artifacts/merchgrid/context/merchgrid-listing-context.json
 ```
 
 The visibility command can accept the listing context explicitly:
@@ -302,8 +302,8 @@ The visibility command can accept the listing context explicitly:
 npm run marketplace:visibility-review -- \
   --profile merchgrid_shopify_app_store \
   --date 2026-08-07 \
-  --context .local/merchgrid-visibility-context.json \
-  --listing-context .local/merchgrid-listing-context.json
+  --context artifacts/merchgrid/context/merchgrid-visibility-context.json \
+  --listing-context artifacts/merchgrid/context/merchgrid-listing-context.json
 ```
 
 The existing `--context` remains the product brief. The new

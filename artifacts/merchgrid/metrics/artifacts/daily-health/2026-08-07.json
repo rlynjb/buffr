@@ -1,0 +1,56 @@
+{
+  "period": {
+    "kind": "daily",
+    "date": "2026-08-07"
+  },
+  "sourceCoverage": {
+    "posthog": "complete",
+    "fly_metrics": "unavailable",
+    "shopify_partner": "complete"
+  },
+  "sourceFreshness": {
+    "posthog": {
+      "date": "2026-08-07",
+      "collectedAt": "2026-08-24T00:36:51.421Z",
+      "status": "complete",
+      "notes": [
+        "backfill"
+      ]
+    },
+    "fly_metrics": {
+      "date": "2026-08-07",
+      "collectedAt": "2026-08-24T00:36:51.740Z",
+      "status": "unavailable",
+      "notes": [
+        "no_metrics",
+        "backfill"
+      ]
+    },
+    "shopify_partner": {
+      "date": "2026-08-07",
+      "collectedAt": "2026-08-24T00:36:51.743Z",
+      "status": "complete",
+      "notes": [
+        "manual_import",
+        "backfill"
+      ]
+    }
+  },
+  "aggregateMetrics": {
+    "posthog": {
+      "app_opened_count": 0,
+      "scan_started_count": 0,
+      "scan_completed_count": 0,
+      "scan_failed_count": 0
+    },
+    "shopify_partner": {
+      "active_merchants": 0,
+      "installs": 1,
+      "uninstalls": 1,
+      "earnings_amount": 0
+    }
+  },
+  "limitations": [
+    "fly_metrics:unavailable"
+  ]
+}

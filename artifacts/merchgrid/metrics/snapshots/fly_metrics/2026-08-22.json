@@ -1,0 +1,12 @@
+{
+  "source": "fly_metrics",
+  "date": "2026-08-22",
+  "collectedAt": "2026-08-23T21:19:43.814Z",
+  "status": "complete",
+  "metrics": {
+    "request_count": 2,
+    "error_response_count": 0,
+    "error_rate": 0
+  },
+  "notes": []
+}

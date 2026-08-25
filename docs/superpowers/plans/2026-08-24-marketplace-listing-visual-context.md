@@ -160,7 +160,7 @@ Append these tests inside `describe('marketplace visibility evidence contract', 
   it('allows marketplace visibility evidence to reference listing context', () => {
     expect(parseMarketplaceVisibilityEvidence({
       ...sparseEvidence(),
-      artifactRef: '.local/merchgrid-metrics/artifacts/daily-health/2026-08-22.json',
+      artifactRef: 'artifacts/merchgrid/metrics/artifacts/daily-health/2026-08-22.json',
       listingContext: merchGridListingContext(),
     })).toMatchObject({
       listingContext: {
@@ -601,8 +601,8 @@ In `src/tests/workflow/marketplace-visibility-profile.test.ts`, add this test ne
       profile: 'merchgrid_shopify_app_store',
       runId: 'visibility-with-listing-context',
       date: '2026-08-22',
-      contextPath: '.local/merchgrid-visibility-context.json',
-      listingContextPath: '.local/merchgrid-listing-context.json',
+      contextPath: 'artifacts/merchgrid/context/merchgrid-visibility-context.json',
+      listingContextPath: 'artifacts/merchgrid/context/merchgrid-listing-context.json',
     });
 
     expect(state.evidenceSnapshots?.initial).toMatchObject({
@@ -683,8 +683,8 @@ In `src/tests/cli/marketplace-visibility.test.ts`, add:
         '--profile', 'merchgrid_shopify_app_store',
         '--date', '2026-08-22',
         '--run-id', 'visibility-1',
-        '--context', '.local/merchgrid-visibility-context.json',
-        '--listing-context', '.local/merchgrid-listing-context.json',
+        '--context', 'artifacts/merchgrid/context/merchgrid-visibility-context.json',
+        '--listing-context', 'artifacts/merchgrid/context/merchgrid-listing-context.json',
       ],
       dependencies: {
         service: {
@@ -702,8 +702,8 @@ In `src/tests/cli/marketplace-visibility.test.ts`, add:
       profile: 'merchgrid_shopify_app_store',
       runId: 'visibility-1',
       date: '2026-08-22',
-      contextPath: '.local/merchgrid-visibility-context.json',
-      listingContextPath: '.local/merchgrid-listing-context.json',
+      contextPath: 'artifacts/merchgrid/context/merchgrid-visibility-context.json',
+      listingContextPath: 'artifacts/merchgrid/context/merchgrid-listing-context.json',
     }]);
   });
 ```
@@ -1061,14 +1061,14 @@ git commit -m "feat: use listing context in visibility modules"
 - Consumes:
   - `MERCHGRID_LISTING_CONTEXT_PATH`
   - CLI option `--listing-context`
-- Produces: documented owner workflow for `.local/merchgrid-listing-context.json`.
+- Produces: documented owner workflow for `artifacts/merchgrid/context/merchgrid-listing-context.json`.
 
 - [ ] **Step 1: Add env example**
 
 In `.env.example`, add below `MERCHGRID_VISIBILITY_CONTEXT_PATH`:
 
 ```dotenv
-MERCHGRID_LISTING_CONTEXT_PATH=.local/merchgrid-listing-context.json
+MERCHGRID_LISTING_CONTEXT_PATH=artifacts/merchgrid/context/merchgrid-listing-context.json
 ```
 
 - [ ] **Step 2: Update README command docs**
@@ -1076,7 +1076,7 @@ MERCHGRID_LISTING_CONTEXT_PATH=.local/merchgrid-listing-context.json
 In `README.md`, update the marketplace visibility command list:
 
 ```md
-- `npm run marketplace:visibility-review -- --profile merchgrid_shopify_app_store --date YYYY-MM-DD --run-id RUN_ID --context .local/merchgrid-visibility-context.json --listing-context .local/merchgrid-listing-context.json`
+- `npm run marketplace:visibility-review -- --profile merchgrid_shopify_app_store --date YYYY-MM-DD --run-id RUN_ID --context artifacts/merchgrid/context/merchgrid-visibility-context.json --listing-context artifacts/merchgrid/context/merchgrid-listing-context.json`
 ```
 
 Replace the context explanation paragraph with:
@@ -1096,7 +1096,7 @@ Add this after the existing visibility context copy instruction:
 ```md
 For listing context, copy
 `docs/examples/merchgrid-listing-context.example.json` to
-`.local/merchgrid-listing-context.json`, refresh the `capturedAt` value after
+`artifacts/merchgrid/context/merchgrid-listing-context.json`, refresh the `capturedAt` value after
 reviewing the public listing, then include `--listing-context` in the visibility
 review command.
 ```
@@ -1121,7 +1121,7 @@ In `src/tests/cli/marketplace-visibility.test.ts`, add:
         '--profile', 'merchgrid_shopify_app_store',
         '--date', '2026-08-22',
         '--run-id', 'visibility-1',
-        '--context', '.local/merchgrid-visibility-context.json',
+        '--context', 'artifacts/merchgrid/context/merchgrid-visibility-context.json',
       ],
       dependencies: {
         service: {
@@ -1131,7 +1131,7 @@ In `src/tests/cli/marketplace-visibility.test.ts`, add:
           },
         },
         engine: { step: async () => state },
-        defaultListingContextPath: '.local/merchgrid-listing-context.json',
+        defaultListingContextPath: 'artifacts/merchgrid/context/merchgrid-listing-context.json',
       },
       writeLine: () => undefined,
     });
@@ -1140,8 +1140,8 @@ In `src/tests/cli/marketplace-visibility.test.ts`, add:
       profile: 'merchgrid_shopify_app_store',
       runId: 'visibility-1',
       date: '2026-08-22',
-      contextPath: '.local/merchgrid-visibility-context.json',
-      listingContextPath: '.local/merchgrid-listing-context.json',
+      contextPath: 'artifacts/merchgrid/context/merchgrid-visibility-context.json',
+      listingContextPath: 'artifacts/merchgrid/context/merchgrid-listing-context.json',
     }]);
   });
 ```
@@ -1205,20 +1205,20 @@ git commit -m "docs: document marketplace listing context input"
 - [ ] M1 exposes curated listing facts to M4-M6.
 - [ ] M4-M6 prompt/normalization language keeps recommendations exploratory and manual.
 - [ ] Example context is safe to commit.
-- [ ] No screenshots or `.local` files are committed.
+- [ ] No screenshots or raw provider exports are committed.
 
 ## Manual Smoke Command
 
 After implementation, a real local run should look like:
 
 ```bash
-cp docs/examples/merchgrid-listing-context.example.json .local/merchgrid-listing-context.json
+cp docs/examples/merchgrid-listing-context.example.json artifacts/merchgrid/context/merchgrid-listing-context.json
 npm run marketplace:visibility-review -- \
   --profile merchgrid_shopify_app_store \
   --date 2026-08-07 \
   --run-id merchgrid-visibility-2026-08-07-listing-context \
-  --context .local/merchgrid-visibility-context.json \
-  --listing-context .local/merchgrid-listing-context.json
+  --context artifacts/merchgrid/context/merchgrid-visibility-context.json \
+  --listing-context artifacts/merchgrid/context/merchgrid-listing-context.json
 ```
 
 Expected terminal shape:
@@ -1233,6 +1233,6 @@ artifact: initial:marketplace_visibility:merchgrid_shopify_app_store:merchgrid:v
 Expected artifacts:
 
 ```text
-.local/merchgrid-metrics/workflow-runs/merchgrid-visibility-2026-08-07-listing-context/run.json
-.local/merchgrid-metrics/workflow-runs/merchgrid-visibility-2026-08-07-listing-context/experiment-plan.json
+artifacts/merchgrid/metrics/workflow-runs/merchgrid-visibility-2026-08-07-listing-context/run.json
+artifacts/merchgrid/metrics/workflow-runs/merchgrid-visibility-2026-08-07-listing-context/experiment-plan.json
 ```

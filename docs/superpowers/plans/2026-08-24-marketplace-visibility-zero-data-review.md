@@ -916,14 +916,14 @@ engine can recommend one low-risk exploratory test without pretending the data
 proves the change.
 
 Copy `docs/examples/merchgrid-visibility-context.example.json` to
-`.local/merchgrid-visibility-context.json`, edit the product context, then run:
+`artifacts/merchgrid/context/merchgrid-visibility-context.json`, edit the product context, then run:
 
 ```bash
 npm run marketplace:visibility-review -- \
   --profile merchgrid_shopify_app_store \
   --date 2026-08-24 \
   --run-id merchgrid-visibility-2026-08-24 \
-  --context .local/merchgrid-visibility-context.json
+  --context artifacts/merchgrid/context/merchgrid-visibility-context.json
 ```
 
 If the brief is complete, zero metrics can still produce an `approval_wait`

@@ -1,0 +1,49 @@
+{
+  "product": "marketplace_visibility",
+  "profile": "merchgrid_shopify_app_store",
+  "subjectRef": "merchgrid:visibility:2026-08-07",
+  "artifactRef": "artifacts/merchgrid/metrics/artifacts/daily-health/2026-08-07.json",
+  "evidenceLevel": "sparse",
+  "recommendationType": "visibility_hypothesis",
+  "reviewMode": {
+    "mode": "exploratory_visibility_test",
+    "evidenceLevel": "sparse",
+    "confidenceBoundary": "low",
+    "reason": "metrics_sparse_context_sufficient"
+  },
+  "marketplaceContext": {
+    "marketplace": "shopify_app_store",
+    "productName": "MerchGrid",
+    "productType": "shopify_app",
+    "targetCustomer": "Shopify merchants auditing catalog quality",
+    "customerProblem": "Catalog issues can hurt trust before the merchant notices",
+    "currentPromise": "Find catalog issues before they hurt sales or trust",
+    "currentSurfaceSummary": "Shopify App Store listing for a read-only catalog audit app",
+    "primaryDiscoverySurface": "Shopify App Store search and category browsing",
+    "primaryActionWanted": "Open the app and run the first catalog audit",
+    "constraints": [
+      "manual listing changes only",
+      "do not change app behavior"
+    ],
+    "availableAssets": [
+      "listing copy",
+      "screenshots",
+      "setup documentation"
+    ],
+    "ownerGoal": "increase qualified app opens and first scan starts"
+  },
+  "measuredSignals": {
+    "app_opened_count": 0,
+    "scan_started_count": 0,
+    "scan_completed_count": 0,
+    "scan_failed_count": 0
+  },
+  "limitations": [
+    "Fly metrics unavailable"
+  ],
+  "prohibitedClaims": [
+    "Do not claim sparse evidence proves a marketplace visibility bottleneck",
+    "Do not claim a visibility change will increase installs",
+    "Do not recommend automatic marketplace edits"
+  ]
+}

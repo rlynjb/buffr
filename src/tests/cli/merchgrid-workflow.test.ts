@@ -10,7 +10,7 @@ describe('MerchGrid workflow CLI', () => {
       runId: 'weekly-1',
       status: 'awaiting_approval',
       stage: 'approval_wait',
-      evidenceRefs: ['initial:weekly_review:.local/merchgrid.json'],
+      evidenceRefs: ['initial:weekly_review:artifacts/merchgrid.json'],
     };
     const service = { startWeeklyRecommendation: async () => state } as unknown as MerchGridWorkflowService;
     const engine = { step: async () => state } as unknown as WorkflowEngine;
@@ -25,7 +25,7 @@ describe('MerchGrid workflow CLI', () => {
       'run: weekly-1',
       'status: awaiting_approval',
       'stage: approval_wait',
-      'artifact: initial:weekly_review:.local/merchgrid.json',
+      'artifact: initial:weekly_review:artifacts/merchgrid.json',
     ]);
     expect(lines.join('\n')).not.toMatch(/OPENAI_API_KEY|POSTHOG_PERSONAL_API_KEY|FLY_ACCESS_TOKEN|myshopify/i);
   });

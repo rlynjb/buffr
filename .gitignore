@@ -1,8 +1,11 @@
 # secrets — never commit
 .env
 .env.local
-.local/
 .worktrees/
+.local/etsy-token.json
+
+# raw provider exports can contain emails, shop domains, or other private fields
+artifacts/merchgrid/sources/raw/
 
 # node
 node_modules/

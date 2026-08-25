@@ -17,7 +17,7 @@ describe('marketplace visibility CLI', () => {
         '--profile', 'merchgrid_shopify_app_store',
         '--date', '2026-08-22',
         '--run-id', 'visibility-1',
-        '--context', '.local/merchgrid-visibility-context.json',
+        '--context', 'artifacts/merchgrid/context/merchgrid-visibility-context.json',
       ],
       dependencies: {
         service: { startVisibilityReview: async () => state },
@@ -59,7 +59,7 @@ describe('marketplace visibility CLI', () => {
         '--profile', 'merchgrid_shopify_app_store',
         '--date', '2026-08-22',
         '--run-id', 'visibility-1',
-        '--context', '.local/merchgrid-visibility-context.json',
+        '--context', 'artifacts/merchgrid/context/merchgrid-visibility-context.json',
       ],
       dependencies: {
         service: {
@@ -106,8 +106,8 @@ describe('marketplace visibility CLI', () => {
         '--profile', 'merchgrid_shopify_app_store',
         '--date', '2026-08-22',
         '--run-id', 'visibility-1',
-        '--context', '.local/merchgrid-visibility-context.json',
-        '--listing-context', '.local/merchgrid-listing-context.json',
+        '--context', 'artifacts/merchgrid/context/merchgrid-visibility-context.json',
+        '--listing-context', 'artifacts/merchgrid/context/merchgrid-listing-context.json',
       ],
       dependencies: {
         service: {
@@ -125,8 +125,8 @@ describe('marketplace visibility CLI', () => {
       profile: 'merchgrid_shopify_app_store',
       runId: 'visibility-1',
       date: '2026-08-22',
-      contextPath: '.local/merchgrid-visibility-context.json',
-      listingContextPath: '.local/merchgrid-listing-context.json',
+      contextPath: 'artifacts/merchgrid/context/merchgrid-visibility-context.json',
+      listingContextPath: 'artifacts/merchgrid/context/merchgrid-listing-context.json',
     }]);
   });
 
@@ -139,8 +139,8 @@ describe('marketplace visibility CLI', () => {
         'visibility-review',
         '--profile', 'merchgrid_shopify_app_store',
         '--date', '2026-08-07',
-        '--context', '.local/merchgrid-visibility-context.json',
-        '--listing-context', '.local/merchgrid-listing-context.json',
+        '--context', 'artifacts/merchgrid/context/merchgrid-visibility-context.json',
+        '--listing-context', 'artifacts/merchgrid/context/merchgrid-listing-context.json',
       ],
       dependencies: {
         service: {
@@ -181,7 +181,7 @@ describe('marketplace visibility CLI', () => {
         '--profile', 'merchgrid_shopify_app_store',
         '--date', '2026-08-22',
         '--run-id', 'visibility-1',
-        '--context', '.local/merchgrid-visibility-context.json',
+        '--context', 'artifacts/merchgrid/context/merchgrid-visibility-context.json',
       ],
       dependencies: {
         service: {
@@ -191,7 +191,7 @@ describe('marketplace visibility CLI', () => {
           },
         },
         engine: { step: async () => state },
-        defaultListingContextPath: '.local/merchgrid-listing-context.json',
+        defaultListingContextPath: 'artifacts/merchgrid/context/merchgrid-listing-context.json',
       },
       writeLine: () => undefined,
     });
@@ -200,8 +200,8 @@ describe('marketplace visibility CLI', () => {
       profile: 'merchgrid_shopify_app_store',
       runId: 'visibility-1',
       date: '2026-08-22',
-      contextPath: '.local/merchgrid-visibility-context.json',
-      listingContextPath: '.local/merchgrid-listing-context.json',
+      contextPath: 'artifacts/merchgrid/context/merchgrid-visibility-context.json',
+      listingContextPath: 'artifacts/merchgrid/context/merchgrid-listing-context.json',
     }]);
   });
 

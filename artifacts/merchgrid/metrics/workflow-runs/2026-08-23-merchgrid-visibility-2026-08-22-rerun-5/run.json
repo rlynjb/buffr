@@ -1,0 +1,316 @@
+{
+  "runId": "2026-08-23-merchgrid-visibility-2026-08-22-rerun-5",
+  "subjectRef": "merchgrid:visibility:2026-08-22",
+  "workflowKind": "marketplace_visibility_review",
+  "status": "waiting_for_data",
+  "stage": "m4_diagnosis",
+  "createdAt": "2026-08-24T00:24:31.815Z",
+  "updatedAt": "2026-08-24T00:24:36.006Z",
+  "evidenceRefs": [
+    "initial:marketplace_visibility:merchgrid_shopify_app_store:merchgrid:visibility:2026-08-22"
+  ],
+  "evidenceSnapshots": {
+    "initial": {
+      "product": "marketplace_visibility",
+      "profile": "merchgrid_shopify_app_store",
+      "subjectRef": "merchgrid:visibility:2026-08-22",
+      "artifactRef": "artifacts/merchgrid/metrics/artifacts/daily-health/2026-08-22.json",
+      "evidenceLevel": "sparse",
+      "recommendationType": "visibility_hypothesis",
+      "marketplaceContext": {
+        "marketplace": "shopify_app_store",
+        "productName": "MerchGrid",
+        "currentSurfaceSummary": "Shopify app listing for a catalog audit app that helps merchants find catalog quality issues.",
+        "targetAudience": "Shopify merchants who want a fast catalog audit before fixing product data.",
+        "knownDiscoverySurface": "Shopify App Store search, category browsing, listing screenshots, and app onboarding."
+      },
+      "measuredSignals": {
+        "app_opened_count": 0,
+        "scan_started_count": 0,
+        "scan_completed_count": 0,
+        "scan_failed_count": 0,
+        "request_count": 2,
+        "error_response_count": 0,
+        "error_rate": 0
+      },
+      "limitations": [
+        "Shopify Partner metrics failed"
+      ],
+      "prohibitedClaims": [
+        "Do not claim sparse evidence proves a marketplace visibility bottleneck",
+        "Do not claim a visibility change will increase installs",
+        "Do not recommend automatic marketplace edits"
+      ]
+    }
+  },
+  "moduleOutputs": {
+    "m1": {
+      "product": "MerchGrid",
+      "likelyCustomer": "Shopify merchants who want a fast catalog audit before fixing product data.",
+      "positioning": "Shopify App Store visibility review: Shopify app listing for a catalog audit app that helps merchants find catalog quality issues.",
+      "availableEvidence": [
+        "profile: merchgrid_shopify_app_store",
+        "evidence level: sparse",
+        "artifact: artifacts/merchgrid/metrics/artifacts/daily-health/2026-08-22.json"
+      ],
+      "missingInformation": [
+        "Shopify Partner metrics failed"
+      ],
+      "notes": [
+        "Do not claim sparse evidence proves a marketplace visibility bottleneck",
+        "Do not claim a visibility change will increase installs",
+        "Do not recommend automatic marketplace edits"
+      ]
+    },
+    "m2Initial": {
+      "phase": "initial",
+      "metrics": [
+        {
+          "name": "visibility.evidence_level",
+          "current": 1,
+          "baseline": null,
+          "absoluteChange": null,
+          "percentageChange": null,
+          "qualification": "inconclusive",
+          "confidence": "low"
+        },
+        {
+          "name": "app_opened_count",
+          "current": 0,
+          "baseline": null,
+          "absoluteChange": null,
+          "percentageChange": null,
+          "qualification": "inconclusive",
+          "confidence": "low"
+        },
+        {
+          "name": "error_rate",
+          "current": 0,
+          "baseline": null,
+          "absoluteChange": null,
+          "percentageChange": null,
+          "qualification": "inconclusive",
+          "confidence": "low"
+        },
+        {
+          "name": "error_response_count",
+          "current": 0,
+          "baseline": null,
+          "absoluteChange": null,
+          "percentageChange": null,
+          "qualification": "inconclusive",
+          "confidence": "low"
+        },
+        {
+          "name": "request_count",
+          "current": 2,
+          "baseline": null,
+          "absoluteChange": null,
+          "percentageChange": null,
+          "qualification": "inconclusive",
+          "confidence": "low"
+        },
+        {
+          "name": "scan_completed_count",
+          "current": 0,
+          "baseline": null,
+          "absoluteChange": null,
+          "percentageChange": null,
+          "qualification": "inconclusive",
+          "confidence": "low"
+        },
+        {
+          "name": "scan_failed_count",
+          "current": 0,
+          "baseline": null,
+          "absoluteChange": null,
+          "percentageChange": null,
+          "qualification": "inconclusive",
+          "confidence": "low"
+        },
+        {
+          "name": "scan_started_count",
+          "current": 0,
+          "baseline": null,
+          "absoluteChange": null,
+          "percentageChange": null,
+          "qualification": "inconclusive",
+          "confidence": "low"
+        }
+      ],
+      "comparisonQuality": "limited",
+      "unresolvedQualificationNeeds": [
+        "measured marketplace traffic is sparse",
+        "Shopify Partner metrics failed"
+      ]
+    },
+    "m3": [],
+    "m4": {
+      "performancePath": "insufficient_data",
+      "primaryBottleneck": "Insufficient marketplace visibility evidence: observed fact: Shopify Partner metrics failed and measured signals are sparse, so the main bottleneck cannot be isolated beyond a possible top-of-funnel discovery issue.",
+      "competingExplanation": "interpretation: Zero app opens and zero scans could reflect weak discovery, but could also reflect missing/failed measurement rather than true marketplace underperformance.",
+      "confidence": "low",
+      "decision": "collect_more_data",
+      "researchQuestion": null,
+      "notes": [
+        "observed fact: app_opened_count=0, scan_started_count=0, scan_completed_count=0, request_count=2, error_response_count=0, error_rate=0.",
+        "observed fact: evidence level is sparse and limitations include 'Shopify Partner metrics failed'.",
+        "interpretation: The available signals do not reliably separate discovery, click-through, interest, or conversion problems.",
+        "interpretation: If forced to name a likely area, the earliest plausible bottleneck is discovery/visibility, but this is not proven and should not be treated as a confirmed diagnosis.",
+        "assumption: request_count may not map cleanly to Shopify App Store listing exposure or install intent without partner analytics."
+      ]
+    }
+  },
+  "events": [
+    {
+      "eventId": "232bc418-0269-4d2b-9470-a76d9444ef2b",
+      "runId": "2026-08-23-merchgrid-visibility-2026-08-22-rerun-5",
+      "type": "workflow.started",
+      "stage": "m1_context",
+      "message": "Workflow run started",
+      "createdAt": "2026-08-24T00:24:31.815Z",
+      "data": {
+        "initialEvidenceRef": "initial:marketplace_visibility:merchgrid_shopify_app_store:merchgrid:visibility:2026-08-22"
+      }
+    },
+    {
+      "eventId": "a3ad94b6-3c30-49bb-ae45-60f4a1854974",
+      "runId": "2026-08-23-merchgrid-visibility-2026-08-22-rerun-5",
+      "type": "module.started",
+      "stage": "m1_context",
+      "message": "M1 context started",
+      "createdAt": "2026-08-24T00:24:31.817Z",
+      "data": {
+        "moduleId": "m1"
+      }
+    },
+    {
+      "eventId": "98a24996-7053-4e30-b6aa-70c5f4091bfa",
+      "runId": "2026-08-23-merchgrid-visibility-2026-08-22-rerun-5",
+      "type": "module.completed",
+      "stage": "m1_context",
+      "message": "M1 context completed",
+      "createdAt": "2026-08-24T00:24:31.818Z",
+      "data": {
+        "moduleId": "m1"
+      }
+    },
+    {
+      "eventId": "e723ca6d-c979-432d-85ef-c26a5806adab",
+      "runId": "2026-08-23-merchgrid-visibility-2026-08-22-rerun-5",
+      "type": "route.decided",
+      "stage": "m1_context",
+      "message": "Route decided: advance",
+      "createdAt": "2026-08-24T00:24:31.818Z",
+      "data": {
+        "decisionType": "advance",
+        "nextStage": "m2_metrics_initial"
+      }
+    },
+    {
+      "eventId": "d4a0399a-5172-4a2a-b577-ab0281218fb6",
+      "runId": "2026-08-23-merchgrid-visibility-2026-08-22-rerun-5",
+      "type": "workflow.advanced",
+      "stage": "m2_metrics_initial",
+      "message": "Workflow advanced to m2_metrics_initial",
+      "createdAt": "2026-08-24T00:24:31.818Z",
+      "data": {}
+    },
+    {
+      "eventId": "368cafad-3e87-4637-891a-a0067545c372",
+      "runId": "2026-08-23-merchgrid-visibility-2026-08-22-rerun-5",
+      "type": "module.started",
+      "stage": "m2_metrics_initial",
+      "message": "M2 initial metrics started",
+      "createdAt": "2026-08-24T00:24:31.819Z",
+      "data": {
+        "moduleId": "m2"
+      }
+    },
+    {
+      "eventId": "b47d2966-3e18-42a5-baff-10ede53043c2",
+      "runId": "2026-08-23-merchgrid-visibility-2026-08-22-rerun-5",
+      "type": "module.completed",
+      "stage": "m2_metrics_initial",
+      "message": "M2 initial metrics completed",
+      "createdAt": "2026-08-24T00:24:31.824Z",
+      "data": {
+        "moduleId": "m2",
+        "phase": "initial"
+      }
+    },
+    {
+      "eventId": "e8d74009-5c26-4c03-8ba9-2d49774ab957",
+      "runId": "2026-08-23-merchgrid-visibility-2026-08-22-rerun-5",
+      "type": "route.decided",
+      "stage": "m2_metrics_initial",
+      "message": "Route decided: advance",
+      "createdAt": "2026-08-24T00:24:31.824Z",
+      "data": {
+        "decisionType": "advance",
+        "nextStage": "m4_diagnosis"
+      }
+    },
+    {
+      "eventId": "348d5a81-01dc-4156-923f-f65bdd63f817",
+      "runId": "2026-08-23-merchgrid-visibility-2026-08-22-rerun-5",
+      "type": "workflow.advanced",
+      "stage": "m4_diagnosis",
+      "message": "Workflow advanced to m4_diagnosis",
+      "createdAt": "2026-08-24T00:24:31.824Z",
+      "data": {}
+    },
+    {
+      "eventId": "1ace8b4d-c157-4ef0-8fee-b5b32fc49dc3",
+      "runId": "2026-08-23-merchgrid-visibility-2026-08-22-rerun-5",
+      "type": "module.started",
+      "stage": "m4_diagnosis",
+      "message": "M4 diagnosis started",
+      "createdAt": "2026-08-24T00:24:31.825Z",
+      "data": {
+        "moduleId": "m4"
+      }
+    },
+    {
+      "eventId": "008e131d-47c6-4e7d-a560-27bbc78b4abc",
+      "runId": "2026-08-23-merchgrid-visibility-2026-08-22-rerun-5",
+      "type": "module.completed",
+      "stage": "m4_diagnosis",
+      "message": "M4 diagnosis completed",
+      "createdAt": "2026-08-24T00:24:36.006Z",
+      "data": {
+        "moduleId": "m4"
+      }
+    },
+    {
+      "eventId": "ede6f746-86c4-44c5-b7dd-693e0fd30e54",
+      "runId": "2026-08-23-merchgrid-visibility-2026-08-22-rerun-5",
+      "type": "route.decided",
+      "stage": "m4_diagnosis",
+      "message": "Route decided: wait",
+      "createdAt": "2026-08-24T00:24:36.006Z",
+      "data": {
+        "decisionType": "wait",
+        "reason": "diagnosis requires more data"
+      }
+    },
+    {
+      "eventId": "99c3d843-662d-4bfe-bd7b-975ddf3644a8",
+      "runId": "2026-08-23-merchgrid-visibility-2026-08-22-rerun-5",
+      "type": "workflow.waiting",
+      "stage": "m4_diagnosis",
+      "message": "diagnosis requires more data",
+      "createdAt": "2026-08-24T00:24:36.006Z",
+      "data": {}
+    },
+    {
+      "eventId": "0b4fc1f8-f77c-4060-b831-813d10cd1ec0",
+      "runId": "2026-08-23-merchgrid-visibility-2026-08-22-rerun-5",
+      "type": "workflow.waiting_for_data",
+      "stage": "m4_diagnosis",
+      "message": "diagnosis requires more data",
+      "createdAt": "2026-08-24T00:24:36.006Z",
+      "data": {}
+    }
+  ]
+}

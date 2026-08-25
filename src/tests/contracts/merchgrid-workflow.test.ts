@@ -37,12 +37,12 @@ describe('MerchGrid workflow evidence contract', () => {
     expect(
       parseMerchGridWorkflowEvidence(
         weeklyArtifact,
-        '.local/merchgrid-metrics/artifacts/weekly-reviews/2026-08-21.json',
+        'artifacts/merchgrid/metrics/artifacts/weekly-reviews/2026-08-21.json',
       ),
     ).toMatchObject({
       product: 'merchgrid',
       kind: 'weekly_review',
-      artifactRef: '.local/merchgrid-metrics/artifacts/weekly-reviews/2026-08-21.json',
+      artifactRef: 'artifacts/merchgrid/metrics/artifacts/weekly-reviews/2026-08-21.json',
     });
   });
 
