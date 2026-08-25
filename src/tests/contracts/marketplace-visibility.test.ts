@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  MarketplaceListingContextSchema,
   MarketplaceVisibilityContextSchema,
   MarketplaceVisibilityEvidenceSchema,
   parseMarketplaceVisibilityEvidence,
@@ -43,6 +44,48 @@ describe('marketplace visibility evidence contract', () => {
     evidenceLevel: 'sparse' as const,
     confidenceBoundary: 'low' as const,
     reason: 'metrics_sparse_context_sufficient' as const,
+  });
+
+  const merchGridListingContext = (overrides: Record<string, unknown> = {}) => ({
+    marketplace: 'shopify_app_store' as const,
+    profile: 'merchgrid_shopify_app_store' as const,
+    productName: 'MerchGrid',
+    sourceUrl: 'https://apps.shopify.com/merchgrid-catalog-audit',
+    capturedAt: '2026-08-24T12:00:00.000Z',
+    captureMode: 'manual_visual_review' as const,
+    publicSurface: {
+      title: 'MerchGrid Catalog Audit',
+      headline: 'Scans your product catalog and shows exactly which items are priced below cost',
+      category: 'Analytics',
+      pricingLabel: 'Free',
+      ratingSummary: '0 reviews',
+      reviewCount: 0,
+      launchDate: 'August 7, 2026',
+    },
+    gallery: {
+      imageCount: 4,
+      observedImageLabels: ['main image', 'onboarding image', 'progress image', 'result image'],
+      visualNotes: ['screenshots show audit flow and result surface'],
+    },
+    trustSignals: {
+      positive: ['free pricing', 'privacy policy visible'],
+      friction: ['no reviews yet', 'data access disclosure may need safety copy'],
+    },
+    copyNotes: {
+      clearClaims: ['detect below cost pricing', 'find duplicate and missing skus'],
+      unclearClaims: ['read only safety is not prominent'],
+      missingContext: ['first scan outcome could be clearer'],
+    },
+    visibilityRubricNotes: {
+      promiseClarity: 'pricing issue promise is concrete',
+      audienceSpecificity: 'merchant role is implied but not explicit',
+      problemActionFit: 'catalog audit connects to first scan',
+      discoveryFit: 'analytics category may require clearer catalog audit keywords',
+      trustAndRiskReduction: 'read only safety should be easier to see',
+      assetClarity: 'gallery shows screens but outcome hierarchy may need review',
+    },
+    limitations: ['manual public page review only'],
+    ...overrides,
   });
 
   it('accepts a complete MerchGrid visibility brief', () => {
@@ -139,6 +182,41 @@ describe('marketplace visibility evidence contract', () => {
       },
       limitations: ['etsy runtime profile is fixture-backed in this slice'],
     })).toMatchObject({ profile: 'etsy_listing' });
+  });
+
+  it('accepts public marketplace listing context', () => {
+    expect(MarketplaceListingContextSchema.parse(merchGridListingContext())).toMatchObject({
+      marketplace: 'shopify_app_store',
+      sourceUrl: 'https://apps.shopify.com/merchgrid-catalog-audit',
+      gallery: { imageCount: 4 },
+    });
+  });
+
+  it('allows marketplace visibility evidence to reference listing context', () => {
+    expect(parseMarketplaceVisibilityEvidence({
+      ...sparseEvidence(),
+      artifactRef: '.local/merchgrid-metrics/artifacts/daily-health/2026-08-22.json',
+      listingContext: merchGridListingContext(),
+    })).toMatchObject({
+      listingContext: {
+        sourceUrl: 'https://apps.shopify.com/merchgrid-catalog-audit',
+        trustSignals: { friction: ['no reviews yet', 'data access disclosure may need safety copy'] },
+      },
+    });
+  });
+
+  it.each([
+    { sourceUrl: 'http://apps.shopify.com/merchgrid-catalog-audit' },
+    { sourceUrl: 'https://partners.shopify.com/123/apps/456' },
+    { sourceUrl: 'file:///tmp/listing.html' },
+    { rawHtml: '<html>listing</html>' },
+    { cookies: 'sid=secret' },
+    { trustSignals: { positive: ['free pricing'], friction: ['customer email jane@example.com'] } },
+  ])('rejects unsafe listing context values %#', (unsafe) => {
+    expect(() => MarketplaceListingContextSchema.parse({
+      ...merchGridListingContext(),
+      ...unsafe,
+    })).toThrow();
   });
 
   it.each([

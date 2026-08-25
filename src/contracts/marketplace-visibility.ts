@@ -35,9 +35,21 @@ const MarketplaceVisibilitySignalKeySchema = z.string()
   .regex(/^[a-z][a-z0-9_]{0,63}$/u, 'must be a normalized signal name')
   .refine((value) => !UncuratedDataPattern.test(value), 'must not name private or source data');
 
+const PublicMarketplaceUrlSchema = z.string()
+  .url()
+  .startsWith('https://')
+  .refine((value) => !value.includes('partners.shopify.com'), 'must not reference private Partner Dashboard pages')
+  .refine((value) => !value.includes('admin.shopify.com'), 'must not reference private admin pages')
+  .refine((value) => !UncuratedDataPattern.test(value), 'must not include private or source data markers');
+
 export const MarketplaceVisibilityProfileSchema = z.enum([
   'merchgrid_shopify_app_store',
   'etsy_listing',
+]);
+
+export const MarketplaceListingCaptureModeSchema = z.enum([
+  'manual_visual_review',
+  'browser_assisted_public_page',
 ]);
 
 export const MarketplaceVisibilityProductTypeSchema = z.enum([
@@ -78,6 +90,74 @@ export const VisibilityReviewModeSchema = z.discriminatedUnion('mode', [
   }).strict(),
 ]);
 
+const ListingPublicSurfaceSchema = z.object({
+  title: safeMarketplaceText(160).optional(),
+  subtitle: safeMarketplaceText(240).optional(),
+  headline: safeMarketplaceText(300).optional(),
+  shortDescription: safeMarketplaceText(500).optional(),
+  category: safeMarketplaceText(120).optional(),
+  pricingLabel: safeMarketplaceText(80).optional(),
+  ratingSummary: safeMarketplaceText(120).optional(),
+  reviewCount: z.number().int().min(0).max(1_000_000).optional(),
+  launchDate: safeMarketplaceText(80).optional(),
+}).strict();
+
+const ListingGallerySchema = z.object({
+  imageCount: z.number().int().min(0).max(50),
+  observedImageLabels: z.array(safeMarketplaceText(120)).max(20),
+  visualNotes: z.array(safeMarketplaceText(500)).max(20),
+}).strict();
+
+const ListingTrustSignalsSchema = z.object({
+  positive: z.array(safeMarketplaceText(200)).max(20),
+  friction: z.array(safeMarketplaceText(200)).max(20),
+}).strict();
+
+const ListingCopyNotesSchema = z.object({
+  clearClaims: z.array(safeMarketplaceText(240)).max(20),
+  unclearClaims: z.array(safeMarketplaceText(240)).max(20),
+  missingContext: z.array(safeMarketplaceText(240)).max(20),
+}).strict();
+
+const ListingVisibilityRubricNotesSchema = z.object({
+  promiseClarity: safeMarketplaceText(500),
+  audienceSpecificity: safeMarketplaceText(500),
+  problemActionFit: safeMarketplaceText(500),
+  discoveryFit: safeMarketplaceText(500),
+  trustAndRiskReduction: safeMarketplaceText(500),
+  assetClarity: safeMarketplaceText(500),
+}).strict();
+
+export const MarketplaceListingContextSchema = z.object({
+  marketplace: z.enum(['shopify_app_store', 'etsy', 'meta_marketplace']),
+  profile: MarketplaceVisibilityProfileSchema,
+  productName: safeMarketplaceText(120),
+  sourceUrl: PublicMarketplaceUrlSchema,
+  capturedAt: z.string().datetime({ offset: true }),
+  captureMode: MarketplaceListingCaptureModeSchema,
+  publicSurface: ListingPublicSurfaceSchema,
+  gallery: ListingGallerySchema,
+  trustSignals: ListingTrustSignalsSchema,
+  copyNotes: ListingCopyNotesSchema,
+  visibilityRubricNotes: ListingVisibilityRubricNotesSchema,
+  limitations: z.array(safeMarketplaceText(300)).max(20),
+}).strict().superRefine((value, ctx) => {
+  if (value.profile === 'merchgrid_shopify_app_store' && value.marketplace !== 'shopify_app_store') {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['marketplace'],
+      message: 'marketplace must match profile',
+    });
+  }
+  if (value.profile === 'etsy_listing' && value.marketplace !== 'etsy') {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['marketplace'],
+      message: 'marketplace must match profile',
+    });
+  }
+});
+
 export const MarketplaceVisibilityEvidenceSchema = z.object({
   product: z.literal('marketplace_visibility'),
   profile: MarketplaceVisibilityProfileSchema,
@@ -87,6 +167,7 @@ export const MarketplaceVisibilityEvidenceSchema = z.object({
   recommendationType: z.literal('visibility_hypothesis'),
   reviewMode: ExploratoryVisibilityReviewModeSchema,
   marketplaceContext: MarketplaceVisibilityContextSchema,
+  listingContext: MarketplaceListingContextSchema.optional(),
   measuredSignals: z.record(MarketplaceVisibilitySignalKeySchema, z.number().finite()),
   limitations: z.array(safeMarketplaceText(300)),
   prohibitedClaims: z.array(safeMarketplaceText(300)),
@@ -101,12 +182,21 @@ export const MarketplaceVisibilityEvidenceSchema = z.object({
       message: 'subjectRef must match the marketplace profile',
     });
   }
+  if (value.listingContext && value.listingContext.profile !== value.profile) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['listingContext', 'profile'],
+      message: 'listingContext profile must match evidence profile',
+    });
+  }
 });
 
 export type MarketplaceVisibilityEvidence = z.infer<typeof MarketplaceVisibilityEvidenceSchema>;
 export type MarketplaceVisibilityProfile = z.infer<typeof MarketplaceVisibilityProfileSchema>;
 export type MarketplaceVisibilityContext = z.infer<typeof MarketplaceVisibilityContextSchema>;
 export type MarketplaceVisibilityProductType = z.infer<typeof MarketplaceVisibilityProductTypeSchema>;
+export type MarketplaceListingContext = z.infer<typeof MarketplaceListingContextSchema>;
+export type MarketplaceListingCaptureMode = z.infer<typeof MarketplaceListingCaptureModeSchema>;
 export type ExploratoryVisibilityReviewMode = z.infer<typeof ExploratoryVisibilityReviewModeSchema>;
 export type VisibilityReviewMode = z.infer<typeof VisibilityReviewModeSchema>;
 
