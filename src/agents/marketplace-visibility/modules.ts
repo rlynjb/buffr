@@ -22,20 +22,22 @@ const VISIBILITY_DIAGNOSIS_PROMPT = [
   'M4 Marketplace Visibility Diagnosis.',
   'Use sparse evidence honestly. Do not claim proof.',
   'If reviewMode.mode is exploratory_visibility_test, sparse or zero metrics alone are not a reason to stop.',
-  'Use product context and marketplace context to identify one likely visibility bottleneck hypothesis.',
-  'Choose proceed_to_hypothesis for one manual exploratory test unless the product context is contradictory or unsafe.',
+  'Use product context, marketplace context, and listing context to identify one likely visibility bottleneck hypothesis.',
+  'Listing observations are qualitative evidence only.',
+  'Choose proceed_to_hypothesis for one manual exploratory test unless the product or listing context is contradictory or unsafe.',
 ].join('\n');
 
 const VISIBILITY_HYPOTHESIS_PROMPT = [
   'M5 Marketplace Visibility Hypothesis.',
   'Use sparse evidence honestly. Propose one manual, exploratory listing revision.',
-  'Do not claim the revision will improve marketplace outcomes.',
+  'The hypothesis may use listing copy or visual context, but must not claim the revision will improve marketplace outcomes.',
 ].join('\n');
 
 const VISIBILITY_TEST_PLAN_PROMPT = [
   'M6 Marketplace Visibility Test Plan.',
   'Use sparse evidence honestly. Define a manual exploratory test and its later measurement needs.',
   'The output is a manual test plan. It must not claim the system will edit an external marketplace.',
+  'Change one listing element at a time so the result remains interpretable.',
 ].join('\n');
 
 const VISIBILITY_EVALUATION_PROMPT = [
@@ -108,6 +110,7 @@ export function createMarketplaceVisibilityModuleExecutor(deps: { agentRunner: A
 }
 
 export function deterministicMarketplaceVisibilityContext(evidence: MarketplaceVisibilityEvidence): ContextOutput {
+  const listing = evidence.listingContext;
   return {
     product: evidence.marketplaceContext.productName,
     likelyCustomer: evidence.marketplaceContext.targetCustomer,
@@ -116,9 +119,32 @@ export function deterministicMarketplaceVisibilityContext(evidence: MarketplaceV
       `profile: ${evidence.profile}`,
       `evidence level: ${evidence.evidenceLevel}`,
       `artifact: ${evidence.artifactRef}`,
+      ...(listing ? [
+        `listing url: ${listing.sourceUrl}`,
+        ...(listing.publicSurface.headline ? [`listing headline: ${listing.publicSurface.headline}`] : []),
+        ...(listing.publicSurface.category ? [`listing category: ${listing.publicSurface.category}`] : []),
+        `listing gallery images: ${listing.gallery.imageCount}`,
+        ...listing.copyNotes.clearClaims.map((claim) => `listing clear claim: ${claim}`),
+      ] : ['listing context: unavailable']),
     ],
-    missingInformation: evidence.limitations,
-    notes: evidence.prohibitedClaims,
+    missingInformation: [
+      ...evidence.limitations,
+      ...(listing ? [
+        ...listing.trustSignals.friction.map((item) => `listing friction: ${item}`),
+        ...listing.copyNotes.unclearClaims.map((item) => `listing unclear claim: ${item}`),
+        ...listing.copyNotes.missingContext.map((item) => `listing missing context: ${item}`),
+        ...listing.limitations.map((item) => `listing limitation: ${item}`),
+      ] : ['listing context unavailable']),
+    ],
+    notes: [
+      ...evidence.prohibitedClaims,
+      ...(listing ? [
+        'Listing observations are qualitative context, not conversion proof.',
+        `listing captured at: ${listing.capturedAt}`,
+        `promise clarity: ${listing.visibilityRubricNotes.promiseClarity}`,
+        `trust and risk reduction: ${listing.visibilityRubricNotes.trustAndRiskReduction}`,
+      ] : []),
+    ],
   };
 }
 

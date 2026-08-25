@@ -13,8 +13,21 @@ describe('marketplace visibility modules', () => {
     expect(deterministicMarketplaceVisibilityContext(visibilityEvidence())).toMatchObject({
       product: 'MerchGrid',
       positioning: expect.stringContaining('Shopify App Store'),
-      missingInformation: ['low request volume'],
+      missingInformation: expect.arrayContaining(['low request volume']),
     });
+  });
+
+  it('surfaces listing context as curated M1 evidence', () => {
+    const context = deterministicMarketplaceVisibilityContext({
+      ...visibilityEvidence(),
+      listingContext: listingContext(),
+    });
+
+    expect(context.availableEvidence).toContain('listing url: https://apps.shopify.com/merchgrid-catalog-audit');
+    expect(context.availableEvidence).toContain('listing headline: Scans your product catalog and shows exactly which items are priced below cost');
+    expect(context.availableEvidence).toContain('listing gallery images: 4');
+    expect(context.missingInformation).toContain('listing friction: no reviews yet');
+    expect(context.notes).toContain('Listing observations are qualitative context, not conversion proof.');
   });
 
   it('labels M2 as limited sparse evidence without blocking M4', () => {
@@ -230,6 +243,47 @@ function visibilityEvidence(): MarketplaceVisibilityEvidence {
     measuredSignals: { posthog_app_opened_count: 0 },
     limitations: ['low request volume'],
     prohibitedClaims: ['Do not claim the listing caused traffic'],
+  };
+}
+
+function listingContext() {
+  return {
+    marketplace: 'shopify_app_store' as const,
+    profile: 'merchgrid_shopify_app_store' as const,
+    productName: 'MerchGrid',
+    sourceUrl: 'https://apps.shopify.com/merchgrid-catalog-audit',
+    capturedAt: '2026-08-24T12:00:00.000Z',
+    captureMode: 'manual_visual_review' as const,
+    publicSurface: {
+      headline: 'Scans your product catalog and shows exactly which items are priced below cost',
+      category: 'Analytics',
+      pricingLabel: 'Free',
+      ratingSummary: '0 reviews',
+      reviewCount: 0,
+    },
+    gallery: {
+      imageCount: 4,
+      observedImageLabels: ['main image', 'onboarding image', 'progress image', 'result image'],
+      visualNotes: ['screenshots show audit flow and result surface'],
+    },
+    trustSignals: {
+      positive: ['free pricing'],
+      friction: ['no reviews yet'],
+    },
+    copyNotes: {
+      clearClaims: ['detect below cost pricing'],
+      unclearClaims: ['read only safety is not prominent'],
+      missingContext: ['first scan outcome could be clearer'],
+    },
+    visibilityRubricNotes: {
+      promiseClarity: 'pricing issue promise is concrete',
+      audienceSpecificity: 'merchant role is implied but not explicit',
+      problemActionFit: 'catalog audit connects to first scan',
+      discoveryFit: 'analytics category may require clearer catalog audit keywords',
+      trustAndRiskReduction: 'read only safety should be easier to see',
+      assetClarity: 'gallery shows screens but outcome hierarchy may need review',
+    },
+    limitations: ['manual public page review only'],
   };
 }
 
