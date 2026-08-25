@@ -69,6 +69,33 @@ describe('marketplace visibility profile', () => {
     });
   });
 
+  it('includes optional listing context in initial visibility evidence', async () => {
+    const service = createMarketplaceVisibilityService({
+      engine: new FakeMarketplaceVisibilityEngine(),
+      merchgridArtifacts: new InMemoryArtifacts(dailyArtifact()),
+      runRepository: new InMemoryRunRepository(),
+      loadContext: async () => readyContext(),
+      loadListingContext: async () => readyListingContext(),
+    });
+
+    const state = await service.startVisibilityReview({
+      profile: 'merchgrid_shopify_app_store',
+      runId: 'visibility-with-listing-context',
+      date: '2026-08-22',
+      contextPath: '.local/merchgrid-visibility-context.json',
+      listingContextPath: '.local/merchgrid-listing-context.json',
+    });
+
+    expect(state.evidenceSnapshots?.initial).toMatchObject({
+      listingContext: {
+        sourceUrl: 'https://apps.shopify.com/merchgrid-catalog-audit',
+        trustSignals: {
+          friction: ['no reviews yet', 'read only safety is not prominent near data access context'],
+        },
+      },
+    });
+  });
+
   it('projects Fly numeric signals when the daily artifact has no PostHog metrics', async () => {
     const service = createService({
       dailyArtifact: flyOnlyDailyArtifact(),
@@ -435,6 +462,49 @@ function readyContext() {
     constraints: ['manual listing changes only'],
     availableAssets: ['listing copy', 'screenshots'],
     ownerGoal: 'increase qualified app opens and first scans',
+  };
+}
+
+function readyListingContext() {
+  return {
+    marketplace: 'shopify_app_store' as const,
+    profile: 'merchgrid_shopify_app_store' as const,
+    productName: 'MerchGrid',
+    sourceUrl: 'https://apps.shopify.com/merchgrid-catalog-audit',
+    capturedAt: '2026-08-24T12:00:00.000Z',
+    captureMode: 'manual_visual_review' as const,
+    publicSurface: {
+      title: 'MerchGrid Catalog Audit',
+      headline: 'Scans your product catalog and shows exactly which items are priced below cost',
+      category: 'Analytics',
+      pricingLabel: 'Free',
+      ratingSummary: '0 reviews',
+      reviewCount: 0,
+      launchDate: 'August 7, 2026',
+    },
+    gallery: {
+      imageCount: 4,
+      observedImageLabels: ['main image', 'onboarding image', 'progress image', 'result image'],
+      visualNotes: ['screenshots show audit flow and result surface'],
+    },
+    trustSignals: {
+      positive: ['free pricing', 'privacy policy visible'],
+      friction: ['no reviews yet', 'read only safety is not prominent near data access context'],
+    },
+    copyNotes: {
+      clearClaims: ['detect below cost pricing'],
+      unclearClaims: ['first scan action could be more explicit'],
+      missingContext: ['why read only access is safe'],
+    },
+    visibilityRubricNotes: {
+      promiseClarity: 'pricing issue promise is concrete',
+      audienceSpecificity: 'merchant role is implied but not explicit',
+      problemActionFit: 'catalog audit connects to first scan',
+      discoveryFit: 'analytics category may require clearer catalog audit keywords',
+      trustAndRiskReduction: 'read only safety should be easier to see',
+      assetClarity: 'gallery shows screens but outcome hierarchy may need review',
+    },
+    limitations: ['manual public page review only'],
   };
 }
 

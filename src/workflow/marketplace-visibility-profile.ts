@@ -1,6 +1,7 @@
 import { join } from 'node:path';
 import {
   MarketplaceVisibilityEvidenceSchema,
+  type MarketplaceListingContext,
   type MarketplaceVisibilityContext,
   type MarketplaceVisibilityEvidence,
   type MarketplaceVisibilityProfile,
@@ -38,6 +39,7 @@ export type MarketplaceVisibilityService = {
     runId: string;
     date?: string;
     contextPath: string;
+    listingContextPath?: string;
   }): Promise<WorkflowRunState>;
   supplyVisibilityResult(input: { profile: MarketplaceVisibilityProfile; runId: string; through?: string }): Promise<WorkflowRunState>;
 };
@@ -49,18 +51,23 @@ export function createMarketplaceVisibilityService(deps: {
   merchgridArtifactRootRef?: string;
   runRepository: RunRepository;
   loadContext: (path: string) => Promise<MarketplaceVisibilityContext>;
+  loadListingContext?: (path: string) => Promise<MarketplaceListingContext>;
 }): MarketplaceVisibilityService {
   return {
     async startVisibilityReview(input) {
       const context = await deps.loadContext(input.contextPath);
+      const listingContext = input.listingContextPath
+        ? await requireListingContextLoader(deps.loadListingContext)(input.listingContextPath)
+        : undefined;
       const evidence = input.profile === 'merchgrid_shopify_app_store'
         ? await buildMerchGridVisibilityEvidence({
             input,
             context,
+            listingContext,
             artifacts: deps.merchgridArtifacts,
             artifactRootRef: deps.merchgridArtifactRootRef,
           })
-        : buildEtsyVisibilityEvidence({ input, context });
+        : buildEtsyVisibilityEvidence({ input, context, listingContext });
 
       return deps.engine.startMarketplaceVisibility({
         runId: input.runId,
@@ -116,6 +123,7 @@ export function createMarketplaceVisibilityService(deps: {
 async function buildMerchGridVisibilityEvidence(input: {
   input: { date?: string; contextPath: string };
   context: MarketplaceVisibilityContext;
+  listingContext?: MarketplaceListingContext;
   artifacts: MerchGridReviewArtifactRepository;
   artifactRootRef?: string;
 }): Promise<MarketplaceVisibilityEvidence> {
@@ -144,6 +152,7 @@ async function buildMerchGridVisibilityEvidence(input: {
     recommendationType: 'visibility_hypothesis',
     reviewMode,
     marketplaceContext: input.context,
+    listingContext: input.listingContext,
     measuredSignals,
     limitations: curatedMerchGridLimitations(artifact.limitations),
     prohibitedClaims: PROHIBITED_CLAIMS,
@@ -153,6 +162,7 @@ async function buildMerchGridVisibilityEvidence(input: {
 function buildEtsyVisibilityEvidence(input: {
   input: { runId: string; contextPath: string };
   context: MarketplaceVisibilityContext;
+  listingContext?: MarketplaceListingContext;
 }): MarketplaceVisibilityEvidence {
   if (input.context.marketplace !== 'etsy') {
     throw new AppError('validation_failed', 'Etsy visibility profile requires Etsy context');
@@ -174,6 +184,7 @@ function buildEtsyVisibilityEvidence(input: {
     recommendationType: 'visibility_hypothesis',
     reviewMode,
     marketplaceContext: input.context,
+    listingContext: input.listingContext,
     measuredSignals: {},
     limitations: ['etsy runtime profile is fixture-backed in this slice'],
     prohibitedClaims: PROHIBITED_CLAIMS,
@@ -229,6 +240,13 @@ function assertExploratoryMode(mode: VisibilityReviewMode): asserts mode is Extr
   if (mode.mode === 'missing_context') {
     throw new AppError('validation_failed', `visibility_context_missing:${mode.missingFields.join(',')}`);
   }
+}
+
+function requireListingContextLoader(
+  loader: ((path: string) => Promise<MarketplaceListingContext>) | undefined,
+): (path: string) => Promise<MarketplaceListingContext> {
+  if (!loader) throw new AppError('configuration_failed', 'Marketplace listing context loader is unavailable');
+  return loader;
 }
 
 function requireInitialVisibilityEvidence(

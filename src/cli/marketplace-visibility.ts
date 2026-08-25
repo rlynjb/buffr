@@ -3,7 +3,10 @@ import { pathToFileURL } from 'node:url';
 import { OpenAiAgentRunner } from '../agents/runner.js';
 import { createMarketplaceVisibilityModuleExecutor } from '../agents/marketplace-visibility/modules.js';
 import { MarketplaceVisibilityProfileSchema, type MarketplaceVisibilityProfile } from '../contracts/marketplace-visibility.js';
-import { loadMarketplaceVisibilityContext } from '../connectors/marketplace/local-context.js';
+import {
+  loadMarketplaceListingContext,
+  loadMarketplaceVisibilityContext,
+} from '../connectors/marketplace/local-context.js';
 import { AppError } from '../core/errors.js';
 import { loadLocalEnvironment } from '../core/local-env.js';
 import { JsonFileMerchGridReviewArtifactRepository } from '../jobs/merchgrid-source-pack.js';
@@ -15,7 +18,13 @@ type RunState = { runId: string; status: string; stage: string; evidenceRefs: st
 
 export type MarketplaceVisibilityCliDependencies = {
   service: {
-    startVisibilityReview?: (input: { profile: MarketplaceVisibilityProfile; runId: string; date?: string; contextPath: string }) => Promise<RunState>;
+    startVisibilityReview?: (input: {
+      profile: MarketplaceVisibilityProfile;
+      runId: string;
+      date?: string;
+      contextPath: string;
+      listingContextPath?: string;
+    }) => Promise<RunState>;
     supplyVisibilityResult?: (input: { profile: MarketplaceVisibilityProfile; runId: string; through?: string }) => Promise<RunState>;
   };
   engine: {
@@ -24,6 +33,7 @@ export type MarketplaceVisibilityCliDependencies = {
     rejectExperiment?: (input: { runId: string; reason: string }) => Promise<RunState>;
   };
   defaultContextPath?: string;
+  defaultListingContextPath?: string;
 };
 
 export async function runMarketplaceVisibilityCli(input: {
@@ -34,7 +44,7 @@ export async function runMarketplaceVisibilityCli(input: {
   const [command, ...options] = input.args;
 
   if (command === 'visibility-review') {
-    assertOptions(options, ['--profile', '--run-id'], ['--date', '--context']);
+    assertOptions(options, ['--profile', '--run-id'], ['--date', '--context', '--listing-context']);
     const profile = parseProfile(option(options, '--profile'));
     const date = optionalOption(options, '--date');
     if (profile === 'merchgrid_shopify_app_store' && !date) {
@@ -46,6 +56,7 @@ export async function runMarketplaceVisibilityCli(input: {
 
     const contextPath = optionalOption(options, '--context') ?? input.dependencies.defaultContextPath;
     if (!contextPath) throw new AppError('configuration_failed', 'Missing required marketplace visibility context path');
+    const listingContextPath = optionalOption(options, '--listing-context') ?? input.dependencies.defaultListingContextPath;
 
     const runId = option(options, '--run-id');
     let state = await requireService(input.dependencies.service, 'startVisibilityReview')({
@@ -53,6 +64,7 @@ export async function runMarketplaceVisibilityCli(input: {
       runId,
       date,
       contextPath,
+      listingContextPath,
     });
     while (state.status === 'analyzing' && ['m1_context', 'm2_metrics_initial', 'm4_diagnosis', 'm5_hypothesis', 'm6_test_plan'].includes(state.stage)) {
       state = await requireEngine(input.dependencies.engine, 'step')(runId);
@@ -111,8 +123,10 @@ export function createMarketplaceVisibilityDependencies(
       merchgridArtifactRootRef: join(dataDir, 'artifacts'),
       runRepository: runs,
       loadContext: loadMarketplaceVisibilityContext,
+      loadListingContext: loadMarketplaceListingContext,
     }),
     defaultContextPath: env.MERCHGRID_VISIBILITY_CONTEXT_PATH,
+    defaultListingContextPath: env.MERCHGRID_LISTING_CONTEXT_PATH,
   };
 }
 
