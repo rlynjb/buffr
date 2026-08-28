@@ -1,5 +1,13 @@
 import { z } from 'zod';
 
+/**
+ * Sparse-data marketplace visibility boundary.
+ *
+ * These contracts let Buffr recommend an exploratory visibility test even when
+ * installs, views, or revenue are missing. The tradeoff is explicit: use richer
+ * product and public-listing context, keep confidence low, and prohibit private
+ * marketplace/admin data from entering the workflow.
+ */
 const CuratedTextPattern = /^[\p{L}\p{N}][\p{L}\p{N} &'(),./-]*$/u;
 const UncuratedDataPattern = /(?:\b(?:api[ _-]?key|access[ _-]?token|authorization|buyer|credential|customer[ _-]?(?:list|record|history)|domain|email|event(?:s)?|export(?:s|ed|ing)?|history|internal|listing[ _-]?data|order(?:s)?|password|payload|person(?:al)?|private|provider|purchase(?:s|d|ing)?|raw|record(?:s)?|secret|shop[ _-]?domain|source|token)\b|(?:^|[\s"'`])[\w.-]+\.myshopify\.com\b)/iu;
 const SensitiveProseValuePatterns = [

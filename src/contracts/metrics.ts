@@ -1,5 +1,13 @@
 import { z } from 'zod';
 
+/**
+ * Daily aggregate metric snapshot boundary.
+ *
+ * A snapshot is one source, one completed UTC day, and numeric aggregate
+ * values only. The sensitive-key scan keeps raw provider payloads, tokens,
+ * customer data, shop domains, and catalog details out of Buffr's evidence
+ * layer.
+ */
 const SENSITIVE_KEY_PATTERN = /token|secret|authorization|email|shop|domain|customer|catalog|product|payload|response/i;
 
 export const MetricSourceSchema = z.enum(['posthog', 'fly_metrics', 'shopify_partner']);

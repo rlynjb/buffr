@@ -1,5 +1,12 @@
 import { z } from 'zod';
 
+/**
+ * Original listing evidence boundary.
+ *
+ * Read this as Buffr's cleaned-up listing facts, not as a provider payload.
+ * Source-specific adapters should translate Etsy or future marketplaces into
+ * this shape before the work engine sees them.
+ */
 export const EvidenceSourceSchema = z.enum(['etsy', 'web', 'user', 'derived']);
 export const IsoDateSchema = z.string().datetime();
 

@@ -13,6 +13,13 @@ import {
   TestPlanOutputSchema,
 } from './modules.js';
 
+/**
+ * Durable work-engine run state.
+ *
+ * This is the product-level execution record written to run.json. It captures
+ * workflow status, evidence, module outputs, approval state, and chronological
+ * events so a run can be inspected or resumed without replaying raw sources.
+ */
 export const WorkflowStageSchema = z.enum([
   'm1_context',
   'm2_metrics_initial',

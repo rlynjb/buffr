@@ -7,6 +7,13 @@ import {
 } from '../contracts/metrics.js';
 import type { DailyHealthSummary, WeeklyBusinessReview } from './summaries.js';
 
+/**
+ * Summary-to-workflow evidence projection.
+ *
+ * The metrics layer can compute many implementation details, but the work
+ * engine receives only this deterministic evidence view: source status,
+ * freshness, aggregate values, and limitations.
+ */
 export const SourceStatusSchema = z.union([SnapshotStatusSchema, z.literal('missing')]);
 export const SourceStatusesSchema = z.object({
   posthog: SourceStatusSchema,

@@ -9,6 +9,13 @@ import {
   WeeklySourceFreshnessSchema,
 } from '../metrics/evidence.js';
 
+/**
+ * MerchGrid review evidence boundary.
+ *
+ * Metric collection produces source snapshots and summaries. This contract is
+ * the narrower packet the work engine is allowed to consume for daily health
+ * and weekly business-review workflows.
+ */
 const LocalArtifactReferenceSchema = z
   .string()
   .min(1)

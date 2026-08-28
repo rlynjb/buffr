@@ -1,6 +1,13 @@
 import { z } from 'zod';
 import { IsoDateSchema } from './evidence.js';
 
+/**
+ * M1-M7 work-engine module outputs.
+ *
+ * Each module has a focused responsibility: understand context, qualify
+ * metrics, research gaps, diagnose, form a hypothesis, design a test, and
+ * evaluate learning. These schemas make each handoff inspectable in run.json.
+ */
 export const ModuleIdSchema = z.enum(['m1', 'm2', 'm3', 'm4', 'm5', 'm6', 'm7']);
 export const RequesterModuleIdSchema = z.enum(['m1', 'm2', 'm4', 'm5', 'm6', 'm7']);
 export const ConfidenceSchema = z.enum(['low', 'moderate', 'high']);
