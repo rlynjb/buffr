@@ -4,9 +4,11 @@ import { AppError } from '../../core/errors.js';
 import {
   CitationSchema,
   ResearchOutputSchema,
+  ResearchSearchSummarySchema,
   ResearchToolNameSchema,
   type ModuleId,
   type ResearchOutput,
+  type ResearchSearchSummary,
   type ResearchToolName,
 } from '../../contracts/modules.js';
 import { parseWithSchema } from '../../contracts/workflow.js';
@@ -62,7 +64,8 @@ export async function runResearchModule(input: {
   const limits = { ...M3_DEFAULT_LIMITS, ...input.limits };
   const now = input.now ?? Date.now;
   const startedAt = now();
-  const toolEvidence: Array<{ tool: ResearchToolName; citations: ResearchToolResult['citations']; data: unknown }> = [];
+  const toolEvidence: ToolEvidence[] = [];
+  const searchSummaries: ResearchSearchSummary[] = [];
   let toolCallCount = 0;
   let totalTokens = 0;
   let totalEstimatedCostUsd = 0;
@@ -86,11 +89,19 @@ export async function runResearchModule(input: {
     totalEstimatedCostUsd += result.usage?.estimatedCostUsd ?? 0;
 
     if (output.next_action === 'stop') {
-      return output;
+      return finalizeResearchOutput(output, toolEvidence, searchSummaries);
     }
 
-    if (limitReached({ limits, now: now(), startedAt, toolCallCount, totalTokens, totalEstimatedCostUsd })) {
-      return forceStop(output);
+    const preLookupLimit = limitReason({
+      limits,
+      now: now(),
+      startedAt,
+      toolCallCount,
+      totalTokens,
+      totalEstimatedCostUsd,
+    });
+    if (preLookupLimit) {
+      return finalizeResearchOutput(output, toolEvidence, searchSummaries, preLookupLimit);
     }
 
     const requestedLookup = normalizeRequestedLookup(output);
@@ -113,9 +124,24 @@ export async function runResearchModule(input: {
       citations,
       data: toolResult.data,
     });
+    const toolSearchSummaries = parseToolSearchSummaries(toolResult.data);
+    searchSummaries.push(...toolSearchSummaries);
+    totalTokens += toolSearchSummaries.reduce((sum, summary) => sum + (summary.totalTokens ?? 0), 0);
+    totalEstimatedCostUsd += toolSearchSummaries.reduce(
+      (sum, summary) => sum + (summary.estimatedCostUsd ?? 0),
+      0,
+    );
 
-    if (limitReached({ limits, now: now(), startedAt, toolCallCount, totalTokens, totalEstimatedCostUsd })) {
-      return forceStop(output);
+    const postLookupLimit = limitReason({
+      limits,
+      now: now(),
+      startedAt,
+      toolCallCount,
+      totalTokens,
+      totalEstimatedCostUsd,
+    });
+    if (postLookupLimit) {
+      return finalizeResearchOutput(output, toolEvidence, searchSummaries, postLookupLimit);
     }
   }
 }
@@ -161,34 +187,103 @@ function buildToolMap(tools: readonly ResearchTool[]): Map<ResearchToolName, Res
   return toolsByName;
 }
 
-function limitReached(input: {
+function limitReason(input: {
   limits: ResearchLimits;
   now: number;
   startedAt: number;
   toolCallCount: number;
   totalTokens: number;
   totalEstimatedCostUsd: number;
-}): boolean {
+}): string | undefined {
   if (input.toolCallCount >= input.limits.maxToolCalls) {
-    return true;
+    return 'M3 research tool-call limit reached.';
   }
 
   if (input.now - input.startedAt >= input.limits.maxWallClockMs) {
-    return true;
+    return 'M3 research wall-clock limit reached.';
   }
 
   if (input.limits.maxTokens !== undefined && input.totalTokens >= input.limits.maxTokens) {
-    return true;
+    return 'M3 research token budget exhausted.';
   }
 
-  return (
+  if (
     input.limits.maxEstimatedCostUsd !== undefined &&
     input.totalEstimatedCostUsd >= input.limits.maxEstimatedCostUsd
+  ) {
+    return 'M3 research cost budget exhausted.';
+  }
+
+  return undefined;
+}
+
+type ToolEvidence = {
+  tool: ResearchToolName;
+  citations: ToolCitation[];
+  data: unknown;
+};
+
+function finalizeResearchOutput(
+  output: ResearchOutput,
+  toolEvidence: readonly ToolEvidence[],
+  searchSummaries: readonly ResearchSearchSummary[],
+  limit?: string,
+): ResearchOutput {
+  const { searchSummaries: _modelAuthoredSummaries, ...modelOutput } = output;
+  const evidence = limit ? mergeToolCitations(modelOutput.evidence, toolEvidence) : modelOutput.evidence;
+  assertWebCitationsCameFromTools(evidence, toolEvidence);
+
+  return ResearchOutputSchema.parse({
+    ...modelOutput,
+    ...(limit ? { next_action: 'stop', limitations: uniqueStrings([...modelOutput.limitations, limit]) } : {}),
+    evidence,
+    ...(searchSummaries.length > 0 ? { searchSummaries } : {}),
+  });
+}
+
+function parseToolSearchSummaries(data: unknown): ResearchSearchSummary[] {
+  if (!data || typeof data !== 'object' || !('searchSummaries' in data)) return [];
+  return parseWithSchema(
+    ResearchSearchSummarySchema.array(),
+    (data as { searchSummaries: unknown }).searchSummaries,
+    'M3 search summaries',
   );
 }
 
-function forceStop(output: ResearchOutput): ResearchOutput {
-  return { ...output, next_action: 'stop' };
+function assertWebCitationsCameFromTools(
+  citations: readonly ResearchOutput['evidence'][number][],
+  toolEvidence: readonly ToolEvidence[],
+): void {
+  const toolUrls = new Set(
+    toolEvidence.flatMap((evidence) =>
+      evidence.citations
+        .filter((citation) => citation.source === 'web' && citation.url)
+        .map((citation) => citation.url!),
+    ),
+  );
+
+  const unmatched = citations.find((citation) => citation.source === 'web' && !toolUrls.has(citation.url!));
+  if (unmatched) {
+    throw new AppError('validation_failed', 'M3 web citation was not returned by a permitted research tool');
+  }
+}
+
+function mergeToolCitations(
+  outputCitations: readonly ResearchOutput['evidence'][number][],
+  toolEvidence: readonly ToolEvidence[],
+): ResearchOutput['evidence'] {
+  const merged = [...outputCitations, ...toolEvidence.flatMap((evidence) => evidence.citations)];
+  const seen = new Set<string>();
+  return merged.filter((citation) => {
+    const key = `${citation.source}\u0000${citation.url ?? ''}\u0000${citation.title}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function uniqueStrings(values: readonly string[]): string[] {
+  return [...new Set(values)];
 }
 
 function normalizeToolCitation(citation: ReturnType<typeof parseCitation>): ToolCitation {

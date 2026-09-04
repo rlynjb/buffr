@@ -82,7 +82,11 @@ describe('M3 bounded research module', () => {
 
   it('forces stop when the wall-clock limit is reached before another lookup', async () => {
     const runner = new SequenceRunner([
-      researchOutput({ next_action: 'continue', requestedLookup: lookup('hosted_web_search', 'Timed lookup') }),
+      researchOutput({
+        next_action: 'continue',
+        evidence: [],
+        requestedLookup: lookup('hosted_web_search', 'Timed lookup'),
+      }),
     ]);
     const webSearch = recordingTool('hosted_web_search');
     const times = [0, 120_001];
@@ -153,7 +157,7 @@ describe('M3 bounded research module', () => {
     });
 
     const unresolved = await runResearchModule({
-      runner: new SequenceRunner([researchOutput({ status: 'unresolved', next_action: 'stop' })]),
+      runner: new SequenceRunner([researchOutput({ status: 'unresolved', next_action: 'stop', evidence: [] })]),
       tools: [],
       request: researchRequest(),
       trace: trace(),
@@ -161,6 +165,86 @@ describe('M3 bounded research module', () => {
 
     expect(unresolved.status).toBe('unresolved');
     expect(unresolved.next_action).toBe('stop');
+  });
+
+  it('returns tool-backed citations and deterministic search summaries', async () => {
+    const summary = completedSearchSummary();
+    const webEvidence = webCitation('https://docs.example.test/guide');
+    const runner = new SequenceRunner([
+      researchOutput({
+        next_action: 'continue',
+        evidence: [],
+        requestedLookup: lookup('hosted_web_search', 'Synthetic lookup'),
+      }),
+      researchOutput({ evidence: [webEvidence], searchSummaries: [{ ...summary, citationCount: 99 }] }),
+    ]);
+    const tool = recordingTool('hosted_web_search', {
+      citations: [webEvidence],
+      data: { searchSummaries: [summary] },
+    });
+
+    const output = await runResearchModule({
+      runner,
+      tools: [tool],
+      request: researchRequest(),
+      trace: trace(),
+    });
+
+    expect(output.evidence).toEqual([webEvidence]);
+    expect(output.searchSummaries).toEqual([summary]);
+  });
+
+  it('rejects a final web citation that was not returned by a tool', async () => {
+    const runner = new SequenceRunner([
+      researchOutput({
+        next_action: 'continue',
+        evidence: [],
+        requestedLookup: lookup('hosted_web_search', 'Synthetic lookup'),
+      }),
+      researchOutput({ evidence: [webCitation('https://unmatched.example.test/guide')] }),
+    ]);
+
+    await expect(
+      runResearchModule({
+        runner,
+        tools: [
+          recordingTool('hosted_web_search', {
+            citations: [webCitation('https://docs.example.test/guide')],
+            data: { searchSummaries: [completedSearchSummary()] },
+          }),
+        ],
+        request: researchRequest(),
+        trace: trace(),
+      }),
+    ).rejects.toMatchObject({ code: 'validation_failed' });
+  });
+
+  it('keeps the latest tool citations when the call limit is reached', async () => {
+    const webEvidence = webCitation('https://docs.example.test/guide');
+    const output = await runResearchModule({
+      runner: new SequenceRunner([
+        researchOutput({
+          next_action: 'continue',
+          evidence: [],
+          requestedLookup: lookup('hosted_web_search', 'Synthetic lookup'),
+        }),
+      ]),
+      tools: [
+        recordingTool('hosted_web_search', {
+          citations: [webEvidence],
+          data: { searchSummaries: [completedSearchSummary()] },
+        }),
+      ],
+      limits: { maxToolCalls: 1 },
+      request: researchRequest(),
+      trace: trace(),
+    });
+
+    expect(output).toMatchObject({
+      next_action: 'stop',
+      evidence: [expect.objectContaining({ url: 'https://docs.example.test/guide' })],
+      searchSummaries: [expect.objectContaining({ pass: 'authoritative_domains' })],
+    });
   });
 });
 
@@ -179,18 +263,50 @@ class SequenceRunner implements AgentRunner {
   }
 }
 
-function recordingTool(name: ResearchTool['name']): ResearchTool & { calls: Record<string, unknown>[] } {
+function recordingTool(
+  name: ResearchTool['name'],
+  result?: ResearchToolResult,
+): ResearchTool & { calls: Record<string, unknown>[] } {
   return {
     name,
     calls: [],
     async call(input: Record<string, unknown>): Promise<ResearchToolResult> {
       this.calls.push(input);
 
-      return {
+      return result ?? {
         citations: [toolCitation({ title: `${name} result`, source: name === 'hosted_web_search' ? 'web' : 'etsy' })],
         data: { ok: true },
       };
     },
+  };
+}
+
+function webCitation(url: string): ToolCitation {
+  return {
+    source: 'web',
+    title: 'Official guide',
+    url,
+    excerpt: 'Synthetic official guidance.',
+    fetchedAt: '2026-08-31T00:00:00.000Z',
+    domain: new URL(url).hostname,
+    sourceType: 'official_platform',
+    retrievalMethod: 'openai_hosted_web_search',
+    searchPass: 'authoritative_domains',
+  };
+}
+
+function completedSearchSummary() {
+  return {
+    pass: 'authoritative_domains' as const,
+    status: 'completed' as const,
+    citationCount: 1,
+    officialCitationCount: 1,
+    broaderCitationCount: 0,
+    allowedDomainCount: 2,
+    totalTokens: 12,
+    estimatedCostUsd: 0.01,
+    startedAt: '2026-08-31T00:00:00.000Z',
+    completedAt: '2026-08-31T00:00:01.000Z',
   };
 }
 
