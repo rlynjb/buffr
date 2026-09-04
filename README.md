@@ -470,8 +470,8 @@ never applies a real-world change by itself.
 ## Marketplace visibility operations
 
 Marketplace visibility reviews turn sparse, aggregate-only evidence and local
-context into a manual visibility recommendation. They do not query marketplace
-providers, and they never apply marketplace edits.
+context into a manual visibility recommendation. They never query private
+marketplace providers or apply marketplace edits.
 
 Main commands:
 
@@ -514,6 +514,26 @@ data in either context file.
 If the brief is complete, zero metrics can still produce an `approval_wait`
 recommendation. If required context is missing, the command stops with the
 specific missing fields.
+
+Marketplace M3 research is optional and disabled by default. Set
+`MARKETPLACE_RESEARCH_ENABLED=true` only when the visibility workflow should
+answer a concrete M2, M4, M5, M6, or M7 question with OpenAI hosted public web
+search. The first pass is restricted to the configured official Shopify and
+Etsy domains; one broader public-web pass is allowed only when official
+evidence is insufficient. Sparse metrics alone do not trigger research.
+
+Research receives one bounded question and returns structured citations to the
+module that requested it. It never opens a private dashboard, uses an
+authenticated marketplace session, or edits a listing. Call, time, token, and
+cost controls are documented in `.env.example`, and the existing owner approval
+gate remains mandatory before any marketplace change.
+
+Automated tests stay fully offline: they inject runners and hosted tools, use
+synthetic `.example.test` URLs, fixed clocks, and temporary directories, and
+require neither credentials nor a real `.env`. After a separately authorized
+live validation, reviewers can inspect `run.json` as the source of record,
+bounded search events in `events.jsonl`, and citation-only
+`metadata.researchRefs` in `experiment-plan.json`.
 
 ## Etsy connector validation
 
