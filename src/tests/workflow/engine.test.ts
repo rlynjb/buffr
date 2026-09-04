@@ -193,6 +193,87 @@ describe('workflow engine', () => {
     expect(returned.moduleOutputs.m3).toHaveLength(1);
   });
 
+  it('executes M3 through the module executor and returns to the requesting stage', async () => {
+    const repository = new InMemoryRunRepository();
+    const calls: Array<{ stage: string; question: string }> = [];
+    const engine = createWorkflowEngine({
+      repository,
+      modules: moduleExecutor({
+        runM3: async (state, request) => {
+          calls.push({ stage: state.stage, question: request.question });
+          return researchOutput({ requester: request.requester, question: request.question });
+        },
+      }),
+      now: fixedNow,
+    });
+    await repository.create({
+      ...baseState(),
+      stage: 'm4_diagnosis',
+      evidenceRefs: ['initial:synthetic-evidence'],
+      moduleOutputs: { m3: [] },
+    });
+    await engine.requestResearch('run-123', {
+      requester: 'm4',
+      returnStage: 'm4_diagnosis',
+      question: 'Check official listing rules',
+    });
+
+    const returned = await engine.step('run-123');
+
+    expect(returned).toMatchObject({
+      stage: 'm4_diagnosis',
+      status: 'analyzing',
+      moduleOutputs: { m3: [expect.objectContaining({ requester: 'm4' })] },
+    });
+    expect(calls).toEqual([{ stage: 'm3_research', question: 'Check official listing rules' }]);
+    expect(returned.events.map((event) => event.type)).toEqual(expect.arrayContaining([
+      'module.started',
+      'module.completed',
+      'research.returned',
+    ]));
+  });
+
+  it('waits instead of repeating an identical unresolved research request without new evidence', async () => {
+    const repository = new InMemoryRunRepository();
+    const engine = createWorkflowEngine({
+      repository,
+      modules: moduleExecutor({
+        runM3: async (_state, request) => researchOutput({
+          status: 'unresolved',
+          requester: request.requester,
+          question: request.question,
+          evidence: [],
+          confidence: 'low',
+        }),
+      }),
+      now: fixedNow,
+    });
+    await repository.create({
+      ...baseState(),
+      stage: 'm4_diagnosis',
+      evidenceRefs: ['initial:synthetic-evidence'],
+      moduleOutputs: { m3: [] },
+    });
+    await engine.requestResearch('run-123', {
+      requester: 'm4',
+      returnStage: 'm4_diagnosis',
+      question: 'Synthetic policy question',
+    });
+    await engine.step('run-123');
+
+    const next = await engine.requestResearch('run-123', {
+      requester: 'm4',
+      returnStage: 'm4_diagnosis',
+      question: '  Synthetic   policy question ',
+    });
+
+    expect(next).toMatchObject({ status: 'waiting_for_data', stage: 'm4_diagnosis' });
+    expect(next.events.slice(-2).map((event) => event.type)).toEqual([
+      'research.repeated_suppressed',
+      'workflow.waiting_for_data',
+    ]);
+  });
+
   it('prevents M3 continue when the configured call cap has been reached', async () => {
     const repository = new InMemoryRunRepository();
     const engine = createWorkflowEngine({

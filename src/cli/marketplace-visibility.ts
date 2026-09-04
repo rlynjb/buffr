@@ -2,6 +2,8 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { OpenAiAgentRunner } from '../agents/runner.js';
 import { createMarketplaceVisibilityModuleExecutor } from '../agents/marketplace-visibility/modules.js';
+import { createHostedWebSearchResearchTool } from '../agents/research/hosted-web-search.js';
+import { loadMarketplaceResearchConfig } from '../agents/research/marketplace-config.js';
 import { MarketplaceVisibilityProfileSchema, type MarketplaceVisibilityProfile } from '../contracts/marketplace-visibility.js';
 import {
   loadMarketplaceListingContext,
@@ -72,9 +74,12 @@ export async function runMarketplaceVisibilityCli(input: {
       contextPath,
       listingContextPath,
     });
-    while (state.status === 'analyzing' && ['m1_context', 'm2_metrics_initial', 'm4_diagnosis', 'm5_hypothesis', 'm6_test_plan'].includes(state.stage)) {
-      state = await requireEngine(input.dependencies.engine, 'step')(runId);
-    }
+    state = await continueWorkflowStages(
+      state,
+      runId,
+      input.dependencies.engine,
+      ['m1_context', 'm2_metrics_initial', 'm4_diagnosis', 'm5_hypothesis', 'm6_test_plan'],
+    );
     return printRun(input.writeLine, state);
   }
 
@@ -102,9 +107,7 @@ export async function runMarketplaceVisibilityCli(input: {
       runId,
       through: optionalOption(options, '--through'),
     });
-    while (['m2_metrics_results', 'm7_learning'].includes(state.stage)) {
-      state = await requireEngine(input.dependencies.engine, 'step')(runId);
-    }
+    state = await continueWorkflowStages(state, runId, input.dependencies.engine, ['m2_metrics_results', 'm7_learning']);
     return printRun(input.writeLine, state);
   }
 
@@ -116,9 +119,26 @@ export function createMarketplaceVisibilityDependencies(
 ): MarketplaceVisibilityCliDependencies {
   const dataDir = required(env, 'MERCHGRID_METRICS_DATA_DIR');
   const runs: RunRepository = new JsonFileRunRepository({ rootDir: join(dataDir, 'workflow-runs') });
+  const researchConfig = loadMarketplaceResearchConfig(env);
+  const agentRunner = new OpenAiAgentRunner({ apiKey: env.OPENAI_API_KEY });
+  const researchTool = researchConfig.enabled
+    ? createHostedWebSearchResearchTool({ runner: agentRunner, config: researchConfig })
+    : undefined;
   const engine = createWorkflowEngine({
     repository: runs,
-    modules: createMarketplaceVisibilityModuleExecutor({ agentRunner: new OpenAiAgentRunner({ apiKey: env.OPENAI_API_KEY }) }),
+    modules: createMarketplaceVisibilityModuleExecutor({
+      agentRunner,
+      research: { config: researchConfig, tool: researchTool },
+    }),
+    researchLimits: {
+      maxToolCalls: researchConfig.limits.maxToolCalls,
+      maxWallClockMs: researchConfig.limits.maxWallClockMs,
+      permittedTools: ['hosted_web_search'],
+      costBudget: {
+        maxTokens: researchConfig.limits.maxTokens,
+        maxEstimatedCostUsd: researchConfig.limits.maxEstimatedCostUsd,
+      },
+    },
   });
 
   return {
@@ -134,6 +154,22 @@ export function createMarketplaceVisibilityDependencies(
     defaultContextPath: env.MERCHGRID_VISIBILITY_CONTEXT_PATH,
     defaultListingContextPath: env.MERCHGRID_LISTING_CONTEXT_PATH,
   };
+}
+
+async function continueWorkflowStages(
+  initialState: RunState,
+  runId: string,
+  engine: MarketplaceVisibilityCliDependencies['engine'],
+  stages: readonly string[],
+): Promise<RunState> {
+  let state = initialState;
+  while (
+    (stages.includes(state.stage) && ['analyzing', 'ready_for_evaluation'].includes(state.status)) ||
+    (state.stage === 'm3_research' && state.status === 'researching')
+  ) {
+    state = await requireEngine(engine, 'step')(runId);
+  }
+  return state;
 }
 
 function parseProfile(value: string): MarketplaceVisibilityProfile {

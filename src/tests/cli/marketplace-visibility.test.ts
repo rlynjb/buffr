@@ -91,6 +91,44 @@ describe('marketplace visibility CLI', () => {
     expect(lines).toContain('stage: m4_diagnosis');
   });
 
+  it('continues a visibility review through an M3 side route', async () => {
+    const states = [
+      { runId: 'visibility-1', status: 'researching', stage: 'm3_research', evidenceRefs: ['initial-ref'] },
+      { runId: 'visibility-1', status: 'analyzing', stage: 'm4_diagnosis', evidenceRefs: ['initial-ref'] },
+      { runId: 'visibility-1', status: 'awaiting_approval', stage: 'approval_wait', evidenceRefs: ['initial-ref'] },
+    ];
+    const steppedStages: string[] = [];
+    const lines: string[] = [];
+
+    await runMarketplaceVisibilityCli({
+      args: [
+        'visibility-review',
+        '--profile', 'merchgrid_shopify_app_store',
+        '--date', '2026-08-22',
+        '--run-id', 'visibility-1',
+        '--context', 'artifacts/merchgrid/context/merchgrid-visibility-context.json',
+      ],
+      dependencies: {
+        service: {
+          startVisibilityReview: async () => ({
+            runId: 'visibility-1', status: 'analyzing', stage: 'm4_diagnosis', evidenceRefs: ['initial-ref'],
+          }),
+        },
+        engine: {
+          step: async () => {
+            const state = states.shift()!;
+            steppedStages.push(state.stage);
+            return state;
+          },
+        },
+      },
+      writeLine: (line) => lines.push(line),
+    });
+
+    expect(steppedStages).toEqual(['m3_research', 'm4_diagnosis', 'approval_wait']);
+    expect(lines).toContain('stage: approval_wait');
+  });
+
   it('forwards optional listing context path for a visibility review', async () => {
     const calls: unknown[] = [];
     const state = {

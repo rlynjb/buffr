@@ -248,7 +248,7 @@ export function createWorkflowEngine(deps: {
       case 'experiment_wait':
         throw new AppError('route_not_allowed', 'Cannot step experiment_wait before result evidence is supplied');
       case 'm3_research':
-        throw new AppError('route_not_allowed', 'M3 research must return through completeResearch');
+        return runM3(state);
       case 'cycle_complete':
         throw new AppError('route_not_allowed', 'Workflow cycle is already complete');
     }
@@ -342,6 +342,14 @@ export function createWorkflowEngine(deps: {
 
   async function completeResearch(runId: string, output: ResearchOutput): Promise<WorkflowRunState> {
     const state = await deps.repository.load(runId);
+    return completeResearchFromState(state, output);
+  }
+
+  async function completeResearchFromState(
+    state: WorkflowRunState,
+    output: ResearchOutput,
+    emitFromIndex = state.events.length,
+  ): Promise<WorkflowRunState> {
     if (state.stage !== 'm3_research' || state.status !== 'researching') {
       throw new AppError('route_not_allowed', 'No active M3 research request is waiting for a result');
     }
@@ -373,6 +381,7 @@ export function createWorkflowEngine(deps: {
             requestedLookup: researchOutput.requestedLookup,
           },
         ),
+        emitFromIndex,
       );
     }
 
@@ -380,15 +389,39 @@ export function createWorkflowEngine(deps: {
       withEvent(
         {
           ...state,
-          status: 'analyzing',
+          status: statusForStage(activeRequest.returnStage),
           stage: activeRequest.returnStage,
           moduleOutputs: { ...state.moduleOutputs, m3: m3Outputs },
         },
         'research.returned',
         'M3 research returned to requester',
-        { requester: activeRequest.requester, returnStage: activeRequest.returnStage },
+        {
+          requester: activeRequest.requester,
+          returnStage: activeRequest.returnStage,
+          citationCount: researchOutput.evidence.length,
+          researchStatus: researchOutput.status,
+        },
       ),
+      emitFromIndex,
     );
+  }
+
+  async function runM3(state: WorkflowRunState): Promise<WorkflowRunState> {
+    assertCurrentStage(state, 'm3_research');
+    if (state.status !== 'researching') {
+      throw new AppError('route_not_allowed', 'M3 research can run only while research is active');
+    }
+    assertCanRunStage(state, 'm3_research');
+    const emitFromIndex = state.events.length;
+    const activeRequest = findActiveResearchRequest(state);
+    const started = withModuleStarted(state, 'm3', 'M3 research started');
+    const output = await deps.modules.runM3(started, {
+      requester: activeRequest.requester,
+      returnStage: activeRequest.returnStage,
+      question: activeRequest.question,
+    });
+    const completed = withModuleCompleted(started, 'm3', 'M3 research completed');
+    return completeResearchFromState(completed, output, emitFromIndex);
   }
 
   async function runM1(state: WorkflowRunState): Promise<WorkflowRunState> {
@@ -594,6 +627,28 @@ export function createWorkflowEngine(deps: {
       );
     }
 
+    const currentEvidenceRef = state.evidenceRefs.at(-1) ?? 'none';
+    if (isRepeatedUnresolvedResearch(state, request, currentEvidenceRef)) {
+      const suppressed = withEvent(
+        { ...state, status: 'waiting_for_data' },
+        'research.repeated_suppressed',
+        'Repeated unresolved research request suppressed',
+        {
+          requester: request.requester,
+          returnStage: request.returnStage,
+          evidenceRef: currentEvidenceRef,
+        },
+      );
+      return persist(
+        withEvent(
+          suppressed,
+          'workflow.waiting_for_data',
+          'Research remains unresolved; new evidence is required before retrying',
+        ),
+        emitFromIndex,
+      );
+    }
+
     return persist(
       withEvent(
         {
@@ -607,6 +662,7 @@ export function createWorkflowEngine(deps: {
           requester: request.requester,
           returnStage: request.returnStage,
           startedAt: now().toISOString(),
+          evidenceRef: currentEvidenceRef,
         },
       ),
       emitFromIndex,
@@ -641,6 +697,8 @@ export function createWorkflowEngine(deps: {
     requester: ResearchRequester;
     returnStage: WorkflowStage;
     startedAt: string;
+    question: string;
+    evidenceRef?: string;
   } {
     const event = [...state.events].reverse().find((candidate) => candidate.type === 'research.requested');
     if (!event) {
@@ -650,11 +708,40 @@ export function createWorkflowEngine(deps: {
     const requester = event.data.requester;
     const returnStage = event.data.returnStage;
     const startedAt = event.data.startedAt;
+    const evidenceRef = event.data.evidenceRef;
     if (!isResearchRequester(requester) || !isWorkflowStage(returnStage) || typeof startedAt !== 'string') {
       throw new AppError('validation_failed', 'Active M3 research request metadata failed validation');
     }
 
-    return { requester, returnStage, startedAt };
+    return {
+      requester,
+      returnStage,
+      startedAt,
+      question: event.message,
+      ...(typeof evidenceRef === 'string' ? { evidenceRef } : {}),
+    };
+  }
+
+  function isRepeatedUnresolvedResearch(
+    state: WorkflowRunState,
+    request: ResearchRequest,
+    evidenceReference: string,
+  ): boolean {
+    const latestOutput = state.moduleOutputs.m3.at(-1);
+    if (!latestOutput || latestOutput.status !== 'unresolved' || latestOutput.next_action !== 'stop') return false;
+
+    const latestRequestEvent = [...state.events]
+      .reverse()
+      .find((event) => event.type === 'research.requested');
+    if (!latestRequestEvent || typeof latestRequestEvent.data.evidenceRef !== 'string') return false;
+
+    return (
+      latestOutput.requester === request.requester &&
+      normalizeResearchQuestion(latestOutput.question) === normalizeResearchQuestion(request.question) &&
+      latestRequestEvent.data.requester === request.requester &&
+      latestRequestEvent.data.returnStage === request.returnStage &&
+      latestRequestEvent.data.evidenceRef === evidenceReference
+    );
   }
 
   function withEvent(
@@ -779,4 +866,8 @@ function isResearchRequester(value: unknown): value is ResearchRequester {
 
 function isWorkflowStage(value: unknown): value is WorkflowStage {
   return typeof value === 'string' && WORKFLOW_STAGES.includes(value as WorkflowStage);
+}
+
+function normalizeResearchQuestion(value: string): string {
+  return value.trim().toLowerCase().replace(/\s+/g, ' ');
 }
