@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
+import { webSearchTool } from '@openai/agents';
 import { AppError } from '../../core/errors.js';
 import { buildModuleInstructions } from '../../agents/core/policy.js';
 import { FakeAgentRunner, OpenAiAgentRunner, runStructuredModule, toOpenAiStructuredOutputSchema } from '../../agents/runner.js';
@@ -98,7 +99,7 @@ describe('agent runner seam', () => {
       model: 'gpt-5.4',
       execute: async (input) => {
         calls.push(input);
-        return { summary: 'The weekly evidence is qualified.', confidence: 'high' };
+        return { output: { summary: 'The weekly evidence is qualified.', confidence: 'high' } };
       },
     });
 
@@ -115,6 +116,39 @@ describe('agent runner seam', () => {
       model: 'gpt-5.4',
     });
     expect(calls).toEqual([{ instructions: 'Return only the requested structured output.', input: { product: 'MerchGrid' } }]);
+  });
+
+  it('passes optional hosted tools and model through the structured runner seam', async () => {
+    const hostedTools = [webSearchTool({ searchContextSize: 'low' })];
+    const calls: Array<{
+      hostedTools?: readonly ReturnType<typeof webSearchTool>[];
+      model?: string;
+    }> = [];
+    const runner = new OpenAiAgentRunner({
+      apiKey: 'test-key',
+      execute: async (input) => {
+        calls.push(input);
+        return {
+          output: { summary: 'The official source answered the question.', confidence: 'low' },
+          usage: { totalTokens: 15 },
+        };
+      },
+    });
+
+    const result = await runStructuredModule({
+      runner,
+      moduleId: 'm3',
+      modulePrompt: 'Lookup official documentation.',
+      input: {},
+      outputSchema: OutputSchema,
+      trace: { runId: 'run-123' },
+      hostedTools,
+      model: 'test-research-model',
+    });
+
+    expect(calls[0]?.hostedTools).toBe(hostedTools);
+    expect(calls[0]?.model).toBe('test-research-model');
+    expect(result.usage).toEqual({ totalTokens: 15 });
   });
 
   it('rejects an OpenAI runner without a configured API key before any model call', async () => {

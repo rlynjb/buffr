@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { Agent, run, setDefaultOpenAIKey } from '@openai/agents';
+import { Agent, run, setDefaultOpenAIKey, webSearchTool } from '@openai/agents';
 import { AppError } from '../core/errors.js';
 import type { ModuleId } from '../contracts/modules.js';
 import { parseWithSchema } from '../contracts/workflow.js';
@@ -17,6 +17,8 @@ export type AgentRunInput<TOutput> = {
   input: unknown;
   outputSchema: z.ZodType<TOutput>;
   trace: TraceContext;
+  hostedTools?: readonly ReturnType<typeof webSearchTool>[];
+  model?: string;
 };
 
 export type AgentRunResult<TOutput> = {
@@ -42,6 +44,8 @@ export type RunStructuredModuleInput<TOutput> = {
   input: unknown;
   outputSchema: z.ZodType<TOutput>;
   trace: TraceContext;
+  hostedTools?: readonly ReturnType<typeof webSearchTool>[];
+  model?: string;
 };
 
 export type StructuredModuleRunResult<TOutput> = AgentRunResult<TOutput> & {
@@ -68,7 +72,17 @@ export class FakeAgentRunner implements AgentRunner {
 export type OpenAiAgentRunnerOptions = {
   apiKey?: string;
   model?: string;
-  execute?: (input: { instructions: string; input: unknown }) => Promise<unknown>;
+  execute?: (input: {
+    instructions: string;
+    input: unknown;
+    hostedTools?: readonly ReturnType<typeof webSearchTool>[];
+    model?: string;
+  }) => Promise<AgentExecutionResult>;
+};
+
+type AgentExecutionResult = {
+  output: unknown;
+  usage?: AgentRunResult<unknown>['usage'];
 };
 
 /** Production adapter for the AgentRunner port; tests inject execute and never call the network. */
@@ -89,12 +103,18 @@ export class OpenAiAgentRunner implements AgentRunner {
     }
 
     try {
-      const output = this.execute
-        ? await this.execute({ instructions: input.instructions, input: input.input })
+      const execution = this.execute
+        ? await this.execute({
+            instructions: input.instructions,
+            input: input.input,
+            hostedTools: input.hostedTools,
+            model: input.model,
+          })
         : await this.runWithSdk(input);
       return {
-        output: parseWithSchema(input.outputSchema, output, `${input.moduleId} output`),
-        model: this.model,
+        output: parseWithSchema(input.outputSchema, execution.output, `${input.moduleId} output`),
+        model: input.model ?? this.model,
+        usage: execution.usage,
       };
     } catch (error) {
       if (error instanceof AppError) {
@@ -104,19 +124,30 @@ export class OpenAiAgentRunner implements AgentRunner {
     }
   }
 
-  private async runWithSdk<TOutput>(input: AgentRunInput<TOutput>): Promise<unknown> {
+  private async runWithSdk<TOutput>(input: AgentRunInput<TOutput>): Promise<AgentExecutionResult> {
     setDefaultOpenAIKey(this.apiKey!);
     const agent = new Agent<any, any>({
       name: `Buffr ${input.moduleId}`,
-      model: this.model,
+      model: input.model ?? this.model,
       instructions: input.instructions,
       outputType: toOpenAiStructuredOutputSchema(input.outputSchema) as any,
+      tools: input.hostedTools ? [...input.hostedTools] : undefined,
     });
     const result = await run(agent, JSON.stringify(input.input));
     if (result.finalOutput === undefined) {
       throw new AppError('connector_failed', `${input.moduleId} OpenAI runner returned no structured output`);
     }
-    return result.finalOutput;
+    const usage = (result.state as any)?._context?.usage;
+    return {
+      output: result.finalOutput,
+      usage: usage
+        ? {
+            inputTokens: usage.inputTokens,
+            outputTokens: usage.outputTokens,
+            totalTokens: usage.totalTokens,
+          }
+        : undefined,
+    };
   }
 }
 
@@ -160,6 +191,8 @@ export async function runStructuredModule<TOutput>(
       input: sanitizeModuleInput(input.input),
       outputSchema: input.outputSchema,
       trace: input.trace,
+      hostedTools: input.hostedTools,
+      model: input.model,
     });
 
     return {
