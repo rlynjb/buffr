@@ -29,6 +29,10 @@ export type ToolCitation = {
     url?: string;
     excerpt: string;
     fetchedAt: string;
+    domain?: string;
+    sourceType?: 'official_platform' | 'official_marketplace' | 'public_web' | 'derived';
+    retrievalMethod?: 'openai_hosted_web_search';
+    searchPass?: 'authoritative_domains' | 'broader_web';
 };
 
 export type ResearchRequest = {
