@@ -2,6 +2,7 @@ import { AppError } from '../../core/errors.js';
 import type { MerchGridWorkflowEvidence } from '../../contracts/merchgrid-workflow.js';
 import {
   ResearchOutputSchema,
+  ResearchProviderOutputSchema,
   type ContextOutput,
   type MetricsOutput,
   type ResearchOutput,
@@ -180,7 +181,7 @@ async function runMerchGridResearchModule(
     moduleId: 'm3',
     modulePrompt: M3_PROMPT,
     input: { state, request },
-    outputSchema: ResearchOutputSchema,
+    outputSchema: ResearchProviderOutputSchema,
     trace: trace(state),
   });
   return ResearchOutputSchema.parse(result.output);

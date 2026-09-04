@@ -634,6 +634,28 @@ export function createWorkflowEngine(deps: {
     }
 
     const currentEvidenceRef = state.evidenceRefs.at(-1) ?? 'none';
+    if (state.moduleOutputs.m3.length >= researchLimits.maxToolCalls) {
+      const limited = withEvent(
+        { ...state, status: 'waiting_for_data' },
+        'research.limit_reached',
+        'Workflow research call cap reached',
+        {
+          requester: request.requester,
+          returnStage: request.returnStage,
+          evidenceRef: currentEvidenceRef,
+          maxToolCalls: researchLimits.maxToolCalls,
+        },
+      );
+      return persist(
+        withEvent(
+          limited,
+          'workflow.waiting_for_data',
+          'Research call cap reached; new evidence is required before continuing',
+        ),
+        emitFromIndex,
+      );
+    }
+
     if (isRepeatedUnresolvedResearch(state, request, currentEvidenceRef)) {
       const suppressed = withEvent(
         { ...state, status: 'waiting_for_data' },
@@ -734,7 +756,7 @@ export function createWorkflowEngine(deps: {
     evidenceReference: string,
   ): boolean {
     const latestOutput = state.moduleOutputs.m3.at(-1);
-    if (!latestOutput || latestOutput.status !== 'unresolved' || latestOutput.next_action !== 'stop') return false;
+    if (!latestOutput || latestOutput.status === 'resolved' || latestOutput.next_action !== 'stop') return false;
 
     const latestRequestEvent = [...state.events]
       .reverse()

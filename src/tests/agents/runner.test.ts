@@ -3,7 +3,13 @@ import { z } from 'zod';
 import { webSearchTool } from '@openai/agents';
 import { AppError } from '../../core/errors.js';
 import { buildModuleInstructions } from '../../agents/core/policy.js';
-import { FakeAgentRunner, OpenAiAgentRunner, runStructuredModule, toOpenAiStructuredOutputSchema } from '../../agents/runner.js';
+import {
+  FakeAgentRunner,
+  OpenAiAgentRunner,
+  runStructuredModule,
+  sanitizeModuleInput,
+  toOpenAiStructuredOutputSchema,
+} from '../../agents/runner.js';
 import {
   ContextOutputSchema,
   DiagnosisOutputSchema,
@@ -11,6 +17,7 @@ import {
   HypothesisOutputSchema,
   MetricsOutputSchema,
   ResearchOutputSchema,
+  ResearchProviderOutputSchema,
   TestPlanOutputSchema,
 } from '../../contracts/modules.js';
 
@@ -22,6 +29,19 @@ const OutputSchema = z
   .strict();
 
 describe('agent runner seam', () => {
+  it('retains token-usage counters while removing credential-bearing keys from module input', () => {
+    expect(
+      sanitizeModuleInput({
+        totalTokens: 30,
+        nested: { inputTokens: 10, accessToken: 'not-allowed' },
+        apiKey: 'not-allowed',
+      }),
+    ).toEqual({
+      totalTokens: 30,
+      nested: { inputTokens: 10 },
+    });
+  });
+
   it('validates valid structured output with the supplied Zod schema', async () => {
     const runner = new FakeAgentRunner({
       m4: { summary: 'Title likely mismatches buyer wording.', confidence: 'moderate' },
@@ -233,6 +253,58 @@ describe('agent runner seam', () => {
     );
 
     expect(optionalPaths).toEqual([]);
+  });
+
+  it('leaves URL and datetime validation to the local contract after provider output', () => {
+    const providerSchema = toOpenAiStructuredOutputSchema(ResearchOutputSchema);
+    const structurallyValidProviderOutput = {
+      status: 'resolved',
+      next_action: 'stop',
+      requester: 'm4',
+      question: 'Synthetic question',
+      evidence: [
+        {
+          source: 'web',
+          title: 'Synthetic source',
+          url: 'not-a-url',
+          excerpt: 'Synthetic evidence.',
+          fetchedAt: 'not-a-date',
+          domain: null,
+          sourceType: null,
+          retrievalMethod: null,
+          searchPass: null,
+        },
+      ],
+      confidence: 'low',
+      limitations: [],
+      searchSummaries: null,
+      requestedLookup: null,
+    };
+
+    expect(providerSchema.safeParse(structurallyValidProviderOutput).success).toBe(true);
+    expect(ResearchOutputSchema.safeParse(structurallyValidProviderOutput).success).toBe(false);
+  });
+
+  it('uses a closed provider schema for bounded research lookup inputs', () => {
+    const providerSchema = toOpenAiStructuredOutputSchema(ResearchProviderOutputSchema);
+    const output = {
+      status: 'partly_resolved',
+      next_action: 'continue',
+      requester: 'm6',
+      question: 'Synthetic measurement question',
+      evidence: [],
+      confidence: 'low',
+      limitations: [],
+      searchSummaries: null,
+      requestedLookup: {
+        tool: 'hosted_web_search',
+        reason: 'Need official evidence.',
+        input: { query: 'Synthetic measurement question', listingId: null },
+      },
+    };
+
+    expect(providerSchema.safeParse(output).success).toBe(true);
+    expect(ResearchOutputSchema.safeParse(output).success).toBe(true);
   });
 });
 

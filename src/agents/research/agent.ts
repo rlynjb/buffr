@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { AppError } from '../../core/errors.js';
 import {
   CitationSchema,
+  ResearchProviderOutputSchema,
   ResearchOutputSchema,
   ResearchSearchSummarySchema,
   ResearchToolNameSchema,
@@ -55,6 +56,7 @@ export const M3_PROMPT = readPromptMarkdown();
 export async function runResearchModule(input: {
   runner: AgentRunner;
   tools: readonly ResearchTool[];
+  initialLookup?: { tool: ResearchToolName; input: Record<string, unknown> };
   request: ResearchRequest;
   limits?: Partial<ResearchLimits>;
   now?: () => number;
@@ -70,6 +72,34 @@ export async function runResearchModule(input: {
   let totalTokens = 0;
   let totalEstimatedCostUsd = 0;
 
+  const executeLookup = async (
+    toolName: ResearchToolName,
+    lookupInput: Record<string, unknown>,
+  ): Promise<void> => {
+    const tool = toolsByName.get(toolName);
+    if (!tool) {
+      throw new AppError('configuration_failed', `M3 requested tool is not configured: ${toolName}`);
+    }
+
+    const toolResult = await tool.call(lookupInput);
+    const citations = toolResult.citations.map((citation) =>
+      normalizeToolCitation(parseWithSchema(CitationSchema, citation, `${toolName} citation`)),
+    );
+    toolCallCount += 1;
+    toolEvidence.push({ tool: toolName, citations, data: toolResult.data });
+    const toolSearchSummaries = parseToolSearchSummaries(toolResult.data);
+    searchSummaries.push(...toolSearchSummaries);
+    totalTokens += toolSearchSummaries.reduce((sum, summary) => sum + (summary.totalTokens ?? 0), 0);
+    totalEstimatedCostUsd += toolSearchSummaries.reduce(
+      (sum, summary) => sum + (summary.estimatedCostUsd ?? 0),
+      0,
+    );
+  };
+
+  if (input.initialLookup) {
+    await executeLookup(input.initialLookup.tool, input.initialLookup.input);
+  }
+
   while (true) {
     const result = await runStructuredModule({
       runner: input.runner,
@@ -78,10 +108,11 @@ export async function runResearchModule(input: {
       input: {
         request: input.request,
         limits,
+        permittedTools: [...toolsByName.keys()],
         toolCallCount,
         toolEvidence,
       },
-      outputSchema: ResearchOutputSchema,
+      outputSchema: ResearchProviderOutputSchema,
       trace: input.trace,
     });
     const output = normalizeResearchOutput(result.output);
@@ -109,28 +140,7 @@ export async function runResearchModule(input: {
       throw new AppError('validation_failed', 'M3 continue output requires requestedLookup');
     }
 
-    const tool = toolsByName.get(requestedLookup.tool);
-    if (!tool) {
-      throw new AppError('configuration_failed', `M3 requested tool is not configured: ${requestedLookup.tool}`);
-    }
-
-    const toolResult = await tool.call(requestedLookup.input);
-    const citations = toolResult.citations.map((citation) =>
-      normalizeToolCitation(parseWithSchema(CitationSchema, citation, `${requestedLookup.tool} citation`)),
-    );
-    toolCallCount += 1;
-    toolEvidence.push({
-      tool: requestedLookup.tool,
-      citations,
-      data: toolResult.data,
-    });
-    const toolSearchSummaries = parseToolSearchSummaries(toolResult.data);
-    searchSummaries.push(...toolSearchSummaries);
-    totalTokens += toolSearchSummaries.reduce((sum, summary) => sum + (summary.totalTokens ?? 0), 0);
-    totalEstimatedCostUsd += toolSearchSummaries.reduce(
-      (sum, summary) => sum + (summary.estimatedCostUsd ?? 0),
-      0,
-    );
+    await executeLookup(requestedLookup.tool, requestedLookup.input);
 
     const postLookupLimit = limitReason({
       limits,

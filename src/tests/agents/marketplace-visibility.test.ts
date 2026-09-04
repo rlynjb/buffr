@@ -242,18 +242,7 @@ describe('marketplace visibility modules', () => {
       fetchedAt: '2026-08-31T00:00:00.000Z',
     };
     const tool = recordingResearchTool({ citations: [citation], data: {} });
-    const runner = new SequenceRunner([
-      researchOutput({
-        next_action: 'continue',
-        evidence: [],
-        requestedLookup: {
-          tool: 'hosted_web_search',
-          reason: 'Need official guidance.',
-          input: { query: 'Synthetic policy question' },
-        },
-      }),
-      researchOutput({ evidence: [citation] }),
-    ]);
+    const runner = new SequenceRunner([researchOutput({ evidence: [citation] })]);
     const executor = createMarketplaceVisibilityModuleExecutor({
       agentRunner: runner,
       research: { config: enabledConfig(), tool, now: incrementingNow() },

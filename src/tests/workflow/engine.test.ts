@@ -274,6 +274,76 @@ describe('workflow engine', () => {
     ]);
   });
 
+  it('waits instead of repeating an identical partly resolved research request without new evidence', async () => {
+    const repository = new InMemoryRunRepository();
+    const engine = createWorkflowEngine({ repository, modules: moduleExecutor(), now: fixedNow });
+    await repository.create({
+      ...baseState(),
+      stage: 'm6_test_plan',
+      evidenceRefs: ['initial:synthetic-evidence'],
+      moduleOutputs: { m3: [] },
+    });
+    await engine.requestResearch('run-123', {
+      requester: 'm6',
+      returnStage: 'm6_test_plan',
+      question: 'Confirm app-specific measurement availability',
+    });
+    await engine.completeResearch(
+      'run-123',
+      researchOutput({
+        status: 'partly_resolved',
+        requester: 'm6',
+        question: 'Confirm app-specific measurement availability',
+      }),
+    );
+
+    const next = await engine.requestResearch('run-123', {
+      requester: 'm6',
+      returnStage: 'm6_test_plan',
+      question: '  Confirm app-specific measurement availability  ',
+    });
+
+    expect(next).toMatchObject({ status: 'waiting_for_data', stage: 'm6_test_plan' });
+    expect(next.events.slice(-2).map((event) => event.type)).toEqual([
+      'research.repeated_suppressed',
+      'workflow.waiting_for_data',
+    ]);
+  });
+
+  it('waits instead of starting a new side route after the workflow research cap is reached', async () => {
+    const repository = new InMemoryRunRepository();
+    const engine = createWorkflowEngine({
+      repository,
+      modules: moduleExecutor(),
+      researchLimits: { maxToolCalls: 3, maxWallClockMs: 120_000, costBudget: {} },
+      now: fixedNow,
+    });
+    await repository.create({
+      ...baseState(),
+      stage: 'm6_test_plan',
+      evidenceRefs: ['initial:synthetic-evidence'],
+      moduleOutputs: {
+        m3: [
+          researchOutput({ question: 'First question' }),
+          researchOutput({ question: 'Second question' }),
+          researchOutput({ question: 'Third question' }),
+        ],
+      },
+    });
+
+    const next = await engine.requestResearch('run-123', {
+      requester: 'm6',
+      returnStage: 'm6_test_plan',
+      question: 'A differently worded fourth question',
+    });
+
+    expect(next).toMatchObject({ status: 'waiting_for_data', stage: 'm6_test_plan' });
+    expect(next.events.slice(-2).map((event) => event.type)).toEqual([
+      'research.limit_reached',
+      'workflow.waiting_for_data',
+    ]);
+  });
+
   it('prevents M3 continue when the configured call cap has been reached', async () => {
     const repository = new InMemoryRunRepository();
     const engine = createWorkflowEngine({

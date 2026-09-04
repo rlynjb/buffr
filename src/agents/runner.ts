@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { Agent, run, setDefaultOpenAIKey, webSearchTool } from '@openai/agents';
 import { AppError } from '../core/errors.js';
+import { isCredentialLikeKey } from '../core/credential-keys.js';
 import type { ModuleId } from '../contracts/modules.js';
 import { parseWithSchema } from '../contracts/workflow.js';
 import { buildModuleInstructions } from './core/policy.js';
@@ -167,6 +168,11 @@ function makeStructuredOutputSchema(schema: z.ZodTypeAny): z.ZodTypeAny {
       return z.array(makeStructuredOutputSchema(schema._def.type));
     case z.ZodFirstPartyTypeKind.ZodEffects:
       return makeStructuredOutputSchema(schema._def.schema);
+    case z.ZodFirstPartyTypeKind.ZodString:
+      // OpenAI structured outputs reject string formats such as `uri`.
+      // Keep the provider schema structural and apply the original Zod
+      // validators to finalOutput in runStructured().
+      return z.string();
     case z.ZodFirstPartyTypeKind.ZodObject: {
       const shape = (schema as z.ZodObject<z.ZodRawShape>).shape;
       const convertedShape = Object.fromEntries(
@@ -209,8 +215,6 @@ export async function runStructuredModule<TOutput>(
   }
 }
 
-const CREDENTIAL_KEY_PATTERN = /api[_-]?key|secret|token|refresh/i;
-
 export function sanitizeModuleInput(value: unknown): unknown {
   if (!value || typeof value !== 'object') {
     return value;
@@ -222,7 +226,7 @@ export function sanitizeModuleInput(value: unknown): unknown {
 
   return Object.fromEntries(
     Object.entries(value as Record<string, unknown>)
-      .filter(([key]) => !CREDENTIAL_KEY_PATTERN.test(key))
+      .filter(([key]) => !isCredentialLikeKey(key))
       .map(([key, child]) => [key, sanitizeModuleInput(child)]),
   );
 }

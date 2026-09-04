@@ -78,6 +78,10 @@ export function createMarketplaceVisibilityModuleExecutor(
       return runResearchModule({
         runner: deps.agentRunner,
         tools: [deps.research.tool],
+        initialLookup: {
+          tool: 'hosted_web_search',
+          input: { query: request.question },
+        },
         request: {
           requester: request.requester,
           question: request.question,

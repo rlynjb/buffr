@@ -67,6 +67,20 @@ describe('workflow guards', () => {
 
     expect(() => assertNoCredentialKeys({ listingId: 'listing-123', stats: { views: 1 } })).not.toThrow();
   });
+
+  it('allows bounded token-usage counters while still rejecting token credentials', () => {
+    expect(() =>
+      assertNoCredentialKeys({
+        inputTokens: 10,
+        outputTokens: 20,
+        totalTokens: 30,
+      }),
+    ).not.toThrow();
+
+    expect(() => assertNoCredentialKeys({ accessToken: 'not-allowed' })).toThrow(
+      'Credential-like key is not allowed in workflow data: accessToken',
+    );
+  });
 });
 
 function workflowState(overrides: Partial<WorkflowRunState> = {}): WorkflowRunState {

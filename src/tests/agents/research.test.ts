@@ -194,6 +194,32 @@ describe('M3 bounded research module', () => {
     expect(output.searchSummaries).toEqual([summary]);
   });
 
+  it('can run one deterministic initial lookup before the first synthesis turn', async () => {
+    const webEvidence = webCitation('https://docs.example.test/guide');
+    const tool = recordingTool('hosted_web_search', {
+      citations: [webEvidence],
+      data: { searchSummaries: [completedSearchSummary()] },
+    });
+    const runner = new SequenceRunner([researchOutput({ evidence: [webEvidence] })]);
+
+    const output = await runResearchModule({
+      runner,
+      tools: [tool],
+      initialLookup: {
+        tool: 'hosted_web_search',
+        input: { query: 'What official guidance applies?' },
+      },
+      request: researchRequest(),
+      trace: trace(),
+    });
+
+    expect(tool.calls).toEqual([{ query: 'What official guidance applies?' }]);
+    expect(runner.inputs[0]?.input).toMatchObject({
+      toolEvidence: [expect.objectContaining({ tool: 'hosted_web_search', citations: [webEvidence] })],
+    });
+    expect(output.evidence).toEqual([webEvidence]);
+  });
+
   it('rejects a final web citation that was not returned by a tool', async () => {
     const runner = new SequenceRunner([
       researchOutput({

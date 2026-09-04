@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { NormalizedListingEvidenceSchema } from '../../contracts/evidence.js';
-import { ResearchOutputSchema } from '../../contracts/modules.js';
+import { ResearchOutputSchema, ResearchSearchSummarySchema } from '../../contracts/modules.js';
 import { parseWithSchema, WorkflowRunStateSchema } from '../../contracts/workflow.js';
 import { makeFixtureListingEvidence } from '../fixtures/listing.js';
 
@@ -96,6 +96,28 @@ describe('contracts', () => {
       searchSummaries: [{ pass: 'authoritative_domains', citationCount: 1 }],
     });
     expect(() => ResearchOutputSchema.parse({ ...withProvenance, rawHtml: '<html />' })).toThrow();
+  });
+
+  it('normalizes provider nulls in optional search-summary fields', () => {
+    const summary = ResearchSearchSummarySchema.parse({
+      pass: 'authoritative_domains',
+      status: 'completed',
+      citationCount: 1,
+      officialCitationCount: 1,
+      broaderCitationCount: 0,
+      allowedDomainCount: 2,
+      failureCategory: null,
+      totalTokens: null,
+      estimatedCostUsd: null,
+      startedAt: '2026-08-31T00:00:00.000Z',
+      completedAt: '2026-08-31T00:00:01.000Z',
+    });
+
+    expect(summary).toMatchObject({
+      failureCategory: undefined,
+      totalTokens: undefined,
+      estimatedCostUsd: undefined,
+    });
   });
 
   it('validates persisted run state shape', () => {

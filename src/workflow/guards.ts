@@ -1,11 +1,10 @@
 import { AppError } from '../core/errors.js';
+import { isCredentialLikeKey } from '../core/credential-keys.js';
 import type { WorkflowRunState, WorkflowStage } from '../contracts/workflow.js';
-
-const CREDENTIAL_KEY_PATTERN = /api[_-]?key|secret|token|refresh/i;
 
 export function assertNoCredentialKeys(value: unknown): void {
   visitObjectKeys(value, (key) => {
-    if (CREDENTIAL_KEY_PATTERN.test(key)) {
+    if (isCredentialLikeKey(key)) {
       throw new AppError('validation_failed', `Credential-like key is not allowed in workflow data: ${key}`);
     }
   });

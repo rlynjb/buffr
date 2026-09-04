@@ -63,16 +63,17 @@ export const ResearchSearchSummarySchema = z
     allowedDomainCount: z.number().int().nonnegative(),
     failureCategory: z
       .enum(['no_results', 'connector_failed', 'invalid_citations', 'budget_exhausted'])
-      .optional(),
-    totalTokens: z.number().int().nonnegative().optional(),
-    estimatedCostUsd: z.number().nonnegative().optional(),
+      .nullable()
+      .optional()
+      .transform((value) => value ?? undefined),
+    totalTokens: z.number().int().nonnegative().nullable().optional().transform((value) => value ?? undefined),
+    estimatedCostUsd: z.number().nonnegative().nullable().optional().transform((value) => value ?? undefined),
     startedAt: IsoDateSchema,
     completedAt: IsoDateSchema,
   })
   .strict();
 
-export const ResearchOutputSchema = z
-  .object({
+const ResearchOutputShape = {
     status: z.enum(['resolved', 'partly_resolved', 'unresolved']),
     next_action: z.enum(['continue', 'stop']),
     requester: RequesterModuleIdSchema,
@@ -85,26 +86,45 @@ export const ResearchOutputSchema = z
       .nullable()
       .optional()
       .transform((value) => value ?? undefined),
-    requestedLookup: z
+};
+
+function createResearchOutputSchema(inputSchema: z.ZodTypeAny) {
+  return z
+    .object({
+      ...ResearchOutputShape,
+      requestedLookup: z
       .object({
         tool: ResearchToolNameSchema,
         reason: z.string().min(1),
-        input: z.record(z.unknown()).default({}),
+        input: inputSchema.default({}),
       })
       .strict()
       .nullable()
       .optional(),
-  })
-  .strict()
-  .superRefine((value, ctx) => {
-    if (value.next_action === 'continue' && !value.requestedLookup) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ['requestedLookup'],
-        message: 'requestedLookup is required when next_action is continue',
-      });
-    }
-  });
+    })
+    .strict()
+    .superRefine((value, ctx) => {
+      if (value.next_action === 'continue' && !value.requestedLookup) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['requestedLookup'],
+          message: 'requestedLookup is required when next_action is continue',
+        });
+      }
+    });
+}
+
+export const ResearchOutputSchema = createResearchOutputSchema(z.record(z.unknown()));
+
+/** Closed schema used only at the provider boundary; persisted output keeps the generic record contract. */
+export const ResearchProviderOutputSchema = createResearchOutputSchema(
+  z
+    .object({
+      query: z.string().nullable().optional(),
+      listingId: z.string().nullable().optional(),
+    })
+    .strict(),
+);
 
 export const ContextOutputSchema = z
   .object({
