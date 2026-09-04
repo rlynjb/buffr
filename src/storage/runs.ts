@@ -123,6 +123,17 @@ export class JsonFileRunRepository implements RunRepository {
 }
 
 function experimentPlanArtifact(state: WorkflowRunState): Record<string, unknown> {
+  const researchRefs = state.moduleOutputs.m3
+    .map((output, m3Index) => ({
+      m3Index,
+      urls: [...new Set(
+        output.evidence
+          .filter((citation) => citation.source === 'web' && citation.url?.startsWith('https://'))
+          .map((citation) => citation.url!),
+      )].sort(),
+    }))
+    .filter((reference) => reference.urls.length > 0);
+
   return {
     metadata: {
       artifactKind: 'experiment_plan',
@@ -135,6 +146,7 @@ function experimentPlanArtifact(state: WorkflowRunState): Record<string, unknown
       generatedAt: state.updatedAt,
       runCreatedAt: state.createdAt,
       evidenceRefs: state.evidenceRefs,
+      ...(researchRefs.length > 0 ? { researchRefs } : {}),
     },
     ...state.moduleOutputs.m6,
   };

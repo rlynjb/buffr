@@ -25,6 +25,7 @@ import {
   type HypothesisOutput,
   type MetricsOutput,
   type ResearchOutput,
+  type ResearchSearchSummary,
   type ResearchToolName,
   type TestPlanOutput,
 } from '../contracts/modules.js';
@@ -364,14 +365,19 @@ export function createWorkflowEngine(deps: {
     }
 
     validateResearchPolicy(state, researchOutput, activeRequest.startedAt);
-    const m3Outputs = [...state.moduleOutputs.m3, researchOutput];
+    const stateWithSearchEvents = withResearchSearchEvents(
+      state,
+      researchOutput.searchSummaries ?? [],
+      activeRequest,
+    );
+    const m3Outputs = [...stateWithSearchEvents.moduleOutputs.m3, researchOutput];
 
     if (researchOutput.next_action === 'continue') {
       return persist(
         withEvent(
           {
-            ...state,
-            moduleOutputs: { ...state.moduleOutputs, m3: m3Outputs },
+            ...stateWithSearchEvents,
+            moduleOutputs: { ...stateWithSearchEvents.moduleOutputs, m3: m3Outputs },
           },
           'research.continued',
           researchOutput.requestedLookup?.reason ?? 'M3 requested another lookup',
@@ -388,10 +394,10 @@ export function createWorkflowEngine(deps: {
     return persist(
       withEvent(
         {
-          ...state,
+          ...stateWithSearchEvents,
           status: statusForStage(activeRequest.returnStage),
           stage: activeRequest.returnStage,
-          moduleOutputs: { ...state.moduleOutputs, m3: m3Outputs },
+          moduleOutputs: { ...stateWithSearchEvents.moduleOutputs, m3: m3Outputs },
         },
         'research.returned',
         'M3 research returned to requester',
@@ -742,6 +748,46 @@ export function createWorkflowEngine(deps: {
       latestRequestEvent.data.returnStage === request.returnStage &&
       latestRequestEvent.data.evidenceRef === evidenceReference
     );
+  }
+
+  function withResearchSearchEvents(
+    state: WorkflowRunState,
+    summaries: readonly ResearchSearchSummary[],
+    request: { requester: ResearchRequester; returnStage: WorkflowStage },
+  ): WorkflowRunState {
+    return summaries.reduce((current, summary) => {
+      const started = withEvent(
+        current,
+        'research.search.started',
+        'Hosted web-search pass started',
+        {
+          requester: request.requester,
+          returnStage: request.returnStage,
+          pass: summary.pass,
+          allowedDomainCount: summary.allowedDomainCount,
+          startedAt: summary.startedAt,
+        },
+      );
+
+      return withEvent(
+        started,
+        summary.status === 'completed' ? 'research.search.completed' : 'research.search.failed',
+        summary.status === 'completed' ? 'Hosted web-search pass completed' : 'Hosted web-search pass failed',
+        {
+          requester: request.requester,
+          returnStage: request.returnStage,
+          pass: summary.pass,
+          citationCount: summary.citationCount,
+          officialCitationCount: summary.officialCitationCount,
+          broaderCitationCount: summary.broaderCitationCount,
+          allowedDomainCount: summary.allowedDomainCount,
+          completedAt: summary.completedAt,
+          ...(summary.failureCategory ? { failureCategory: summary.failureCategory } : {}),
+          ...(summary.totalTokens !== undefined ? { totalTokens: summary.totalTokens } : {}),
+          ...(summary.estimatedCostUsd !== undefined ? { estimatedCostUsd: summary.estimatedCostUsd } : {}),
+        },
+      );
+    }, state);
   }
 
   function withEvent(

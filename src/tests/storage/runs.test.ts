@@ -176,6 +176,76 @@ describe('JsonFileRunRepository', () => {
     });
   });
 
+  it('writes only sorted M3 citation references into the experiment plan', async () => {
+    const repository = new JsonFileRunRepository({ rootDir });
+
+    await repository.create({
+      ...baseState,
+      status: 'awaiting_approval',
+      stage: 'approval_wait',
+      moduleOutputs: {
+        m3: [
+          {
+            status: 'resolved',
+            next_action: 'stop',
+            requester: 'm4',
+            question: 'Synthetic policy question',
+            evidence: [
+              {
+                source: 'web',
+                title: 'Second guide',
+                url: 'https://docs.example.test/z-guide',
+                excerpt: 'Synthetic evidence.',
+                fetchedAt: '2026-08-31T00:00:00.000Z',
+              },
+              {
+                source: 'web',
+                title: 'First guide',
+                url: 'https://docs.example.test/a-guide',
+                excerpt: 'Synthetic evidence.',
+                fetchedAt: '2026-08-31T00:00:00.000Z',
+              },
+              {
+                source: 'web',
+                title: 'Duplicate guide',
+                url: 'https://docs.example.test/a-guide',
+                excerpt: 'Synthetic evidence.',
+                fetchedAt: '2026-08-31T00:00:00.000Z',
+              },
+            ],
+            confidence: 'low',
+            limitations: [],
+          },
+        ],
+        m6: testPlanOutput(),
+      },
+    });
+
+    const plan = JSON.parse(await readFile(join(rootDir, 'run-123', 'experiment-plan.json'), 'utf8'));
+    expect(plan.metadata.researchRefs).toEqual([
+      {
+        m3Index: 0,
+        urls: ['https://docs.example.test/a-guide', 'https://docs.example.test/z-guide'],
+      },
+    ]);
+    expect(JSON.stringify(plan)).not.toContain('<html>');
+  });
+
+  it('keeps experiment plans without research references compatible', async () => {
+    const repository = new JsonFileRunRepository({ rootDir });
+    await repository.create({
+      ...baseState,
+      status: 'awaiting_approval',
+      stage: 'approval_wait',
+      moduleOutputs: { m3: [], m6: testPlanOutput() },
+    });
+
+    const run = await repository.load('run-123');
+    const plan = JSON.parse(await readFile(join(rootDir, 'run-123', 'experiment-plan.json'), 'utf8'));
+    expect(run.moduleOutputs.m3).toEqual([]);
+    expect(plan.metadata).not.toHaveProperty('researchRefs');
+  });
+
   it('rejects run ids that would escape the configured root', async () => {
     const repository = new JsonFileRunRepository({ rootDir });
 
@@ -190,4 +260,19 @@ describe('JsonFileRunRepository', () => {
 async function mkdtempCompat(prefix: string): Promise<string> {
   const { mkdtemp } = await import('node:fs/promises');
   return mkdtemp(join(tmpdir(), prefix));
+}
+
+function testPlanOutput() {
+  return {
+    primaryMetric: 'visibility_count',
+    secondaryMetrics: [],
+    baselineValue: 0,
+    baselinePeriod: 'synthetic baseline',
+    qualificationRequirements: [],
+    expectedSupportingSignal: 'A later signal appears.',
+    expectedWeakeningSignal: 'The signal remains absent.',
+    inconclusiveCondition: 'Evidence remains sparse.',
+    contextToMonitor: [],
+    unresolvedMeasurementRules: [],
+  };
 }

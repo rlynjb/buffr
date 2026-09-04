@@ -94,6 +94,78 @@ describe('workflow tracing events', () => {
     ]);
     expect(JSON.stringify(emitted)).not.toMatch(/apiKey|secret|token|refresh/iu);
   });
+
+  it('emits bounded hosted-search lifecycle metadata without page bodies or provider data', async () => {
+    const emitted: WorkflowEvent[] = [];
+    const repository = new InMemoryRunRepository();
+    const modules = initialLifecycleExecutor();
+    modules.runM3 = async (_state, request) => ({
+      status: 'resolved',
+      next_action: 'stop',
+      requester: request.requester,
+      question: request.question,
+      evidence: [
+        {
+          source: 'web',
+          title: 'Official guide',
+          url: 'https://docs.example.test/guide',
+          excerpt: 'Synthetic guidance.',
+          fetchedAt: '2026-08-31T00:00:00.000Z',
+        },
+      ],
+      confidence: 'low',
+      limitations: [],
+      searchSummaries: [
+        {
+          pass: 'authoritative_domains',
+          status: 'completed',
+          citationCount: 1,
+          officialCitationCount: 1,
+          broaderCitationCount: 0,
+          allowedDomainCount: 2,
+          startedAt: '2026-08-31T00:00:00.000Z',
+          completedAt: '2026-08-31T00:00:01.000Z',
+        },
+      ],
+    });
+    await repository.create({
+      runId: 'run-123',
+      listingId: 'listing-123',
+      subjectRef: 'listing:listing-123',
+      workflowKind: 'etsy_listing',
+      status: 'analyzing',
+      stage: 'm4_diagnosis',
+      createdAt: '2026-08-12T00:00:00.000Z',
+      updatedAt: '2026-08-12T00:00:00.000Z',
+      evidenceRefs: ['initial:synthetic-evidence'],
+      moduleOutputs: { m3: [] },
+      events: [],
+    });
+    const engine = createWorkflowEngine({
+      repository,
+      modules,
+      emit: (event) => {
+        emitted.push(event);
+      },
+      now: fixedNow,
+    });
+
+    await engine.requestResearch('run-123', {
+      requester: 'm4',
+      returnStage: 'm4_diagnosis',
+      question: 'Synthetic policy question',
+    });
+    await engine.step('run-123');
+
+    expect(emitted.map((event) => event.type)).toEqual(expect.arrayContaining([
+      'research.search.started',
+      'research.search.completed',
+    ]));
+    const serialized = JSON.stringify(emitted);
+    expect(serialized).not.toContain('<html>');
+    expect(serialized).not.toContain('provider payload');
+    expect(serialized).not.toContain('OPENAI_API_KEY');
+  });
 });
 
 class InMemoryRunRepository implements RunRepository {
