@@ -50,6 +50,54 @@ describe('contracts', () => {
     ).toBe('hosted_web_search');
   });
 
+  it('keeps historical research outputs compatible and accepts bounded search provenance', () => {
+    const historical = {
+      status: 'resolved',
+      next_action: 'stop',
+      requester: 'm4',
+      question: 'Synthetic question',
+      evidence: [],
+      confidence: 'low',
+      limitations: [],
+    } as const;
+
+    expect(ResearchOutputSchema.parse(historical)).not.toHaveProperty('searchSummaries');
+
+    const withProvenance = {
+      ...historical,
+      evidence: [
+        {
+          source: 'web',
+          title: 'Official guide',
+          url: 'https://docs.example.test/official-guide',
+          excerpt: 'Synthetic documentation excerpt.',
+          fetchedAt: '2026-08-31T00:00:00.000Z',
+          domain: 'docs.example.test',
+          sourceType: 'official_platform',
+          retrievalMethod: 'openai_hosted_web_search',
+          searchPass: 'authoritative_domains',
+        },
+      ],
+      searchSummaries: [
+        {
+          pass: 'authoritative_domains',
+          status: 'completed',
+          citationCount: 1,
+          officialCitationCount: 1,
+          broaderCitationCount: 0,
+          allowedDomainCount: 3,
+          startedAt: '2026-08-31T00:00:00.000Z',
+          completedAt: '2026-08-31T00:00:01.000Z',
+        },
+      ],
+    } as const;
+
+    expect(ResearchOutputSchema.parse(withProvenance)).toMatchObject({
+      searchSummaries: [{ pass: 'authoritative_domains', citationCount: 1 }],
+    });
+    expect(() => ResearchOutputSchema.parse({ ...withProvenance, rawHtml: '<html />' })).toThrow();
+  });
+
   it('validates persisted run state shape', () => {
     const state = WorkflowRunStateSchema.parse({
       runId: 'run-123',

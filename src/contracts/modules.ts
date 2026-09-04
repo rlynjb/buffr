@@ -25,6 +25,10 @@ export const CitationSchema = z
     url: z.string().url().nullable().optional(),
     excerpt: z.string().min(1),
     fetchedAt: IsoDateSchema,
+    domain: z.string().min(1).optional(),
+    sourceType: z.enum(['official_platform', 'official_marketplace', 'public_web', 'derived']).optional(),
+    retrievalMethod: z.literal('openai_hosted_web_search').optional(),
+    searchPass: z.enum(['authoritative_domains', 'broader_web']).optional(),
   })
   .strict()
   .superRefine((value, ctx) => {
@@ -37,6 +41,24 @@ export const CitationSchema = z
     }
   });
 
+export const ResearchSearchSummarySchema = z
+  .object({
+    pass: z.enum(['authoritative_domains', 'broader_web']),
+    status: z.enum(['completed', 'failed']),
+    citationCount: z.number().int().nonnegative(),
+    officialCitationCount: z.number().int().nonnegative(),
+    broaderCitationCount: z.number().int().nonnegative(),
+    allowedDomainCount: z.number().int().nonnegative(),
+    failureCategory: z
+      .enum(['no_results', 'connector_failed', 'invalid_citations', 'budget_exhausted'])
+      .optional(),
+    totalTokens: z.number().int().nonnegative().optional(),
+    estimatedCostUsd: z.number().nonnegative().optional(),
+    startedAt: IsoDateSchema,
+    completedAt: IsoDateSchema,
+  })
+  .strict();
+
 export const ResearchOutputSchema = z
   .object({
     status: z.enum(['resolved', 'partly_resolved', 'unresolved']),
@@ -46,6 +68,7 @@ export const ResearchOutputSchema = z
     evidence: z.array(CitationSchema),
     confidence: ConfidenceSchema,
     limitations: z.array(z.string()),
+    searchSummaries: z.array(ResearchSearchSummarySchema).optional(),
     requestedLookup: z
       .object({
         tool: ResearchToolNameSchema,
@@ -165,6 +188,7 @@ export const EvaluationOutputSchema = z
 export type ModuleId = z.infer<typeof ModuleIdSchema>;
 export type Confidence = z.infer<typeof ConfidenceSchema>;
 export type ResearchToolName = z.infer<typeof ResearchToolNameSchema>;
+export type ResearchSearchSummary = z.infer<typeof ResearchSearchSummarySchema>;
 export type ResearchOutput = z.infer<typeof ResearchOutputSchema>;
 export type ContextOutput = z.infer<typeof ContextOutputSchema>;
 export type MetricsOutput = z.infer<typeof MetricsOutputSchema>;
