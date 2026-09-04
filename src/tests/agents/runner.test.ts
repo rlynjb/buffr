@@ -151,6 +151,54 @@ describe('agent runner seam', () => {
     expect(result.usage).toEqual({ totalTokens: 15 });
   });
 
+  it('normalizes SDK nulls for optional research provenance before persistence', async () => {
+    const runner = new OpenAiAgentRunner({
+      apiKey: 'test-key',
+      execute: async () => ({
+        output: {
+          status: 'resolved',
+          next_action: 'stop',
+          requester: 'm4',
+          question: 'Synthetic policy question',
+          evidence: [
+            {
+              source: 'web',
+              title: 'Official guide',
+              url: 'https://docs.example.test/guide',
+              excerpt: 'Synthetic guidance.',
+              fetchedAt: '2026-08-31T00:00:00.000Z',
+              domain: null,
+              sourceType: null,
+              retrievalMethod: null,
+              searchPass: null,
+            },
+          ],
+          confidence: 'low',
+          limitations: [],
+          searchSummaries: null,
+          requestedLookup: null,
+        },
+      }),
+    });
+
+    const result = await runner.runStructured({
+      moduleId: 'm3',
+      instructions: 'Return structured output.',
+      input: {},
+      outputSchema: ResearchOutputSchema,
+      trace: { runId: 'run-123' },
+    });
+
+    expect(result.output.searchSummaries).toBeUndefined();
+    expect(result.output.evidence[0]).toMatchObject({
+      source: 'web',
+      domain: undefined,
+      sourceType: undefined,
+      retrievalMethod: undefined,
+      searchPass: undefined,
+    });
+  });
+
   it('rejects an OpenAI runner without a configured API key before any model call', async () => {
     const runner = new OpenAiAgentRunner({ apiKey: '' });
 

@@ -25,10 +25,22 @@ export const CitationSchema = z
     url: z.string().url().nullable().optional(),
     excerpt: z.string().min(1),
     fetchedAt: IsoDateSchema,
-    domain: z.string().min(1).optional(),
-    sourceType: z.enum(['official_platform', 'official_marketplace', 'public_web', 'derived']).optional(),
-    retrievalMethod: z.literal('openai_hosted_web_search').optional(),
-    searchPass: z.enum(['authoritative_domains', 'broader_web']).optional(),
+    domain: z.string().min(1).nullable().optional().transform((value) => value ?? undefined),
+    sourceType: z
+      .enum(['official_platform', 'official_marketplace', 'public_web', 'derived'])
+      .nullable()
+      .optional()
+      .transform((value) => value ?? undefined),
+    retrievalMethod: z
+      .literal('openai_hosted_web_search')
+      .nullable()
+      .optional()
+      .transform((value) => value ?? undefined),
+    searchPass: z
+      .enum(['authoritative_domains', 'broader_web'])
+      .nullable()
+      .optional()
+      .transform((value) => value ?? undefined),
   })
   .strict()
   .superRefine((value, ctx) => {
@@ -68,7 +80,11 @@ export const ResearchOutputSchema = z
     evidence: z.array(CitationSchema),
     confidence: ConfidenceSchema,
     limitations: z.array(z.string()),
-    searchSummaries: z.array(ResearchSearchSummarySchema).optional(),
+    searchSummaries: z
+      .array(ResearchSearchSummarySchema)
+      .nullable()
+      .optional()
+      .transform((value) => value ?? undefined),
     requestedLookup: z
       .object({
         tool: ResearchToolNameSchema,
