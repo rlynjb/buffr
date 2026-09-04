@@ -18,7 +18,11 @@ real-world marketplace changes automatically.
 - [Product mental model](#product-mental-model)
 - [What Buffr does](#what-buffr-does)
 - [Current workflows](#current-workflows)
-- [Architecture at a glance](#architecture-at-a-glance)
+- [System at a glance](#system-at-a-glance)
+- [Buffr through a systems-thinking lens](#buffr-through-a-systems-thinking-lens)
+- [Subsystem inventory](#subsystem-inventory)
+- [Sources and trust boundaries](#sources-and-trust-boundaries)
+- [Technology stack](#technology-stack)
 - [Workflow lifecycle](#workflow-lifecycle)
 - [Agent modules](#agent-modules)
 - [Data boundaries](#data-boundaries)
@@ -89,52 +93,215 @@ mockable module boundaries.
 
 Buffr currently has three product-facing workflow families.
 
-| Workflow | Product surface | What it produces |
-| --- | --- | --- |
-| Etsy listing workflow | Etsy seller listing evidence | A listing experiment plan and later learning record |
-| MerchGrid daily/weekly workflow | MerchGrid aggregate business and reliability metrics | Daily diagnosis, weekly recommendation, approval wait, and result learning |
-| Marketplace visibility workflow | Sparse marketplace metrics plus curated product/listing context | A low-risk visibility experiment recommendation |
+| Workflow | Current entry point | Product surface | What it produces |
+| --- | --- | --- | --- |
+| Etsy listing workflow | Shared engine/API path; connector-validation scaffold only at the CLI | Etsy seller listing evidence | A listing experiment plan and later learning record |
+| MerchGrid daily/weekly workflow | `merchgrid:*` commands | Aggregate business and reliability metrics | Daily diagnosis, weekly recommendation, approval wait, and result learning |
+| Marketplace visibility workflow | `marketplace:*` commands | Sparse metrics plus curated product/listing context and optional public research | A low-risk visibility experiment recommendation with evidence references |
 
 These workflows share the same core engine pattern. The source evidence differs,
 but the lifecycle remains deterministic and contract-driven.
 
-## Architecture at a glance
+## System at a glance
 
-The approved architecture is:
-
-**deterministic workflow orchestrator with bounded agentic workers**
+Buffr is a **local evidence-to-decision system** built around a deterministic
+workflow orchestrator and bounded agentic specialists. The diagram below shows
+the complete system implemented in this repository. External providers and the
+owner's real-world actions sit outside Buffr's trust boundary.
 
 ```text
-+--------------------------- external systems ----------------------------+
-| Etsy API        PostHog        Fly metrics        Shopify CSV        web |
-+-------------------------------+-----------------------------------------+
-                                |
-                                v
-+--------------------------- adapters/connectors --------------------------+
-| src/connectors/etsy/        src/connectors/merchgrid/        web tools   |
-| map provider-specific data into Buffr evidence contracts                 |
-+-------------------------------+-----------------------------------------+
-                                |
-                                v
-+---------------------------- src/contracts -------------------------------+
-| Zod schemas for evidence, workflow state, module outputs, experiments    |
-+-------------------------------+-----------------------------------------+
-                                |
-                                v
-+----------------------------- src/workflow -------------------------------+
-| deterministic engine, routes, guards, wait/resume states, approvals      |
-+-------------------------------+-----------------------------------------+
-                                |
-             +------------------+------------------+
-             |                                     |
-             v                                     v
-+---------------------------+       +-------------------------------+
-| src/agents/<role>/        |       | src/storage/                  |
-| bounded M1-M7 judgment    |       | local JSON run/artifact files |
-+---------------------------+       +-------------------------------+
+                     OUTSIDE BUFFR: SOURCES AND REAL-WORLD ACTIONS
+
+ PostHog API    Fly Metrics API    Shopify aggregate CSV    Etsy API
+      |                |                    |                  |
+      +----------------+--------------------+------------------+
+                               |
+ Curated product/listing JSON -+       OpenAI model + hosted public web
+                               |                    |
+                               v                    v
++============================================================================+
+|                         BUFFR SYSTEM BOUNDARY                              |
+|                                                                            |
+|  [1] CONNECTORS AND COLLECTION              [2] MODEL + RESEARCH PORTS    |
+|  Etsy mapper; PostHog/Fly/CSV adapters;     structured agent runner;      |
+|  local-context loaders; completed-UTC       bounded read-only web search  |
+|               |                                      |                     |
+|               v                                      v                     |
+|  [3] RUNTIME-VALIDATED CONTRACTS <---------- structured outputs -----------|
+|  normalized evidence, metrics, module outputs, workflow state, plans       |
+|               |                                                            |
+|        +------+----------------------+                                     |
+|        |                             |                                     |
+|        v                             v                                     |
+|  [4] SOURCE PACK                [5] PRODUCT ENTRY SERVICES                 |
+|  snapshots -> daily health      start Etsy evidence directly; load and    |
+|  -> weekly review artifacts     qualify MerchGrid/visibility evidence     |
+|        |                             |                                     |
+|        +-----------------------------+                                     |
+|                                      v                                     |
+|  [6] DETERMINISTIC WORKFLOW ENGINE <------> [7] M1-M7 AGENT MODULES        |
+|  routes, guards, state, waits, approval,     bounded interpretation via   |
+|  research caps, resume, trace events          [2]; structured output only  |
+|                     |                        M3 returns to its requester     |
+|                     v                                                      |
+|  [8] LOCAL FILE REPOSITORIES AND ARTIFACTS                                 |
+|  metric snapshots; daily/weekly reviews; run.json; evidence; events; plan  |
+|                     |                                                      |
++=====================|======================================================+
+                      v
+             [9] HUMAN APPROVAL GATE
+                      |
+             owner makes a manual change
+                      |
+              experiment wait / delay
+                      |
+              later aggregate evidence
+                      |
+                      +------> back through Buffr to M2 Results and M7 Learning
 ```
 
-The architecture combines a few standard patterns:
+What each boundary means:
+
+- Provider credentials are handled only by configuration and connector/tool
+  boundaries. They do not cross into evidence, workflow state, prompts, traces,
+  or artifacts.
+- Provider-specific payloads are mapped or aggregated before the workflow sees
+  them. The workflow consumes only Zod-validated Buffr contracts.
+- The TypeScript engine decides which stage can run. A model can interpret
+  evidence inside a stage, but cannot bypass guards, approval, research limits,
+  or wait states.
+- `run.json` is the durable source of truth for a workflow run. Metric snapshot
+  files are the source of truth for collected daily aggregates. Human-readable
+  plans, evidence files, and JSONL events are derived projections.
+- Buffr produces recommendations and records learning. It never applies an
+  Etsy, Shopify, or other marketplace change automatically.
+
+## Buffr through a systems-thinking lens
+
+This framing borrows from Donella H. Meadows's *Thinking in Systems*: understand
+the system by naming its purpose, boundary, stocks, flows, feedback, delays, and
+decision rules—not only its boxes and files.
+
+**Purpose**
+
+Turn small, trusted evidence packets into one safe next experiment and then turn
+the delayed result into reusable learning. The goal is not maximum automation;
+it is better owner decisions with explicit uncertainty and provenance.
+
+**System boundary**
+
+Buffr includes its CLIs, connectors, contracts, source-pack pipeline, profile
+services, workflow engine, agent modules, research adapter, local repositories,
+and trace events. Provider systems, credential stores, schedulers, dashboards,
+and the owner's manual marketplace edits remain outside the boundary.
+
+**Stocks: state that accumulates or persists**
+
+| Stock | Meaning | Source of record |
+| --- | --- | --- |
+| Daily metric snapshots | One normalized aggregate result per source and completed UTC day | `snapshots/<source>/<date>.json` |
+| Daily and weekly reviews | Derived product-health evidence built from snapshots | `artifacts/daily-health/` and `artifacts/weekly-reviews/` |
+| Workflow run state | Current stage, status, evidence references, module outputs, approval, and events | `workflow-runs/<run-id>/run.json` |
+| Experiment plan | Reviewable M6 recommendation plus evidence and research references | `workflow-runs/<run-id>/experiment-plan.json` |
+| Learning state | Post-experiment M2 result and M7 evaluation retained in the run | `workflow-runs/<run-id>/run.json` |
+
+**Flows: what changes the stocks**
+
+1. Collection reads approved aggregates from PostHog, Fly, and a Shopify CSV.
+2. Connectors normalize source data and repositories persist daily snapshots.
+3. Source-pack jobs derive daily health and adjacent seven-day weekly reviews.
+4. Profile services qualify evidence and start or resume a workflow run.
+5. The engine advances M1-M7, taking a bounded M3 detour when a concrete public
+   research question is raised.
+6. M6 writes a plan; the owner approves or rejects it and performs any change
+   manually.
+7. Later evidence re-enters through M2 Results, and M7 records the learning.
+
+**Feedback loop and delays**
+
+```text
+observed evidence -> diagnosis -> hypothesis -> manual experiment
+       ^                                           |
+       |                                           v
+future decision <- retained learning <- delayed result evidence
+```
+
+This is a human-mediated feedback loop. Its intentional delays are completed
+UTC collection windows, adjacent weekly comparison windows, the experiment
+wait, and the time required to gather qualified result evidence. Buffr does not
+manufacture immediate feedback when the real signal has not arrived.
+
+**Decision rules and leverage points**
+
+- Zod schemas determine what may cross an untrusted boundary.
+- Readiness functions determine whether evidence is complete enough to use.
+- Workflow routes and guards determine legal state transitions.
+- Research allowlists and call/time/token/cost caps constrain M3.
+- Immutable completed snapshots prevent historical evidence from silently
+  changing.
+- The approval gate is the highest-leverage safety control: recommendations can
+  accumulate, but only the owner can create a real-world marketplace change.
+
+## Subsystem inventory
+
+| Subsystem | Responsibility | Primary implementation |
+| --- | --- | --- |
+| CLI and composition roots | Parse commands, load local configuration, and wire real adapters, repositories, engines, and modules | `src/cli/` |
+| Core configuration and errors | Load `.env`, validate runtime settings, classify bounded errors, and identify prohibited credential keys | `src/core/` |
+| Etsy connector | Read Etsy listing/transaction endpoints and map listing data into normalized evidence | `src/connectors/etsy/` |
+| MerchGrid connectors | Collect approved aggregate signals from PostHog, Fly metrics, and the Shopify Partner CSV | `src/connectors/merchgrid/` |
+| Marketplace context connector | Load and validate curated product context and public listing observations from local JSON | `src/connectors/marketplace/local-context.ts` |
+| Metrics pipeline | Coordinate bounded source collection and build normalized evidence summaries | `src/metrics/` |
+| Source-pack jobs | Reuse completed snapshots and derive daily-health and weekly-review artifacts | `src/jobs/merchgrid-source-pack.ts` |
+| Contracts | Define runtime schemas for evidence, metrics, workflow state, M1-M7 outputs, and experiment plans | `src/contracts/` |
+| Product entry services | Start Etsy evidence directly or translate MerchGrid/visibility evidence into the shared engine; validate result evidence | `src/workflow/engine.ts`, `src/workflow/merchgrid-profile.ts`, `src/workflow/marketplace-visibility-profile.ts` |
+| Workflow control plane | Own stage transitions, guards, waits, research routing, approval, resume, and completion | `src/workflow/` |
+| Agent runtime and modules | Sanitize model input and run OpenAI-backed structured specialists or deterministic workflow-specific implementations | `src/agents/runner.ts`, `src/agents/` |
+| M3 research subsystem | Perform bounded read-only hosted search, validate citations, and return evidence only to the requester | `src/agents/research/` |
+| Storage | Persist validated metric snapshots, workflow runs, evidence projections, events, and plans with atomic file replacement | `src/storage/` |
+| Tracing | Create credential-checked structured workflow events | `src/tracing/events.ts` |
+| Verification | Exercise contracts, connectors, workflows, storage, CLIs, and end-to-end behavior with fakes and temporary files | `src/tests/` |
+
+The CLI files are the runtime composition roots. Tests replace their network,
+clock, model, and filesystem dependencies with fakes; the domain and workflow
+code do not reach into environment variables directly.
+
+## Sources and trust boundaries
+
+| Source | Access path | What enters Buffr | What is retained |
+| --- | --- | --- | --- |
+| PostHog | Read-only aggregate HogQL request through `PosthogMetricSourceAdapter` | Counts for four approved product events and a derived scan-completion rate | Normalized daily aggregate snapshot; no raw event rows |
+| Fly Metrics API | Read-only Prometheus query through `FlyMetricsSourceAdapter` | Request count, 5xx response count, and derived error rate | Normalized daily aggregate snapshot; no raw response payload |
+| Shopify Partner | Owner-exported aggregate CSV through `ShopifyPartnerCsvMetricSource` | Date, active merchants, installs, uninstalls, and earnings amount | Normalized daily aggregate snapshot; no merchant/customer records |
+| Etsy API | Read-only `EtsyHttpClient` and `EtsyEvidenceRepository` | Listing evidence and transaction responses mapped at the connector boundary | Normalized listing evidence when used; credentials and token files are excluded |
+| Product context JSON | Owner-curated local file | Product, customer, promise, constraints, owner goal, and marketplace surface | Validated marketplace visibility evidence |
+| Listing context JSON | Owner-curated observations of a public listing | Headline, category, gallery count, trust signals, copy notes, and visual-review notes | Validated qualitative evidence; never conversion proof |
+| OpenAI model | Structured module calls through `OpenAiAgentRunner` | Validated workflow context with credential-like keys removed | Validated module output and bounded usage metadata; not raw provider payloads |
+| Public web | OpenAI hosted web search through the M3 adapter | A concrete question plus configured domain policy | Citation metadata, bounded search summaries, and research references; no page bodies |
+| Result evidence | Owner-triggered result command using a later review artifact | Qualified aggregate signals after the experiment delay | Result evidence projection plus M2/M7 outputs in the existing run |
+
+An implemented connector is not necessarily a complete product entry point.
+For example, Etsy has a read-only connector and a shared workflow lifecycle, but
+the current user-facing Etsy command is configuration validation rather than a
+full listing-review CLI. `npm start` likewise loads only the scaffold entry
+point; operational work runs through the workflow-specific commands below.
+
+## Technology stack
+
+| Layer | Technology used here |
+| --- | --- |
+| Language and runtime | Strict TypeScript, ES2022 target, Node.js ESM |
+| Build and package tooling | `npm`, `package-lock.json`, TypeScript compiler (`tsc`) |
+| Runtime validation | Zod strict schemas and discriminated unions |
+| Agent/model integration | `@openai/agents`, structured outputs, hosted web-search tool |
+| HTTP | Node's native `fetch`, `AbortController`, explicit timeouts |
+| Configuration | Environment variables loaded locally with `dotenv` |
+| Persistence | Node filesystem APIs, JSON snapshots/artifacts, JSONL event projections, atomic rename writes, per-snapshot lock directories |
+| Testing | Vitest, dependency-injected fakes, fixed clocks, temporary directories, synthetic provider responses |
+| User interface | Command-line scripts exposed through `npm`; no web UI or terminal chat runtime in this slice |
+| Deployment/operations | Self-hosted local process; external scheduling is expected; no database, queue, or in-process scheduler |
+
+The architecture combines a few standard implementation patterns:
 
 | Capability | Pattern name | Where to look |
 | --- | --- | --- |
@@ -142,15 +309,9 @@ The architecture combines a few standard patterns:
 | Transition checks | Guards / schema validation | `src/workflow/guards.ts`, `src/contracts/` |
 | External systems | Ports and adapters | `src/connectors/` |
 | Persistence | Repository pattern | `src/storage/runs.ts`, `src/storage/metric-snapshots.ts` |
-| LLM reasoning | Strategy-like specialist modules | `src/agents/<role>/` |
-| Research detours | Bounded tool-use loop with circuit breakers | `src/agents/research/`, `src/workflow/routes.ts` |
-
-The useful first-principles distinction is:
-
-- Deterministic code handles things that must be repeatable, auditable, and
-  safe: validation, routing, persistence, waits, approvals, and stop conditions.
-- LLM modules handle judgment-heavy interpretation: context summaries,
-  diagnoses, hypotheses, research interpretation, test plans, and learning.
+| Product entry | Profile service / facade | `src/workflow/*-profile.ts` |
+| LLM reasoning | Bounded specialist strategies | `src/agents/<role>/`, workflow-specific `modules.ts` files |
+| Research detours | Tool-use loop with deterministic circuit breakers | `src/agents/research/`, `src/workflow/engine.ts` |
 
 ## Workflow lifecycle
 
@@ -288,7 +449,49 @@ or environment variable names. Those belong at the adapter/configuration edge.
 ## Persistence and artifacts
 
 The first version uses local files because Buffr currently serves one owner on
-one developer-controlled machine.
+one developer-controlled machine. With the documented defaults, its data layout
+is:
+
+```text
+artifacts/merchgrid/
+  context/
+    merchgrid-visibility-context.json       # owner-curated product input
+    merchgrid-listing-context.json          # owner-curated public listing input
+  sources/
+    shopify-partner-aggregates.csv          # approved manual aggregate input
+  metrics/                                  # MERCHGRID_METRICS_DATA_DIR
+    snapshots/
+      posthog/<YYYY-MM-DD>.json             # normalized daily source records
+      fly_metrics/<YYYY-MM-DD>.json
+      shopify_partner/<YYYY-MM-DD>.json
+    artifacts/
+      daily-health/<YYYY-MM-DD>.json        # derived one-day review evidence
+      weekly-reviews/<YYYY-MM-DD>.json      # derived adjacent-week evidence
+    workflow-runs/
+      <run-id>/
+        run.json                            # authoritative workflow state
+        evidence/
+          initial.json                     # reviewable evidence projection
+          result.json                      # optional later evidence projection
+        events.jsonl                       # reviewable trace projection
+        experiment-plan.json               # M6 plan plus evidence/research refs
+```
+
+There are two local systems of record:
+
+- A completed daily snapshot is the collection record for one source and UTC
+  date. Completed snapshots are immutable; an incomplete snapshot may be
+  replaced when collection later succeeds.
+- `run.json` is the workflow record. It contains the current state and the
+  validated module outputs needed to resume after a wait or process restart.
+
+Daily/weekly reviews, separate evidence files, `events.jsonl`, and
+`experiment-plan.json` are inspectable projections. They make review easier,
+but they do not replace their underlying snapshots or `run.json`.
+
+Writes use temporary files followed by atomic rename. Snapshot writers also use
+a per-file lock directory, which protects a date/source record from concurrent
+local writers. This is local process coordination, not a distributed lock.
 
 Local file persistence is useful here because it is:
 
@@ -303,7 +506,9 @@ runs, richer querying, account isolation, background workers, or production
 observability that local files cannot handle cleanly.
 
 Generated operational evidence and workflow artifacts live under `artifacts/`.
-Real `.env` files and private source exports must stay out of git.
+Real `.env` files, credentials, raw provider payloads, private customer data,
+and unapproved source exports must stay out of git and out of persisted
+workflow data.
 
 ## How to read the codebase
 
@@ -380,6 +585,12 @@ deployment-provided variables may override it. Never commit the real `.env`.
 Common environment variable names:
 
 - `OPENAI_API_KEY`
+- `ETSY_API_KEY`
+- `ETSY_OAUTH_CLIENT_ID`
+- `ETSY_OAUTH_REDIRECT_URI`
+- `ETSY_OAUTH_SCOPES`
+- `ETSY_TOKEN_STORAGE_PATH`
+- `ETSY_VALIDATE_LISTING_ID`
 - `POSTHOG_PROJECT_ID`
 - `POSTHOG_PERSONAL_API_KEY`
 - `POSTHOG_BASE_URL`
@@ -389,8 +600,10 @@ Common environment variable names:
 - `MERCHGRID_METRICS_DATA_DIR`
 - `SHOPIFY_PARTNER_AGGREGATES_CSV_PATH`
 
-Etsy connector validation uses the Etsy-related variables documented by the
-Etsy configuration boundary and `.env.example`.
+Etsy connector validation uses the Etsy-related variables defined by
+`src/core/config.ts` and the Etsy configuration-boundary design. The runtime
+token provider remains an injected connector dependency; this repository does
+not implement an OAuth login flow.
 
 ## Core commands
 
@@ -542,16 +755,21 @@ owner. The first implementation phase proves engine inputs, pauses, state
 transitions, evidence gates, and outputs before adding a terminal-chat adapter.
 Terminal chat starts only after a mocked end-to-end lifecycle proves engine inputs, waits, resume behavior, outputs, traces, and persisted evidence.
 
-Validate Etsy connector configuration after building:
+The Etsy validation scaffold is exposed after building:
 
 ```bash
 npm run etsy:validate
 ```
 
-The Etsy connector is read-only. It fetches shop, listing, and transaction
-evidence and maps provider-specific API responses into Buffr's normalized
-contracts. It must not expose raw credential material to workflow state or agent
-modules.
+It validates Etsy configuration and is designed to perform one read-only listing
+fetch. The default CLI currently injects an unavailable token provider, so a
+live call stops with `configuration_failed` until an OAuth token provider is
+implemented or injected. Tests supply fake tokens and HTTP responses.
+
+The implemented Etsy connector is read-only. It can fetch listing and
+transaction evidence and maps provider-specific listing responses into Buffr's
+normalized contracts. It must not expose raw credential material to workflow
+state or agent modules.
 
 ## Safety rules
 
