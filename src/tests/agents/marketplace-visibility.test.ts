@@ -2,6 +2,10 @@ import { describe, expect, it } from 'vitest';
 import type { MarketplaceVisibilityEvidence } from '../../contracts/marketplace-visibility.js';
 import type { WorkflowRunState } from '../../contracts/workflow.js';
 import { FakeAgentRunner } from '../../agents/runner.js';
+import type { AgentRunInput, AgentRunResult, AgentRunner } from '../../agents/runner.js';
+import type { MarketplaceResearchConfig } from '../../agents/research/marketplace-config.js';
+import type { ResearchTool, ResearchToolResult } from '../../agents/research/agent.js';
+import { parseWithSchema } from '../../contracts/workflow.js';
 import {
   createMarketplaceVisibilityModuleExecutor,
   deterministicMarketplaceVisibilityContext,
@@ -208,9 +212,159 @@ describe('marketplace visibility modules', () => {
       status: 'unresolved',
       next_action: 'stop',
       confidence: 'low',
+      limitations: ['External research is disabled for marketplace visibility reviews.'],
     });
   });
+
+  it('preserves concrete M4-M7 research signals when marketplace research is enabled', async () => {
+    const tool = recordingResearchTool();
+    const executor = createMarketplaceVisibilityModuleExecutor({
+      agentRunner: researchSignalRunner(),
+      research: { config: enabledConfig(), tool },
+    });
+    const state = workflowState({ evidence: visibilityEvidence() });
+
+    await expect(executor.runM4(state)).resolves.toMatchObject({ decision: 'research_domain_knowledge' });
+    await expect(executor.runM5(state)).resolves.toHaveProperty('researchNeed');
+    await expect(executor.runM6(state)).resolves.toMatchObject({
+      unresolvedMeasurementRules: ['Research whether the listing changed.'],
+      researchNeed: 'Research the marketplace.',
+    });
+    await expect(executor.runM7(state)).resolves.toMatchObject({ nextAction: 'research' });
+  });
+
+  it('runs enabled M3 with only the injected hosted web-search tool', async () => {
+    const citation = {
+      source: 'web' as const,
+      title: 'Official guide',
+      url: 'https://docs.example.test/guide',
+      excerpt: 'Synthetic guidance.',
+      fetchedAt: '2026-08-31T00:00:00.000Z',
+    };
+    const tool = recordingResearchTool({ citations: [citation], data: {} });
+    const runner = new SequenceRunner([
+      researchOutput({
+        next_action: 'continue',
+        evidence: [],
+        requestedLookup: {
+          tool: 'hosted_web_search',
+          reason: 'Need official guidance.',
+          input: { query: 'Synthetic policy question' },
+        },
+      }),
+      researchOutput({ evidence: [citation] }),
+    ]);
+    const executor = createMarketplaceVisibilityModuleExecutor({
+      agentRunner: runner,
+      research: { config: enabledConfig(), tool, now: incrementingNow() },
+    });
+
+    await executor.runM3(workflowState({ evidence: visibilityEvidence() }), {
+      requester: 'm4',
+      returnStage: 'm4_diagnosis',
+      question: 'Synthetic policy question',
+    });
+
+    expect(tool.calls).toEqual([{ query: 'Synthetic policy question' }]);
+  });
 });
+
+function enabledConfig(): MarketplaceResearchConfig {
+  return {
+    enabled: true,
+    allowedDomains: ['docs.example.test'],
+    searchContextSize: 'low',
+    limits: { maxToolCalls: 3, maxWallClockMs: 120_000 },
+  };
+}
+
+function researchSignalRunner(): AgentRunner {
+  return new FakeAgentRunner({
+    m4: {
+      performancePath: 'discovery',
+      primaryBottleneck: 'The listing needs more context.',
+      confidence: 'low',
+      decision: 'research_domain_knowledge',
+      researchQuestion: 'Which listing phrases improve discovery?',
+      notes: [],
+    },
+    m5: {
+      hypothesis: 'A clearer listing message may improve discovery.',
+      primaryVariable: 'listing message',
+      recommendedRevision: 'Lead with the audit outcome.',
+      keepConstant: ['pricing'],
+      expectedSignal: 'Later evidence becomes available.',
+      researchNeed: 'Research marketplace listing phrasing.',
+      notes: [],
+    },
+    m6: {
+      primaryMetric: 'posthog.app_opened_count',
+      secondaryMetrics: [],
+      baselineValue: 0,
+      baselinePeriod: 'sparse initial evidence',
+      qualificationRequirements: [],
+      expectedSupportingSignal: 'A later signal is available.',
+      expectedWeakeningSignal: 'A later signal stays flat.',
+      inconclusiveCondition: 'Traffic is sparse.',
+      contextToMonitor: [],
+      unresolvedMeasurementRules: ['Research whether the listing changed.'],
+      researchNeed: 'Research the marketplace.',
+    },
+    m7: {
+      outcome: 'inconclusive',
+      hypothesisEvaluation: 'inconclusive',
+      evidence: [],
+      contextualFactors: [],
+      learning: 'Sparse evidence cannot establish an outcome.',
+      confidence: 'low',
+      knowledgeSource: 'product_data',
+      nextAction: 'research',
+      researchQuestion: 'Research marketplace visibility.',
+      nextActionRationale: 'More context would be useful.',
+    },
+  });
+}
+
+class SequenceRunner implements AgentRunner {
+  constructor(private readonly outputs: unknown[]) {}
+
+  async runStructured<TOutput>(input: AgentRunInput<TOutput>): Promise<AgentRunResult<TOutput>> {
+    return {
+      output: parseWithSchema(input.outputSchema, this.outputs.shift(), `${input.moduleId} output`) as TOutput,
+    };
+  }
+}
+
+function recordingResearchTool(
+  result: ResearchToolResult = { citations: [], data: {} },
+): ResearchTool & { calls: Record<string, unknown>[] } {
+  return {
+    name: 'hosted_web_search',
+    calls: [],
+    async call(input) {
+      this.calls.push(input);
+      return result;
+    },
+  };
+}
+
+function researchOutput(overrides: Record<string, unknown>) {
+  return {
+    status: 'partly_resolved',
+    next_action: 'stop',
+    requester: 'm4',
+    question: 'Synthetic policy question',
+    evidence: [],
+    confidence: 'low',
+    limitations: [],
+    ...overrides,
+  };
+}
+
+function incrementingNow(): () => number {
+  let value = 0;
+  return () => value++;
+}
 
 function visibilityEvidence(): MarketplaceVisibilityEvidence {
   return {

@@ -16,6 +16,8 @@ import {
 } from '../../contracts/modules.js';
 import type { WorkflowRunState } from '../../contracts/workflow.js';
 import { runStructuredModule, type AgentRunner } from '../runner.js';
+import { runResearchModule, type ResearchTool } from '../research/agent.js';
+import type { MarketplaceResearchConfig } from '../research/marketplace-config.js';
 import type { ModuleExecutor, ResearchRequest } from '../../workflow/engine.js';
 
 const VISIBILITY_DIAGNOSIS_PROMPT = [
@@ -46,8 +48,24 @@ const VISIBILITY_EVALUATION_PROMPT = [
   'Do not claim proof of a marketplace visibility outcome.',
 ].join('\n');
 
-/** Builds a provider-free executor for sparse marketplace-visibility reviews. */
-export function createMarketplaceVisibilityModuleExecutor(deps: { agentRunner: AgentRunner }): ModuleExecutor {
+type MarketplaceVisibilityModuleDependencies = {
+  agentRunner: AgentRunner;
+  research?: {
+    config: MarketplaceResearchConfig;
+    tool?: ResearchTool;
+    now?: () => number;
+  };
+};
+
+/** Builds the marketplace executor with an optional read-only M3 research seam. */
+export function createMarketplaceVisibilityModuleExecutor(
+  deps: MarketplaceVisibilityModuleDependencies,
+): ModuleExecutor {
+  const researchEnabled = deps.research?.config.enabled ?? false;
+  if (researchEnabled && !deps.research?.tool) {
+    throw new AppError('configuration_failed', 'Enabled marketplace research requires a hosted web-search tool');
+  }
+
   return {
     async runM1(state) {
       return deterministicMarketplaceVisibilityContext(requireInitialEvidence(state));
@@ -55,8 +73,20 @@ export function createMarketplaceVisibilityModuleExecutor(deps: { agentRunner: A
     async runM2Initial(state) {
       return metricsFromMarketplaceVisibilityEvidence(requireInitialEvidence(state));
     },
-    async runM3(_state, request) {
-      return unavailableResearchResult(request);
+    async runM3(state, request) {
+      if (!researchEnabled || !deps.research?.tool) return unavailableResearchResult(request);
+      return runResearchModule({
+        runner: deps.agentRunner,
+        tools: [deps.research.tool],
+        request: {
+          requester: request.requester,
+          question: request.question,
+          reason: 'Marketplace visibility research request',
+        },
+        limits: deps.research.config.limits,
+        now: deps.research.now,
+        trace: trace(state),
+      });
     },
     async runM4(state) {
       const evidence = requireInitialEvidence(state);
@@ -68,7 +98,7 @@ export function createMarketplaceVisibilityModuleExecutor(deps: { agentRunner: A
         outputSchema: DiagnosisOutputSchema,
         trace: trace(state),
       });
-      return normalizeDiagnosis(result.output, evidence);
+      return normalizeDiagnosis(result.output, evidence, researchEnabled);
     },
     async runM5(state) {
       const result = await runStructuredModule({
@@ -79,7 +109,7 @@ export function createMarketplaceVisibilityModuleExecutor(deps: { agentRunner: A
         outputSchema: HypothesisOutputSchema,
         trace: trace(state),
       });
-      return normalizeHypothesis(result.output);
+      return normalizeHypothesis(result.output, researchEnabled);
     },
     async runM6(state) {
       const result = await runStructuredModule({
@@ -90,7 +120,7 @@ export function createMarketplaceVisibilityModuleExecutor(deps: { agentRunner: A
         outputSchema: TestPlanOutputSchema,
         trace: trace(state),
       });
-      return normalizeTestPlan(result.output);
+      return normalizeTestPlan(result.output, researchEnabled);
     },
     async runM2Results(state) {
       return metricsFromMarketplaceVisibilityResult(state, requireResultEvidence(state));
@@ -104,7 +134,7 @@ export function createMarketplaceVisibilityModuleExecutor(deps: { agentRunner: A
         outputSchema: EvaluationOutputSchema,
         trace: trace(state),
       });
-      return normalizeEvaluation(result.output);
+      return normalizeEvaluation(result.output, researchEnabled);
     },
   };
 }
@@ -239,7 +269,11 @@ function trace(state: WorkflowRunState) {
   return { runId: state.runId, stage: state.stage };
 }
 
-function normalizeDiagnosis(output: DiagnosisOutput, evidence: MarketplaceVisibilityEvidence): DiagnosisOutput {
+function normalizeDiagnosis(
+  output: DiagnosisOutput,
+  evidence: MarketplaceVisibilityEvidence,
+  researchEnabled: boolean,
+): DiagnosisOutput {
   if (
     evidence.reviewMode.mode === 'exploratory_visibility_test'
     && output.decision === 'collect_more_data'
@@ -255,15 +289,16 @@ function normalizeDiagnosis(output: DiagnosisOutput, evidence: MarketplaceVisibi
       ],
     };
   }
-  if (output.decision !== 'research_domain_knowledge') return output;
+  if (output.decision !== 'research_domain_knowledge' || researchEnabled) return output;
   const { researchQuestion: _researchQuestion, ...withoutResearchQuestion } = output;
   return { ...withoutResearchQuestion, decision: 'collect_more_data' };
 }
 
-function normalizeHypothesis(output: HypothesisOutput): HypothesisOutput {
-  const { researchNeed: _researchNeed, ...withoutResearchNeed } = output;
+function normalizeHypothesis(output: HypothesisOutput, researchEnabled: boolean): HypothesisOutput {
+  const { researchNeed, ...withoutResearchNeed } = output;
   return {
     ...withoutResearchNeed,
+    ...(researchEnabled && researchNeed ? { researchNeed } : {}),
     notes: uniqueStrings([
       ...withoutResearchNeed.notes,
       'Exploratory recommendation; not metric-proven.',
@@ -272,10 +307,11 @@ function normalizeHypothesis(output: HypothesisOutput): HypothesisOutput {
   };
 }
 
-function normalizeTestPlan(output: TestPlanOutput): TestPlanOutput {
-  const { researchNeed: _researchNeed, ...withoutResearchNeed } = output;
+function normalizeTestPlan(output: TestPlanOutput, researchEnabled: boolean): TestPlanOutput {
+  const { researchNeed, ...withoutResearchNeed } = output;
   return {
     ...withoutResearchNeed,
+    ...(researchEnabled && researchNeed ? { researchNeed } : {}),
     qualificationRequirements: uniqueStrings([
       ...withoutResearchNeed.qualificationRequirements,
       'Human approval and manual marketplace edit are required before measurement.',
@@ -285,12 +321,12 @@ function normalizeTestPlan(output: TestPlanOutput): TestPlanOutput {
       ...withoutResearchNeed.contextToMonitor,
       'manual marketplace change applied by owner',
     ]),
-    unresolvedMeasurementRules: [],
+    unresolvedMeasurementRules: researchEnabled ? output.unresolvedMeasurementRules : [],
   };
 }
 
-function normalizeEvaluation(output: EvaluationOutput): EvaluationOutput {
-  if (output.nextAction !== 'research') return output;
+function normalizeEvaluation(output: EvaluationOutput, researchEnabled: boolean): EvaluationOutput {
+  if (output.nextAction !== 'research' || researchEnabled) return output;
   const { researchQuestion: _researchQuestion, ...withoutResearchQuestion } = output;
   return { ...withoutResearchQuestion, nextAction: 'wait' };
 }
@@ -303,7 +339,7 @@ function unavailableResearchResult(request: ResearchRequest): ResearchOutput {
     question: request.question,
     evidence: [],
     confidence: 'low',
-    limitations: ['External research is unavailable for marketplace visibility reviews.'],
+    limitations: ['External research is disabled for marketplace visibility reviews.'],
   });
 }
 
