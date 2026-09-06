@@ -20,7 +20,8 @@ Raw or human-curated sources
   ├─ MerchGrid Fly reliability metrics
   ├─ Shopify Partner CSV exports
   ├─ marketplace/product context JSON
-  └─ public listing observations
+  ├─ public listing observations
+  └─ bounded public-web research
 
         ↓ validate and normalize
 
@@ -37,6 +38,7 @@ Workflow contracts
   ├─ WorkflowEvent
   ├─ M1 context output
   ├─ M2 metrics output
+  ├─ M3 cited research output
   ├─ M4 diagnosis output
   ├─ M5 hypothesis output
   ├─ M6 test plan output
@@ -263,7 +265,7 @@ These are the reasoning steps inside the work engine.
 | --- | --- |
 | `ContextOutput` | M1 identifies product context, available evidence, missing information, and notes. |
 | `MetricsOutput` | M2 compares metrics and states whether the comparison is valid, limited, invalid, or missing. |
-| `ResearchOutput` | M3 or another module asks for external or source-backed research when it needs more evidence. |
+| `ResearchOutput` | M3 returns cited, bounded external or source-backed evidence to the module that requested it. |
 | `DiagnosisOutput` | M4 identifies the likely bottleneck and decides whether to proceed, research, or collect more data. |
 | `HypothesisOutput` | M5 states what change might improve the outcome and what signal should move. |
 | `TestPlanOutput` | M6 turns the hypothesis into a measurable experiment plan. |
@@ -272,6 +274,214 @@ These are the reasoning steps inside the work engine.
 Read these as: "Each module gets one job and passes a typed result to the next module."
 
 APOSD lens: this avoids a shallow "do everything" module. Each module has a small, named responsibility and a contract that makes its output inspectable.
+
+### M3 research contract layer
+
+M3 is different from the other module outputs because it can cross a read-only
+tool boundary and bring new evidence into the workflow. Its contracts therefore
+describe not only the model's conclusion, but also which tools were permitted,
+where each citation came from, how search was bounded, and which representation
+is safe to persist.
+
+```text
+M2, M4, M5, M6, or M7 raises a concrete research question
+        |
+        v
+engine-owned ResearchRequest and ResearchLimits
+        |
+        v
+ResearchToolNameSchema allowlist
+        |
+        v
+read-only tool evidence and CitationSchema validation
+        |
+        v
+ResearchProviderOutputSchema
+        |  provider-compatible structured candidate
+        v
+local grounding, normalization, and ResearchOutputSchema validation
+        |
+        v
+WorkflowRunState.moduleOutputs.m3[]
+        |
+        +--> bounded search events in events.jsonl
+        +--> citation URLs projected into experiment-plan researchRefs
+```
+
+The deterministic workflow engine owns the request, limits, routing, and return
+stage. M3 can recommend whether its own lookup loop should continue, but it
+cannot choose the next product-workflow stage.
+
+#### `ResearchToolNameSchema`
+
+This enum is the contract-level tool allowlist. A requested tool name must be
+one of:
+
+- `etsy_listing_details`
+- `etsy_transactions`
+- `normalized_evidence`
+- `hosted_web_search`
+
+Read it as: "M3 may use only a named, injected, read-only capability." A tool
+appearing in this enum does not automatically make it available. The workflow
+must also permit it, and the active module executor must inject an
+implementation.
+
+Marketplace visibility currently injects only `hosted_web_search`. It does not
+give M3 authenticated marketplace tools or access to private dashboards.
+
+#### `CitationSchema`
+
+This is the evidence unit returned by research. Every citation contains:
+
+- `source` — `etsy`, `web`, `user`, or `derived`;
+- `title` and a non-empty `excerpt`;
+- `fetchedAt` — a validated ISO timestamp;
+- `url` — optional for non-web evidence and required for `source: web`;
+- optional provenance fields: `domain`, `sourceType`, `retrievalMethod`, and
+  `searchPass`.
+
+For hosted research, `retrievalMethod` can only be
+`openai_hosted_web_search`. `searchPass` distinguishes the configured
+`authoritative_domains` pass from a `broader_web` fallback. `sourceType`
+distinguishes official platform, official marketplace, general public-web, and
+derived evidence.
+
+Read it as: "This is the smallest cited claim M3 is allowed to return."
+
+`CitationSchema` validates citation shape. The M3 implementation adds a second
+grounding check: every persisted web URL must have been returned by an injected
+research tool. A model cannot introduce a recalled or invented URL as evidence.
+
+#### `ResearchSearchSummarySchema`
+
+This is bounded operational provenance for one search pass. It records:
+
+- pass and completion status;
+- total, official, and broader citation counts;
+- the number of configured allowed domains;
+- start and completion timestamps;
+- optional token and estimated-cost totals;
+- an optional bounded failure category: `no_results`, `connector_failed`,
+  `invalid_citations`, or `budget_exhausted`.
+
+It intentionally does not contain search-result bodies, raw provider payloads,
+credentials, request headers, or provider error text. Read it as: "What kind of
+search ran, how much bounded evidence returned, and did the pass succeed?"
+
+#### `ResearchProviderOutputSchema`
+
+This is the closed contract used at the OpenAI structured-output boundary. It
+contains the common research-result fields plus a provider-compatible
+`requestedLookup.input` object with only optional `query` and `listingId`
+fields.
+
+The provider schema is intentionally narrower than Buffr's persisted schema.
+OpenAI receives a JSON-schema-compatible structure, then the runner validates
+the returned candidate again with Buffr's local schema. Provider acceptance is
+not treated as proof that an output is safe or meaningful.
+
+Read it as: "This is the candidate shape the model is allowed to propose."
+
+#### `ResearchOutputSchema`
+
+This is Buffr's canonical internal and persisted M3 result. It contains:
+
+- `status` — `resolved`, `partly_resolved`, or `unresolved`;
+- `next_action` — `continue` or `stop` for the internal research loop;
+- `requester` and the original `question`;
+- validated `evidence` citations;
+- `confidence` and explicit `limitations`;
+- optional validated `searchSummaries`;
+- optional `requestedLookup` with a permitted tool, reason, and input.
+
+The schema enforces a cross-field rule: `next_action: continue` is invalid
+without `requestedLookup`. Runtime policy then checks the requested tool and
+call, wall-clock, token, and cost limits before another lookup can run.
+
+The canonical schema keeps `requestedLookup.input` as a generic record so
+internal or future injected research tools can retain their typed adapter
+inputs. The provider-facing schema remains closed so a model cannot invent
+arbitrary input fields. This separation keeps provider limitations out of the
+durable Buffr contract.
+
+Read it as: "This is the research result Buffr has validated and is willing to
+save and return to the requester."
+
+Example shape using synthetic evidence:
+
+```json
+{
+  "status": "resolved",
+  "next_action": "stop",
+  "requester": "m6",
+  "question": "Which public measurement guidance applies to this test?",
+  "evidence": [
+    {
+      "source": "web",
+      "title": "Official measurement guide",
+      "url": "https://docs.example.test/measurement",
+      "excerpt": "Use one consistent before-and-after measurement window.",
+      "fetchedAt": "2026-09-05T00:00:00.000Z",
+      "domain": "docs.example.test",
+      "sourceType": "official_platform",
+      "retrievalMethod": "openai_hosted_web_search",
+      "searchPass": "authoritative_domains"
+    }
+  ],
+  "confidence": "moderate",
+  "limitations": [],
+  "searchSummaries": [
+    {
+      "pass": "authoritative_domains",
+      "status": "completed",
+      "citationCount": 1,
+      "officialCitationCount": 1,
+      "broaderCitationCount": 0,
+      "allowedDomainCount": 1,
+      "startedAt": "2026-09-05T00:00:00.000Z",
+      "completedAt": "2026-09-05T00:00:01.000Z"
+    }
+  ]
+}
+```
+
+#### What is persisted and what is projected
+
+The complete validated `ResearchOutput` is appended to
+`WorkflowRunState.moduleOutputs.m3`. M3 is an array because several eligible
+modules may request separate research detours during one workflow run.
+
+`run.json` remains the source of truth. The run repository derives two
+review-oriented views:
+
+- `events.jsonl` receives bounded search-started, search-completed/failed, and
+  research-returned events;
+- `experiment-plan.json` receives sorted, unique HTTPS citation URLs under
+  `metadata.researchRefs` when research evidence exists.
+
+These projections preserve provenance without copying full web pages or raw
+provider responses into the experiment plan.
+
+#### Contract boundary versus runtime policy
+
+The contracts answer "is this data structurally valid and safe to hand off?"
+Runtime policy answers "is this research action permitted now?"
+
+Runtime settings such as the marketplace feature flag, domain allowlist,
+search-context size, model selection, and budgets therefore live in
+`src/agents/research/marketplace-config.ts`, not in `src/contracts/`. They
+configure execution and are not part of historical persisted research data.
+
+The combined boundary is:
+
+```text
+provider-compatible structure
+        + local contract validation
+        + tool-grounding validation
+        + deterministic runtime policy
+        = persisted M3 research evidence
+```
 
 ## Final output contract
 
