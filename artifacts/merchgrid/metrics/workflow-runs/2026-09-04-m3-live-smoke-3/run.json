@@ -1,0 +1,857 @@
+{
+  "runId": "2026-09-04-m3-live-smoke-3",
+  "subjectRef": "merchgrid:visibility:2026-08-22",
+  "workflowKind": "marketplace_visibility_review",
+  "status": "waiting_for_data",
+  "stage": "m6_test_plan",
+  "createdAt": "2026-09-04T15:39:01.920Z",
+  "updatedAt": "2026-09-04T15:40:17.018Z",
+  "evidenceRefs": [
+    "initial:marketplace_visibility:merchgrid_shopify_app_store:merchgrid:visibility:2026-08-22"
+  ],
+  "evidenceSnapshots": {
+    "initial": {
+      "product": "marketplace_visibility",
+      "profile": "merchgrid_shopify_app_store",
+      "subjectRef": "merchgrid:visibility:2026-08-22",
+      "artifactRef": "artifacts/merchgrid/metrics/artifacts/daily-health/2026-08-22.json",
+      "evidenceLevel": "sparse",
+      "recommendationType": "visibility_hypothesis",
+      "reviewMode": {
+        "mode": "exploratory_visibility_test",
+        "evidenceLevel": "sparse",
+        "confidenceBoundary": "low",
+        "reason": "metrics_sparse_context_sufficient"
+      },
+      "marketplaceContext": {
+        "marketplace": "shopify_app_store",
+        "productName": "MerchGrid",
+        "productType": "shopify_app",
+        "targetCustomer": "Shopify merchants auditing catalog quality",
+        "customerProblem": "Catalog issues can hurt trust before the merchant notices",
+        "currentPromise": "Find catalog issues before they hurt sales or trust",
+        "currentSurfaceSummary": "Shopify App Store listing for a read-only catalog audit app",
+        "primaryDiscoverySurface": "Shopify App Store search and category browsing",
+        "primaryActionWanted": "Open the app and run the first catalog audit",
+        "constraints": [
+          "manual listing changes only",
+          "do not change app behavior"
+        ],
+        "availableAssets": [
+          "listing copy",
+          "screenshots",
+          "setup documentation"
+        ],
+        "ownerGoal": "increase qualified app opens and first scan starts"
+      },
+      "listingContext": {
+        "marketplace": "shopify_app_store",
+        "profile": "merchgrid_shopify_app_store",
+        "productName": "MerchGrid",
+        "sourceUrl": "https://apps.shopify.com/merchgrid-catalog-audit",
+        "capturedAt": "2026-08-25T13:45:00.000Z",
+        "captureMode": "manual_visual_review",
+        "publicSurface": {
+          "title": "MerchGrid Catalog Audit",
+          "headline": "Scans your product catalog and shows exactly which items are priced below cost",
+          "category": "Analytics",
+          "pricingLabel": "Free",
+          "ratingSummary": "0 reviews",
+          "reviewCount": 0,
+          "launchDate": "August 7, 2026"
+        },
+        "gallery": {
+          "imageCount": 4,
+          "observedImageLabels": [
+            "main image",
+            "onboarding image",
+            "progress image",
+            "result image"
+          ],
+          "visualNotes": [
+            "screenshots show audit flow and result surface"
+          ]
+        },
+        "trustSignals": {
+          "positive": [
+            "free pricing",
+            "privacy policy visible",
+            "support channel visible"
+          ],
+          "friction": [
+            "no reviews yet",
+            "read only safety is not prominent near data access context"
+          ]
+        },
+        "copyNotes": {
+          "clearClaims": [
+            "detect below cost pricing",
+            "catch compare at price issues",
+            "find duplicate and missing skus"
+          ],
+          "unclearClaims": [
+            "trust outcome could be sharper",
+            "first scan action could be more explicit"
+          ],
+          "missingContext": [
+            "what happens after opening the app",
+            "why read only access is safe"
+          ]
+        },
+        "visibilityRubricNotes": {
+          "promiseClarity": "pricing issue promise is concrete",
+          "audienceSpecificity": "merchant role is implied but not explicit",
+          "problemActionFit": "catalog audit connects to first scan",
+          "discoveryFit": "analytics category may require clearer catalog audit keywords",
+          "trustAndRiskReduction": "read only safety should be easier to see",
+          "assetClarity": "gallery shows screens but outcome hierarchy may need review"
+        },
+        "limitations": [
+          "manual public page review only",
+          "listing may change after capturedAt"
+        ]
+      },
+      "measuredSignals": {
+        "app_opened_count": 0,
+        "scan_started_count": 0,
+        "scan_completed_count": 0,
+        "scan_failed_count": 0,
+        "request_count": 2,
+        "error_response_count": 0,
+        "error_rate": 0
+      },
+      "limitations": [
+        "Shopify Partner metrics failed"
+      ],
+      "prohibitedClaims": [
+        "Do not claim sparse evidence proves a marketplace visibility bottleneck",
+        "Do not claim a visibility change will increase installs",
+        "Do not recommend automatic marketplace edits"
+      ]
+    }
+  },
+  "moduleOutputs": {
+    "m1": {
+      "product": "MerchGrid",
+      "likelyCustomer": "Shopify merchants auditing catalog quality",
+      "positioning": "Shopify App Store visibility review: Shopify App Store listing for a read-only catalog audit app",
+      "availableEvidence": [
+        "profile: merchgrid_shopify_app_store",
+        "evidence level: sparse",
+        "artifact: artifacts/merchgrid/metrics/artifacts/daily-health/2026-08-22.json",
+        "listing url: https://apps.shopify.com/merchgrid-catalog-audit",
+        "listing headline: Scans your product catalog and shows exactly which items are priced below cost",
+        "listing category: Analytics",
+        "listing gallery images: 4",
+        "listing clear claim: detect below cost pricing",
+        "listing clear claim: catch compare at price issues",
+        "listing clear claim: find duplicate and missing skus"
+      ],
+      "missingInformation": [
+        "Shopify Partner metrics failed",
+        "listing friction: no reviews yet",
+        "listing friction: read only safety is not prominent near data access context",
+        "listing unclear claim: trust outcome could be sharper",
+        "listing unclear claim: first scan action could be more explicit",
+        "listing missing context: what happens after opening the app",
+        "listing missing context: why read only access is safe",
+        "listing limitation: manual public page review only",
+        "listing limitation: listing may change after capturedAt"
+      ],
+      "notes": [
+        "Do not claim sparse evidence proves a marketplace visibility bottleneck",
+        "Do not claim a visibility change will increase installs",
+        "Do not recommend automatic marketplace edits",
+        "Listing observations are qualitative context, not conversion proof.",
+        "listing captured at: 2026-08-25T13:45:00.000Z",
+        "promise clarity: pricing issue promise is concrete",
+        "trust and risk reduction: read only safety should be easier to see"
+      ]
+    },
+    "m2Initial": {
+      "phase": "initial",
+      "metrics": [
+        {
+          "name": "visibility.evidence_level",
+          "current": 1,
+          "baseline": null,
+          "absoluteChange": null,
+          "percentageChange": null,
+          "qualification": "inconclusive",
+          "confidence": "low"
+        },
+        {
+          "name": "app_opened_count",
+          "current": 0,
+          "baseline": null,
+          "absoluteChange": null,
+          "percentageChange": null,
+          "qualification": "inconclusive",
+          "confidence": "low"
+        },
+        {
+          "name": "error_rate",
+          "current": 0,
+          "baseline": null,
+          "absoluteChange": null,
+          "percentageChange": null,
+          "qualification": "inconclusive",
+          "confidence": "low"
+        },
+        {
+          "name": "error_response_count",
+          "current": 0,
+          "baseline": null,
+          "absoluteChange": null,
+          "percentageChange": null,
+          "qualification": "inconclusive",
+          "confidence": "low"
+        },
+        {
+          "name": "request_count",
+          "current": 2,
+          "baseline": null,
+          "absoluteChange": null,
+          "percentageChange": null,
+          "qualification": "inconclusive",
+          "confidence": "low"
+        },
+        {
+          "name": "scan_completed_count",
+          "current": 0,
+          "baseline": null,
+          "absoluteChange": null,
+          "percentageChange": null,
+          "qualification": "inconclusive",
+          "confidence": "low"
+        },
+        {
+          "name": "scan_failed_count",
+          "current": 0,
+          "baseline": null,
+          "absoluteChange": null,
+          "percentageChange": null,
+          "qualification": "inconclusive",
+          "confidence": "low"
+        },
+        {
+          "name": "scan_started_count",
+          "current": 0,
+          "baseline": null,
+          "absoluteChange": null,
+          "percentageChange": null,
+          "qualification": "inconclusive",
+          "confidence": "low"
+        }
+      ],
+      "comparisonQuality": "limited",
+      "unresolvedQualificationNeeds": [
+        "measured marketplace traffic is sparse",
+        "Shopify Partner metrics failed"
+      ]
+    },
+    "m3": [
+      {
+        "status": "resolved",
+        "next_action": "stop",
+        "requester": "m6",
+        "question": "Need measurement guidance or restored marketplace analytics for impressions/app-store traffic so the team can define a minimum observation window and a practical decision threshold for this sparse-traffic manual test.",
+        "evidence": [
+          {
+            "source": "web",
+            "title": "Shopify Help Center | Shop sales channel performance analytics",
+            "url": "https://help.shopify.com/en/manual/online-sales-channels/shop/analytics",
+            "excerpt": "Documents Shop channel metrics including Shop product impressions and explains that sessions referred by the Shop app appear in acquisition reports as UTM source `shop_app`. Also states users can select today, last 7 days, or last 30 days.",
+            "fetchedAt": "2026-09-04T00:00:00Z",
+            "domain": "help.shopify.com",
+            "sourceType": "official_platform",
+            "retrievalMethod": "openai_hosted_web_search",
+            "searchPass": "authoritative_domains"
+          },
+          {
+            "source": "web",
+            "title": "Shopify Help Center | Analytics data points (fields) reference",
+            "url": "https://help.shopify.com/en/manual/reports-and-analytics/shopify-reports/report-types/analytics-fields",
+            "excerpt": "Defines Sessions as online store visits and notes Shop product impressions as the number of times products were viewed in the Shop channel.",
+            "fetchedAt": "2026-09-04T00:00:00Z",
+            "domain": "help.shopify.com",
+            "sourceType": "official_platform",
+            "retrievalMethod": "openai_hosted_web_search",
+            "searchPass": "authoritative_domains"
+          },
+          {
+            "source": "web",
+            "title": "Shopify Help Center | Acquisition reports",
+            "url": "https://help.shopify.com/en/manual/reports-and-analytics/shopify-reports/report-types/default-reports/acquisition-reports?itcat=partner_blog&itterm=homepage_subnav&link_search=true&page=2&q=Nick+Winkler",
+            "excerpt": "Explains acquisition reporting context and caveats for session counting, including that sessions may differ due to analytics conditions such as cookie consent and bot filtering.",
+            "fetchedAt": "2026-09-04T00:00:00Z",
+            "domain": "help.shopify.com",
+            "sourceType": "official_platform",
+            "retrievalMethod": "openai_hosted_web_search",
+            "searchPass": "authoritative_domains"
+          },
+          {
+            "source": "web",
+            "title": "Use minimum detectable effect to prioritize experiments – Optimizely Support",
+            "url": "https://support.optimizely.com/hc/en-us/articles/4410283338253-Use-minimum-detectable-effect-to-prioritize-experiments",
+            "excerpt": "Optimizely recommends using minimum detectable effect (MDE) with baseline conversion rate to estimate required sample size and prioritize experiments, especially when traffic is limited.",
+            "fetchedAt": "2026-09-04T00:00:00Z",
+            "domain": "support.optimizely.com",
+            "sourceType": "public_web",
+            "retrievalMethod": "openai_hosted_web_search",
+            "searchPass": "broader_web"
+          },
+          {
+            "source": "web",
+            "title": "How long to run an experiment – Optimizely Support",
+            "url": "https://support.optimizely.com/hc/en-us/articles/4410283969165-How-long-to-run-an-experiment",
+            "excerpt": "Experiment length depends on MDE, traffic, and calculator-estimated sample needs; low-traffic sites may need alternate tactics.",
+            "fetchedAt": "2026-09-04T00:00:00Z",
+            "domain": "support.optimizely.com",
+            "sourceType": "public_web",
+            "retrievalMethod": "openai_hosted_web_search",
+            "searchPass": "broader_web"
+          },
+          {
+            "source": "web",
+            "title": "Test tips for low-traffic sites – Optimizely Support",
+            "url": "https://support.optimizely.com/hc/en-us/articles/4410283325325-Test-tips-for-low-traffic-sites",
+            "excerpt": "Optimizely discusses strategies for experimentation when visitor traffic or conversions are low, including tradeoffs around significance and speed.",
+            "fetchedAt": "2026-09-04T00:00:00Z",
+            "domain": "support.optimizely.com",
+            "sourceType": "public_web",
+            "retrievalMethod": "openai_hosted_web_search",
+            "searchPass": "broader_web"
+          },
+          {
+            "source": "derived",
+            "title": "Research synthesis for sparse-traffic marketplace measurement",
+            "url": null,
+            "excerpt": "Observed fact: Shopify provides two relevant native signals for Shop marketplace visibility: Shop product impressions and sessions referred by UTM source `shop_app`, with selectable windows including today, last 7 days, and last 30 days. Observed fact: Shopify warns acquisition/session counts can vary because of analytics conditions like cookie consent and bot filtering. External research: Experiment duration should be set from traffic rate, baseline rate, and chosen minimum detectable effect (MDE); low-traffic contexts often require alternate tactics or more upstream proxy metrics. Interpretation: For a sparse-traffic manual marketplace test, the practical primary metric should be Shop product impressions or shop_app-referred sessions before downstream conversions, because these accumulate faster. Interpretation: A defensible minimum observation window is at least 30 days when traffic is sparse, since Shopify exposes a native 30-day view and broader experimentation guidance says runtime expands materially with low traffic and small effects. Interpretation: A practical decision threshold can be framed as 'do not judge until enough exposures accrue to detect a meaningful effect'; operationally, require either a full 30-day window or enough impressions/sessions to support an MDE-based comparison, and if that volume is not reached, treat results as inconclusive rather than negative. Hypothesis: For this team, a usable manual rule is to set a minimum effect threshold such as a large directional lift in impressions or shop_app sessions, because smaller effects are unlikely to be measurable with sparse marketplace traffic.",
+            "fetchedAt": "2026-09-04T00:00:00Z",
+            "sourceType": "derived",
+            "retrievalMethod": "openai_hosted_web_search",
+            "searchPass": "broader_web"
+          }
+        ],
+        "confidence": "moderate",
+        "limitations": [
+          "No Etsy-specific official analytics citation was available in the provided evidence; the closest official platform evidence is Shopify Shop analytics, so transfer to the target marketplace context is an interpretation rather than an observed Etsy fact.",
+          "The citations support using MDE/power-analysis concepts, but they do not provide a universal numeric threshold for sparse-traffic marketplace tests; any exact cutoff would be an assumption without local baseline data.",
+          "One cited low-traffic practitioner source was anecdotal Reddit discussion and was not relied on for the main recommendation.",
+          "Without the team's actual baseline impressions, referred sessions, click rate, or conversion rate, required sample size and exact decision thresholds cannot be calculated."
+        ],
+        "searchSummaries": [
+          {
+            "pass": "authoritative_domains",
+            "status": "completed",
+            "citationCount": 3,
+            "officialCitationCount": 3,
+            "broaderCitationCount": 0,
+            "allowedDomainCount": 7,
+            "totalTokens": 10238,
+            "startedAt": "2026-09-04T15:39:29.193Z",
+            "completedAt": "2026-09-04T15:39:37.023Z"
+          },
+          {
+            "pass": "broader_web",
+            "status": "completed",
+            "citationCount": 9,
+            "officialCitationCount": 0,
+            "broaderCitationCount": 9,
+            "allowedDomainCount": 0,
+            "totalTokens": 11112,
+            "startedAt": "2026-09-04T15:39:37.024Z",
+            "completedAt": "2026-09-04T15:39:53.890Z"
+          }
+        ],
+        "requestedLookup": null
+      }
+    ],
+    "m4": {
+      "performancePath": "discovery",
+      "primaryBottleneck": "Likely discovery bottleneck: the listing may not be signaling the right search/category relevance for merchants seeking catalog audit or catalog quality tools, because the category is Analytics while the strongest visible claims are narrower issue examples and the audience/use case is only implied.",
+      "competingExplanation": "A competing explanation is click-through or trust friction after discovery: observed qualitative notes say read-only safety is not prominent, there are 0 reviews, and the first-scan outcome/action is not very explicit, which could suppress app opens even if some relevant impressions occur.",
+      "confidence": "low",
+      "decision": "proceed_to_hypothesis",
+      "researchQuestion": "Would a manual listing test that makes catalog audit relevance and merchant audience more explicit in title/headline/subheadline-style copy and gallery text increase qualified app opens or first scan starts versus the current issue-specific framing?",
+      "notes": [
+        "observed fact: reviewMode is exploratory_visibility_test with sparse evidence, so zero or sparse metrics alone are not a reason to stop.",
+        "observed fact: measured signals are sparse: app_opened_count 0, scan_started_count 0, request_count 2, and Shopify Partner metrics failed.",
+        "observed fact: listing title is 'MerchGrid Catalog Audit' and headline is 'Scans your product catalog and shows exactly which items are priced below cost.'",
+        "observed fact: clear claims include below-cost pricing, compare-at price issues, duplicate SKUs, and missing SKUs.",
+        "observed fact: visibility rubric notes say discovery fit may require clearer catalog audit keywords, audience specificity is implied but not explicit, and the category is Analytics.",
+        "observed fact: trust friction notes include 0 reviews and read-only safety not being prominent near data access context.",
+        "interpretation: with insufficient marketplace metrics, the most supportable single diagnosis is an upstream discovery mismatch rather than a proven downstream conversion failure.",
+        "hypothesis: merchants browsing/searching the Shopify App Store may not immediately classify the app as a catalog quality/audit tool for their role, reducing qualified discovery before app-open behavior can be observed.",
+        "assumption: Shopify App Store discovery depends materially on visible keyword/category relevance and fast audience recognition, but no external research was supplied here to validate platform-specific weighting.",
+        "limitation: listing observations are qualitative only and were captured manually on 2026-08-25; they do not prove causation."
+      ]
+    },
+    "m5": {
+      "hypothesis": "If the Shopify App Store listing makes the merchant audience and catalog-audit use case more explicit near the top of the page, more qualified visitors may recognize MerchGrid as a read-only catalog quality tool worth opening, compared with the current narrower issue-example framing.",
+      "primaryVariable": "Top-of-listing message clarity: emphasize 'read-only catalog audit for Shopify merchants' before or alongside specific issue examples.",
+      "recommendedRevision": "Manually revise the top listing copy so the first visible message leads with audience + job-to-be-done + safety, then specific issue examples. Example direction: change the headline/subheadline-style copy from a narrow below-cost emphasis to language such as 'Read-only catalog audit for Shopify merchants. Find below-cost prices, compare-at issues, duplicate SKUs, and missing SKUs before they hurt trust.' If possible within listing assets, update the first screenshot caption to reinforce 'read-only' and 'run your first audit' rather than only showing interface state.",
+      "keepConstant": [
+        "App behavior and onboarding flow",
+        "Pricing label",
+        "Category",
+        "Support and privacy links",
+        "Core issue examples already claimed: below-cost pricing, compare-at price issues, duplicate SKUs, missing SKUs",
+        "All other screenshots and setup documentation unless needed only for the first screenshot caption"
+      ],
+      "expectedSignal": "Directional, not guaranteed: after the manual revision, qualified top-of-funnel signals such as app opens and first scan starts may increase relative to the prior version if discovery recognition or trust clarity was limiting response.",
+      "notes": [
+        "observed fact: current headline is 'Scans your product catalog and shows exactly which items are priced below cost'.",
+        "observed fact: audience specificity is implied but not explicit in the current listing notes.",
+        "observed fact: trust friction notes say read-only safety is not prominent near data access context.",
+        "observed fact: clear claims already include below-cost pricing, compare-at price issues, duplicate SKUs, and missing SKUs.",
+        "interpretation: the current top message may be too narrow, causing some merchants to classify the app as a single-purpose pricing checker instead of a broader catalog audit tool.",
+        "hypothesis: clearer audience + use-case + safety framing could improve recognition among qualified visitors.",
+        "assumption: merchants considering install may care about read-only safety before opening the app, especially with 0 reviews.",
+        "limitation: evidence is sparse and qualitative; this is an exploratory manual test, not a prediction of install lift.",
+        "do not interpret any later movement as proof of causation without a before/after comparison window and enough traffic.",
+        "Exploratory recommendation; not metric-proven.",
+        "Human approval required before changing any marketplace surface."
+      ]
+    },
+    "m6": {
+      "primaryMetric": "scan_started_count",
+      "secondaryMetrics": [
+        "app_opened_count",
+        "scan_completed_count",
+        "request_count",
+        "error_rate"
+      ],
+      "baselineValue": 0,
+      "baselinePeriod": "Pre-change baseline is the supplied sparse snapshot for subjectRef merchgrid:visibility:2026-08-22. Observed values: scan_started_count = 0, app_opened_count = 0, scan_completed_count = 0, request_count = 2, error_rate = 0. Baseline quality is limited because Shopify Partner metrics failed and evidence is sparse.",
+      "qualificationRequirements": [
+        "Manual-only exploratory test: a human manually updates one listing message cluster at the top of the Shopify App Store listing; app behavior must remain unchanged.",
+        "Change one interpretable variable only: revise the top listing copy to make audience + catalog-audit job-to-be-done + read-only safety more explicit; keep pricing, category, support/privacy links, app behavior, and gallery assets constant during the first test window.",
+        "If the listing UI requires multiple coordinated top text fields, treat those edits as one message-cluster change and do not change screenshots, setup documentation, or category in the same window.",
+        "Record the exact before and after copy, the manual publish timestamp, and the start and end dates of the post-change observation window.",
+        "Minimum post-change observation rule: observe for at least 30 days after publish, or longer if traffic remains too sparse to accumulate any interpretable signal. This 30-day minimum is supported by external research synthesis noting Shopify exposes native 30-day analytics views and low-traffic experiments often need longer runtime.",
+        "Do not end the test early solely because the first days remain at zero; sparse traffic makes early stopping uninformative.",
+        "Interpret results directionally only; do not treat movement as causal proof because evidence quality is low and no impression-normalized baseline is available.",
+        "Human approval and manual marketplace edit are required before launch.",
+        "Human approval and manual marketplace edit are required before measurement.",
+        "Later evidence must be compared as exploratory and low confidence."
+      ],
+      "expectedSupportingSignal": "After the manual top-copy revision, scan_started_count rises from 0 to a higher observed count during the post-change window, ideally with app_opened_count also increasing and no deterioration in error_rate. A weaker but still supportive signal is that app_opened_count or request_count increases and at least one scan start occurs, which would directionally fit the message-clarity hypothesis.",
+      "expectedWeakeningSignal": "The hypothesis is weakened if, after the full minimum observation window, app_opened_count and scan_started_count both remain at 0, or if app_opened_count rises without any scan_started_count, or if error_rate worsens enough to make engagement changes uninterpretable. That would make the specific top-message explanation less convincing and leave low traffic or downstream friction as stronger alternatives.",
+      "inconclusiveCondition": "Results are inconclusive if the 30-day minimum window is not completed, if traffic remains too sparse for any meaningful before/after comparison, if other listing elements or external promotion changed during the same window, if tracking quality differs before versus after, or if no upstream exposure metric can be restored to contextualize observed counts.",
+      "contextToMonitor": [
+        "Whether the live listing still has 0 reviews during the test window, because trust friction may suppress response independent of copy changes.",
+        "Whether the revised top copy makes read-only safety clearer without adding unsupported capability claims.",
+        "Whether the public listing materially changed after the 2026-08-25 manual capture before the test begins.",
+        "Any concurrent launches, promotions, seasonality, app store featuring, or external referral pushes that could change traffic mix during the observation window.",
+        "Whether category remains Analytics during this first test so the result stays focused on top-message clarity.",
+        "Whether scan failures or other downstream friction emerge after app open, because they could mask a discovery improvement.",
+        "Whether restored analytics provide an upstream exposure proxy such as app-store traffic, impressions, or referred sessions for context.",
+        "manual marketplace change applied by owner"
+      ],
+      "unresolvedMeasurementRules": [
+        "A numeric success threshold is still not defensible from supplied evidence. Predefine a directional rule before launch, such as 'any non-zero scan_started_count after the 30-day window is supportive but low-confidence,' rather than inventing a stronger cutoff after seeing results.",
+        "Definition of a qualified app open versus a raw marketplace visit is not provided in the evidence.",
+        "It is unclear whether request_count is a reliable proxy for user interest or may include non-user/system activity.",
+        "Attribution rules are not defined for separating listing-driven traffic from outside referrals during the test.",
+        "No valid impression-normalized comparison rule is available unless marketplace analytics are restored.",
+        "If upstream exposure metrics become available, the team should prefer evaluating rate-based context as well as raw counts, but that rule cannot be finalized from current evidence."
+      ],
+      "researchNeed": "Restored marketplace analytics or app-store exposure reporting is still needed to contextualize this sparse-traffic test. External research supports using at least a 30-day window and avoiding judgment before enough exposure accrues, but exact minimum detectable effect and decision thresholds cannot be calculated without local baseline traffic or impression data."
+    }
+  },
+  "events": [
+    {
+      "eventId": "c0535b76-7cc7-4c1c-bbcd-6218c0731155",
+      "runId": "2026-09-04-m3-live-smoke-3",
+      "type": "workflow.started",
+      "stage": "m1_context",
+      "message": "Workflow run started",
+      "createdAt": "2026-09-04T15:39:01.920Z",
+      "data": {
+        "initialEvidenceRef": "initial:marketplace_visibility:merchgrid_shopify_app_store:merchgrid:visibility:2026-08-22"
+      }
+    },
+    {
+      "eventId": "759cede2-b381-4106-813d-2c92a9867d39",
+      "runId": "2026-09-04-m3-live-smoke-3",
+      "type": "module.started",
+      "stage": "m1_context",
+      "message": "M1 context started",
+      "createdAt": "2026-09-04T15:39:01.922Z",
+      "data": {
+        "moduleId": "m1"
+      }
+    },
+    {
+      "eventId": "13674dcc-887c-4338-8fc5-faeedbac1728",
+      "runId": "2026-09-04-m3-live-smoke-3",
+      "type": "module.completed",
+      "stage": "m1_context",
+      "message": "M1 context completed",
+      "createdAt": "2026-09-04T15:39:01.922Z",
+      "data": {
+        "moduleId": "m1"
+      }
+    },
+    {
+      "eventId": "abeba95a-d346-4832-aeac-61b92235a0c2",
+      "runId": "2026-09-04-m3-live-smoke-3",
+      "type": "route.decided",
+      "stage": "m1_context",
+      "message": "Route decided: advance",
+      "createdAt": "2026-09-04T15:39:01.922Z",
+      "data": {
+        "decisionType": "advance",
+        "nextStage": "m2_metrics_initial"
+      }
+    },
+    {
+      "eventId": "21eccb65-db86-4833-a0b7-e543394d2287",
+      "runId": "2026-09-04-m3-live-smoke-3",
+      "type": "workflow.advanced",
+      "stage": "m2_metrics_initial",
+      "message": "Workflow advanced to m2_metrics_initial",
+      "createdAt": "2026-09-04T15:39:01.922Z",
+      "data": {}
+    },
+    {
+      "eventId": "f2c34ae7-68b5-4b66-aae7-619f9ba0b90d",
+      "runId": "2026-09-04-m3-live-smoke-3",
+      "type": "module.started",
+      "stage": "m2_metrics_initial",
+      "message": "M2 initial metrics started",
+      "createdAt": "2026-09-04T15:39:01.925Z",
+      "data": {
+        "moduleId": "m2"
+      }
+    },
+    {
+      "eventId": "340d81e2-df3f-44d2-a629-e68c7aa3ba39",
+      "runId": "2026-09-04-m3-live-smoke-3",
+      "type": "module.completed",
+      "stage": "m2_metrics_initial",
+      "message": "M2 initial metrics completed",
+      "createdAt": "2026-09-04T15:39:01.929Z",
+      "data": {
+        "moduleId": "m2",
+        "phase": "initial"
+      }
+    },
+    {
+      "eventId": "771815d7-7135-4519-af32-f11f6b382dad",
+      "runId": "2026-09-04-m3-live-smoke-3",
+      "type": "route.decided",
+      "stage": "m2_metrics_initial",
+      "message": "Route decided: advance",
+      "createdAt": "2026-09-04T15:39:01.929Z",
+      "data": {
+        "decisionType": "advance",
+        "nextStage": "m4_diagnosis"
+      }
+    },
+    {
+      "eventId": "9cff289b-67b0-4c8f-8dd9-ce0ca995a9dd",
+      "runId": "2026-09-04-m3-live-smoke-3",
+      "type": "workflow.advanced",
+      "stage": "m4_diagnosis",
+      "message": "Workflow advanced to m4_diagnosis",
+      "createdAt": "2026-09-04T15:39:01.929Z",
+      "data": {}
+    },
+    {
+      "eventId": "35ebb0c0-b5c6-4dad-b8e9-e9b5b3b0cf02",
+      "runId": "2026-09-04-m3-live-smoke-3",
+      "type": "module.started",
+      "stage": "m4_diagnosis",
+      "message": "M4 diagnosis started",
+      "createdAt": "2026-09-04T15:39:01.931Z",
+      "data": {
+        "moduleId": "m4"
+      }
+    },
+    {
+      "eventId": "b7068b0c-8206-423c-a7f8-1d0e57f574bf",
+      "runId": "2026-09-04-m3-live-smoke-3",
+      "type": "module.completed",
+      "stage": "m4_diagnosis",
+      "message": "M4 diagnosis completed",
+      "createdAt": "2026-09-04T15:39:08.303Z",
+      "data": {
+        "moduleId": "m4"
+      }
+    },
+    {
+      "eventId": "af9dcd01-8138-49a5-a4dd-7bfcab96a21b",
+      "runId": "2026-09-04-m3-live-smoke-3",
+      "type": "route.decided",
+      "stage": "m4_diagnosis",
+      "message": "Route decided: advance",
+      "createdAt": "2026-09-04T15:39:08.303Z",
+      "data": {
+        "decisionType": "advance",
+        "nextStage": "m5_hypothesis"
+      }
+    },
+    {
+      "eventId": "f753cf27-f893-47fd-9f31-bc63bb783290",
+      "runId": "2026-09-04-m3-live-smoke-3",
+      "type": "workflow.advanced",
+      "stage": "m5_hypothesis",
+      "message": "Workflow advanced to m5_hypothesis",
+      "createdAt": "2026-09-04T15:39:08.303Z",
+      "data": {}
+    },
+    {
+      "eventId": "fbb43f1b-eb64-4074-9f81-d3e79036ef91",
+      "runId": "2026-09-04-m3-live-smoke-3",
+      "type": "module.started",
+      "stage": "m5_hypothesis",
+      "message": "M5 hypothesis started",
+      "createdAt": "2026-09-04T15:39:08.308Z",
+      "data": {
+        "moduleId": "m5"
+      }
+    },
+    {
+      "eventId": "c2ca8728-2461-4505-8f28-a3e4e89d9381",
+      "runId": "2026-09-04-m3-live-smoke-3",
+      "type": "module.completed",
+      "stage": "m5_hypothesis",
+      "message": "M5 hypothesis completed",
+      "createdAt": "2026-09-04T15:39:15.043Z",
+      "data": {
+        "moduleId": "m5"
+      }
+    },
+    {
+      "eventId": "71a73d57-3b23-492f-9472-0e74817f5112",
+      "runId": "2026-09-04-m3-live-smoke-3",
+      "type": "route.decided",
+      "stage": "m5_hypothesis",
+      "message": "Route decided: advance",
+      "createdAt": "2026-09-04T15:39:15.043Z",
+      "data": {
+        "decisionType": "advance",
+        "nextStage": "m6_test_plan"
+      }
+    },
+    {
+      "eventId": "e454d8b2-1e3c-4495-b46b-0a28bb34eae4",
+      "runId": "2026-09-04-m3-live-smoke-3",
+      "type": "workflow.advanced",
+      "stage": "m6_test_plan",
+      "message": "Workflow advanced to m6_test_plan",
+      "createdAt": "2026-09-04T15:39:15.043Z",
+      "data": {}
+    },
+    {
+      "eventId": "62ffe841-e323-4f15-8d95-7b7b27b9ab27",
+      "runId": "2026-09-04-m3-live-smoke-3",
+      "type": "module.started",
+      "stage": "m6_test_plan",
+      "message": "M6 test plan started",
+      "createdAt": "2026-09-04T15:39:15.051Z",
+      "data": {
+        "moduleId": "m6"
+      }
+    },
+    {
+      "eventId": "3497a7c6-545e-453e-abbd-7bf58a77824e",
+      "runId": "2026-09-04-m3-live-smoke-3",
+      "type": "module.completed",
+      "stage": "m6_test_plan",
+      "message": "M6 test plan completed",
+      "createdAt": "2026-09-04T15:39:29.183Z",
+      "data": {
+        "moduleId": "m6"
+      }
+    },
+    {
+      "eventId": "87f69dbe-f56f-4a81-901a-9df9c8ccd6d1",
+      "runId": "2026-09-04-m3-live-smoke-3",
+      "type": "route.decided",
+      "stage": "m6_test_plan",
+      "message": "Route decided: research",
+      "createdAt": "2026-09-04T15:39:29.183Z",
+      "data": {
+        "decisionType": "research"
+      }
+    },
+    {
+      "eventId": "38f0c3eb-187a-48f6-9cd3-5fcf36ab9466",
+      "runId": "2026-09-04-m3-live-smoke-3",
+      "type": "research.requested",
+      "stage": "m3_research",
+      "message": "Need measurement guidance or restored marketplace analytics for impressions/app-store traffic so the team can define a minimum observation window and a practical decision threshold for this sparse-traffic manual test.",
+      "createdAt": "2026-09-04T15:39:29.183Z",
+      "data": {
+        "requester": "m6",
+        "returnStage": "m6_test_plan",
+        "startedAt": "2026-09-04T15:39:29.183Z",
+        "evidenceRef": "initial:marketplace_visibility:merchgrid_shopify_app_store:merchgrid:visibility:2026-08-22"
+      }
+    },
+    {
+      "eventId": "bc022caf-3d47-4c05-a42c-695b2b720d0b",
+      "runId": "2026-09-04-m3-live-smoke-3",
+      "type": "module.started",
+      "stage": "m3_research",
+      "message": "M3 research started",
+      "createdAt": "2026-09-04T15:39:29.192Z",
+      "data": {
+        "moduleId": "m3"
+      }
+    },
+    {
+      "eventId": "ad2cf1e5-7dab-4b04-88a2-8f16c2db5774",
+      "runId": "2026-09-04-m3-live-smoke-3",
+      "type": "module.completed",
+      "stage": "m3_research",
+      "message": "M3 research completed",
+      "createdAt": "2026-09-04T15:40:07.208Z",
+      "data": {
+        "moduleId": "m3"
+      }
+    },
+    {
+      "eventId": "d5f42178-00cc-49fa-a48a-57b29af926a4",
+      "runId": "2026-09-04-m3-live-smoke-3",
+      "type": "research.search.started",
+      "stage": "m3_research",
+      "message": "Hosted web-search pass started",
+      "createdAt": "2026-09-04T15:40:07.208Z",
+      "data": {
+        "requester": "m6",
+        "returnStage": "m6_test_plan",
+        "pass": "authoritative_domains",
+        "allowedDomainCount": 7,
+        "startedAt": "2026-09-04T15:39:29.193Z"
+      }
+    },
+    {
+      "eventId": "4656aaa2-9599-478f-bd45-21ae4d0a7247",
+      "runId": "2026-09-04-m3-live-smoke-3",
+      "type": "research.search.completed",
+      "stage": "m3_research",
+      "message": "Hosted web-search pass completed",
+      "createdAt": "2026-09-04T15:40:07.208Z",
+      "data": {
+        "requester": "m6",
+        "returnStage": "m6_test_plan",
+        "pass": "authoritative_domains",
+        "citationCount": 3,
+        "officialCitationCount": 3,
+        "broaderCitationCount": 0,
+        "allowedDomainCount": 7,
+        "completedAt": "2026-09-04T15:39:37.023Z",
+        "totalTokens": 10238
+      }
+    },
+    {
+      "eventId": "0906e30a-b552-45ed-8ef2-4e37936dabed",
+      "runId": "2026-09-04-m3-live-smoke-3",
+      "type": "research.search.started",
+      "stage": "m3_research",
+      "message": "Hosted web-search pass started",
+      "createdAt": "2026-09-04T15:40:07.208Z",
+      "data": {
+        "requester": "m6",
+        "returnStage": "m6_test_plan",
+        "pass": "broader_web",
+        "allowedDomainCount": 0,
+        "startedAt": "2026-09-04T15:39:37.024Z"
+      }
+    },
+    {
+      "eventId": "0e86b0c5-5afa-46b1-a4d3-8daa16578fd4",
+      "runId": "2026-09-04-m3-live-smoke-3",
+      "type": "research.search.completed",
+      "stage": "m3_research",
+      "message": "Hosted web-search pass completed",
+      "createdAt": "2026-09-04T15:40:07.208Z",
+      "data": {
+        "requester": "m6",
+        "returnStage": "m6_test_plan",
+        "pass": "broader_web",
+        "citationCount": 9,
+        "officialCitationCount": 0,
+        "broaderCitationCount": 9,
+        "allowedDomainCount": 0,
+        "completedAt": "2026-09-04T15:39:53.890Z",
+        "totalTokens": 11112
+      }
+    },
+    {
+      "eventId": "394cd614-6bdd-4fee-ab34-ab397e9cc418",
+      "runId": "2026-09-04-m3-live-smoke-3",
+      "type": "research.returned",
+      "stage": "m6_test_plan",
+      "message": "M3 research returned to requester",
+      "createdAt": "2026-09-04T15:40:07.208Z",
+      "data": {
+        "requester": "m6",
+        "returnStage": "m6_test_plan",
+        "citationCount": 7,
+        "researchStatus": "resolved"
+      }
+    },
+    {
+      "eventId": "501d6091-b4fe-4bbc-833d-7e83201050f1",
+      "runId": "2026-09-04-m3-live-smoke-3",
+      "type": "module.started",
+      "stage": "m6_test_plan",
+      "message": "M6 test plan started",
+      "createdAt": "2026-09-04T15:40:07.217Z",
+      "data": {
+        "moduleId": "m6"
+      }
+    },
+    {
+      "eventId": "69bb265b-41b9-4c67-a88e-cc704db37d49",
+      "runId": "2026-09-04-m3-live-smoke-3",
+      "type": "module.completed",
+      "stage": "m6_test_plan",
+      "message": "M6 test plan completed",
+      "createdAt": "2026-09-04T15:40:17.018Z",
+      "data": {
+        "moduleId": "m6"
+      }
+    },
+    {
+      "eventId": "e311a3f5-bbac-497f-be57-5dec59b69008",
+      "runId": "2026-09-04-m3-live-smoke-3",
+      "type": "route.decided",
+      "stage": "m6_test_plan",
+      "message": "Route decided: research",
+      "createdAt": "2026-09-04T15:40:17.018Z",
+      "data": {
+        "decisionType": "research"
+      }
+    },
+    {
+      "eventId": "15f3dcfd-64d0-4bf9-b220-932e8ac4fc42",
+      "runId": "2026-09-04-m3-live-smoke-3",
+      "type": "research.limit_reached",
+      "stage": "m6_test_plan",
+      "message": "Workflow research call cap reached",
+      "createdAt": "2026-09-04T15:40:17.018Z",
+      "data": {
+        "requester": "m6",
+        "returnStage": "m6_test_plan",
+        "evidenceRef": "initial:marketplace_visibility:merchgrid_shopify_app_store:merchgrid:visibility:2026-08-22",
+        "maxToolCalls": 1
+      }
+    },
+    {
+      "eventId": "c2dbf136-9e31-4ffb-aaad-d1ebad882b27",
+      "runId": "2026-09-04-m3-live-smoke-3",
+      "type": "workflow.waiting_for_data",
+      "stage": "m6_test_plan",
+      "message": "Research call cap reached; new evidence is required before continuing",
+      "createdAt": "2026-09-04T15:40:17.018Z",
+      "data": {}
+    }
+  ]
+}

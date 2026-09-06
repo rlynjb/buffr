@@ -1,0 +1,108 @@
+{
+  "metadata": {
+    "artifactKind": "experiment_plan",
+    "runId": "2026-09-04-m3-live-smoke-2",
+    "workflowKind": "marketplace_visibility_review",
+    "subjectRef": "merchgrid:visibility:2026-08-22",
+    "status": "analyzing",
+    "stage": "m6_test_plan",
+    "evidenceDate": "2026-08-22",
+    "generatedAt": "2026-09-04T15:38:08.796Z",
+    "runCreatedAt": "2026-09-04T15:34:43.945Z",
+    "evidenceRefs": [
+      "initial:marketplace_visibility:merchgrid_shopify_app_store:merchgrid:visibility:2026-08-22"
+    ],
+    "researchRefs": [
+      {
+        "m3Index": 0,
+        "urls": [
+          "https://help.shopify.com/en/partners/build-integrate",
+          "https://shopify.dev/docs/apps/build/dev-dashboard/migrate-from-partners",
+          "https://shopify.dev/docs/apps/build/dev-dashboard/monitoring-and-logs",
+          "https://shopify.dev/docs/apps/launch/distribution/track-app-usage",
+          "https://shopify.dev/docs/apps/launch/marketing/track-listing-traffic"
+        ]
+      },
+      {
+        "m3Index": 1,
+        "urls": [
+          "https://shopify.dev/changelog/app-events-see-app-usage-and-performance-data-in-your-dev-dashboard",
+          "https://shopify.dev/docs/apps/build/app-events",
+          "https://shopify.dev/docs/apps/build/app-events/send-events",
+          "https://shopify.dev/docs/apps/build/dev-dashboard",
+          "https://shopify.dev/docs/apps/build/dev-dashboard/monitoring-and-logs",
+          "https://shopify.dev/docs/apps/build/performance/admin-installation-oauth",
+          "https://shopify.dev/docs/apps/launch/distribution/track-app-usage",
+          "https://shopify.dev/docs/apps/launch/marketing/track-listing-traffic"
+        ]
+      },
+      {
+        "m3Index": 2,
+        "urls": [
+          "https://shopify.dev/docs/apps/build/app-events",
+          "https://shopify.dev/docs/apps/build/app-events/send-events",
+          "https://shopify.dev/docs/apps/build/dev-dashboard",
+          "https://shopify.dev/docs/apps/build/dev-dashboard/monitoring-and-logs",
+          "https://shopify.dev/docs/apps/launch/distribution/track-app-usage",
+          "https://shopify.dev/docs/apps/launch/marketing/track-listing-traffic"
+        ]
+      },
+      {
+        "m3Index": 3,
+        "urls": [
+          "https://shopify.dev/changelog/app-events-see-app-usage-and-performance-data-in-your-dev-dashboard",
+          "https://shopify.dev/docs/apps/build/app-events",
+          "https://shopify.dev/docs/apps/build/dev-dashboard",
+          "https://shopify.dev/docs/apps/build/dev-dashboard/monitoring-and-logs",
+          "https://shopify.dev/docs/apps/launch/marketing/track-listing-traffic"
+        ]
+      }
+    ]
+  },
+  "primaryMetric": "qualified app opens leading to first scan starts",
+  "secondaryMetrics": [
+    "app_opened_count",
+    "scan_started_count",
+    "scan_completed_count",
+    "scan_failed_count",
+    "request_count",
+    "error_rate"
+  ],
+  "baselineValue": 0,
+  "baselinePeriod": "Current observed sparse baseline from the supplied snapshot before any manual listing change: app_opened_count=0 and scan_started_count=0, with listing observations captured on 2026-08-25 and measured signals tied to the 2026-08-22 artifact.",
+  "qualificationRequirements": [
+    "Manual-only exploratory test: a human manually changes one Shopify App Store listing element at a time; do not change app behavior or automate marketplace edits.",
+    "Run the first test on the headline only, because observed listing evidence suggests audience/job-to-be-done clarity and read-only safety are under-expressed above the fold.",
+    "Keep title, category, pricing label, screenshots, support links, privacy links, setup documentation, and app behavior constant during the headline test window.",
+    "Use only supported claims already grounded in observed listing evidence and product context: catalog audit, below-cost pricing, compare-at price issues, duplicate SKUs, missing SKUs, and read-only safety if accurate.",
+    "Do not add unsupported promises about installs, sales lift, ranking improvement, or broader outcomes.",
+    "Record the exact go-live timestamp of the manual headline edit and preserve the exact tested wording for later comparison.",
+    "Observe one clean post-change window before making any second listing change.",
+    "If a second test is needed later, test only the first screenshot/caption in a separate window; do not change headline and screenshot together.",
+    "Use the same measurement source before and after the change where possible.",
+    "Treat all results as exploratory and low-confidence unless measurement reliability and traffic improve.",
+    "Human approval and manual marketplace edit are required before measurement.",
+    "Later evidence must be compared as exploratory and low confidence."
+  ],
+  "expectedSupportingSignal": "Hypothesis: after the manual headline-only revision, app_opened_count increases above the current observed baseline of 0 and at least some scan_started_count appears, without a worsening error_rate or scan_failed_count trend.",
+  "expectedWeakeningSignal": "Hypothesis: after the headline revision, app_opened_count and scan_started_count remain at 0 in a comparable window, or opens increase without any scan starts, which would weaken the idea that headline clarity is the main constraint.",
+  "inconclusiveCondition": "The test is inconclusive if measurement for opens is unavailable or inconsistent, traffic stays too sparse to compare periods, multiple listing elements changed in the same window, or major external changes make pre/post periods non-comparable.",
+  "contextToMonitor": [
+    "Whether Shopify Dev Dashboard or equivalent Shopify analytics becomes available for installs, traffic, or related listing-performance reporting.",
+    "Whether a separate traffic source such as listing-traffic tracking is already configured and stable enough to compare pre/post periods.",
+    "Any simultaneous changes to reviews, rating summary, category, pricing label, screenshots, gallery order, documentation, or trust elements during the test.",
+    "Any app reliability movement in scan_failed_count, request_count, or error_rate that could affect scan-start behavior independently of listing messaging.",
+    "Whether the no-reviews state changes during the observation window.",
+    "The exact tested headline version and exact manual go-live time.",
+    "manual marketplace change applied by owner"
+  ],
+  "unresolvedMeasurementRules": [
+    "Define what qualifies as a 'qualified app open' in the available analytics stack; the supplied evidence includes app_opened_count but not its rule definition.",
+    "Confirm the best available post-change source for app-open or nearest-proxy data, because external research from official Shopify sources supports installs, analytics, listing-traffic tracking, and an App Listing page 'Open app button' event, but does not confirm a built-in universal merchant app-open metric without developer instrumentation.",
+    "Decide the minimum pre/post observation window after actual traffic volume is known.",
+    "Decide whether any non-zero movement from baseline is enough for an exploratory readout or whether a larger threshold is required.",
+    "Confirm whether scan_started_count can be segmented cleanly by the listing change go-live timestamp.",
+    "Decide whether scan_completed_count should remain a guardrail or also be treated as a secondary outcome."
+  ],
+  "researchNeed": "Measurement-source clarification is still needed to choose the best post-change evaluation method: external research from official Shopify sources supports Dev Dashboard analytics, install/performance tracking, optional listing-traffic tracking, and an App Listing page 'Open app button' event, but does not confirm a built-in universal app-open metric without developer instrumentation."
+}

@@ -1,0 +1,72 @@
+{
+  "metadata": {
+    "artifactKind": "experiment_plan",
+    "runId": "2026-09-04-m3-live-smoke-3",
+    "workflowKind": "marketplace_visibility_review",
+    "subjectRef": "merchgrid:visibility:2026-08-22",
+    "status": "waiting_for_data",
+    "stage": "m6_test_plan",
+    "evidenceDate": "2026-08-22",
+    "generatedAt": "2026-09-04T15:40:17.018Z",
+    "runCreatedAt": "2026-09-04T15:39:01.920Z",
+    "evidenceRefs": [
+      "initial:marketplace_visibility:merchgrid_shopify_app_store:merchgrid:visibility:2026-08-22"
+    ],
+    "researchRefs": [
+      {
+        "m3Index": 0,
+        "urls": [
+          "https://help.shopify.com/en/manual/online-sales-channels/shop/analytics",
+          "https://help.shopify.com/en/manual/reports-and-analytics/shopify-reports/report-types/analytics-fields",
+          "https://help.shopify.com/en/manual/reports-and-analytics/shopify-reports/report-types/default-reports/acquisition-reports?itcat=partner_blog&itterm=homepage_subnav&link_search=true&page=2&q=Nick+Winkler",
+          "https://support.optimizely.com/hc/en-us/articles/4410283325325-Test-tips-for-low-traffic-sites",
+          "https://support.optimizely.com/hc/en-us/articles/4410283338253-Use-minimum-detectable-effect-to-prioritize-experiments",
+          "https://support.optimizely.com/hc/en-us/articles/4410283969165-How-long-to-run-an-experiment"
+        ]
+      }
+    ]
+  },
+  "primaryMetric": "scan_started_count",
+  "secondaryMetrics": [
+    "app_opened_count",
+    "scan_completed_count",
+    "request_count",
+    "error_rate"
+  ],
+  "baselineValue": 0,
+  "baselinePeriod": "Pre-change baseline is the supplied sparse snapshot for subjectRef merchgrid:visibility:2026-08-22. Observed values: scan_started_count = 0, app_opened_count = 0, scan_completed_count = 0, request_count = 2, error_rate = 0. Baseline quality is limited because Shopify Partner metrics failed and evidence is sparse.",
+  "qualificationRequirements": [
+    "Manual-only exploratory test: a human manually updates one listing message cluster at the top of the Shopify App Store listing; app behavior must remain unchanged.",
+    "Change one interpretable variable only: revise the top listing copy to make audience + catalog-audit job-to-be-done + read-only safety more explicit; keep pricing, category, support/privacy links, app behavior, and gallery assets constant during the first test window.",
+    "If the listing UI requires multiple coordinated top text fields, treat those edits as one message-cluster change and do not change screenshots, setup documentation, or category in the same window.",
+    "Record the exact before and after copy, the manual publish timestamp, and the start and end dates of the post-change observation window.",
+    "Minimum post-change observation rule: observe for at least 30 days after publish, or longer if traffic remains too sparse to accumulate any interpretable signal. This 30-day minimum is supported by external research synthesis noting Shopify exposes native 30-day analytics views and low-traffic experiments often need longer runtime.",
+    "Do not end the test early solely because the first days remain at zero; sparse traffic makes early stopping uninformative.",
+    "Interpret results directionally only; do not treat movement as causal proof because evidence quality is low and no impression-normalized baseline is available.",
+    "Human approval and manual marketplace edit are required before launch.",
+    "Human approval and manual marketplace edit are required before measurement.",
+    "Later evidence must be compared as exploratory and low confidence."
+  ],
+  "expectedSupportingSignal": "After the manual top-copy revision, scan_started_count rises from 0 to a higher observed count during the post-change window, ideally with app_opened_count also increasing and no deterioration in error_rate. A weaker but still supportive signal is that app_opened_count or request_count increases and at least one scan start occurs, which would directionally fit the message-clarity hypothesis.",
+  "expectedWeakeningSignal": "The hypothesis is weakened if, after the full minimum observation window, app_opened_count and scan_started_count both remain at 0, or if app_opened_count rises without any scan_started_count, or if error_rate worsens enough to make engagement changes uninterpretable. That would make the specific top-message explanation less convincing and leave low traffic or downstream friction as stronger alternatives.",
+  "inconclusiveCondition": "Results are inconclusive if the 30-day minimum window is not completed, if traffic remains too sparse for any meaningful before/after comparison, if other listing elements or external promotion changed during the same window, if tracking quality differs before versus after, or if no upstream exposure metric can be restored to contextualize observed counts.",
+  "contextToMonitor": [
+    "Whether the live listing still has 0 reviews during the test window, because trust friction may suppress response independent of copy changes.",
+    "Whether the revised top copy makes read-only safety clearer without adding unsupported capability claims.",
+    "Whether the public listing materially changed after the 2026-08-25 manual capture before the test begins.",
+    "Any concurrent launches, promotions, seasonality, app store featuring, or external referral pushes that could change traffic mix during the observation window.",
+    "Whether category remains Analytics during this first test so the result stays focused on top-message clarity.",
+    "Whether scan failures or other downstream friction emerge after app open, because they could mask a discovery improvement.",
+    "Whether restored analytics provide an upstream exposure proxy such as app-store traffic, impressions, or referred sessions for context.",
+    "manual marketplace change applied by owner"
+  ],
+  "unresolvedMeasurementRules": [
+    "A numeric success threshold is still not defensible from supplied evidence. Predefine a directional rule before launch, such as 'any non-zero scan_started_count after the 30-day window is supportive but low-confidence,' rather than inventing a stronger cutoff after seeing results.",
+    "Definition of a qualified app open versus a raw marketplace visit is not provided in the evidence.",
+    "It is unclear whether request_count is a reliable proxy for user interest or may include non-user/system activity.",
+    "Attribution rules are not defined for separating listing-driven traffic from outside referrals during the test.",
+    "No valid impression-normalized comparison rule is available unless marketplace analytics are restored.",
+    "If upstream exposure metrics become available, the team should prefer evaluating rate-based context as well as raw counts, but that rule cannot be finalized from current evidence."
+  ],
+  "researchNeed": "Restored marketplace analytics or app-store exposure reporting is still needed to contextualize this sparse-traffic test. External research supports using at least a 30-day window and avoiding judgment before enough exposure accrues, but exact minimum detectable effect and decision thresholds cannot be calculated without local baseline traffic or impression data."
+}

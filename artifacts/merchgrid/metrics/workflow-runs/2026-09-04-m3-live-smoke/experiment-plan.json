@@ -1,0 +1,98 @@
+{
+  "metadata": {
+    "artifactKind": "experiment_plan",
+    "runId": "2026-09-04-m3-live-smoke",
+    "workflowKind": "marketplace_visibility_review",
+    "subjectRef": "merchgrid:visibility:2026-08-22",
+    "status": "researching",
+    "stage": "m3_research",
+    "evidenceDate": "2026-08-22",
+    "generatedAt": "2026-09-04T15:32:28.102Z",
+    "runCreatedAt": "2026-09-04T15:20:12.161Z",
+    "evidenceRefs": [
+      "initial:marketplace_visibility:merchgrid_shopify_app_store:merchgrid:visibility:2026-08-22"
+    ],
+    "researchRefs": [
+      {
+        "m3Index": 0,
+        "urls": [
+          "https://help.shopify.com/partners/making-apps/dashboard",
+          "https://shopify.dev/docs/api/app-home/latest/app-bridge-web-components/app-window",
+          "https://shopify.dev/docs/apps/build/dev-dashboard/monitoring-and-logs",
+          "https://shopify.dev/docs/apps/launch/distribution/track-app-usage",
+          "https://shopify.dev/docs/apps/launch/marketing/track-listing-traffic"
+        ]
+      },
+      {
+        "m3Index": 1,
+        "urls": [
+          "https://shopify.dev/docs/apps/build/app-events",
+          "https://shopify.dev/docs/apps/build/dev-dashboard/monitoring-and-logs",
+          "https://shopify.dev/docs/apps/launch/distribution/track-app-usage",
+          "https://shopify.dev/docs/apps/launch/marketing/track-listing-traffic"
+        ]
+      },
+      {
+        "m3Index": 2,
+        "urls": [
+          "https://shopify.dev/docs/apps/build/app-events",
+          "https://shopify.dev/docs/apps/launch/distribution/track-app-usage",
+          "https://shopify.dev/docs/apps/launch/marketing/track-listing-traffic"
+        ]
+      },
+      {
+        "m3Index": 3,
+        "urls": [
+          "https://help.openai.com/en/articles/10875114-user-analytics-for-chatgpt-enterprise-and-edu-public-beta",
+          "https://help.openai.com/en/articles/11487775-connectors-in-chatgpt%2525252525252525252525252525252525252525252525252525252525252525252525252525252525252525252525252525252525252525252525252525252525252525252525252525252525252525252525252525252525252525252525252525252525252525252525252525252525252525252525252525252525252525252525252525252525252525252525252525252525252525252525252525252525252525252525252525252525252525252525252525252525252525252525252525252525252525252525252525252525252525252525252525252525252525252529.zst",
+          "https://help.shopify.com/partners/making-apps/dashboard",
+          "https://shopify.dev/docs/apps/launch/distribution/track-app-usage",
+          "https://shopify.dev/docs/apps/launch/marketing/track-listing-traffic"
+        ]
+      }
+    ]
+  },
+  "primaryMetric": "qualified app opens that proceed to first scan start after the manual headline revision",
+  "secondaryMetrics": [
+    "app-listing Open click or equivalent app-open event",
+    "scan_started_count",
+    "scan_completed_count",
+    "error_rate"
+  ],
+  "baselineValue": 0,
+  "baselinePeriod": "pre-change sparse snapshot in provided evidence for subjectRef merchgrid:visibility:2026-08-22",
+  "qualificationRequirements": [
+    "observed fact: change only one listing element in this exploratory test, limited to the Shopify App Store headline/copy revision described in M5",
+    "observed fact: keep app behavior, pricing label, category, screenshots/gallery order, support/privacy links, and setup documentation constant during the before/after comparison window",
+    "observed fact: human approval and a manual marketplace edit are required before the test begins",
+    "assumption: a qualified app open means an app-listing Open click or equivalent app-open event followed by at least one first scan start in the same post-change observation window",
+    "external research: Shopify docs indicate app analytics can appear in the Partner Dashboard, listing traffic can track an Open app button event, and custom app events can be tracked in the Dev Dashboard; this does not prove this specific app currently has those measurements configured",
+    "assumption: use the same measurement source, event definitions, and attribution rule before and after the change",
+    "interpretation: because the current baseline is zero and evidence is sparse, treat any single-window result as exploratory and low confidence unless repeated over another comparable post-change window",
+    "Human approval and manual marketplace edit are required before measurement.",
+    "Later evidence must be compared as exploratory and low confidence."
+  ],
+  "expectedSupportingSignal": "observed result that would support the hypothesis: after the manual headline revision, measured app-listing Open/app-open activity rises above the baseline of 0 and at least some of those opens proceed to first scan starts, without a worsening in error_rate.",
+  "expectedWeakeningSignal": "observed result that would weaken the hypothesis: after the manual headline revision, measured opens and scan starts remain at 0 across the post-change window, or opens increase but scan_started_count does not, suggesting the copy change increased curiosity more than qualified intent.",
+  "inconclusiveCondition": "results are inconclusive if listing-open or scan-start tracking is unavailable, newly configured mid-test, inconsistent across periods, if any other listing element changes during the window, if traffic remains too low to separate noise from movement, or if event definitions differ between the pre-change and post-change periods.",
+  "contextToMonitor": [
+    "observed fact: Shopify Partner metrics previously failed, so verify whether Partner Dashboard analytics, listing traffic tracking, or Dev Dashboard/custom event tracking are actually available before judging the test",
+    "external research: Shopify docs indicate app analytics can appear in the Partner Dashboard with date-range selection and export, and listing traffic docs describe an Open app button event on app listings",
+    "external research: Shopify docs support custom app events for merchant behavior tracking, but provided evidence does not confirm this app already emits a stable scan-start event",
+    "observed fact: the listing had 0 reviews at capture time, which may continue to suppress trust independently of this copy test",
+    "observed fact: read-only safety is not prominent near the data-access context; if a brief read-only cue is included in the revised headline, do not make any additional trust-copy changes elsewhere during this same test",
+    "observed fact: the listing may have changed after the capturedAt date, so confirm the exact pre-test headline before making the manual revision",
+    "interpretation: unrelated Shopify App Store traffic swings can distort very low-volume results more than the copy change itself",
+    "observed fact: this is a manual marketplace change only; do not change app behavior during the test",
+    "manual marketplace change applied by owner"
+  ],
+  "unresolvedMeasurementRules": [
+    "assumption: define the exact post-change observation window before launch, using the same length as the pre-change comparison window once reliable tracking exists",
+    "assumption: confirm the operational source of the open metric, whether Shopify listing Open-click tracking, in-app open events, or both, and do not switch definitions mid-test",
+    "observed fact: no stable historical baseline beyond the sparse zero snapshot is available yet, so there is no reliable normal range for expected volume",
+    "observed fact: current evidence does not include impression or search-query data, so the test cannot cleanly separate discovery lift from click-through lift",
+    "assumption: set a zero-volume handling rule in advance, such as extending the window or requiring a minimum event count before interpretation",
+    "assumption: confirm how scan_started_count is instrumented, because Shopify platform docs support custom event tracking generally but do not show that this app already records scan-start events"
+  ],
+  "researchNeed": "App-specific measurement validation is still needed: confirm whether this app currently has usable Partner Dashboard analytics, app-listing Open-click tracking, and a stable scan-start event before reading outcomes from the manual headline test."
+}

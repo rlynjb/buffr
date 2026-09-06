@@ -1,0 +1,1569 @@
+{
+  "runId": "2026-09-04-m3-live-smoke-2",
+  "subjectRef": "merchgrid:visibility:2026-08-22",
+  "workflowKind": "marketplace_visibility_review",
+  "status": "analyzing",
+  "stage": "m6_test_plan",
+  "createdAt": "2026-09-04T15:34:43.945Z",
+  "updatedAt": "2026-09-04T15:38:08.796Z",
+  "evidenceRefs": [
+    "initial:marketplace_visibility:merchgrid_shopify_app_store:merchgrid:visibility:2026-08-22"
+  ],
+  "evidenceSnapshots": {
+    "initial": {
+      "product": "marketplace_visibility",
+      "profile": "merchgrid_shopify_app_store",
+      "subjectRef": "merchgrid:visibility:2026-08-22",
+      "artifactRef": "artifacts/merchgrid/metrics/artifacts/daily-health/2026-08-22.json",
+      "evidenceLevel": "sparse",
+      "recommendationType": "visibility_hypothesis",
+      "reviewMode": {
+        "mode": "exploratory_visibility_test",
+        "evidenceLevel": "sparse",
+        "confidenceBoundary": "low",
+        "reason": "metrics_sparse_context_sufficient"
+      },
+      "marketplaceContext": {
+        "marketplace": "shopify_app_store",
+        "productName": "MerchGrid",
+        "productType": "shopify_app",
+        "targetCustomer": "Shopify merchants auditing catalog quality",
+        "customerProblem": "Catalog issues can hurt trust before the merchant notices",
+        "currentPromise": "Find catalog issues before they hurt sales or trust",
+        "currentSurfaceSummary": "Shopify App Store listing for a read-only catalog audit app",
+        "primaryDiscoverySurface": "Shopify App Store search and category browsing",
+        "primaryActionWanted": "Open the app and run the first catalog audit",
+        "constraints": [
+          "manual listing changes only",
+          "do not change app behavior"
+        ],
+        "availableAssets": [
+          "listing copy",
+          "screenshots",
+          "setup documentation"
+        ],
+        "ownerGoal": "increase qualified app opens and first scan starts"
+      },
+      "listingContext": {
+        "marketplace": "shopify_app_store",
+        "profile": "merchgrid_shopify_app_store",
+        "productName": "MerchGrid",
+        "sourceUrl": "https://apps.shopify.com/merchgrid-catalog-audit",
+        "capturedAt": "2026-08-25T13:45:00.000Z",
+        "captureMode": "manual_visual_review",
+        "publicSurface": {
+          "title": "MerchGrid Catalog Audit",
+          "headline": "Scans your product catalog and shows exactly which items are priced below cost",
+          "category": "Analytics",
+          "pricingLabel": "Free",
+          "ratingSummary": "0 reviews",
+          "reviewCount": 0,
+          "launchDate": "August 7, 2026"
+        },
+        "gallery": {
+          "imageCount": 4,
+          "observedImageLabels": [
+            "main image",
+            "onboarding image",
+            "progress image",
+            "result image"
+          ],
+          "visualNotes": [
+            "screenshots show audit flow and result surface"
+          ]
+        },
+        "trustSignals": {
+          "positive": [
+            "free pricing",
+            "privacy policy visible",
+            "support channel visible"
+          ],
+          "friction": [
+            "no reviews yet",
+            "read only safety is not prominent near data access context"
+          ]
+        },
+        "copyNotes": {
+          "clearClaims": [
+            "detect below cost pricing",
+            "catch compare at price issues",
+            "find duplicate and missing skus"
+          ],
+          "unclearClaims": [
+            "trust outcome could be sharper",
+            "first scan action could be more explicit"
+          ],
+          "missingContext": [
+            "what happens after opening the app",
+            "why read only access is safe"
+          ]
+        },
+        "visibilityRubricNotes": {
+          "promiseClarity": "pricing issue promise is concrete",
+          "audienceSpecificity": "merchant role is implied but not explicit",
+          "problemActionFit": "catalog audit connects to first scan",
+          "discoveryFit": "analytics category may require clearer catalog audit keywords",
+          "trustAndRiskReduction": "read only safety should be easier to see",
+          "assetClarity": "gallery shows screens but outcome hierarchy may need review"
+        },
+        "limitations": [
+          "manual public page review only",
+          "listing may change after capturedAt"
+        ]
+      },
+      "measuredSignals": {
+        "app_opened_count": 0,
+        "scan_started_count": 0,
+        "scan_completed_count": 0,
+        "scan_failed_count": 0,
+        "request_count": 2,
+        "error_response_count": 0,
+        "error_rate": 0
+      },
+      "limitations": [
+        "Shopify Partner metrics failed"
+      ],
+      "prohibitedClaims": [
+        "Do not claim sparse evidence proves a marketplace visibility bottleneck",
+        "Do not claim a visibility change will increase installs",
+        "Do not recommend automatic marketplace edits"
+      ]
+    }
+  },
+  "moduleOutputs": {
+    "m1": {
+      "product": "MerchGrid",
+      "likelyCustomer": "Shopify merchants auditing catalog quality",
+      "positioning": "Shopify App Store visibility review: Shopify App Store listing for a read-only catalog audit app",
+      "availableEvidence": [
+        "profile: merchgrid_shopify_app_store",
+        "evidence level: sparse",
+        "artifact: artifacts/merchgrid/metrics/artifacts/daily-health/2026-08-22.json",
+        "listing url: https://apps.shopify.com/merchgrid-catalog-audit",
+        "listing headline: Scans your product catalog and shows exactly which items are priced below cost",
+        "listing category: Analytics",
+        "listing gallery images: 4",
+        "listing clear claim: detect below cost pricing",
+        "listing clear claim: catch compare at price issues",
+        "listing clear claim: find duplicate and missing skus"
+      ],
+      "missingInformation": [
+        "Shopify Partner metrics failed",
+        "listing friction: no reviews yet",
+        "listing friction: read only safety is not prominent near data access context",
+        "listing unclear claim: trust outcome could be sharper",
+        "listing unclear claim: first scan action could be more explicit",
+        "listing missing context: what happens after opening the app",
+        "listing missing context: why read only access is safe",
+        "listing limitation: manual public page review only",
+        "listing limitation: listing may change after capturedAt"
+      ],
+      "notes": [
+        "Do not claim sparse evidence proves a marketplace visibility bottleneck",
+        "Do not claim a visibility change will increase installs",
+        "Do not recommend automatic marketplace edits",
+        "Listing observations are qualitative context, not conversion proof.",
+        "listing captured at: 2026-08-25T13:45:00.000Z",
+        "promise clarity: pricing issue promise is concrete",
+        "trust and risk reduction: read only safety should be easier to see"
+      ]
+    },
+    "m2Initial": {
+      "phase": "initial",
+      "metrics": [
+        {
+          "name": "visibility.evidence_level",
+          "current": 1,
+          "baseline": null,
+          "absoluteChange": null,
+          "percentageChange": null,
+          "qualification": "inconclusive",
+          "confidence": "low"
+        },
+        {
+          "name": "app_opened_count",
+          "current": 0,
+          "baseline": null,
+          "absoluteChange": null,
+          "percentageChange": null,
+          "qualification": "inconclusive",
+          "confidence": "low"
+        },
+        {
+          "name": "error_rate",
+          "current": 0,
+          "baseline": null,
+          "absoluteChange": null,
+          "percentageChange": null,
+          "qualification": "inconclusive",
+          "confidence": "low"
+        },
+        {
+          "name": "error_response_count",
+          "current": 0,
+          "baseline": null,
+          "absoluteChange": null,
+          "percentageChange": null,
+          "qualification": "inconclusive",
+          "confidence": "low"
+        },
+        {
+          "name": "request_count",
+          "current": 2,
+          "baseline": null,
+          "absoluteChange": null,
+          "percentageChange": null,
+          "qualification": "inconclusive",
+          "confidence": "low"
+        },
+        {
+          "name": "scan_completed_count",
+          "current": 0,
+          "baseline": null,
+          "absoluteChange": null,
+          "percentageChange": null,
+          "qualification": "inconclusive",
+          "confidence": "low"
+        },
+        {
+          "name": "scan_failed_count",
+          "current": 0,
+          "baseline": null,
+          "absoluteChange": null,
+          "percentageChange": null,
+          "qualification": "inconclusive",
+          "confidence": "low"
+        },
+        {
+          "name": "scan_started_count",
+          "current": 0,
+          "baseline": null,
+          "absoluteChange": null,
+          "percentageChange": null,
+          "qualification": "inconclusive",
+          "confidence": "low"
+        }
+      ],
+      "comparisonQuality": "limited",
+      "unresolvedQualificationNeeds": [
+        "measured marketplace traffic is sparse",
+        "Shopify Partner metrics failed"
+      ]
+    },
+    "m3": [
+      {
+        "status": "resolved",
+        "next_action": "stop",
+        "requester": "m6",
+        "question": "Need measurement-source clarification, especially whether Shopify App Store/Partner reporting for app opens can be restored or replaced, because current sparse analytics make the exploratory test hard to evaluate confidently.",
+        "evidence": [
+          {
+            "source": "web",
+            "title": "Track app usage metrics with the Partner Dashboard",
+            "url": "https://shopify.dev/docs/apps/launch/distribution/track-app-usage",
+            "excerpt": "Analytics for each app appear on its Overview page in your Partner Dashboard... metrics include installs, earnings, reviews, merchants, uninstalls, exports, and app history events such as installs and charges.",
+            "fetchedAt": "2026-09-04T00:00:00Z",
+            "domain": "shopify.dev",
+            "sourceType": "official_platform",
+            "retrievalMethod": "openai_hosted_web_search",
+            "searchPass": "authoritative_domains"
+          },
+          {
+            "source": "web",
+            "title": "Migrate from the Partner Dashboard",
+            "url": "https://shopify.dev/docs/apps/build/dev-dashboard/migrate-from-partners",
+            "excerpt": "The Dev Dashboard replaces the Partner Dashboard for all development workflows.",
+            "fetchedAt": "2026-09-04T00:00:00Z",
+            "domain": "shopify.dev",
+            "sourceType": "official_platform",
+            "retrievalMethod": "openai_hosted_web_search",
+            "searchPass": "authoritative_domains"
+          },
+          {
+            "source": "web",
+            "title": "Build & integrate",
+            "url": "https://help.shopify.com/en/partners/build-integrate",
+            "excerpt": "The Dev Dashboard is the central hub... Metrics and analytics: After you launch your app, track its performance with detailed revenue and installation metrics.",
+            "fetchedAt": "2026-09-04T00:00:00Z",
+            "domain": "help.shopify.com",
+            "sourceType": "official_platform",
+            "retrievalMethod": "openai_hosted_web_search",
+            "searchPass": "authoritative_domains"
+          },
+          {
+            "source": "web",
+            "title": "Track your listing traffic",
+            "url": "https://shopify.dev/docs/apps/launch/marketing/track-listing-traffic",
+            "excerpt": "You can get more information about how merchants are finding your app listing in the Shopify App Store by tracking your listing traffic with Google Analytics or Facebook Pixel.",
+            "fetchedAt": "2026-09-04T00:00:00Z",
+            "domain": "shopify.dev",
+            "sourceType": "official_platform",
+            "retrievalMethod": "openai_hosted_web_search",
+            "searchPass": "authoritative_domains"
+          },
+          {
+            "source": "web",
+            "title": "Monitoring and logs in the Dev Dashboard",
+            "url": "https://shopify.dev/docs/apps/build/dev-dashboard/monitoring-and-logs",
+            "excerpt": "These tools replace the previous logging and monitoring capabilities of the Partner Dashboard... standard events make app-reported activity available to merchants in Shopify Analytics.",
+            "fetchedAt": "2026-09-04T00:00:00Z",
+            "domain": "shopify.dev",
+            "sourceType": "official_platform",
+            "retrievalMethod": "openai_hosted_web_search",
+            "searchPass": "authoritative_domains"
+          }
+        ],
+        "confidence": "moderate",
+        "limitations": [
+          "No cited Shopify source in the provided evidence explicitly mentions an 'app opens' metric being available in the App Store/Partner/Dev Dashboard analytics.",
+          "The available citations confirm installs, revenue, reviews, traffic sources, and monitoring/logging capabilities, but not restoration of historical Partner-dashboard-style app-open counts.",
+          "Evidence is limited to one bounded hosted web search and official Shopify sources returned there."
+        ],
+        "searchSummaries": [
+          {
+            "pass": "authoritative_domains",
+            "status": "completed",
+            "citationCount": 6,
+            "officialCitationCount": 6,
+            "broaderCitationCount": 0,
+            "allowedDomainCount": 7,
+            "totalTokens": 10366,
+            "startedAt": "2026-09-04T15:35:14.785Z",
+            "completedAt": "2026-09-04T15:35:25.184Z"
+          },
+          {
+            "pass": "broader_web",
+            "status": "completed",
+            "citationCount": 5,
+            "officialCitationCount": 5,
+            "broaderCitationCount": 5,
+            "allowedDomainCount": 0,
+            "totalTokens": 10138,
+            "startedAt": "2026-09-04T15:35:25.185Z",
+            "completedAt": "2026-09-04T15:35:35.337Z"
+          }
+        ],
+        "requestedLookup": null
+      },
+      {
+        "status": "resolved",
+        "next_action": "stop",
+        "requester": "m6",
+        "question": "Shopify official sources cited in prior research support Dev Dashboard analytics, install/performance tracking, and optional listing-traffic tracking, but they do not confirm an official app-open metric. Measurement-source clarification is still needed to choose the best post-change evaluation method.",
+        "evidence": [
+          {
+            "source": "web",
+            "title": "Track your listing traffic",
+            "url": "https://shopify.dev/docs/apps/launch/marketing/track-listing-traffic",
+            "excerpt": "Shopify says app listings can be tracked with Google Analytics or Facebook Pixel, and lists events including view_item, add_to_cart, shopify_app_install, and an 'Open app button' event on the App Listing page.",
+            "fetchedAt": "2026-09-04T00:00:00Z",
+            "domain": "shopify.dev",
+            "sourceType": "official_platform",
+            "retrievalMethod": "openai_hosted_web_search",
+            "searchPass": "authoritative_domains"
+          },
+          {
+            "source": "web",
+            "title": "Track app usage metrics with the Partner Dashboard",
+            "url": "https://shopify.dev/docs/apps/launch/distribution/track-app-usage",
+            "excerpt": "Shopify documents app analytics in the Partner Dashboard, including merchant growth, installs, earnings, and uninstalls.",
+            "fetchedAt": "2026-09-04T00:00:00Z",
+            "domain": "shopify.dev",
+            "sourceType": "official_platform",
+            "retrievalMethod": "openai_hosted_web_search",
+            "searchPass": "authoritative_domains"
+          },
+          {
+            "source": "web",
+            "title": "Dev Dashboard",
+            "url": "https://shopify.dev/docs/apps/build/dev-dashboard",
+            "excerpt": "Shopify says the Dev Dashboard provides logs, health metrics, and app events data that your app sends to Shopify.",
+            "fetchedAt": "2026-09-04T00:00:00Z",
+            "domain": "shopify.dev",
+            "sourceType": "official_platform",
+            "retrievalMethod": "openai_hosted_web_search",
+            "searchPass": "authoritative_domains"
+          },
+          {
+            "source": "web",
+            "title": "Monitoring and logs in the Dev Dashboard",
+            "url": "https://shopify.dev/docs/apps/build/dev-dashboard/monitoring-and-logs",
+            "excerpt": "Shopify describes Dev Dashboard monitoring for functions, webhooks, logs, and custom app events used to understand merchant interaction and app performance.",
+            "fetchedAt": "2026-09-04T00:00:00Z",
+            "domain": "shopify.dev",
+            "sourceType": "official_platform",
+            "retrievalMethod": "openai_hosted_web_search",
+            "searchPass": "authoritative_domains"
+          },
+          {
+            "source": "web",
+            "title": "App Events: See app usage and performance data in your Dev Dashboard",
+            "url": "https://shopify.dev/changelog/app-events-see-app-usage-and-performance-data-in-your-dev-dashboard",
+            "excerpt": "Shopify’s changelog says developers can send app events to Shopify for feature usage, workflows, and conversion signals, which then appear in Dev Dashboard logs.",
+            "fetchedAt": "2026-09-04T00:00:00Z",
+            "domain": "shopify.dev",
+            "sourceType": "official_platform",
+            "retrievalMethod": "openai_hosted_web_search",
+            "searchPass": "authoritative_domains"
+          },
+          {
+            "source": "web",
+            "title": "Admin, installation, and OAuth performance",
+            "url": "https://shopify.dev/docs/apps/build/performance/admin-installation-oauth",
+            "excerpt": "Shopify documents performance tracking for admin, installation, and OAuth flows as a separate measurement surface.",
+            "fetchedAt": "2026-09-04T00:00:00Z",
+            "domain": "shopify.dev",
+            "sourceType": "official_platform",
+            "retrievalMethod": "openai_hosted_web_search",
+            "searchPass": "broader_web"
+          },
+          {
+            "source": "web",
+            "title": "About App Events",
+            "url": "https://shopify.dev/docs/apps/build/app-events",
+            "excerpt": "Shopify documents App Events as developer-declared standard events sent through the App Events API and monitored in Dev Dashboard.",
+            "fetchedAt": "2026-09-04T00:00:00Z",
+            "domain": "shopify.dev",
+            "sourceType": "official_platform",
+            "retrievalMethod": "openai_hosted_web_search",
+            "searchPass": "broader_web"
+          },
+          {
+            "source": "web",
+            "title": "Using App Events",
+            "url": "https://shopify.dev/docs/apps/build/app-events/send-events",
+            "excerpt": "Shopify’s example includes an onboarding_started event when a merchant opens the app’s setup flow for the first time, implying custom behavioral instrumentation.",
+            "fetchedAt": "2026-09-04T00:00:00Z",
+            "domain": "shopify.dev",
+            "sourceType": "official_platform",
+            "retrievalMethod": "openai_hosted_web_search",
+            "searchPass": "broader_web"
+          }
+        ],
+        "confidence": "high",
+        "limitations": [
+          "Observed fact: the provided official Shopify citations confirm listing-traffic tracking, Partner Dashboard install/business metrics, Dev Dashboard monitoring, performance surfaces, and developer-sent App Events.",
+          "Interpretation: these sources support two distinct 'open' concepts—an App Store listing 'Open app button' event and in-app/app-usage events developers instrument themselves.",
+          "Observed fact: none of the cited sources explicitly document a built-in, platform-provided universal 'app open' metric across merchant app usage without developer instrumentation.",
+          "Limitation: this answer is bounded to the supplied toolEvidence and one allowed tool call budget already consumed, so it cannot fetch additional clarifying citations beyond the provided set."
+        ],
+        "searchSummaries": [
+          {
+            "pass": "authoritative_domains",
+            "status": "completed",
+            "citationCount": 5,
+            "officialCitationCount": 5,
+            "broaderCitationCount": 0,
+            "allowedDomainCount": 7,
+            "totalTokens": 10368,
+            "startedAt": "2026-09-04T15:35:50.669Z",
+            "completedAt": "2026-09-04T15:36:51.380Z"
+          },
+          {
+            "pass": "broader_web",
+            "status": "completed",
+            "citationCount": 5,
+            "officialCitationCount": 5,
+            "broaderCitationCount": 5,
+            "allowedDomainCount": 0,
+            "totalTokens": 10392,
+            "startedAt": "2026-09-04T15:36:51.380Z",
+            "completedAt": "2026-09-04T15:37:00.621Z"
+          }
+        ],
+        "requestedLookup": null
+      },
+      {
+        "status": "resolved",
+        "next_action": "stop",
+        "requester": "m6",
+        "question": "Measurement-source clarification is still needed to choose the best post-change evaluation method: external research from official Shopify sources supports Dev Dashboard analytics, install/performance tracking, optional listing-traffic tracking, and an App Listing page 'Open app button' event, but does not confirm a built-in universal app-open metric without developer instrumentation.",
+        "evidence": [
+          {
+            "source": "web",
+            "title": "Dev Dashboard",
+            "url": "https://shopify.dev/docs/apps/build/dev-dashboard",
+            "excerpt": "The Dev Dashboard includes built-in monitoring tools, logs, health metrics, and displays app events data that your app sends to Shopify.",
+            "fetchedAt": "2026-09-04T00:00:00Z",
+            "domain": "shopify.dev",
+            "sourceType": "official_platform",
+            "retrievalMethod": "openai_hosted_web_search",
+            "searchPass": "authoritative_domains"
+          },
+          {
+            "source": "web",
+            "title": "Monitoring and logs in the Dev Dashboard",
+            "url": "https://shopify.dev/docs/apps/build/dev-dashboard/monitoring-and-logs",
+            "excerpt": "Logs include app events, and Shopify documents custom events for tracking merchant behavior, feature adoption, and app-specific actions.",
+            "fetchedAt": "2026-09-04T00:00:00Z",
+            "domain": "shopify.dev",
+            "sourceType": "official_platform",
+            "retrievalMethod": "openai_hosted_web_search",
+            "searchPass": "authoritative_domains"
+          },
+          {
+            "source": "web",
+            "title": "Track app usage metrics with the Partner Dashboard",
+            "url": "https://shopify.dev/docs/apps/launch/distribution/track-app-usage",
+            "excerpt": "Shopify provides app analytics such as merchant growth, installs, earnings, and uninstalls for distribution tracking.",
+            "fetchedAt": "2026-09-04T00:00:00Z",
+            "domain": "shopify.dev",
+            "sourceType": "official_platform",
+            "retrievalMethod": "openai_hosted_web_search",
+            "searchPass": "authoritative_domains"
+          },
+          {
+            "source": "web",
+            "title": "Track your listing traffic",
+            "url": "https://shopify.dev/docs/apps/launch/marketing/track-listing-traffic",
+            "excerpt": "Shopify documents optional listing-traffic tracking with Google Analytics or Meta Pixel, including an `Open app button` event on the App Listing page.",
+            "fetchedAt": "2026-09-04T00:00:00Z",
+            "domain": "shopify.dev",
+            "sourceType": "official_platform",
+            "retrievalMethod": "openai_hosted_web_search",
+            "searchPass": "authoritative_domains"
+          },
+          {
+            "source": "web",
+            "title": "About App Events",
+            "url": "https://shopify.dev/docs/apps/build/app-events",
+            "excerpt": "Shopify documents app events shown in the Dev Dashboard, with some events optionally made available to merchants in Shopify Analytics.",
+            "fetchedAt": "2026-09-04T00:00:00Z",
+            "domain": "shopify.dev",
+            "sourceType": "official_platform",
+            "retrievalMethod": "openai_hosted_web_search",
+            "searchPass": "broader_web"
+          },
+          {
+            "source": "web",
+            "title": "Using App Events",
+            "url": "https://shopify.dev/docs/apps/build/app-events/send-events",
+            "excerpt": "Shopify explains that app events appear in the Dev Dashboard and shows developer-built tracking flows for app behaviors such as onboarding.",
+            "fetchedAt": "2026-09-04T00:00:00Z",
+            "domain": "shopify.dev",
+            "sourceType": "official_platform",
+            "retrievalMethod": "openai_hosted_web_search",
+            "searchPass": "broader_web"
+          }
+        ],
+        "confidence": "high",
+        "limitations": [
+          "The cited Shopify sources support built-in distribution and operational analytics plus developer-sent app events, but none explicitly document a universal built-in app-open metric that works without instrumentation.",
+          "The `Open app button` event is documented for Shopify App Store listing traffic tracking, not as proof of in-app usage or repeat opens after install.",
+          "This answer is limited to the supplied official Shopify citations and does not test live dashboard behavior."
+        ],
+        "searchSummaries": [
+          {
+            "pass": "authoritative_domains",
+            "status": "completed",
+            "citationCount": 4,
+            "officialCitationCount": 4,
+            "broaderCitationCount": 0,
+            "allowedDomainCount": 7,
+            "totalTokens": 10093,
+            "startedAt": "2026-09-04T15:37:15.866Z",
+            "completedAt": "2026-09-04T15:37:23.165Z"
+          },
+          {
+            "pass": "broader_web",
+            "status": "completed",
+            "citationCount": 5,
+            "officialCitationCount": 5,
+            "broaderCitationCount": 5,
+            "allowedDomainCount": 0,
+            "totalTokens": 10052,
+            "startedAt": "2026-09-04T15:37:23.165Z",
+            "completedAt": "2026-09-04T15:37:30.923Z"
+          }
+        ],
+        "requestedLookup": null
+      },
+      {
+        "status": "resolved",
+        "next_action": "stop",
+        "requester": "m6",
+        "question": "Measurement-source clarification is still needed to choose the best post-change evaluation method: external research from official Shopify sources supports Dev Dashboard analytics, install/performance tracking, optional listing-traffic tracking, and an App Listing page 'Open app button' event, but does not confirm a built-in universal app-open metric without developer instrumentation.",
+        "evidence": [
+          {
+            "source": "web",
+            "title": "Dev Dashboard",
+            "url": "https://shopify.dev/docs/apps/build/dev-dashboard",
+            "excerpt": "The Dev Dashboard gives direct access to logs and health metrics for each app and also displays app events data that your app sends to Shopify.",
+            "fetchedAt": "2026-09-04T00:00:00Z",
+            "domain": "shopify.dev",
+            "sourceType": "official_platform",
+            "retrievalMethod": "openai_hosted_web_search",
+            "searchPass": "authoritative_domains"
+          },
+          {
+            "source": "web",
+            "title": "Monitoring and logs in the Dev Dashboard",
+            "url": "https://shopify.dev/docs/apps/build/dev-dashboard/monitoring-and-logs",
+            "excerpt": "The Dev Dashboard includes logs and metrics, with custom events for tracking merchant behavior, feature adoption, and app-specific actions.",
+            "fetchedAt": "2026-09-04T00:00:00Z",
+            "domain": "shopify.dev",
+            "sourceType": "official_platform",
+            "retrievalMethod": "openai_hosted_web_search",
+            "searchPass": "authoritative_domains"
+          },
+          {
+            "source": "web",
+            "title": "About App Events",
+            "url": "https://shopify.dev/docs/apps/build/app-events",
+            "excerpt": "Shopify describes app events for cases like a merchant viewing a page or dashboard in the app, with monitoring in the Dev Dashboard.",
+            "fetchedAt": "2026-09-04T00:00:00Z",
+            "domain": "shopify.dev",
+            "sourceType": "official_platform",
+            "retrievalMethod": "openai_hosted_web_search",
+            "searchPass": "authoritative_domains"
+          },
+          {
+            "source": "web",
+            "title": "App Events: See app usage and performance data in your Dev Dashboard",
+            "url": "https://shopify.dev/changelog/app-events-see-app-usage-and-performance-data-in-your-dev-dashboard",
+            "excerpt": "The App Events API lets developers send events such as feature usage and workflows to Shopify, and those events appear in Dev Dashboard Logs.",
+            "fetchedAt": "2026-09-04T00:00:00Z",
+            "domain": "shopify.dev",
+            "sourceType": "official_platform",
+            "retrievalMethod": "openai_hosted_web_search",
+            "searchPass": "authoritative_domains"
+          },
+          {
+            "source": "web",
+            "title": "Track your listing traffic",
+            "url": "https://shopify.dev/docs/apps/launch/marketing/track-listing-traffic",
+            "excerpt": "Shopify documents optional Google Analytics or Facebook Pixel tracking for app listings, including an 'Open app button' event on the App Listing page.",
+            "fetchedAt": "2026-09-04T00:00:00Z",
+            "domain": "shopify.dev",
+            "sourceType": "official_platform",
+            "retrievalMethod": "openai_hosted_web_search",
+            "searchPass": "authoritative_domains"
+          },
+          {
+            "source": "derived",
+            "title": "Research conclusion",
+            "url": null,
+            "excerpt": "External research from official Shopify sources supports these observed capabilities: (1) the Dev Dashboard shows logs, health metrics, and app events that the app sends to Shopify; (2) App Events are developer-sent instrumentation for merchant behavior, feature adoption, and app-specific actions; (3) listing-traffic measurement is optional and documented via GA4/Facebook Pixel plus App Listing events such as 'Open app button'; (4) the provided official sources do not confirm a built-in, universal app-open metric that exists without developer instrumentation. Interpretation: if the goal is to evaluate post-change app opens broadly, the best-supported source is developer-defined App Events in Dev Dashboard, while listing-page 'Open app button' only measures that specific listing CTA interaction, not all app opens.",
+            "fetchedAt": "2026-09-04T00:00:00Z",
+            "sourceType": "derived",
+            "retrievalMethod": "openai_hosted_web_search",
+            "searchPass": "authoritative_domains"
+          }
+        ],
+        "confidence": "high",
+        "limitations": [
+          "The conclusion is bounded to the supplied official Shopify citations and one allowed tool call; no additional lookup was available to search for undocumented or newly published metrics pages.",
+          "The evidence confirms App Listing page 'Open app button' tracking and developer-sent App Events, but absence of evidence in these sources is not absolute proof that no other Shopify metric exists elsewhere.",
+          "The sources support measurement options conceptually, but do not quantify retention windows, reporting granularity, or exact dashboard field names for a universal 'app open' KPI."
+        ],
+        "searchSummaries": [
+          {
+            "pass": "authoritative_domains",
+            "status": "completed",
+            "citationCount": 5,
+            "officialCitationCount": 5,
+            "broaderCitationCount": 0,
+            "allowedDomainCount": 7,
+            "totalTokens": 10128,
+            "startedAt": "2026-09-04T15:37:42.901Z",
+            "completedAt": "2026-09-04T15:37:53.356Z"
+          },
+          {
+            "pass": "broader_web",
+            "status": "completed",
+            "citationCount": 5,
+            "officialCitationCount": 5,
+            "broaderCitationCount": 5,
+            "allowedDomainCount": 0,
+            "totalTokens": 10087,
+            "startedAt": "2026-09-04T15:37:53.356Z",
+            "completedAt": "2026-09-04T15:38:00.400Z"
+          }
+        ],
+        "requestedLookup": null
+      }
+    ],
+    "m4": {
+      "performancePath": "discovery",
+      "primaryBottleneck": "Likely discovery-to-click bottleneck: the listing's searchable positioning appears too narrow and category-generic for the broader catalog-audit problem, so merchants who need catalog quality checks may not recognize it as relevant before opening the app.",
+      "competingExplanation": "A competing explanation is trust friction after impression: the listing has 0 reviews and does not make read-only safety prominent near the access decision, which could suppress opens even if discovery is adequate.",
+      "confidence": "low",
+      "decision": "proceed_to_hypothesis",
+      "researchQuestion": "Will a manual listing test that makes the audience and catalog-audit use case more explicit in title/headline/above-the-fold copy increase qualified app opens or first scan starts versus the current pricing-issue-led positioning?",
+      "notes": [
+        "observed fact: evidence level is sparse and reviewMode is exploratory_visibility_test.",
+        "observed fact: measured signals show app_opened_count=0, scan_started_count=0, scan_completed_count=0, request_count=2, and Shopify Partner metrics failed.",
+        "observed fact: the listing title is 'MerchGrid Catalog Audit', headline is 'Scans your product catalog and shows exactly which items are priced below cost', category is 'Analytics', pricing label is 'Free', and reviewCount is 0.",
+        "observed fact: copy notes say clear claims include below-cost pricing, compare-at price issues, duplicate SKUs, and missing SKUs; unclear claims include sharper trust outcome and more explicit first-scan action; missing context includes what happens after opening and why read-only access is safe.",
+        "interpretation: zero opens alone do not prove a bottleneck because traffic evidence is sparse, but the qualitative listing context is sufficient for one exploratory diagnosis.",
+        "interpretation: the current promise is concrete but may over-anchor on one pricing symptom rather than the broader catalog quality job-to-be-done for Shopify merchants auditing catalog quality.",
+        "interpretation: the Analytics category likely increases the need for clearer catalog-audit keywords and audience framing on the listing surface.",
+        "hypothesis: stronger audience-specific catalog-audit positioning may improve discovery relevance and click/open intent among qualified merchants.",
+        "hypothesis: if discovery positioning is not the main issue, trust and permission-risk messaging is the next most plausible bottleneck."
+      ]
+    },
+    "m5": {
+      "hypothesis": "If the Shopify App Store listing headline and first screenshot are manually revised to foreground the broader audience/job-to-be-done ('catalog audit for Shopify merchants') plus read-only safety and a clearer first action, more qualified merchants may recognize the app as relevant enough to open and start a first scan.",
+      "primaryVariable": "Above-the-fold listing messaging: headline and first screenshot/visual context",
+      "recommendedRevision": "Test a manual listing revision that shifts the current pricing-symptom-led framing toward audience + action + safety. Example direction: update the headline to emphasize catalog audit for Shopify merchants and read-only scanning, and revise the first screenshot caption to show what happens next after install (run first audit, see pricing/SKU/catalog issues) rather than only a single issue type.",
+      "keepConstant": [
+        "App behavior and onboarding flow",
+        "Pricing label",
+        "Category",
+        "Remaining screenshots after the first image",
+        "Core issue claims already supported on the listing (below-cost pricing, compare-at price issues, duplicate SKUs, missing SKUs)",
+        "Support and privacy links"
+      ],
+      "expectedSignal": "Observed fact: current measured signals are app_opened_count=0 and scan_started_count=0 with sparse traffic evidence. Hypothesis: after the manual revision, qualified app opens and first scan starts may show an upward directional change versus the current version, while no claim is made that the listing change will improve outcomes.",
+      "notes": [
+        "observed fact: evidence is sparse, Shopify Partner metrics failed, and current marketplace measurements are inconclusive.",
+        "observed fact: the current headline focuses on below-cost pricing, while copy notes say the first scan action and read-only safety are not explicit enough.",
+        "observed fact: gallery screenshots show audit flow and results, but the review notes say outcome hierarchy may need review.",
+        "interpretation: the current listing may over-anchor on one pricing symptom instead of the broader catalog-audit use case for Shopify merchants.",
+        "hypothesis: making audience relevance, first action, and read-only safety clearer above the fold may reduce ambiguity before the app-open decision.",
+        "assumption: the app's read-only positioning is accurate and can be stated more prominently without changing product behavior.",
+        "Do not interpret any later movement as proof of causation unless compared against a baseline with enough traffic.",
+        "Exploratory recommendation; not metric-proven.",
+        "Human approval required before changing any marketplace surface."
+      ]
+    },
+    "m6": {
+      "primaryMetric": "qualified app opens leading to first scan starts",
+      "secondaryMetrics": [
+        "app_opened_count",
+        "scan_started_count",
+        "scan_completed_count",
+        "scan_failed_count",
+        "request_count",
+        "error_rate"
+      ],
+      "baselineValue": 0,
+      "baselinePeriod": "Current observed sparse baseline from the supplied snapshot before any manual listing change: app_opened_count=0 and scan_started_count=0, with listing observations captured on 2026-08-25 and measured signals tied to the 2026-08-22 artifact.",
+      "qualificationRequirements": [
+        "Manual-only exploratory test: a human manually changes one Shopify App Store listing element at a time; do not change app behavior or automate marketplace edits.",
+        "Run the first test on the headline only, because observed listing evidence suggests audience/job-to-be-done clarity and read-only safety are under-expressed above the fold.",
+        "Keep title, category, pricing label, screenshots, support links, privacy links, setup documentation, and app behavior constant during the headline test window.",
+        "Use only supported claims already grounded in observed listing evidence and product context: catalog audit, below-cost pricing, compare-at price issues, duplicate SKUs, missing SKUs, and read-only safety if accurate.",
+        "Do not add unsupported promises about installs, sales lift, ranking improvement, or broader outcomes.",
+        "Record the exact go-live timestamp of the manual headline edit and preserve the exact tested wording for later comparison.",
+        "Observe one clean post-change window before making any second listing change.",
+        "If a second test is needed later, test only the first screenshot/caption in a separate window; do not change headline and screenshot together.",
+        "Use the same measurement source before and after the change where possible.",
+        "Treat all results as exploratory and low-confidence unless measurement reliability and traffic improve.",
+        "Human approval and manual marketplace edit are required before measurement.",
+        "Later evidence must be compared as exploratory and low confidence."
+      ],
+      "expectedSupportingSignal": "Hypothesis: after the manual headline-only revision, app_opened_count increases above the current observed baseline of 0 and at least some scan_started_count appears, without a worsening error_rate or scan_failed_count trend.",
+      "expectedWeakeningSignal": "Hypothesis: after the headline revision, app_opened_count and scan_started_count remain at 0 in a comparable window, or opens increase without any scan starts, which would weaken the idea that headline clarity is the main constraint.",
+      "inconclusiveCondition": "The test is inconclusive if measurement for opens is unavailable or inconsistent, traffic stays too sparse to compare periods, multiple listing elements changed in the same window, or major external changes make pre/post periods non-comparable.",
+      "contextToMonitor": [
+        "Whether Shopify Dev Dashboard or equivalent Shopify analytics becomes available for installs, traffic, or related listing-performance reporting.",
+        "Whether a separate traffic source such as listing-traffic tracking is already configured and stable enough to compare pre/post periods.",
+        "Any simultaneous changes to reviews, rating summary, category, pricing label, screenshots, gallery order, documentation, or trust elements during the test.",
+        "Any app reliability movement in scan_failed_count, request_count, or error_rate that could affect scan-start behavior independently of listing messaging.",
+        "Whether the no-reviews state changes during the observation window.",
+        "The exact tested headline version and exact manual go-live time.",
+        "manual marketplace change applied by owner"
+      ],
+      "unresolvedMeasurementRules": [
+        "Define what qualifies as a 'qualified app open' in the available analytics stack; the supplied evidence includes app_opened_count but not its rule definition.",
+        "Confirm the best available post-change source for app-open or nearest-proxy data, because external research from official Shopify sources supports installs, analytics, listing-traffic tracking, and an App Listing page 'Open app button' event, but does not confirm a built-in universal merchant app-open metric without developer instrumentation.",
+        "Decide the minimum pre/post observation window after actual traffic volume is known.",
+        "Decide whether any non-zero movement from baseline is enough for an exploratory readout or whether a larger threshold is required.",
+        "Confirm whether scan_started_count can be segmented cleanly by the listing change go-live timestamp.",
+        "Decide whether scan_completed_count should remain a guardrail or also be treated as a secondary outcome."
+      ],
+      "researchNeed": "Measurement-source clarification is still needed to choose the best post-change evaluation method: external research from official Shopify sources supports Dev Dashboard analytics, install/performance tracking, optional listing-traffic tracking, and an App Listing page 'Open app button' event, but does not confirm a built-in universal app-open metric without developer instrumentation."
+    }
+  },
+  "events": [
+    {
+      "eventId": "4ccd38b3-87c8-4661-9f95-d4ea01212c07",
+      "runId": "2026-09-04-m3-live-smoke-2",
+      "type": "workflow.started",
+      "stage": "m1_context",
+      "message": "Workflow run started",
+      "createdAt": "2026-09-04T15:34:43.945Z",
+      "data": {
+        "initialEvidenceRef": "initial:marketplace_visibility:merchgrid_shopify_app_store:merchgrid:visibility:2026-08-22"
+      }
+    },
+    {
+      "eventId": "eec7783b-2fac-4cfc-a8c7-31d10d9cc5b1",
+      "runId": "2026-09-04-m3-live-smoke-2",
+      "type": "module.started",
+      "stage": "m1_context",
+      "message": "M1 context started",
+      "createdAt": "2026-09-04T15:34:43.949Z",
+      "data": {
+        "moduleId": "m1"
+      }
+    },
+    {
+      "eventId": "dfba4c1f-7633-482b-9a37-9aea6738af95",
+      "runId": "2026-09-04-m3-live-smoke-2",
+      "type": "module.completed",
+      "stage": "m1_context",
+      "message": "M1 context completed",
+      "createdAt": "2026-09-04T15:34:43.949Z",
+      "data": {
+        "moduleId": "m1"
+      }
+    },
+    {
+      "eventId": "a89a2071-52e2-412d-95ed-341c50611667",
+      "runId": "2026-09-04-m3-live-smoke-2",
+      "type": "route.decided",
+      "stage": "m1_context",
+      "message": "Route decided: advance",
+      "createdAt": "2026-09-04T15:34:43.949Z",
+      "data": {
+        "decisionType": "advance",
+        "nextStage": "m2_metrics_initial"
+      }
+    },
+    {
+      "eventId": "5f077d77-eaf7-481c-b944-458cc9ddf993",
+      "runId": "2026-09-04-m3-live-smoke-2",
+      "type": "workflow.advanced",
+      "stage": "m2_metrics_initial",
+      "message": "Workflow advanced to m2_metrics_initial",
+      "createdAt": "2026-09-04T15:34:43.949Z",
+      "data": {}
+    },
+    {
+      "eventId": "74ed994a-81ab-402b-9fbf-f9b0bacff6f8",
+      "runId": "2026-09-04-m3-live-smoke-2",
+      "type": "module.started",
+      "stage": "m2_metrics_initial",
+      "message": "M2 initial metrics started",
+      "createdAt": "2026-09-04T15:34:43.951Z",
+      "data": {
+        "moduleId": "m2"
+      }
+    },
+    {
+      "eventId": "b17bb2ff-42ba-416a-a874-7b1d5d55f775",
+      "runId": "2026-09-04-m3-live-smoke-2",
+      "type": "module.completed",
+      "stage": "m2_metrics_initial",
+      "message": "M2 initial metrics completed",
+      "createdAt": "2026-09-04T15:34:43.955Z",
+      "data": {
+        "moduleId": "m2",
+        "phase": "initial"
+      }
+    },
+    {
+      "eventId": "0cb6879a-1846-412d-877a-3d789d6a762b",
+      "runId": "2026-09-04-m3-live-smoke-2",
+      "type": "route.decided",
+      "stage": "m2_metrics_initial",
+      "message": "Route decided: advance",
+      "createdAt": "2026-09-04T15:34:43.955Z",
+      "data": {
+        "decisionType": "advance",
+        "nextStage": "m4_diagnosis"
+      }
+    },
+    {
+      "eventId": "cfc7d3c9-1b95-44d0-8933-a8c139ab63a0",
+      "runId": "2026-09-04-m3-live-smoke-2",
+      "type": "workflow.advanced",
+      "stage": "m4_diagnosis",
+      "message": "Workflow advanced to m4_diagnosis",
+      "createdAt": "2026-09-04T15:34:43.955Z",
+      "data": {}
+    },
+    {
+      "eventId": "626d04af-d6dc-4253-86cb-747b323507a0",
+      "runId": "2026-09-04-m3-live-smoke-2",
+      "type": "module.started",
+      "stage": "m4_diagnosis",
+      "message": "M4 diagnosis started",
+      "createdAt": "2026-09-04T15:34:43.957Z",
+      "data": {
+        "moduleId": "m4"
+      }
+    },
+    {
+      "eventId": "762bd0c7-0abc-4b02-80ce-598e56f11120",
+      "runId": "2026-09-04-m3-live-smoke-2",
+      "type": "module.completed",
+      "stage": "m4_diagnosis",
+      "message": "M4 diagnosis completed",
+      "createdAt": "2026-09-04T15:34:50.474Z",
+      "data": {
+        "moduleId": "m4"
+      }
+    },
+    {
+      "eventId": "8fe48fea-9a0d-4ab9-9b15-633e20753631",
+      "runId": "2026-09-04-m3-live-smoke-2",
+      "type": "route.decided",
+      "stage": "m4_diagnosis",
+      "message": "Route decided: advance",
+      "createdAt": "2026-09-04T15:34:50.474Z",
+      "data": {
+        "decisionType": "advance",
+        "nextStage": "m5_hypothesis"
+      }
+    },
+    {
+      "eventId": "3f7f5a3e-ddb2-43c2-9169-6c34fb822375",
+      "runId": "2026-09-04-m3-live-smoke-2",
+      "type": "workflow.advanced",
+      "stage": "m5_hypothesis",
+      "message": "Workflow advanced to m5_hypothesis",
+      "createdAt": "2026-09-04T15:34:50.474Z",
+      "data": {}
+    },
+    {
+      "eventId": "00accdc7-739d-4ca5-b4d6-896f8b891777",
+      "runId": "2026-09-04-m3-live-smoke-2",
+      "type": "module.started",
+      "stage": "m5_hypothesis",
+      "message": "M5 hypothesis started",
+      "createdAt": "2026-09-04T15:34:50.479Z",
+      "data": {
+        "moduleId": "m5"
+      }
+    },
+    {
+      "eventId": "68de37c0-7fb2-41cc-80ba-3df68d30d098",
+      "runId": "2026-09-04-m3-live-smoke-2",
+      "type": "module.completed",
+      "stage": "m5_hypothesis",
+      "message": "M5 hypothesis completed",
+      "createdAt": "2026-09-04T15:34:56.386Z",
+      "data": {
+        "moduleId": "m5"
+      }
+    },
+    {
+      "eventId": "86c4f6ee-9907-402c-8df9-844a71b60dd3",
+      "runId": "2026-09-04-m3-live-smoke-2",
+      "type": "route.decided",
+      "stage": "m5_hypothesis",
+      "message": "Route decided: advance",
+      "createdAt": "2026-09-04T15:34:56.386Z",
+      "data": {
+        "decisionType": "advance",
+        "nextStage": "m6_test_plan"
+      }
+    },
+    {
+      "eventId": "f570494e-3e73-4305-a21d-cd7ed119f1cf",
+      "runId": "2026-09-04-m3-live-smoke-2",
+      "type": "workflow.advanced",
+      "stage": "m6_test_plan",
+      "message": "Workflow advanced to m6_test_plan",
+      "createdAt": "2026-09-04T15:34:56.386Z",
+      "data": {}
+    },
+    {
+      "eventId": "ecccad00-1b8f-41ac-b27d-ec32ba386d50",
+      "runId": "2026-09-04-m3-live-smoke-2",
+      "type": "module.started",
+      "stage": "m6_test_plan",
+      "message": "M6 test plan started",
+      "createdAt": "2026-09-04T15:34:56.395Z",
+      "data": {
+        "moduleId": "m6"
+      }
+    },
+    {
+      "eventId": "ce5e28ad-0eaa-4071-b325-703d25326c80",
+      "runId": "2026-09-04-m3-live-smoke-2",
+      "type": "module.completed",
+      "stage": "m6_test_plan",
+      "message": "M6 test plan completed",
+      "createdAt": "2026-09-04T15:35:14.776Z",
+      "data": {
+        "moduleId": "m6"
+      }
+    },
+    {
+      "eventId": "21239c22-34d8-4270-8899-93fb19561724",
+      "runId": "2026-09-04-m3-live-smoke-2",
+      "type": "route.decided",
+      "stage": "m6_test_plan",
+      "message": "Route decided: research",
+      "createdAt": "2026-09-04T15:35:14.776Z",
+      "data": {
+        "decisionType": "research"
+      }
+    },
+    {
+      "eventId": "4b8d8d86-590e-4436-8ac0-95cc4226de41",
+      "runId": "2026-09-04-m3-live-smoke-2",
+      "type": "research.requested",
+      "stage": "m3_research",
+      "message": "Need measurement-source clarification, especially whether Shopify App Store/Partner reporting for app opens can be restored or replaced, because current sparse analytics make the exploratory test hard to evaluate confidently.",
+      "createdAt": "2026-09-04T15:35:14.776Z",
+      "data": {
+        "requester": "m6",
+        "returnStage": "m6_test_plan",
+        "startedAt": "2026-09-04T15:35:14.776Z",
+        "evidenceRef": "initial:marketplace_visibility:merchgrid_shopify_app_store:merchgrid:visibility:2026-08-22"
+      }
+    },
+    {
+      "eventId": "7f5f5f72-62db-40ce-a29a-201b862b17b9",
+      "runId": "2026-09-04-m3-live-smoke-2",
+      "type": "module.started",
+      "stage": "m3_research",
+      "message": "M3 research started",
+      "createdAt": "2026-09-04T15:35:14.784Z",
+      "data": {
+        "moduleId": "m3"
+      }
+    },
+    {
+      "eventId": "eec70264-162a-4f90-a574-d76985e05ceb",
+      "runId": "2026-09-04-m3-live-smoke-2",
+      "type": "module.completed",
+      "stage": "m3_research",
+      "message": "M3 research completed",
+      "createdAt": "2026-09-04T15:35:40.998Z",
+      "data": {
+        "moduleId": "m3"
+      }
+    },
+    {
+      "eventId": "d6fd830b-7bf4-4cf8-b11a-b9ab16e8a238",
+      "runId": "2026-09-04-m3-live-smoke-2",
+      "type": "research.search.started",
+      "stage": "m3_research",
+      "message": "Hosted web-search pass started",
+      "createdAt": "2026-09-04T15:35:40.999Z",
+      "data": {
+        "requester": "m6",
+        "returnStage": "m6_test_plan",
+        "pass": "authoritative_domains",
+        "allowedDomainCount": 7,
+        "startedAt": "2026-09-04T15:35:14.785Z"
+      }
+    },
+    {
+      "eventId": "0c84a7d1-9726-4e9b-8b90-90840a11ca78",
+      "runId": "2026-09-04-m3-live-smoke-2",
+      "type": "research.search.completed",
+      "stage": "m3_research",
+      "message": "Hosted web-search pass completed",
+      "createdAt": "2026-09-04T15:35:40.999Z",
+      "data": {
+        "requester": "m6",
+        "returnStage": "m6_test_plan",
+        "pass": "authoritative_domains",
+        "citationCount": 6,
+        "officialCitationCount": 6,
+        "broaderCitationCount": 0,
+        "allowedDomainCount": 7,
+        "completedAt": "2026-09-04T15:35:25.184Z",
+        "totalTokens": 10366
+      }
+    },
+    {
+      "eventId": "b25422f6-2c70-4309-ae7e-cb6c10eb4563",
+      "runId": "2026-09-04-m3-live-smoke-2",
+      "type": "research.search.started",
+      "stage": "m3_research",
+      "message": "Hosted web-search pass started",
+      "createdAt": "2026-09-04T15:35:40.999Z",
+      "data": {
+        "requester": "m6",
+        "returnStage": "m6_test_plan",
+        "pass": "broader_web",
+        "allowedDomainCount": 0,
+        "startedAt": "2026-09-04T15:35:25.185Z"
+      }
+    },
+    {
+      "eventId": "0cb12cb5-b147-4122-8cc2-ead4e860a045",
+      "runId": "2026-09-04-m3-live-smoke-2",
+      "type": "research.search.completed",
+      "stage": "m3_research",
+      "message": "Hosted web-search pass completed",
+      "createdAt": "2026-09-04T15:35:40.999Z",
+      "data": {
+        "requester": "m6",
+        "returnStage": "m6_test_plan",
+        "pass": "broader_web",
+        "citationCount": 5,
+        "officialCitationCount": 5,
+        "broaderCitationCount": 5,
+        "allowedDomainCount": 0,
+        "completedAt": "2026-09-04T15:35:35.337Z",
+        "totalTokens": 10138
+      }
+    },
+    {
+      "eventId": "70aeb7c8-1a55-4701-9741-e13f4b2cb075",
+      "runId": "2026-09-04-m3-live-smoke-2",
+      "type": "research.returned",
+      "stage": "m6_test_plan",
+      "message": "M3 research returned to requester",
+      "createdAt": "2026-09-04T15:35:40.999Z",
+      "data": {
+        "requester": "m6",
+        "returnStage": "m6_test_plan",
+        "citationCount": 5,
+        "researchStatus": "resolved"
+      }
+    },
+    {
+      "eventId": "40e8e63c-404a-49ae-aa4e-caf545b4a008",
+      "runId": "2026-09-04-m3-live-smoke-2",
+      "type": "module.started",
+      "stage": "m6_test_plan",
+      "message": "M6 test plan started",
+      "createdAt": "2026-09-04T15:35:41.008Z",
+      "data": {
+        "moduleId": "m6"
+      }
+    },
+    {
+      "eventId": "07adf0b9-8142-4b6f-95f4-738e1a823cd9",
+      "runId": "2026-09-04-m3-live-smoke-2",
+      "type": "module.completed",
+      "stage": "m6_test_plan",
+      "message": "M6 test plan completed",
+      "createdAt": "2026-09-04T15:35:50.660Z",
+      "data": {
+        "moduleId": "m6"
+      }
+    },
+    {
+      "eventId": "98d9bae4-68df-425a-a862-715ceeb4321d",
+      "runId": "2026-09-04-m3-live-smoke-2",
+      "type": "route.decided",
+      "stage": "m6_test_plan",
+      "message": "Route decided: research",
+      "createdAt": "2026-09-04T15:35:50.660Z",
+      "data": {
+        "decisionType": "research"
+      }
+    },
+    {
+      "eventId": "b81549b3-846f-46f0-9f3d-6cf354bfef4f",
+      "runId": "2026-09-04-m3-live-smoke-2",
+      "type": "research.requested",
+      "stage": "m3_research",
+      "message": "Shopify official sources cited in prior research support Dev Dashboard analytics, install/performance tracking, and optional listing-traffic tracking, but they do not confirm an official app-open metric. Measurement-source clarification is still needed to choose the best post-change evaluation method.",
+      "createdAt": "2026-09-04T15:35:50.660Z",
+      "data": {
+        "requester": "m6",
+        "returnStage": "m6_test_plan",
+        "startedAt": "2026-09-04T15:35:50.660Z",
+        "evidenceRef": "initial:marketplace_visibility:merchgrid_shopify_app_store:merchgrid:visibility:2026-08-22"
+      }
+    },
+    {
+      "eventId": "f5da2ef5-85ee-4e0e-b36d-84a2f3173320",
+      "runId": "2026-09-04-m3-live-smoke-2",
+      "type": "module.started",
+      "stage": "m3_research",
+      "message": "M3 research started",
+      "createdAt": "2026-09-04T15:35:50.669Z",
+      "data": {
+        "moduleId": "m3"
+      }
+    },
+    {
+      "eventId": "2a6fb9e9-e27b-4694-8197-8eaf329c2eeb",
+      "runId": "2026-09-04-m3-live-smoke-2",
+      "type": "module.completed",
+      "stage": "m3_research",
+      "message": "M3 research completed",
+      "createdAt": "2026-09-04T15:37:09.510Z",
+      "data": {
+        "moduleId": "m3"
+      }
+    },
+    {
+      "eventId": "667e9ee3-0d7d-4b43-9329-31fd67d01fda",
+      "runId": "2026-09-04-m3-live-smoke-2",
+      "type": "research.search.started",
+      "stage": "m3_research",
+      "message": "Hosted web-search pass started",
+      "createdAt": "2026-09-04T15:37:09.511Z",
+      "data": {
+        "requester": "m6",
+        "returnStage": "m6_test_plan",
+        "pass": "authoritative_domains",
+        "allowedDomainCount": 7,
+        "startedAt": "2026-09-04T15:35:50.669Z"
+      }
+    },
+    {
+      "eventId": "41ba404c-df7d-407e-85fc-1c324174ba42",
+      "runId": "2026-09-04-m3-live-smoke-2",
+      "type": "research.search.completed",
+      "stage": "m3_research",
+      "message": "Hosted web-search pass completed",
+      "createdAt": "2026-09-04T15:37:09.511Z",
+      "data": {
+        "requester": "m6",
+        "returnStage": "m6_test_plan",
+        "pass": "authoritative_domains",
+        "citationCount": 5,
+        "officialCitationCount": 5,
+        "broaderCitationCount": 0,
+        "allowedDomainCount": 7,
+        "completedAt": "2026-09-04T15:36:51.380Z",
+        "totalTokens": 10368
+      }
+    },
+    {
+      "eventId": "07f402af-9360-45b9-9563-9e74a990f987",
+      "runId": "2026-09-04-m3-live-smoke-2",
+      "type": "research.search.started",
+      "stage": "m3_research",
+      "message": "Hosted web-search pass started",
+      "createdAt": "2026-09-04T15:37:09.511Z",
+      "data": {
+        "requester": "m6",
+        "returnStage": "m6_test_plan",
+        "pass": "broader_web",
+        "allowedDomainCount": 0,
+        "startedAt": "2026-09-04T15:36:51.380Z"
+      }
+    },
+    {
+      "eventId": "a2bdc9b8-8599-4409-a433-1ac81f3347a3",
+      "runId": "2026-09-04-m3-live-smoke-2",
+      "type": "research.search.completed",
+      "stage": "m3_research",
+      "message": "Hosted web-search pass completed",
+      "createdAt": "2026-09-04T15:37:09.511Z",
+      "data": {
+        "requester": "m6",
+        "returnStage": "m6_test_plan",
+        "pass": "broader_web",
+        "citationCount": 5,
+        "officialCitationCount": 5,
+        "broaderCitationCount": 5,
+        "allowedDomainCount": 0,
+        "completedAt": "2026-09-04T15:37:00.621Z",
+        "totalTokens": 10392
+      }
+    },
+    {
+      "eventId": "77465860-f1d7-40bc-b4d0-1030be9abb5c",
+      "runId": "2026-09-04-m3-live-smoke-2",
+      "type": "research.returned",
+      "stage": "m6_test_plan",
+      "message": "M3 research returned to requester",
+      "createdAt": "2026-09-04T15:37:09.511Z",
+      "data": {
+        "requester": "m6",
+        "returnStage": "m6_test_plan",
+        "citationCount": 8,
+        "researchStatus": "resolved"
+      }
+    },
+    {
+      "eventId": "0ba23c20-e68a-4f6e-81b5-42e7934e6f52",
+      "runId": "2026-09-04-m3-live-smoke-2",
+      "type": "module.started",
+      "stage": "m6_test_plan",
+      "message": "M6 test plan started",
+      "createdAt": "2026-09-04T15:37:09.519Z",
+      "data": {
+        "moduleId": "m6"
+      }
+    },
+    {
+      "eventId": "102afa3d-4664-454b-9e48-c8c1679985c1",
+      "runId": "2026-09-04-m3-live-smoke-2",
+      "type": "module.completed",
+      "stage": "m6_test_plan",
+      "message": "M6 test plan completed",
+      "createdAt": "2026-09-04T15:37:15.856Z",
+      "data": {
+        "moduleId": "m6"
+      }
+    },
+    {
+      "eventId": "570ce87d-bc88-412f-9af1-381f85a29e09",
+      "runId": "2026-09-04-m3-live-smoke-2",
+      "type": "route.decided",
+      "stage": "m6_test_plan",
+      "message": "Route decided: research",
+      "createdAt": "2026-09-04T15:37:15.856Z",
+      "data": {
+        "decisionType": "research"
+      }
+    },
+    {
+      "eventId": "a52e38bb-2f44-468b-a68d-c507992c3416",
+      "runId": "2026-09-04-m3-live-smoke-2",
+      "type": "research.requested",
+      "stage": "m3_research",
+      "message": "Measurement-source clarification is still needed to choose the best post-change evaluation method: external research from official Shopify sources supports Dev Dashboard analytics, install/performance tracking, optional listing-traffic tracking, and an App Listing page 'Open app button' event, but does not confirm a built-in universal app-open metric without developer instrumentation.",
+      "createdAt": "2026-09-04T15:37:15.856Z",
+      "data": {
+        "requester": "m6",
+        "returnStage": "m6_test_plan",
+        "startedAt": "2026-09-04T15:37:15.856Z",
+        "evidenceRef": "initial:marketplace_visibility:merchgrid_shopify_app_store:merchgrid:visibility:2026-08-22"
+      }
+    },
+    {
+      "eventId": "b29436ee-5f1c-44ab-aea9-198feb68d6b5",
+      "runId": "2026-09-04-m3-live-smoke-2",
+      "type": "module.started",
+      "stage": "m3_research",
+      "message": "M3 research started",
+      "createdAt": "2026-09-04T15:37:15.866Z",
+      "data": {
+        "moduleId": "m3"
+      }
+    },
+    {
+      "eventId": "9a1e4f7a-15fb-41f8-b722-661c654a96cb",
+      "runId": "2026-09-04-m3-live-smoke-2",
+      "type": "module.completed",
+      "stage": "m3_research",
+      "message": "M3 research completed",
+      "createdAt": "2026-09-04T15:37:37.211Z",
+      "data": {
+        "moduleId": "m3"
+      }
+    },
+    {
+      "eventId": "cd08a451-4bda-405d-9ee9-b895ad399bd3",
+      "runId": "2026-09-04-m3-live-smoke-2",
+      "type": "research.search.started",
+      "stage": "m3_research",
+      "message": "Hosted web-search pass started",
+      "createdAt": "2026-09-04T15:37:37.212Z",
+      "data": {
+        "requester": "m6",
+        "returnStage": "m6_test_plan",
+        "pass": "authoritative_domains",
+        "allowedDomainCount": 7,
+        "startedAt": "2026-09-04T15:37:15.866Z"
+      }
+    },
+    {
+      "eventId": "ebcf7158-7339-4f4d-8519-be6e89609df7",
+      "runId": "2026-09-04-m3-live-smoke-2",
+      "type": "research.search.completed",
+      "stage": "m3_research",
+      "message": "Hosted web-search pass completed",
+      "createdAt": "2026-09-04T15:37:37.212Z",
+      "data": {
+        "requester": "m6",
+        "returnStage": "m6_test_plan",
+        "pass": "authoritative_domains",
+        "citationCount": 4,
+        "officialCitationCount": 4,
+        "broaderCitationCount": 0,
+        "allowedDomainCount": 7,
+        "completedAt": "2026-09-04T15:37:23.165Z",
+        "totalTokens": 10093
+      }
+    },
+    {
+      "eventId": "43ed2e0b-d2cd-49a7-97a0-59cb71c50714",
+      "runId": "2026-09-04-m3-live-smoke-2",
+      "type": "research.search.started",
+      "stage": "m3_research",
+      "message": "Hosted web-search pass started",
+      "createdAt": "2026-09-04T15:37:37.212Z",
+      "data": {
+        "requester": "m6",
+        "returnStage": "m6_test_plan",
+        "pass": "broader_web",
+        "allowedDomainCount": 0,
+        "startedAt": "2026-09-04T15:37:23.165Z"
+      }
+    },
+    {
+      "eventId": "c481f7a2-9c6a-450e-94c2-00a0d874b1d4",
+      "runId": "2026-09-04-m3-live-smoke-2",
+      "type": "research.search.completed",
+      "stage": "m3_research",
+      "message": "Hosted web-search pass completed",
+      "createdAt": "2026-09-04T15:37:37.212Z",
+      "data": {
+        "requester": "m6",
+        "returnStage": "m6_test_plan",
+        "pass": "broader_web",
+        "citationCount": 5,
+        "officialCitationCount": 5,
+        "broaderCitationCount": 5,
+        "allowedDomainCount": 0,
+        "completedAt": "2026-09-04T15:37:30.923Z",
+        "totalTokens": 10052
+      }
+    },
+    {
+      "eventId": "04b68c0b-2f69-4362-ba84-5b82bcee0905",
+      "runId": "2026-09-04-m3-live-smoke-2",
+      "type": "research.returned",
+      "stage": "m6_test_plan",
+      "message": "M3 research returned to requester",
+      "createdAt": "2026-09-04T15:37:37.212Z",
+      "data": {
+        "requester": "m6",
+        "returnStage": "m6_test_plan",
+        "citationCount": 6,
+        "researchStatus": "resolved"
+      }
+    },
+    {
+      "eventId": "9b4f4a85-61ca-4fb5-91cd-0a1b735f087a",
+      "runId": "2026-09-04-m3-live-smoke-2",
+      "type": "module.started",
+      "stage": "m6_test_plan",
+      "message": "M6 test plan started",
+      "createdAt": "2026-09-04T15:37:37.220Z",
+      "data": {
+        "moduleId": "m6"
+      }
+    },
+    {
+      "eventId": "89d3a375-be7e-415a-8270-ec71f2cd6bd6",
+      "runId": "2026-09-04-m3-live-smoke-2",
+      "type": "module.completed",
+      "stage": "m6_test_plan",
+      "message": "M6 test plan completed",
+      "createdAt": "2026-09-04T15:37:42.891Z",
+      "data": {
+        "moduleId": "m6"
+      }
+    },
+    {
+      "eventId": "8c6d0f4a-9f73-4fe6-980c-1144bfae1124",
+      "runId": "2026-09-04-m3-live-smoke-2",
+      "type": "route.decided",
+      "stage": "m6_test_plan",
+      "message": "Route decided: research",
+      "createdAt": "2026-09-04T15:37:42.891Z",
+      "data": {
+        "decisionType": "research"
+      }
+    },
+    {
+      "eventId": "f5a491fa-ed21-4b30-9bf0-e9da6ad644c5",
+      "runId": "2026-09-04-m3-live-smoke-2",
+      "type": "research.requested",
+      "stage": "m3_research",
+      "message": "Measurement-source clarification is still needed to choose the best post-change evaluation method: external research from official Shopify sources supports Dev Dashboard analytics, install/performance tracking, optional listing-traffic tracking, and an App Listing page 'Open app button' event, but does not confirm a built-in universal app-open metric without developer instrumentation.",
+      "createdAt": "2026-09-04T15:37:42.891Z",
+      "data": {
+        "requester": "m6",
+        "returnStage": "m6_test_plan",
+        "startedAt": "2026-09-04T15:37:42.891Z",
+        "evidenceRef": "initial:marketplace_visibility:merchgrid_shopify_app_store:merchgrid:visibility:2026-08-22"
+      }
+    },
+    {
+      "eventId": "c8b705e5-b2a6-4044-a4b7-37224edc0b27",
+      "runId": "2026-09-04-m3-live-smoke-2",
+      "type": "module.started",
+      "stage": "m3_research",
+      "message": "M3 research started",
+      "createdAt": "2026-09-04T15:37:42.901Z",
+      "data": {
+        "moduleId": "m3"
+      }
+    },
+    {
+      "eventId": "daeb9c77-f55c-43a7-9d7b-9101c2d86922",
+      "runId": "2026-09-04-m3-live-smoke-2",
+      "type": "module.completed",
+      "stage": "m3_research",
+      "message": "M3 research completed",
+      "createdAt": "2026-09-04T15:38:08.795Z",
+      "data": {
+        "moduleId": "m3"
+      }
+    },
+    {
+      "eventId": "6334a479-7928-4771-96be-2b902e8efe00",
+      "runId": "2026-09-04-m3-live-smoke-2",
+      "type": "research.search.started",
+      "stage": "m3_research",
+      "message": "Hosted web-search pass started",
+      "createdAt": "2026-09-04T15:38:08.796Z",
+      "data": {
+        "requester": "m6",
+        "returnStage": "m6_test_plan",
+        "pass": "authoritative_domains",
+        "allowedDomainCount": 7,
+        "startedAt": "2026-09-04T15:37:42.901Z"
+      }
+    },
+    {
+      "eventId": "53100fcc-e4e0-458e-a008-2f7e33a26416",
+      "runId": "2026-09-04-m3-live-smoke-2",
+      "type": "research.search.completed",
+      "stage": "m3_research",
+      "message": "Hosted web-search pass completed",
+      "createdAt": "2026-09-04T15:38:08.796Z",
+      "data": {
+        "requester": "m6",
+        "returnStage": "m6_test_plan",
+        "pass": "authoritative_domains",
+        "citationCount": 5,
+        "officialCitationCount": 5,
+        "broaderCitationCount": 0,
+        "allowedDomainCount": 7,
+        "completedAt": "2026-09-04T15:37:53.356Z",
+        "totalTokens": 10128
+      }
+    },
+    {
+      "eventId": "e8d3d3fb-f819-46f0-b618-71d01e2dd422",
+      "runId": "2026-09-04-m3-live-smoke-2",
+      "type": "research.search.started",
+      "stage": "m3_research",
+      "message": "Hosted web-search pass started",
+      "createdAt": "2026-09-04T15:38:08.796Z",
+      "data": {
+        "requester": "m6",
+        "returnStage": "m6_test_plan",
+        "pass": "broader_web",
+        "allowedDomainCount": 0,
+        "startedAt": "2026-09-04T15:37:53.356Z"
+      }
+    },
+    {
+      "eventId": "a0747654-40b9-469f-ad02-8763fa7f374a",
+      "runId": "2026-09-04-m3-live-smoke-2",
+      "type": "research.search.completed",
+      "stage": "m3_research",
+      "message": "Hosted web-search pass completed",
+      "createdAt": "2026-09-04T15:38:08.796Z",
+      "data": {
+        "requester": "m6",
+        "returnStage": "m6_test_plan",
+        "pass": "broader_web",
+        "citationCount": 5,
+        "officialCitationCount": 5,
+        "broaderCitationCount": 5,
+        "allowedDomainCount": 0,
+        "completedAt": "2026-09-04T15:38:00.400Z",
+        "totalTokens": 10087
+      }
+    },
+    {
+      "eventId": "e1a04322-0fa9-4077-bf57-a9e37d6520df",
+      "runId": "2026-09-04-m3-live-smoke-2",
+      "type": "research.returned",
+      "stage": "m6_test_plan",
+      "message": "M3 research returned to requester",
+      "createdAt": "2026-09-04T15:38:08.796Z",
+      "data": {
+        "requester": "m6",
+        "returnStage": "m6_test_plan",
+        "citationCount": 6,
+        "researchStatus": "resolved"
+      }
+    }
+  ]
+}
