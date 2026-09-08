@@ -178,69 +178,208 @@ What each boundary means:
 
 ## Buffr through a systems-thinking lens
 
-This framing borrows from Donella H. Meadows's *Thinking in Systems*: understand
-the system by naming its purpose, boundary, stocks, flows, feedback, delays, and
-decision rules—not only its boxes and files.
+You do not need to have read Donella H. Meadows's *Thinking in Systems* to use
+this section. Systems thinking is simply a way to understand software by asking
+how the whole system behaves over time—not only which folders and classes it
+contains. The vocabulary below gives a junior developer a repeatable set of
+questions: What is the system trying to accomplish? What does it remember? What
+changes that memory? Where does information enter and leave? What makes the
+system wait, continue, or stop?
 
-**Purpose**
+### Purpose: what job does the whole system perform?
 
-Turn small, trusted evidence packets into one safe next experiment and then turn
-the delayed result into reusable learning. The goal is not maximum automation;
-it is better owner decisions with explicit uncertainty and provenance.
+A system's **purpose** is the outcome produced by all of its parts working
+together. It is different from the responsibility of a single module. For
+example, M3's responsibility is public web research, but that is not Buffr's
+overall purpose.
 
-**System boundary**
+Buffr's purpose is to turn a small, trusted packet of product evidence into one
+safe next experiment, then turn the experiment's delayed result into recorded
+learning. A typical input might say that listing visibility declined during a
+completed measurement window. The desired output is not an automatic listing
+edit; it is a reviewable experiment plan that explains the evidence, reasoning,
+uncertainty, and supporting research references. The owner decides whether to
+run the experiment and makes the real-world change manually.
 
-Buffr includes its CLIs, connectors, contracts, source-pack pipeline, profile
-services, workflow engine, agent modules, research adapter, local repositories,
-and trace events. Provider systems, credential stores, schedulers, dashboards,
-and the owner's manual marketplace edits remain outside the boundary.
+For a junior developer, this purpose is the first design test for any proposed
+feature: does it improve the evidence-to-experiment-to-learning loop, or does it
+introduce unrelated automation? Buffr optimizes for better, safer decisions—not
+for the largest possible number of autonomous actions.
 
-**Stocks: state that accumulates or persists**
+### System boundary: what is inside Buffr, and what is outside?
 
-| Stock | Meaning | Source of record |
-| --- | --- | --- |
-| Daily metric snapshots | One normalized aggregate result per source and completed UTC day | `snapshots/<source>/<date>.json` |
-| Daily and weekly reviews | Derived product-health evidence built from snapshots | `artifacts/daily-health/` and `artifacts/weekly-reviews/` |
-| Workflow run state | Current stage, status, evidence references, module outputs, approval, and events | `workflow-runs/<run-id>/run.json` |
-| Experiment plan | Reviewable M6 recommendation plus evidence and research references | `workflow-runs/<run-id>/experiment-plan.json` |
-| Learning state | Post-experiment M2 result and M7 evaluation retained in the run | `workflow-runs/<run-id>/run.json` |
+A **system boundary** is the line around the behavior and data that Buffr owns.
+The boundary is about responsibility and control, not merely where code runs.
+Anything crossing it should be treated as untrusted until a Buffr contract has
+validated and normalized it.
 
-**Flows: what changes the stocks**
+Inside the boundary are the CLIs, connectors, contracts, source-pack pipeline,
+profile services, workflow engine, M1-M7 modules, M3 research adapter, local
+repositories, and trace events. These components decide how Buffr accepts
+evidence, advances a run, records state, and presents a recommendation.
 
-1. Collection reads approved aggregates from PostHog, Fly, and a Shopify CSV.
-2. Connectors normalize source data and repositories persist daily snapshots.
-3. Source-pack jobs derive daily health and adjacent seven-day weekly reviews.
-4. Profile services qualify evidence and start or resume a workflow run.
-5. The engine advances M1-M7, taking a bounded M3 detour when a concrete public
-   research question is raised.
-6. M6 writes a plan; the owner approves or rejects it and performs any change
-   manually.
-7. Later evidence re-enters through M2 Results, and M7 records the learning.
+Outside the boundary are provider systems such as Etsy, PostHog, Fly, Shopify,
+and the public web; credential stores; schedulers and dashboards; and the
+owner's actual marketplace edits. Buffr may read through a narrow adapter, but
+it does not own those systems. In particular, M3 may search permitted public
+sources and return validated citations, while credentials, raw provider
+payloads, and arbitrary browsing remain outside the workflow state.
 
-**Feedback loop and delays**
+When adding a feature, first ask which side of this boundary it belongs on. If
+external information enters Buffr, add or reuse an adapter and validate the
+result at the boundary. If a real-world action leaves Buffr, preserve the human
+approval gate instead of hiding the action inside a module.
+
+### Stocks: what does Buffr remember?
+
+A **stock** is state that exists at a point in time and remains available after
+the operation that produced it has finished. In this repository, a stock does
+not have to live in a database: a validated JSON file can be durable state too.
+Stocks let a later command resume a run or explain how a decision was reached.
+
+| Stock | What it means in Buffr | Where it is stored | Why it is retained |
+| --- | --- | --- | --- |
+| Daily metric snapshots | One normalized aggregate result per source and completed UTC day | `snapshots/<source>/<date>.json` | Reuse stable observations without recollecting or silently rewriting history |
+| Daily and weekly reviews | Product-health evidence derived from snapshots | `artifacts/daily-health/` and `artifacts/weekly-reviews/` | Give profile services a qualified, human-readable evidence packet |
+| Workflow run state | Current stage, status, evidence references, module outputs, approval, and events | `workflow-runs/<run-id>/run.json` | Resume safely and explain the current state of one decision cycle |
+| Experiment plan | M6's reviewable recommendation with evidence and research references | `workflow-runs/<run-id>/experiment-plan.json` | Let the owner inspect the proposed experiment without reading internal run state |
+| Learning state | Post-experiment M2 result and M7 evaluation retained in the workflow run | `workflow-runs/<run-id>/run.json` | Preserve what happened and what the system concluded from it |
+
+The **source of record** is the authoritative copy used to answer “what is true
+right now?” Completed snapshot files are authoritative for collected daily
+aggregates, and `run.json` is authoritative for a workflow run. Daily reviews,
+weekly reviews, experiment plans, evidence files, and event streams are useful
+projections of that state; they should not independently redefine it. This
+distinction matters during debugging: start with the source of record, then
+check whether a projection was built correctly.
+
+### Flows: what changes those stocks?
+
+A **flow** is an operation that creates, transforms, or appends to a stock. A
+connector response is not automatically trusted state. It becomes part of the
+system only after the appropriate flow validates, normalizes, and persists it.
+
+1. Evidence enters through an approved connector or local input: Etsy listing
+   evidence, curated marketplace context, PostHog and Fly aggregates, or a
+   Shopify Partner CSV.
+2. Boundary code parses the input into Buffr contracts. Metrics collection
+   paths persist normalized daily snapshots; direct workflow paths build a
+   validated evidence packet.
+3. Source-pack jobs reuse completed snapshots to derive daily-health artifacts
+   and adjacent seven-day weekly reviews. They derive a new view; they do not
+   change the historical snapshots.
+4. A product/profile service checks that the evidence is complete enough and
+   then starts or resumes a workflow run.
+5. The deterministic engine advances the legal M1-M7 stages. Each module can
+   add a validated output, but the module cannot choose an illegal transition.
+6. When a module raises a concrete public-research question, the engine makes a
+   bounded M3 detour. M3 adds validated search summaries and citations to the
+   run, then returns control to the requesting stage.
+7. M6 produces an experiment plan. The owner approves or rejects it and, if
+   approved, performs the marketplace change outside Buffr.
+8. After the measurement period, qualified result evidence re-enters through
+   M2 Results. M7 evaluates it and records the learning in the run.
+
+When debugging a flow, follow one transformation at a time: identify its input
+contract, validator, output contract, and persistence call. This is usually more
+reliable than starting inside an AI prompt and trying to reason backward.
+
+### Feedback loop: how does a result affect the next decision?
+
+A **feedback loop** exists when the result of an action returns as information
+that can influence a later decision. Buffr's loop is deliberately mediated by
+a human:
 
 ```text
-observed evidence -> diagnosis -> hypothesis -> manual experiment
-       ^                                           |
-       |                                           v
-future decision <- retained learning <- delayed result evidence
+observed evidence -> diagnosis -> hypothesis -> proposed experiment
+       ^                                             |
+       |                                      owner approval
+       |                                             |
+       |                                             v
+future decision <- retained learning <- measured experiment result
 ```
 
-This is a human-mediated feedback loop. Its intentional delays are completed
-UTC collection windows, adjacent weekly comparison windows, the experiment
-wait, and the time required to gather qualified result evidence. Buffr does not
-manufacture immediate feedback when the real signal has not arrived.
+The system proposes and records; the owner approves and acts; later evidence
+shows whether the experiment helped. M2 Results and M7 close the current run by
+capturing that result and its interpretation. Buffr does not retrain a model or
+silently apply the learning to another marketplace. The retained record makes
+the learning reviewable and available to the owner or to later, explicitly
+provided evidence.
 
-**Decision rules and leverage points**
+For a junior developer, the important lesson is that producing an experiment
+plan is only half of the product. If result evidence never returns, the loop is
+open and Buffr has created a recommendation but not learning.
 
-- Zod schemas determine what may cross an untrusted boundary.
-- Readiness functions determine whether evidence is complete enough to use.
-- Workflow routes and guards determine legal state transitions.
-- Research allowlists and call/time/token/cost caps constrain M3.
-- Immutable completed snapshots prevent historical evidence from silently
-  changing.
-- The approval gate is the highest-leverage safety control: recommendations can
-  accumulate, but only the owner can create a real-world marketplace change.
+### Delays: why does Buffr sometimes wait?
+
+A **delay** is the time between an action and trustworthy evidence about its
+effect. Software can execute immediately, but the business signal often cannot.
+Buffr therefore waits for completed UTC collection windows, adjacent weekly
+comparison windows, explicit owner approval, an experiment period, and
+qualified post-experiment evidence.
+
+These waits are correctness controls. Comparing a partial day with a completed
+day can create a false decline, and evaluating a marketplace change too early
+can mistake normal noise for an effect. Statuses such as `awaiting_approval`,
+`ready_for_experiment`, and `waiting_for_data` make the delay visible and
+resumable. They are valid workflow outcomes, not crashes or unfinished code.
+
+When working on wait behavior, do not “fix” it by inventing missing evidence or
+advancing the stage. Determine what real event or qualified input is required
+to resume the run.
+
+### Decision rules: what determines what happens next?
+
+A **decision rule** is a deterministic condition that converts the current
+state into an allowed next action. Buffr keeps these rules in schemas, readiness
+checks, routes, and guards so that a model's interpretation cannot override
+system safety.
+
+| Rule | What it decides | Junior-developer interpretation |
+| --- | --- | --- |
+| Zod schemas | Whether untrusted input or module output has the required shape | Invalid data stops at the boundary instead of spreading through the run |
+| Evidence readiness functions | Whether the available evidence is complete enough to use | “A file exists” is not the same as “the evidence qualifies” |
+| Workflow routes and guards | Which stage may run next and which waits are required | The TypeScript engine, not the model, owns the state machine |
+| M3 allowlists and call/time/token/cost caps | Which research tools can run and how much work they may do | Research is useful but intentionally bounded and read-only |
+| Immutable completed snapshots | Whether historical daily evidence may be overwritten | Re-running collection cannot silently change an accepted observation |
+| Human approval | Whether a proposed experiment may become a real-world action | A recommendation is not permission to modify a marketplace |
+
+If you change one of these rules, test both the newly allowed path and the path
+that must remain rejected. A permissive guard or schema change can affect every
+module downstream even when the edit itself looks small.
+
+### Leverage points: which small controls have a large effect?
+
+A **leverage point** is a place where a focused change can alter the behavior of
+the whole system. In Buffr, the highest-leverage safety control is human
+approval: recommendations may accumulate, but only the owner can create a
+real-world marketplace change. The normalized contract boundary is another
+leverage point because every downstream module depends on the quality and
+meaning of accepted evidence. M3's allowlist and resource caps are a third
+because they control how an open-ended external activity enters a bounded,
+repeatable workflow.
+
+Leverage points deserve stricter review than ordinary presentation code. A
+junior developer should ask, “How many downstream decisions rely on this rule?”
+before changing an approval gate, contract, readiness check, route, or research
+limit.
+
+### Putting the concepts together: one M3-assisted run
+
+Suppose a marketplace visibility run has valid local context but a diagnosis
+needs current public evidence. The existing workflow run is the **stock**. A
+module raises a structured research request, and the engine's research route is
+the **flow**. The public web is outside the **system boundary**, so M3 uses only
+permitted tools and validates citations before adding them to `run.json`. The
+allowlist and resource caps are **decision rules**. The owner approval gate is a
+**leverage point**. After the owner runs the experiment, Buffr respects the
+measurement **delay**; result evidence later closes the **feedback loop** and M7
+adds learning to the run.
+
+That single example is the reason M3 has its own subsystem row below while
+still participating in the shared agent runtime: research crosses an external
+trust boundary and needs special tools, limits, citations, and validation, but
+the workflow engine still owns when M3 runs and where its output goes.
 
 ## Subsystem inventory
 
