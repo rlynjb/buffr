@@ -284,6 +284,25 @@ When debugging a flow, follow one transformation at a time: identify its input
 contract, validator, output contract, and persistence call. This is usually more
 reliable than starting inside an AI prompt and trying to reason backward.
 
+> **Tracing note:** Buffr's application-level trace and the OpenAI Agents SDK
+> trace describe different layers of the same flow. Buffr records durable
+> business events—such as module start and completion, stage transitions,
+> waits, research activity, and owner approval—in the authoritative `run.json`
+> event history and the derived `events.jsonl` view. An OpenAI Agents SDK trace
+> describes execution inside an AI step, including model runs, tool calls,
+> timing, and token usage. The local trace answers “what happened to this Buffr
+> workflow?”; the SDK trace answers “what did the agent and its tools do during
+> this AI execution?” Buffr does not currently link these two trace layers.
+
+> **TODO — link OpenAI Agents SDK traces:** Capture the SDK trace identifier for
+> each model-backed module execution, associate it with the Buffr `runId`,
+> module, and stage, and store that safe reference on the corresponding workflow
+> event. Preserve `run.json` as the business-workflow source of record; use the
+> SDK trace only as drill-down observability. Validate the reference before
+> persistence, cover linked and unavailable-trace cases with network-free tests,
+> and never copy credentials, private inputs, full prompts, or raw provider
+> payloads into Buffr events.
+
 ### Feedback loop: how does a result affect the next decision?
 
 A **feedback loop** exists when the result of an action returns as information
