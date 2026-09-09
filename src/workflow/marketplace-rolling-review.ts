@@ -238,6 +238,7 @@ async function resolvePreviousRun(
       return { state: stopped, resolution: 'not_applied' };
     }
 
+    assertQualifiedResultEvidence(previous, prepared, application);
     const applied = await dependencies.engine.recordExperimentApplication({
       runId: previous.runId,
       application,
@@ -309,7 +310,11 @@ async function closeAppliedPreviousRun(
   dependencies: RollingReviewDependencies,
   resolution: 'evaluated',
 ): Promise<ResolvedPreviousRun> {
-  assertResultWindowAfterApplication(applied, prepared.through);
+  const application = applied.experimentApplication;
+  if (application?.status !== 'applied') {
+    throw new AppError('validation_failed', 'Previous marketplace review must record an applied experiment before evaluation');
+  }
+  assertQualifiedResultEvidence(applied, prepared, application);
   const resultEvidence = buildResultEvidenceForRun({ state: applied, freshEvidence: prepared.freshEvidence });
   const evaluationReady = await dependencies.engine.resumeWithExperimentResults({
     runId: applied.runId,
@@ -328,7 +333,7 @@ async function advanceEvaluation(
   dependencies: RollingReviewDependencies,
 ): Promise<WorkflowRunState> {
   let current = initial;
-  while (EVALUATION_STAGES.has(current.stage)) {
+  while (EVALUATION_STAGES.has(current.stage) && current.status === 'ready_for_evaluation') {
     current = await dependencies.engine.step(current.runId);
   }
   if (!isCompletedWithLearning(current)) {
@@ -353,7 +358,7 @@ async function startAndAdvanceNextRun(
     ...(previous ? { previousRunRef: previous.state.runId } : {}),
     ...(previous?.priorLearning ? { priorLearning: previous.priorLearning } : {}),
   });
-  while (NEW_REVIEW_STAGES.has(current.stage)) {
+  while (NEW_REVIEW_STAGES.has(current.stage) && isNewReviewStageReady(current.status)) {
     current = await dependencies.engine.step(current.runId);
   }
   return current;
@@ -380,18 +385,37 @@ function experimentSummary(state: WorkflowRunState): string {
   return revision;
 }
 
-function assertResultWindowAfterApplication(state: WorkflowRunState, through: string): void {
-  const application = state.experimentApplication;
-  if (application?.status !== 'applied') {
-    throw new AppError('validation_failed', 'Previous marketplace review must record an applied experiment before evaluation');
+function assertQualifiedResultEvidence(
+  previous: WorkflowRunState,
+  prepared: PreparedReview,
+  application: Extract<ExperimentApplication, { status: 'applied' }>,
+): void {
+  const primaryMetric = previous.moduleOutputs.m6?.primaryMetric;
+  if (!primaryMetric) {
+    throw new AppError('validation_failed', 'Previous marketplace review requires an M6 primary metric before result evaluation');
   }
-  const currentWindowStart = utcDateDaysBefore(through, 6);
-  if (currentWindowStart <= application.appliedAt) {
+  const primarySignal = prepared.freshEvidence.measuredSignals[primaryMetric];
+  if (typeof primarySignal !== 'number' || !Number.isFinite(primarySignal)) {
     throw new AppError(
       'route_not_allowed',
-      `Fresh weekly evidence must begin after application date ${application.appliedAt}; waiting for a qualified later window`,
+      `Waiting for qualified result evidence: required primary metric ${primaryMetric} is unavailable`,
     );
   }
+  assertResultWindowAfterApplication(application.appliedAt, prepared.through);
+}
+
+function assertResultWindowAfterApplication(appliedAt: string, through: string): void {
+  const currentWindowStart = utcDateDaysBefore(through, 6);
+  if (currentWindowStart <= appliedAt) {
+    throw new AppError(
+      'route_not_allowed',
+      `Fresh weekly evidence must begin after application date ${appliedAt}; waiting for a qualified later window`,
+    );
+  }
+}
+
+function isNewReviewStageReady(status: WorkflowStatus): boolean {
+  return status === 'analyzing' || status === 'researching';
 }
 
 function isCompletedWithLearning(state: WorkflowRunState): boolean {

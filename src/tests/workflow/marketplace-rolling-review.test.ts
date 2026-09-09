@@ -4,7 +4,7 @@ import type {
   MarketplaceProductIdentity,
   MarketplaceVisibilityEvidence,
 } from '../../contracts/marketplace-visibility.js';
-import type { WorkflowRunState, WorkflowRunStateInput, WorkflowStage } from '../../contracts/workflow.js';
+import type { WorkflowRunState, WorkflowRunStateInput, WorkflowStage, WorkflowStatus } from '../../contracts/workflow.js';
 import { AppError } from '../../core/errors.js';
 import type { MarketplaceRunHistoryRepository } from '../../storage/runs.js';
 import {
@@ -179,6 +179,61 @@ describe('marketplace rolling review coordinator', () => {
     await expect(future.history.load('previous-run')).resolves.toMatchObject({ status: 'awaiting_approval' });
   });
 
+  it.each([
+    ['has no measured signals', {}],
+    ['omits the M6 primary metric', { request_count: 4 }],
+  ])('leaves an applied prior plan unresolved when fresh result evidence %s', async (_label, measuredSignals) => {
+    const fixture = createFixture({
+      previous: awaitingApplicationRun(),
+      promptResult: { status: 'applied', appliedAt: '2026-08-25' },
+      preparedEvidence: { ...freshEvidence(identity(), '2026-09-04'), measuredSignals },
+    });
+
+    await expect(fixture.service.nextReview(nextReviewInput())).rejects.toMatchObject({
+      code: 'route_not_allowed',
+      message: 'Waiting for qualified result evidence: required primary metric app_opened_count is unavailable',
+    });
+
+    expect(fixture.calls).toEqual([
+      'prepare-weekly-evidence',
+      'find-latest-product-run',
+      'prompt-owner',
+    ]);
+    expect(fixture.engine.recordCalls).toHaveLength(0);
+    expect(fixture.engine.resumeCalls).toHaveLength(0);
+    expect(fixture.engine.evaluationStepCalls).toBe(0);
+    expect(fixture.engine.startCalls).toHaveLength(0);
+    await expect(fixture.history.load('previous-run')).resolves.toMatchObject({
+      stage: 'approval_wait',
+      status: 'awaiting_approval',
+    });
+  });
+
+  it('validates an overlapping result window before recording an applied experiment', async () => {
+    const fixture = createFixture({
+      previous: awaitingApplicationRun(),
+      promptResult: { status: 'applied', appliedAt: '2026-08-30' },
+    });
+
+    await expect(fixture.service.nextReview(nextReviewInput())).rejects.toMatchObject({
+      code: 'route_not_allowed',
+      message: 'Fresh weekly evidence must begin after application date 2026-08-30; waiting for a qualified later window',
+    });
+
+    expect(fixture.calls).toEqual([
+      'prepare-weekly-evidence',
+      'find-latest-product-run',
+      'prompt-owner',
+    ]);
+    expect(fixture.engine.recordCalls).toHaveLength(0);
+    expect(fixture.engine.resumeCalls).toHaveLength(0);
+    expect(fixture.engine.evaluationStepCalls).toBe(0);
+    await expect(fixture.history.load('previous-run')).resolves.toMatchObject({
+      stage: 'approval_wait',
+      status: 'awaiting_approval',
+    });
+  });
+
   it('does not query history or mutate a workflow when fresh weekly evidence is unavailable', async () => {
     const fixture = createFixture({
       prepareError: new AppError('storage_failed', 'MerchGrid weekly review artifact not found: 2026-09-04'),
@@ -211,6 +266,32 @@ describe('marketplace rolling review coordinator', () => {
     expect(fixture.engine.startCalls).toHaveLength(0);
     expect(fixture.engine.recordCalls).toHaveLength(0);
     expect(fixture.engine.resumeCalls).toHaveLength(0);
+  });
+
+  it.each([
+    ['data wait', 'waiting_for_data'],
+    ['stopped run', 'stopped'],
+  ] as const)('returns a new review at a terminal %s without stepping its requester stage', async (_label, status) => {
+    const fixture = createFixture({
+      nextStartStage: 'm3_research',
+      nextStartStatus: status,
+    });
+
+    const result = await fixture.service.nextReview(nextReviewInput());
+
+    expect(result).toEqual({
+      currentRun: {
+        runId: '2026-09-04-merchgrid_shopify_app_store-merchgrid-shopify-app',
+        status,
+        stage: 'm3_research',
+        experimentPlanRef: 'artifacts/workflow-runs/2026-09-04-merchgrid_shopify_app_store-merchgrid-shopify-app/experiment-plan.json',
+      },
+    });
+    expect(fixture.calls).toEqual([
+      'prepare-weekly-evidence',
+      'find-latest-product-run',
+      'start-next-run',
+    ]);
   });
 
   it('uses only the exact profile and product identity from history', async () => {
@@ -307,17 +388,20 @@ class FakeRollingEngine implements MarketplaceRollingReviewEngine {
   evaluationStepCalls = 0;
   private remainingStartFailures: number;
   private readonly nextStartStage: WorkflowStage;
+  private readonly nextStartStatus: WorkflowStatus | undefined;
   private readonly history: InMemoryHistory;
 
   constructor(input: {
     calls: string[];
     history: InMemoryHistory;
     nextStartStage: WorkflowStage;
+    nextStartStatus?: WorkflowStatus;
     failNextStartCount: number;
   }) {
     this.calls = input.calls;
     this.history = input.history;
     this.nextStartStage = input.nextStartStage;
+    this.nextStartStatus = input.nextStartStatus;
     this.remainingStartFailures = input.failNextStartCount;
   }
 
@@ -336,7 +420,7 @@ class FakeRollingEngine implements MarketplaceRollingReviewEngine {
       previousRunRef: input.previousRunRef,
       priorLearning: input.priorLearning,
       stage,
-      status: stage === 'approval_wait' ? 'awaiting_approval' : 'analyzing',
+      status: this.nextStartStatus ?? (stage === 'approval_wait' ? 'awaiting_approval' : 'analyzing'),
       evidenceSnapshots: { initial: input.initialEvidence },
       evidenceRefs: [`initial:marketplace_visibility:${input.initialEvidence.profile}:${input.initialEvidence.subjectRef}`],
       createdAt: '2026-09-08T00:00:00.000Z',
@@ -382,6 +466,12 @@ class FakeRollingEngine implements MarketplaceRollingReviewEngine {
 
   async step(runId: string): Promise<WorkflowRunState> {
     const previous = await this.history.load(runId);
+    if (previous.status === 'waiting_for_data') {
+      throw new AppError('route_not_allowed', 'Cannot step workflow while waiting for more data');
+    }
+    if (previous.status === 'stopped') {
+      throw new AppError('route_not_allowed', 'Stopped workflows cannot transition');
+    }
     const call = stepCall(previous.stage);
     this.calls.push(call);
     if (previous.stage === 'm2_metrics_results' || previous.stage === 'm7_learning') this.evaluationStepCalls += 1;
@@ -413,7 +503,9 @@ function createFixture(input: {
   otherRuns?: WorkflowRunState[];
   promptResult?: Awaited<ReturnType<OwnerApplicationPrompt['confirm']>>;
   nextStartStage?: WorkflowStage;
+  nextStartStatus?: WorkflowStatus;
   prepareError?: Error;
+  preparedEvidence?: MarketplaceVisibilityEvidence;
   failNextStartCount?: number;
 } = {}) {
   const calls: string[] = [];
@@ -425,6 +517,7 @@ function createFixture(input: {
     calls,
     history,
     nextStartStage: input.nextStartStage ?? 'm1_context',
+    nextStartStatus: input.nextStartStatus,
     failNextStartCount: input.failNextStartCount ?? 0,
   });
   const prompt = new FakeOwnerPrompt(calls, input.promptResult ?? { status: 'cancelled' });
@@ -436,7 +529,7 @@ function createFixture(input: {
     prepareWeeklyEvidence: async (reviewInput) => {
       calls.push('prepare-weekly-evidence');
       if (input.prepareError) throw input.prepareError;
-      return freshEvidence(reviewInput.identity, reviewInput.through);
+      return input.preparedEvidence ?? freshEvidence(reviewInput.identity, reviewInput.through);
     },
   };
 
