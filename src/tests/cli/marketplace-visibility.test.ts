@@ -1,9 +1,17 @@
 import { describe, expect, it, vi } from 'vitest';
+import type { MarketplaceProductIdentity, MarketplaceVisibilityEvidence } from '../../contracts/marketplace-visibility.js';
+import type { WorkflowRunState, WorkflowStage, WorkflowStatus } from '../../contracts/workflow.js';
+import { AppError } from '../../core/errors.js';
 import {
   createOwnerApplicationPrompt,
   runMarketplaceVisibilityCli,
   type MarketplaceVisibilityCliDependencies,
 } from '../../cli/marketplace-visibility.js';
+import {
+  createMarketplaceRollingReviewService,
+  type MarketplaceRollingReviewEngine,
+  type OwnerApplicationPrompt,
+} from '../../workflow/marketplace-rolling-review.js';
 
 describe('marketplace visibility CLI', () => {
   it('forwards one structured next-review request to the rolling service', async () => {
@@ -95,6 +103,61 @@ describe('marketplace visibility CLI', () => {
 
     expect(nextReview).not.toHaveBeenCalled();
   });
+
+  it.each([
+    ['a required option followed by another option', [
+      'next-review', '--profile', 'merchgrid_shopify_app_store', '--product-ref', '--context', '--through', '2026-09-07',
+    ]],
+    ['an optional context followed by another option', [
+      'next-review', '--profile', 'merchgrid_shopify_app_store', '--product-ref', 'merchgrid-shopify-app',
+      '--through', '2026-09-07', '--context', '--listing-context',
+    ]],
+  ])('rejects %s before calling the rolling service', async (_caseName, args) => {
+    const nextReview = vi.fn(async () => reviewResult());
+
+    await expect(runMarketplaceVisibilityCli(cliInput(args, {
+      rollingReviews: { nextReview },
+      defaultContextPath: 'artifacts/merchgrid/context/default-review.json',
+    }))).rejects.toMatchObject({
+      code: 'validation_failed',
+      message: 'Expected options: --profile, --product-ref, --through, --context, --listing-context',
+    });
+
+    expect(nextReview).not.toHaveBeenCalled();
+  });
+
+  it('does not invoke the owner prompt for the first CLI review cycle', async () => {
+    const fixture = coordinatorFixture();
+
+    await runMarketplaceVisibilityCli(cliInput(nextReviewArgs(), {
+      rollingReviews: fixture.service,
+      defaultContextPath: 'artifacts/merchgrid/context/default-review.json',
+    }));
+
+    expect(fixture.prompt.confirm).not.toHaveBeenCalled();
+  });
+
+  it('does not invoke the owner prompt when the CLI retries an existing cycle', async () => {
+    const fixture = coordinatorFixture({ existing: workflowState('2026-09-07-merchgrid_shopify_app_store-merchgrid-shopify-app') });
+
+    await runMarketplaceVisibilityCli(cliInput(nextReviewArgs(), {
+      rollingReviews: fixture.service,
+      defaultContextPath: 'artifacts/merchgrid/context/default-review.json',
+    }));
+
+    expect(fixture.prompt.confirm).not.toHaveBeenCalled();
+  });
+
+  it('does not invoke the owner prompt for an already-resolved prior CLI review', async () => {
+    const fixture = coordinatorFixture({ previous: completedWorkflowState('previous-review') });
+
+    await runMarketplaceVisibilityCli(cliInput(nextReviewArgs(), {
+      rollingReviews: fixture.service,
+      defaultContextPath: 'artifacts/merchgrid/context/default-review.json',
+    }));
+
+    expect(fixture.prompt.confirm).not.toHaveBeenCalled();
+  });
 });
 
 describe('owner application prompt', () => {
@@ -158,6 +221,139 @@ function reviewResult(overrides: Record<string, unknown> = {}) {
       stage: 'approval_wait' as const,
     },
     ...overrides,
+  };
+}
+
+function nextReviewArgs(): string[] {
+  return [
+    'next-review', '--profile', 'merchgrid_shopify_app_store',
+    '--product-ref', 'merchgrid-shopify-app', '--through', '2026-09-07',
+  ];
+}
+
+function coordinatorFixture(input: { existing?: WorkflowRunState; previous?: WorkflowRunState } = {}) {
+  const prompt: OwnerApplicationPrompt = { confirm: vi.fn(async () => ({ status: 'cancelled' as const })) };
+  const history = {
+    async create(): Promise<void> {},
+    async save(): Promise<void> {},
+    async load(runId: string): Promise<WorkflowRunState> {
+      if (input.existing?.runId === runId) return input.existing;
+      throw new AppError('storage_failed', `Workflow run not found: ${runId}`);
+    },
+    async findLatestByProduct(): Promise<WorkflowRunState | undefined> {
+      return input.previous;
+    },
+  };
+
+  return {
+    prompt,
+    service: createMarketplaceRollingReviewService({
+      history,
+      engine: advancingEngine(),
+      prompt,
+      now: () => new Date('2026-09-08T00:00:00.000Z'),
+      prepareWeeklyEvidence: async (input) => freshEvidence(input.identity, input.through),
+    }),
+  };
+}
+
+function advancingEngine(): MarketplaceRollingReviewEngine {
+  const stages: Array<[WorkflowStage, WorkflowStatus]> = [
+    ['m2_metrics_initial', 'analyzing'],
+    ['m4_diagnosis', 'analyzing'],
+    ['m5_hypothesis', 'analyzing'],
+    ['m6_test_plan', 'analyzing'],
+    ['approval_wait', 'awaiting_approval'],
+  ];
+  let index = 0;
+  return {
+    async startMarketplaceVisibility(input) {
+      return workflowState(input.runId, 'm1_context', 'analyzing');
+    },
+    async step(runId) {
+      const [stage, status] = stages[index++]!;
+      return workflowState(runId, stage, status);
+    },
+    async resumeWithExperimentResults() {
+      throw new Error('No resolved review should resume results');
+    },
+    async recordExperimentApplication() {
+      throw new Error('No resolved review should record application');
+    },
+  };
+}
+
+function workflowState(
+  runId: string,
+  stage: WorkflowStage = 'approval_wait',
+  status: WorkflowStatus = 'awaiting_approval',
+): WorkflowRunState {
+  return {
+    runId,
+    subjectRef: 'merchgrid:visibility:2026-09-07',
+    workflowKind: 'marketplace_visibility_review',
+    marketplaceIdentity: marketplaceIdentity(),
+    status,
+    stage,
+    createdAt: '2026-09-07T00:00:00.000Z',
+    updatedAt: '2026-09-07T00:00:00.000Z',
+    evidenceRefs: [],
+    evidenceSnapshots: { initial: freshEvidence(marketplaceIdentity(), '2026-09-07') },
+    moduleOutputs: { m3: [] },
+    events: [],
+  } as unknown as WorkflowRunState;
+}
+
+function completedWorkflowState(runId: string): WorkflowRunState {
+  const state = workflowState(runId, 'cycle_complete', 'cycle_complete');
+  return {
+    ...state,
+    experimentApplication: { status: 'applied', appliedAt: '2026-08-15' },
+    evidenceSnapshots: {
+      initial: freshEvidence(marketplaceIdentity(), '2026-08-21'),
+      result: { ...freshEvidence(marketplaceIdentity(), '2026-08-28'), subjectRef: 'merchgrid:visibility:2026-08-21' },
+    },
+    moduleOutputs: {
+      m3: [],
+      m5: { hypothesis: 'A clear outcome helps', primaryVariable: 'headline', recommendedRevision: 'Lead with outcome', keepConstant: [], expectedSignal: 'opens', notes: [] },
+      m6: { primaryMetric: 'app_opened_count', secondaryMetrics: [], baselineValue: 1, baselinePeriod: 'week', qualificationRequirements: [], expectedSupportingSignal: 'more opens', expectedWeakeningSignal: 'fewer opens', inconclusiveCondition: 'sparse', contextToMonitor: [], unresolvedMeasurementRules: [] },
+      m7: { outcome: 'inconclusive', hypothesisEvaluation: 'inconclusive', evidence: [], contextualFactors: [], learning: 'More evidence is needed', confidence: 'low', knowledgeSource: 'experiment', nextAction: 'wait', nextActionRationale: 'Wait for a qualified window' },
+    },
+  } as WorkflowRunState;
+}
+
+function marketplaceIdentity(): MarketplaceProductIdentity {
+  return { profile: 'merchgrid_shopify_app_store', productRef: 'merchgrid-shopify-app' };
+}
+
+function freshEvidence(identity: MarketplaceProductIdentity, through: string): MarketplaceVisibilityEvidence {
+  return {
+    product: 'marketplace_visibility',
+    profile: identity.profile,
+    productRef: identity.productRef,
+    subjectRef: `merchgrid:visibility:${through}`,
+    artifactRef: `artifacts/weekly-reviews/${through}.json`,
+    evidenceLevel: 'sparse',
+    recommendationType: 'visibility_hypothesis',
+    reviewMode: { mode: 'exploratory_visibility_test', evidenceLevel: 'sparse', confidenceBoundary: 'low', reason: 'metrics_sparse_context_sufficient' },
+    marketplaceContext: {
+      productRef: identity.productRef,
+      marketplace: 'shopify_app_store',
+      productName: 'MerchGrid',
+      productType: 'shopify_app',
+      targetCustomer: 'Shopify merchants',
+      customerProblem: 'Catalog issues are hard to find',
+      currentPromise: 'Find catalog issues',
+      currentSurfaceSummary: 'Marketplace listing',
+      primaryDiscoverySurface: 'App Store search',
+      primaryActionWanted: 'Open the app',
+      constraints: ['manual changes'],
+      availableAssets: ['listing copy'],
+      ownerGoal: 'increase qualified app opens',
+    },
+    measuredSignals: { app_opened_count: 4 },
+    limitations: ['Evidence is sparse'],
+    prohibitedClaims: ['Do not claim the listing caused traffic'],
   };
 }
 

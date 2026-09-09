@@ -200,6 +200,7 @@ function assertOptions(options: readonly string[], required: readonly string[], 
   if (
     options.length % 2 !== 0
     || options.some((value, index) => index % 2 === 0 && !names.includes(value))
+    || options.some((_, index) => index % 2 === 0 && (!options[index + 1] || options[index + 1]!.startsWith('--')))
     || names.some((name) => options.filter((value) => value === name).length > 1)
     || required.some((name) => !options.includes(name))
   ) {
