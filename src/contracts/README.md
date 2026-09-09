@@ -275,6 +275,10 @@ contains local references to the completed run's result evidence and experiment
 plan plus bounded M7 fields: outcome, hypothesis evaluation, learning,
 confidence, next action, and rationale.
 
+The `learning` and `nextActionRationale` strings are each capped at 1,000
+characters. This controls persisted state and prompt growth while leaving the
+referenced evidence and experiment plan available for deeper inspection.
+
 It intentionally excludes the prior run's events, prompts, provider payloads,
 raw historical evidence, and unrelated module state. The strict schema rejects
 extra fields.
@@ -320,6 +324,12 @@ Read it as: "What happened in sequence while the work engine ran?"
 
 Future UI can stream or replay this kind of event to show progress. Right now the artifacts are written after the command finishes.
 
+Rolling marketplace runs add safe `rolling_review.*` summary events for cycle
+start, prior-run discovery and evaluation, prior-learning selection, next-run
+creation, and completion. They do not replace engine stage events or copy M7
+prose. The persisted completion event makes retry idempotence visible and
+prevents duplicate cycle summaries.
+
 ## M1-M7 module output contracts
 
 Defined in `modules.ts`.
@@ -339,6 +349,16 @@ These are the reasoning steps inside the work engine.
 Read these as: "Each module gets one job and passes a typed result to the next module."
 
 APOSD lens: this avoids a shallow "do everything" module. Each module has a small, named responsibility and a contract that makes its output inspectable.
+
+For marketplace visibility, M6 has an additional deterministic acceptance
+rule: `primaryMetric` must exactly match a key in the validated initial
+evidence. Buffr derives `baselineValue` and `baselinePeriod` from that evidence
+rather than trusting model-proposed values. The shared `TestPlanOutput` remains
+general for other workflows; the marketplace adapter owns this narrower rule.
+
+M7 can request an M3 detour just like M4-M6. When M3 returns, M7 receives only
+the bounded citation projection needed to finish evaluation—not search
+summaries, provider payloads, workflow events, or the entire run.
 
 ### M3 research contract layer
 

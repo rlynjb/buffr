@@ -339,18 +339,28 @@ Here is the same loop as an operational sequence:
    artifact explicitly; if it is absent, the rolling command attempts the same
    local derivation. It never collects providers as part of the review.
 
-2. **Run one rolling operation.** Use the owner-defined, stable `productRef` for
-   this product on every invocation. It must be lowercase kebab-case and match
-   the value in the curated context file.
+2. **Run one rolling operation.** The only command-line choice is `--profile`.
+   Think of the profile as a routing key: it selects the marketplace workflow,
+   configured context paths, evidence rules, and module behavior for this kind
+   of review.
 
    ```bash
    npm run marketplace:next-review -- \
-     --profile merchgrid_shopify_app_store \
-     --product-ref merchgrid-shopify-app \
-     --through 2026-09-07 \
-     --context artifacts/merchgrid/context/merchgrid-visibility-context.json \
-     --listing-context artifacts/merchgrid/context/merchgrid-listing-context.json
+     --profile merchgrid_shopify_app_store
    ```
+
+   For `merchgrid_shopify_app_store`, Buffr loads the context configured by
+   `MERCHGRID_VISIBILITY_CONTEXT_PATH` and the optional public listing context
+   configured by `MERCHGRID_LISTING_CONTEXT_PATH`. The validated context
+   supplies the stable `productRef`, such as `merchgrid-shopify-app`. The owner
+   no longer enters that value, but Buffr still uses it internally to find the
+   correct product history and prevent unrelated products from sharing runs.
+
+   Buffr also scans the persisted snapshots and automatically chooses the
+   newest completed UTC date backed by all three sources across both required
+   seven-day periods. The owner no longer enters `--through`, but the resolved
+   date is still recorded internally as `through` so the evidence window, run
+   id, and later result comparison remain reproducible.
 
 3. **Confirm the prior real-world action.** If Buffr finds an unresolved prior
    M6 plan for the exact `profile + productRef`, it asks whether the owner
@@ -366,6 +376,12 @@ Here is the same loop as an operational sequence:
    carries only the validated M7 learning projection, and advances the new run
    through M6. The generated run id is deterministic, so retrying the identical
    cycle does not repeat events, model calls, artifacts, or owner questions.
+
+   M6 cannot invent a prose-only measurement here. Before a plan reaches the
+   approval wait, Buffr requires `primaryMetric` to name an actual key in the
+   validated baseline evidence and replaces any model-proposed baseline number
+   with that evidence's value and period. This makes the later comparison
+   reproducible instead of trusting the model to remember a metric or baseline.
 
 5. **Review and act manually.** Inspect the new `experiment-plan.json`, decide
    whether to apply it, and make any Shopify change yourself. Buffr has no
@@ -908,25 +924,30 @@ window is present in local snapshots or as a saved weekly-review artifact:
 
 ```bash
 npm run marketplace:next-review -- \
-  --profile merchgrid_shopify_app_store \
-  --product-ref merchgrid-shopify-app \
-  --through 2026-09-07 \
-  --context artifacts/merchgrid/context/merchgrid-visibility-context.json \
-  --listing-context artifacts/merchgrid/context/merchgrid-listing-context.json
+  --profile merchgrid_shopify_app_store
 ```
 
-`--product-ref` is the owner's stable, lowercase kebab-case identity for one
-marketplace product. Use the same value on every review and keep it equal to the
-`productRef` in the context JSON. Buffr combines it with the profile and
-`--through` date to generate the run id, for example:
+`--profile` is the routing key that selects the marketplace workflow and its
+configured context. Buffr reads the stable, lowercase kebab-case `productRef`
+from that validated context; owners do not repeat it on the command line. The
+internal product reference still separates product history and must remain
+stable across reviews. Buffr also scans the persisted snapshots and selects the
+newest completed UTC date for which every required source has complete data
+across both adjacent seven-day windows. It combines that internally resolved
+`through` date with the profile and product reference to generate the run id,
+for example:
 
 ```text
 2026-09-07-merchgrid_shopify_app_store-merchgrid-shopify-app
 ```
 
 Do not supply or carry a run id between commands. Buffr finds the latest run by
-exact `profile + productRef`, and retrying the same through-date returns the
-same cycle without repeating owner prompts, events, artifacts, or model work.
+exact `profile + productRef`, and retrying while the same complete evidence
+window remains newest returns the same cycle without repeating owner prompts,
+events, artifacts, or model work.
+If an earlier invocation persisted an executable intermediate stage before a
+transient failure, the same command resumes that run instead of abandoning it
+or creating a competing cycle.
 
 When a prior experiment plan is still awaiting an application decision, the
 command interactively asks `Was it applied? (yes/no)` with no default. A `yes`
@@ -941,14 +962,14 @@ evidence. The two immutable `run.json` records point to the same artifact, while
 the next run receives only a bounded, validated M7 learning projection through
 `previousRunRef` and `priorLearning`.
 
-The `--context` argument overrides `MERCHGRID_VISIBILITY_CONTEXT_PATH`. Use a
-local curated JSON file with only the product-facing context required for a
-sparse recommendation.
-
-The optional `--listing-context` argument overrides
-`MERCHGRID_LISTING_CONTEXT_PATH`. Use it for public marketplace listing
-observations such as headline, gallery count, trust signals, and visual-review
-notes.
+The command always loads product context from
+`MERCHGRID_VISIBILITY_CONTEXT_PATH` and, when configured, public listing
+context from `MERCHGRID_LISTING_CONTEXT_PATH`. This keeps the recurring command
+to one routing option and prevents one review from accidentally pointing at a
+different product's context. The product context contains only
+the product-facing facts required for a sparse recommendation. Listing context
+contains public observations such as headline, gallery count, trust signals,
+and visual-review notes.
 
 Start from the examples:
 
@@ -965,7 +986,17 @@ The weekly evidence prerequisite remains separate from marketplace review. Use
 `merchgrid:weekly-review` explicitly after two adjacent seven-day windows are
 available; if that artifact is missing, `marketplace:next-review` attempts to
 derive it from the already-persisted local snapshots. It does not call PostHog,
-Fly, Shopify, or another provider to fill gaps.
+Fly, Shopify, or another provider to fill gaps. If snapshots are missing, the
+command falls back to the newest earlier complete window. If no complete
+fourteen-day window exists, it reports the exact bounded `source/YYYY-MM-DD`
+entries missing from the latest candidate window; it does not create a partial
+weekly artifact.
+
+The rolling command records safe `rolling_review.*` events for cycle start,
+prior-run discovery and evaluation, prior-learning selection, next-run
+creation, and completion. `run.json` remains authoritative and `events.jsonl`
+is its reviewable projection. The durable completion marker also prevents
+duplicate cycle-level events on an ordinary retry.
 
 If the brief is complete, zero metrics can still produce an `approval_wait`
 recommendation. If required context is missing, the command stops with the

@@ -12,6 +12,7 @@ import {
 import type { HttpClient, HttpRequest, MetricSourceAdapter } from '../../connectors/merchgrid/source.js';
 import {
   JsonFileMerchGridReviewArtifactRepository,
+  resolveLatestCompleteWeeklyThrough,
   runDailyCollection,
   runWeeklyReview,
   type MerchGridSourcePackDependencies,
@@ -222,6 +223,38 @@ describe('MerchGrid source-pack jobs', () => {
       sourceCoverage: result.review.sourceCoverage,
     });
     expect(result.artifactPath).toContain('weekly-reviews');
+  });
+
+  it('selects the newest completed date with two complete seven-day source windows', async () => {
+    const dependencies = await fakeDependencies();
+    for (const date of datesThrough('2026-08-21', 14)) {
+      await runDailyCollection({ date, dependencies });
+    }
+    await dependencies.repository.save({
+      source: 'posthog',
+      date: '2026-08-22',
+      collectedAt: '2026-08-23T00:05:00.000Z',
+      status: 'complete',
+      metrics: { app_opened_count: 9 },
+      notes: [],
+    });
+
+    await expect(resolveLatestCompleteWeeklyThrough({
+      repository: dependencies.repository,
+      now: new Date('2026-08-24T00:05:00.000Z'),
+    })).resolves.toBe('2026-08-21');
+  });
+
+  it('reports the latest window gaps when no complete evidence window exists', async () => {
+    const dependencies = await fakeDependencies();
+
+    await expect(resolveLatestCompleteWeeklyThrough({
+      repository: dependencies.repository,
+      now: new Date('2026-08-24T00:05:00.000Z'),
+    })).rejects.toMatchObject({
+      code: 'storage_failed',
+      message: expect.stringContaining('Missing weekly metric snapshots (42): posthog/2026-08-10'),
+    });
   });
 
   it('reports every exact missing weekly source-date before derivation or artifact writes', async () => {

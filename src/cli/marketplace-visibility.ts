@@ -7,18 +7,19 @@ import { createHostedWebSearchResearchTool } from '../agents/research/hosted-web
 import { loadMarketplaceResearchConfig } from '../agents/research/marketplace-config.js';
 import {
   MarketplaceVisibilityProfileSchema,
-  ProductRefSchema,
   type MarketplaceVisibilityProfile,
 } from '../contracts/marketplace-visibility.js';
 import { UtcDateSchema } from '../contracts/metrics.js';
 import {
   loadMarketplaceListingContext,
+  loadRollingMarketplaceVisibilityContext,
   loadMarketplaceVisibilityContext,
 } from '../connectors/marketplace/local-context.js';
 import { AppError } from '../core/errors.js';
 import { loadLocalEnvironment } from '../core/local-env.js';
 import {
   JsonFileMerchGridReviewArtifactRepository,
+  resolveLatestCompleteWeeklyThrough,
   runWeeklyReview,
   type MerchGridSourcePackDependencies,
 } from '../jobs/merchgrid-source-pack.js';
@@ -35,6 +36,8 @@ import { buildRollingVisibilityEvidence } from '../workflow/marketplace-visibili
 
 export type MarketplaceVisibilityCliDependencies = {
   rollingReviews: MarketplaceRollingReviewService;
+  resolveThrough: () => Promise<string>;
+  resolveProductRef: (contextPath: string) => Promise<string>;
   defaultContextPath?: string;
   defaultListingContextPath?: string;
 };
@@ -66,20 +69,20 @@ export async function runMarketplaceVisibilityCli(input: {
     throw new AppError('validation_failed', 'Expected next-review command');
   }
 
-  assertOptions(options, ['--profile', '--product-ref', '--through'], ['--context', '--listing-context']);
+  assertOptions(options, ['--profile']);
   const profile = parseProfile(option(options, '--profile'));
-  const productRef = parseProductRef(option(options, '--product-ref'));
-  const through = parseUtcDate(option(options, '--through'));
-  const contextPath = optionalOption(options, '--context') ?? input.dependencies.defaultContextPath;
+  const contextPath = input.dependencies.defaultContextPath;
   if (!contextPath) throw new AppError('configuration_failed', 'Missing required marketplace visibility context path');
+  const productRef = await input.dependencies.resolveProductRef(contextPath);
+  const through = await input.dependencies.resolveThrough();
 
   const result = await input.dependencies.rollingReviews.nextReview({
     profile,
     productRef,
     through,
     contextPath,
-    ...(optionalOption(options, '--listing-context') ?? input.dependencies.defaultListingContextPath
-      ? { listingContextPath: optionalOption(options, '--listing-context') ?? input.dependencies.defaultListingContextPath }
+    ...(input.dependencies.defaultListingContextPath
+      ? { listingContextPath: input.dependencies.defaultListingContextPath }
       : {}),
   });
   printReview(input.writeLine, result);
@@ -134,9 +137,10 @@ export function createMarketplaceVisibilityDependencies(
   const dataDir = required(env, 'MERCHGRID_METRICS_DATA_DIR');
   const layout = marketplaceVisibilityStorageLayout(dataDir);
   const artifacts = new JsonFileMerchGridReviewArtifactRepository({ rootDir: layout.artifactRoot });
+  const snapshotRepository = new JsonFileMetricSnapshotRepository({ rootDir: join(dataDir, 'snapshots') });
   const weeklyEvidenceDependencies: MerchGridSourcePackDependencies = {
     adapters: [],
-    repository: new JsonFileMetricSnapshotRepository({ rootDir: join(dataDir, 'snapshots') }),
+    repository: snapshotRepository,
     artifacts,
   };
   const runs = new JsonFileRunRepository({ rootDir: layout.runRoot });
@@ -186,6 +190,8 @@ export function createMarketplaceVisibilityDependencies(
         });
       },
     }),
+    resolveThrough: () => resolveLatestCompleteWeeklyThrough({ repository: snapshotRepository }),
+    resolveProductRef: async (contextPath) => (await loadRollingMarketplaceVisibilityContext(contextPath)).productRef,
     defaultContextPath: env.MERCHGRID_VISIBILITY_CONTEXT_PATH,
     defaultListingContextPath: env.MERCHGRID_LISTING_CONTEXT_PATH,
   };
@@ -224,18 +230,6 @@ async function askUtcDate(terminal: OwnerPromptInterface): Promise<string> {
 function parseProfile(value: string): MarketplaceVisibilityProfile {
   const result = MarketplaceVisibilityProfileSchema.safeParse(value);
   if (!result.success) throw new AppError('validation_failed', 'Expected supported marketplace visibility profile');
-  return result.data;
-}
-
-function parseProductRef(value: string): string {
-  const result = ProductRefSchema.safeParse(value);
-  if (!result.success) throw new AppError('validation_failed', 'Expected supported marketplace product reference');
-  return result.data;
-}
-
-function parseUtcDate(value: string): string {
-  const result = UtcDateSchema.safeParse(value);
-  if (!result.success) throw new AppError('validation_failed', 'Expected --through UTC date');
   return result.data;
 }
 

@@ -114,6 +114,34 @@ export type WeeklyReviewResult = {
   review: WeeklyBusinessReview;
 };
 
+/** Selects the newest completed UTC date backed by two full seven-day source windows. */
+export async function resolveLatestCompleteWeeklyThrough(input: {
+  repository: MetricSnapshotRepository;
+  now?: Date;
+}): Promise<string> {
+  const latestCompletedDate = previousUtcDate((input.now ?? new Date()).toISOString().slice(0, 10));
+  const snapshots = await loadPeriod(input.repository, '0001-01-01', latestCompletedDate);
+  const complete = new Set(snapshots
+    .filter((snapshot) => snapshot.status === 'complete')
+    .map((snapshot) => `${snapshot.source}/${snapshot.date}`));
+  const candidateDates = [...new Set(snapshots
+    .filter((snapshot) => snapshot.status === 'complete')
+    .map((snapshot) => snapshot.date))]
+    .filter((date) => date <= latestCompletedDate)
+    .sort()
+    .reverse();
+
+  for (const through of candidateDates) {
+    const from = utcDateDaysBefore(through, 13);
+    const required = SOURCES.flatMap((source) => datesFromThrough(from, through).map((date) => `${source}/${date}`));
+    if (required.every((key) => complete.has(key))) return through;
+  }
+
+  const from = utcDateDaysBefore(latestCompletedDate, 13);
+  assertCompleteWeeklySnapshotSet(snapshots, from, latestCompletedDate);
+  throw new AppError('storage_failed', 'No complete weekly metric snapshot window is available');
+}
+
 /** Collects one completed UTC date and persists its aggregate-only daily evidence artifact. */
 export async function runDailyCollection(input: {
   date: string;
@@ -235,6 +263,12 @@ function previousUtcDate(date: string): string {
   const previous = new Date(`${parseDate(date)}T00:00:00.000Z`);
   previous.setUTCDate(previous.getUTCDate() - 1);
   return previous.toISOString().slice(0, 10);
+}
+
+function utcDateDaysBefore(date: string, days: number): string {
+  const result = new Date(`${parseDate(date)}T00:00:00.000Z`);
+  result.setUTCDate(result.getUTCDate() - days);
+  return result.toISOString().slice(0, 10);
 }
 
 function isBackfillDate(date: string, currentTime: Date): boolean {

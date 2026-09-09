@@ -55,6 +55,8 @@ describe('marketplace visibility CLI', () => {
             throw new AppError('storage_failed', missingMessage);
           },
         },
+        resolveThrough: async () => '2026-09-07',
+        resolveProductRef: async () => 'merchgrid-shopify-app',
         defaultContextPath: 'artifacts/merchgrid/context/default-review.json',
       },
       writeLine: (line) => output.push(line),
@@ -65,24 +67,26 @@ describe('marketplace visibility CLI', () => {
     expect(errors).toEqual([`storage_failed: ${missingMessage}`]);
   });
 
-  it('forwards one structured next-review request to the rolling service', async () => {
+  it('always forwards configured context paths to the rolling service', async () => {
     const nextReview = vi.fn(async () => reviewResult());
 
     await runMarketplaceVisibilityCli(cliInput([
       'next-review',
       '--profile', 'merchgrid_shopify_app_store',
-      '--product-ref', 'merchgrid-shopify-app',
-      '--through', '2026-09-07',
-      '--context', 'artifacts/merchgrid/context/review.json',
-      '--listing-context', 'artifacts/merchgrid/context/listing.json',
-    ], { rollingReviews: { nextReview } }));
+    ], {
+      rollingReviews: { nextReview },
+      resolveThrough: async () => '2026-09-07',
+      resolveProductRef: async () => 'merchgrid-shopify-app',
+      defaultContextPath: 'artifacts/merchgrid/context/default-review.json',
+      defaultListingContextPath: 'artifacts/merchgrid/context/default-listing.json',
+    }));
 
     expect(nextReview).toHaveBeenCalledWith({
       profile: 'merchgrid_shopify_app_store',
       productRef: 'merchgrid-shopify-app',
       through: '2026-09-07',
-      contextPath: 'artifacts/merchgrid/context/review.json',
-      listingContextPath: 'artifacts/merchgrid/context/listing.json',
+      contextPath: 'artifacts/merchgrid/context/default-review.json',
+      listingContextPath: 'artifacts/merchgrid/context/default-listing.json',
     });
   });
 
@@ -91,9 +95,10 @@ describe('marketplace visibility CLI', () => {
 
     await runMarketplaceVisibilityCli(cliInput([
       'next-review', '--profile', 'merchgrid_shopify_app_store',
-      '--product-ref', 'merchgrid-shopify-app', '--through', '2026-09-07',
     ], {
       rollingReviews: { nextReview },
+      resolveThrough: async () => '2026-09-07',
+      resolveProductRef: async () => 'merchgrid-shopify-app',
       defaultContextPath: 'artifacts/merchgrid/context/default-review.json',
       defaultListingContextPath: 'artifacts/merchgrid/context/default-listing.json',
     }));
@@ -110,7 +115,6 @@ describe('marketplace visibility CLI', () => {
     await runMarketplaceVisibilityCli({
       ...cliInput([
         'next-review', '--profile', 'merchgrid_shopify_app_store',
-        '--product-ref', 'merchgrid-shopify-app', '--through', '2026-09-07',
       ], {
         rollingReviews: {
           nextReview: async () => reviewResult({
@@ -123,6 +127,8 @@ describe('marketplace visibility CLI', () => {
             },
           }),
         },
+        resolveThrough: async () => '2026-09-07',
+        resolveProductRef: async () => 'merchgrid-shopify-app',
         defaultContextPath: 'artifacts/merchgrid/context/default-review.json',
       }),
       writeLine: (line) => lines.push(line),
@@ -149,7 +155,7 @@ describe('marketplace visibility CLI', () => {
     const nextReview = vi.fn(async () => reviewResult());
 
     await expect(runMarketplaceVisibilityCli(cliInput([
-      'next-review', '--profile', 'merchgrid_shopify_app_store', '--product-ref', 'MerchGrid', '--through', '2026-09-07',
+      'next-review', '--profile', 'unsupported_profile',
     ], { rollingReviews: { nextReview } }))).rejects.toMatchObject({ code: 'validation_failed' });
 
     expect(nextReview).not.toHaveBeenCalled();
@@ -157,11 +163,23 @@ describe('marketplace visibility CLI', () => {
 
   it.each([
     ['a required option followed by another option', [
-      'next-review', '--profile', 'merchgrid_shopify_app_store', '--product-ref', '--context', '--through', '2026-09-07',
+      'next-review', '--profile',
     ]],
-    ['an optional context followed by another option', [
+    ['the removed context option', [
       'next-review', '--profile', 'merchgrid_shopify_app_store', '--product-ref', 'merchgrid-shopify-app',
-      '--through', '2026-09-07', '--context', '--listing-context',
+      '--context', 'artifacts/merchgrid/context/review.json',
+    ]],
+    ['the removed listing-context option', [
+      'next-review', '--profile', 'merchgrid_shopify_app_store', '--product-ref', 'merchgrid-shopify-app',
+      '--listing-context', 'artifacts/merchgrid/context/listing.json',
+    ]],
+    ['the removed through option', [
+      'next-review', '--profile', 'merchgrid_shopify_app_store', '--product-ref', 'merchgrid-shopify-app',
+      '--through', '2026-09-07',
+    ]],
+    ['the removed product-ref option', [
+      'next-review', '--profile', 'merchgrid_shopify_app_store',
+      '--product-ref', 'merchgrid-shopify-app',
     ]],
   ])('rejects %s before calling the rolling service', async (_caseName, args) => {
     const nextReview = vi.fn(async () => reviewResult());
@@ -171,7 +189,7 @@ describe('marketplace visibility CLI', () => {
       defaultContextPath: 'artifacts/merchgrid/context/default-review.json',
     }))).rejects.toMatchObject({
       code: 'validation_failed',
-      message: 'Expected options: --profile, --product-ref, --through, --context, --listing-context',
+      message: 'Expected options: --profile',
     });
 
     expect(nextReview).not.toHaveBeenCalled();
@@ -258,6 +276,8 @@ function cliInput(
     args,
     dependencies: {
       rollingReviews: { nextReview: async () => reviewResult() },
+      resolveThrough: async () => '2026-09-07',
+      resolveProductRef: async () => 'merchgrid-shopify-app',
       ...dependencies,
     },
     writeLine: () => undefined,
@@ -278,7 +298,6 @@ function reviewResult(overrides: Record<string, unknown> = {}) {
 function nextReviewArgs(): string[] {
   return [
     'next-review', '--profile', 'merchgrid_shopify_app_store',
-    '--product-ref', 'merchgrid-shopify-app', '--through', '2026-09-07',
   ];
 }
 

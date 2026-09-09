@@ -39,12 +39,16 @@ For every persisted file or data product, answer:
 
 - [ ] Run through the one-command lifecycle mentally: what does
   `marketplace:next-review` close, and what separate run does it create?
-- [ ] Explain why `profile + productRef` is the history identity, why
-  `productRef` must be owner-defined and stable, and why legacy runs without it
-  are not inferred into the rolling history.
+- [ ] Explain why `profile` is the CLI routing key while `productRef` remains the
+  internal history identity loaded from validated context, and why legacy runs
+  without it are not inferred into rolling history.
 - [ ] Identify the prerequisite weekly evidence: which two adjacent seven-day
-  periods must already exist in local snapshots, and what happens when the
-  weekly artifact or the prior M6 primary metric is unavailable?
+  periods must already exist in local snapshots, how does Buffr automatically
+  choose their newest complete end date, and what happens when the weekly
+  artifact or the prior M6 primary metric is unavailable?
+- [ ] Remove one required daily snapshot in a local test copy and confirm the
+  command reports the exact missing `source/YYYY-MM-DD` entry without writing a
+  partial weekly artifact.
 - [ ] Explain why the applied/not-applied question has no default, why an
   applied answer needs a UTC date, and which mutations are forbidden before
   that answer and result window have been validated.
@@ -56,9 +60,17 @@ For every persisted file or data product, answer:
   historical events, prompts, and provider data stay excluded?
 - [ ] Follow a not-applied prior run. Confirm it stops without fabricated M2
   Results or M7 learning before the next experiment run begins.
-- [ ] Retry the same `profile + productRef + through` cycle. Confirm the
-  deterministic run id prevents duplicate owner prompts, events, artifact
-  projections, model calls, and run directories.
+- [ ] Retry while the same automatically resolved evidence date remains newest.
+  Confirm the deterministic `profile + productRef + through` run id prevents
+  duplicate owner prompts, events, artifact projections, model calls, and run
+  directories.
+- [ ] Explain why marketplace M6 must select an observed signal key and why
+  Buffr replaces the proposed baseline value and period with deterministic
+  values from the validated baseline evidence.
+- [ ] Trace an M7 → M3 → M7 research detour and confirm M7 receives bounded
+  citations but not search summaries, provider payloads, or workflow events.
+- [ ] Interrupt an executable intermediate stage in a test copy, rerun the same
+  cycle, and confirm it resumes rather than creating a second run.
 - [ ] State the external-action boundary precisely: Buffr records the owner's
   answer and proposes the next plan; the owner alone edits the marketplace.
 
