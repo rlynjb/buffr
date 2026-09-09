@@ -102,6 +102,99 @@ describe('workflow engine', () => {
     expect(rejected.events).toContainEqual(expect.objectContaining({ type: 'workflow.experiment_rejected' }));
   });
 
+  it('records an applied marketplace experiment with its supplied application date', async () => {
+    const repository = new InMemoryRunRepository();
+    const engine = createWorkflowEngine({ repository, modules: moduleExecutor(), now: fixedNow });
+    await repository.create({
+      ...baseState(),
+      runId: 'prior-run',
+      stage: 'approval_wait',
+      status: 'awaiting_approval',
+      moduleOutputs: { m3: [], m6: testPlanOutput() },
+    });
+
+    const applied = await engine.recordExperimentApplication({
+      runId: 'prior-run',
+      application: { status: 'applied', appliedAt: '2026-08-12' },
+    });
+
+    expect(applied).toMatchObject({
+      stage: 'experiment_wait',
+      status: 'ready_for_experiment',
+      experimentApplication: { status: 'applied', appliedAt: '2026-08-12' },
+    });
+    expect(applied.events).toContainEqual(expect.objectContaining({
+      type: 'experiment.applied',
+      data: { status: 'applied', appliedAt: '2026-08-12' },
+    }));
+  });
+
+  it('records not_applied without fabricating result or learning outputs', async () => {
+    const repository = new InMemoryRunRepository();
+    const engine = createWorkflowEngine({ repository, modules: moduleExecutor(), now: fixedNow });
+    await repository.create({
+      ...baseState(),
+      runId: 'prior-run',
+      stage: 'approval_wait',
+      status: 'awaiting_approval',
+      moduleOutputs: { m3: [], m6: testPlanOutput() },
+    });
+
+    const stopped = await engine.recordExperimentApplication({
+      runId: 'prior-run',
+      application: { status: 'not_applied', decidedAt: fixedNow().toISOString() },
+    });
+
+    expect(stopped).toMatchObject({
+      stage: 'approval_wait',
+      status: 'stopped',
+      experimentApplication: { status: 'not_applied', decidedAt: '2026-08-12T00:00:00.000Z' },
+    });
+    expect(stopped.events).toContainEqual(expect.objectContaining({
+      type: 'experiment.not_applied',
+      data: { status: 'not_applied', decidedAt: '2026-08-12T00:00:00.000Z' },
+    }));
+    expect(stopped.moduleOutputs.m2Results).toBeUndefined();
+    expect(stopped.moduleOutputs.m7).toBeUndefined();
+  });
+
+  it('rejects an experiment application outside the awaiting-owner stage', async () => {
+    const repository = new InMemoryRunRepository();
+    const engine = createWorkflowEngine({ repository, modules: moduleExecutor(), now: fixedNow });
+    await repository.create(baseState());
+
+    await expect(engine.recordExperimentApplication({
+      runId: 'run-123',
+      application: { status: 'applied', appliedAt: '2026-08-12' },
+    })).rejects.toMatchObject({
+      code: 'route_not_allowed',
+      message: 'Experiment application is only allowed while awaiting approval',
+    });
+  });
+
+  it('rejects a second experiment application decision', async () => {
+    const repository = new InMemoryRunRepository();
+    const engine = createWorkflowEngine({ repository, modules: moduleExecutor(), now: fixedNow });
+    await repository.create({
+      ...baseState(),
+      stage: 'approval_wait',
+      status: 'awaiting_approval',
+      moduleOutputs: { m3: [], m6: testPlanOutput() },
+    });
+    await engine.recordExperimentApplication({
+      runId: 'run-123',
+      application: { status: 'applied', appliedAt: '2026-08-12' },
+    });
+
+    await expect(engine.recordExperimentApplication({
+      runId: 'run-123',
+      application: { status: 'not_applied', decidedAt: fixedNow().toISOString() },
+    })).rejects.toMatchObject({
+      code: 'route_not_allowed',
+      message: 'Experiment application is only allowed while awaiting approval',
+    });
+  });
+
   it('pauses deterministically when M2 reports missing evidence', async () => {
     const repository = new InMemoryRunRepository();
     const engine = createWorkflowEngine({

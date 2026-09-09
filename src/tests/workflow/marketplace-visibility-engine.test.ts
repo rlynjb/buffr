@@ -8,7 +8,7 @@ import type { RunRepository } from '../../storage/runs.js';
 import type { MarketplaceVisibilityEvidence } from '../../contracts/marketplace-visibility.js';
 
 describe('marketplace visibility workflow engine entry', () => {
-  it('starts a marketplace visibility run with sparse evidence', async () => {
+  it('starts a marketplace visibility run with sparse evidence and rolling lineage', async () => {
     const repository = new InMemoryRunRepository();
     const engine = createWorkflowEngine({ repository, modules: moduleExecutor(), now: fixedNow });
 
@@ -16,6 +16,22 @@ describe('marketplace visibility workflow engine entry', () => {
       runId: 'visibility-1',
       subjectRef: 'marketplace_visibility:merchgrid_shopify_app_store:2026-08-22',
       initialEvidence: visibilityEvidence(),
+      marketplaceIdentity: {
+        profile: 'merchgrid_shopify_app_store',
+        productRef: 'merchgrid-shopify-app',
+      },
+      previousRunRef: 'visibility-previous',
+      priorLearning: {
+        sourceRunId: 'visibility-previous',
+        sourceEvidenceRef: 'artifacts/visibility/results/2026-08-15.json',
+        experimentPlanRef: 'artifacts/workflow-runs/visibility-previous/experiment-plan.json',
+        outcome: 'inconclusive',
+        hypothesisEvaluation: 'inconclusive',
+        learning: 'The listing revision needs a longer observation window',
+        confidence: 'low',
+        nextAction: 'wait',
+        nextActionRationale: 'Wait for another weekly review before changing the listing again',
+      },
     });
 
     expect(state).toMatchObject({
@@ -23,6 +39,9 @@ describe('marketplace visibility workflow engine entry', () => {
       workflowKind: 'marketplace_visibility_review',
       stage: 'm1_context',
       evidenceSnapshots: { initial: { product: 'marketplace_visibility', evidenceLevel: 'sparse' } },
+      marketplaceIdentity: { profile: 'merchgrid_shopify_app_store', productRef: 'merchgrid-shopify-app' },
+      previousRunRef: 'visibility-previous',
+      priorLearning: { sourceRunId: 'visibility-previous', outcome: 'inconclusive' },
     });
     expect(repository.created[0]?.evidenceRefs[0]).toContain('marketplace_visibility');
   });

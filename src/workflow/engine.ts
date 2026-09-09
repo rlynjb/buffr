@@ -8,7 +8,13 @@ import {
   type MerchGridWorkflowEvidence,
 } from '../contracts/merchgrid-workflow.js';
 import {
+  ExperimentApplicationSchema,
+  MarketplaceProductIdentitySchema,
   MarketplaceVisibilityEvidenceSchema,
+  PriorLearningContextSchema,
+  type ExperimentApplication,
+  type MarketplaceProductIdentity,
+  type PriorLearningContext,
   type MarketplaceVisibilityEvidence,
 } from '../contracts/marketplace-visibility.js';
 import {
@@ -35,6 +41,7 @@ import {
   type WorkflowEvidence,
   type WorkflowKind,
   type WorkflowRunState,
+  WorkflowRunStateSchema,
   type WorkflowStage,
   type WorkflowStatus,
 } from '../contracts/workflow.js';
@@ -74,6 +81,14 @@ export type StartMarketplaceVisibilityInput = {
   runId: string;
   subjectRef: string;
   initialEvidence: MarketplaceVisibilityEvidence;
+  marketplaceIdentity?: MarketplaceProductIdentity;
+  previousRunRef?: string;
+  priorLearning?: PriorLearningContext;
+};
+
+export type RecordExperimentApplicationInput = {
+  runId: string;
+  application: ExperimentApplication;
 };
 
 export type ResearchRequest = {
@@ -111,6 +126,7 @@ export type WorkflowEngine = {
   startMarketplaceVisibility(input: StartMarketplaceVisibilityInput): Promise<WorkflowRunState>;
   step(runId: string): Promise<WorkflowRunState>;
   resumeWithExperimentResults(input: ResumeExperimentInput): Promise<WorkflowRunState>;
+  recordExperimentApplication(input: RecordExperimentApplicationInput): Promise<WorkflowRunState>;
   approveExperiment(runId: string): Promise<WorkflowRunState>;
   rejectExperiment(input: { runId: string; reason: string }): Promise<WorkflowRunState>;
   waitForMoreData(input: { runId: string; reason: string }): Promise<WorkflowRunState>;
@@ -206,6 +222,15 @@ export function createWorkflowEngine(deps: {
       input.initialEvidence,
       'initial marketplace visibility evidence',
     );
+    const marketplaceIdentity = input.marketplaceIdentity === undefined
+      ? undefined
+      : parseWithSchema(MarketplaceProductIdentitySchema, input.marketplaceIdentity, 'marketplace product identity');
+    const previousRunRef = input.previousRunRef === undefined
+      ? undefined
+      : parseWithSchema(WorkflowRunStateSchema.shape.previousRunRef, input.previousRunRef, 'previous run reference');
+    const priorLearning = input.priorLearning === undefined
+      ? undefined
+      : parseWithSchema(PriorLearningContextSchema, input.priorLearning, 'prior learning context');
     const state = createInitialWorkflowState({
       runId: input.runId,
       subjectRef: input.subjectRef,
@@ -213,7 +238,13 @@ export function createWorkflowEngine(deps: {
       initialEvidenceRef: evidenceRef('initial', evidence),
       now: now(),
     });
-    const stateWithEvidence = { ...state, evidenceSnapshots: { initial: evidence } };
+    const stateWithEvidence = {
+      ...state,
+      evidenceSnapshots: { initial: evidence },
+      ...(marketplaceIdentity === undefined ? {} : { marketplaceIdentity }),
+      ...(previousRunRef === undefined ? {} : { previousRunRef }),
+      ...(priorLearning === undefined ? {} : { priorLearning }),
+    };
 
     await deps.repository.create(stateWithEvidence);
     const created = await deps.repository.load(input.runId);
@@ -297,6 +328,43 @@ export function createWorkflowEngine(deps: {
     );
     assertCanRunStage(next, 'experiment_wait');
     return persist(next);
+  }
+
+  async function recordExperimentApplication(input: RecordExperimentApplicationInput): Promise<WorkflowRunState> {
+    const state = await deps.repository.load(input.runId);
+    if (state.stage !== 'approval_wait' || state.status !== 'awaiting_approval' || state.experimentApplication) {
+      throw new AppError('route_not_allowed', 'Experiment application is only allowed while awaiting approval');
+    }
+    const application = parseWithSchema(ExperimentApplicationSchema, input.application, 'experiment application');
+
+    if (application.status === 'applied') {
+      const next = withEvent(
+        {
+          ...state,
+          stage: 'experiment_wait',
+          status: 'ready_for_experiment',
+          experimentApplication: application,
+        },
+        'experiment.applied',
+        'Experiment application recorded',
+        { status: application.status, appliedAt: application.appliedAt },
+      );
+      assertCanRunStage(next, 'experiment_wait');
+      return persist(next);
+    }
+
+    return persist(
+      withEvent(
+        {
+          ...state,
+          status: 'stopped',
+          experimentApplication: application,
+        },
+        'experiment.not_applied',
+        'Experiment not applied',
+        { status: application.status, decidedAt: application.decidedAt },
+      ),
+    );
   }
 
   async function rejectExperiment(input: { runId: string; reason: string }): Promise<WorkflowRunState> {
@@ -846,6 +914,7 @@ export function createWorkflowEngine(deps: {
     startMarketplaceVisibility,
     step,
     resumeWithExperimentResults,
+    recordExperimentApplication,
     approveExperiment,
     rejectExperiment,
     waitForMoreData,
