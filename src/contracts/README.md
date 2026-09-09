@@ -29,7 +29,10 @@ Evidence contracts
   ├─ NormalizedListingEvidence
   ├─ DailyMetricSnapshot
   ├─ MerchGridWorkflowEvidence
-  └─ MarketplaceVisibilityEvidence
+  ├─ MarketplaceVisibilityEvidence
+  ├─ MarketplaceProductIdentity
+  ├─ ExperimentApplication
+  └─ PriorLearningContext
 
         ↓ run through the work engine
 
@@ -192,6 +195,27 @@ Read it as: "What do we know about the product even when there are no strong met
 
 This exists because early-stage products often have sparse or zero quantitative data. Buffr should still be able to recommend a safe exploratory test, but it must be honest about low confidence.
 
+The legacy context schema keeps `productRef` optional so historical records
+remain readable. The rolling command uses
+`RollingMarketplaceVisibilityContextSchema`, which requires it. That stricter
+entry boundary prevents a new review from entering product history without a
+stable identity.
+
+### `ProductRef` and `MarketplaceProductIdentity`
+
+Defined in `marketplace-visibility.ts`.
+
+`ProductRefSchema` accepts an owner-defined lowercase kebab-case identifier such
+as `merchgrid-shopify-app`. It is not inferred from display copy, a listing URL,
+or a provider identifier. `MarketplaceProductIdentitySchema` combines that
+stable reference with the visibility profile.
+
+Read it as: "Which exact product history does this rolling review belong to?"
+
+The run repository looks up history by exact `profile + productRef`. A profile
+match alone is not enough, and legacy runs without this identity remain readable
+but are ignored for automatic rolling lookup.
+
 ### `MarketplaceListingContext`
 
 Defined in `marketplace-visibility.ts`.
@@ -220,6 +244,43 @@ Read it as: "Given weak metrics, here is enough qualitative evidence to propose 
 
 DDIA concept: different sources, one normalized evidence shape. The same pattern can later support Shopify App Store, Etsy, or Meta Marketplace without making the work engine platform-specific.
 
+For a rolling MerchGrid review, one qualified weekly artifact can play two
+roles without becoming two observations. The prior run stores it under
+`evidenceSnapshots.result`; the next run stores it under
+`evidenceSnapshots.initial`. Both projections retain the same `artifactRef`,
+while each run remains its own aggregate and keeps its own subject and events.
+
+### `ExperimentApplication`
+
+Defined in `marketplace-visibility.ts`.
+
+This strict discriminated union records one owner-confirmed fact:
+
+- `applied` includes the UTC date on which the owner made the marketplace
+  change;
+- `not_applied` includes the UTC decision timestamp.
+
+The application is not an API write or an approval proxy. Buffr asks the owner
+what happened outside the system and persists that answer before it can treat a
+later weekly artifact as result evidence. Mixed or default answers are invalid.
+
+Read it as: "Did the manual experiment actually happen, and when?"
+
+### `PriorLearningContext`
+
+Defined in `marketplace-visibility.ts`.
+
+This is the only prior-run learning allowed to enter a new rolling run. It
+contains local references to the completed run's result evidence and experiment
+plan plus bounded M7 fields: outcome, hypothesis evaluation, learning,
+confidence, next action, and rationale.
+
+It intentionally excludes the prior run's events, prompts, provider payloads,
+raw historical evidence, and unrelated module state. The strict schema rejects
+extra fields.
+
+Read it as: "What small, validated lesson may inform the next experiment?"
+
 ## Work engine contracts
 
 ### `WorkflowRunState`
@@ -233,6 +294,10 @@ It records:
 - which workflow ran;
 - what stage it reached;
 - current status;
+- marketplace product identity for rolling runs;
+- the owner's applied or not-applied experiment fact;
+- `previousRunRef` lineage to the immediately prior experiment;
+- the bounded `priorLearning` projection, when an applied prior run reached M7;
 - evidence references;
 - evidence snapshots;
 - module outputs;

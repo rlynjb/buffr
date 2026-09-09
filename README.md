@@ -97,7 +97,7 @@ Buffr currently has three product-facing workflow families.
 | --- | --- | --- | --- |
 | Etsy listing workflow | Shared engine/API path; connector-validation scaffold only at the CLI | Etsy seller listing evidence | A listing experiment plan and later learning record |
 | MerchGrid daily/weekly workflow | `merchgrid:*` commands | Aggregate business and reliability metrics | Daily diagnosis, weekly recommendation, approval wait, and result learning |
-| Marketplace visibility workflow | `marketplace:*` commands | Sparse metrics plus curated product/listing context and optional public research | A low-risk visibility experiment recommendation with evidence references |
+| Marketplace visibility workflow | `marketplace:next-review` | Sparse metrics plus curated product/listing context and optional public research | A rolling, low-risk visibility experiment recommendation with evidence references |
 
 These workflows share the same core engine pattern. The source evidence differs,
 but the lifecycle remains deterministic and contract-driven.
@@ -306,28 +306,77 @@ reliable than starting inside an AI prompt and trying to reason backward.
 ### Feedback loop: how does a result affect the next decision?
 
 A **feedback loop** exists when the result of an action returns as information
-that can influence a later decision. Buffr's loop is deliberately mediated by
-a human:
+that can influence a later decision. Buffr's current Shopify visibility loop is
+deliberately mediated by the owner:
 
 ```text
-observed evidence -> diagnosis -> hypothesis -> proposed experiment
-       ^                                             |
-       |                                      owner approval
-       |                                             |
-       |                                             v
-future decision <- retained learning <- measured experiment result
+PRIOR EXPERIMENT RUN                         NEXT EXPERIMENT RUN
+
+baseline -> diagnosis -> hypothesis -> M6 plan
+                                          |
+                                 owner edits Shopify
+                                 manually, outside Buffr
+                                          |
+                                          v
+fresh weekly artifact --------------------+-------------------------+
+       |                                                            |
+       | result role                                                | baseline role
+       v                                                            v
+M2 Results -> M7 -> completed run.json       new run.json -> M1 ... M6 -> approval wait
+       |                                                            |
+       +---------------- bounded learning --------------------------+
+
+One `marketplace:next-review` invocation closes the left-hand run and creates
+the right-hand run. The two run records stay separate; the artifact is reused
+by reference rather than copied or reinterpreted as two different observations.
 ```
 
-The system proposes and records; the owner approves and acts; later evidence
-shows whether the experiment helped. M2 Results and M7 close the current run by
-capturing that result and its interpretation. Buffr does not retrain a model or
-silently apply the learning to another marketplace. The retained record makes
-the learning reviewable and available to the owner or to later, explicitly
-provided evidence.
+Here is the same loop as an operational sequence:
 
-For a junior developer, the important lesson is that producing an experiment
-plan is only half of the product. If result evidence never returns, the loop is
-open and Buffr has created a recommendation but not learning.
+1. **Persist the observation window.** Collect aggregate signals for completed
+   UTC dates. A rolling review needs enough persisted snapshots to form two
+   adjacent seven-day periods. `merchgrid:weekly-review` may build the weekly
+   artifact explicitly; if it is absent, the rolling command attempts the same
+   local derivation. It never collects providers as part of the review.
+
+2. **Run one rolling operation.** Use the owner-defined, stable `productRef` for
+   this product on every invocation. It must be lowercase kebab-case and match
+   the value in the curated context file.
+
+   ```bash
+   npm run marketplace:next-review -- \
+     --profile merchgrid_shopify_app_store \
+     --product-ref merchgrid-shopify-app \
+     --through 2026-09-07 \
+     --context artifacts/merchgrid/context/merchgrid-visibility-context.json \
+     --listing-context artifacts/merchgrid/context/merchgrid-listing-context.json
+   ```
+
+3. **Confirm the prior real-world action.** If Buffr finds an unresolved prior
+   M6 plan for the exact `profile + productRef`, it asks whether the owner
+   actually applied it. There is no default answer. A `yes` also requires the
+   UTC application date; a `no` stops that prior run without inventing result
+   metrics or M7 learning. Cancellation happens before workflow mutation.
+
+4. **Close one run and create the next.** For an applied experiment, the fresh
+   weekly artifact must contain the M6 primary metric and its current seven-day
+   window must begin after the application date. Buffr uses it as the prior
+   run's result, executes M2 Results and M7, and completes that `run.json`.
+   Buffr then uses the same artifact reference as the new run's baseline,
+   carries only the validated M7 learning projection, and advances the new run
+   through M6. The generated run id is deterministic, so retrying the identical
+   cycle does not repeat events, model calls, artifacts, or owner questions.
+
+5. **Review and act manually.** Inspect the new `experiment-plan.json`, decide
+   whether to apply it, and make any Shopify change yourself. Buffr has no
+   marketplace-write path. A later invocation with fresh weekly evidence will
+   ask what actually happened before closing this run and opening another one.
+
+For a junior developer, the important lesson is that an experiment plan is only
+half of the product. A completed feedback loop needs a real owner action plus a
+qualified later observation. Buffr makes their relationship traceable, but it
+does not confuse a recommendation with an applied change or a new experiment
+with an update to the old run.
 
 ### Delays: why does Buffr sometimes wait?
 
@@ -844,24 +893,43 @@ Marketplace visibility reviews turn sparse, aggregate-only evidence and local
 context into a manual visibility recommendation. They never query private
 marketplace providers or apply marketplace edits.
 
-Main commands:
+Run the single rolling lifecycle command after the requested weekly evidence
+window is present in local snapshots or as a saved weekly-review artifact:
 
 ```bash
-npm run marketplace:visibility-review -- --profile merchgrid_shopify_app_store --date YYYY-MM-DD --run-id RUN_ID --context artifacts/merchgrid/context/merchgrid-visibility-context.json --listing-context artifacts/merchgrid/context/merchgrid-listing-context.json
-npm run marketplace:approve -- --run-id RUN_ID
-npm run marketplace:reject -- --run-id RUN_ID --reason "Reason"
-npm run marketplace:record-result -- --profile merchgrid_shopify_app_store --run-id RUN_ID --through YYYY-MM-DD
+npm run marketplace:next-review -- \
+  --profile merchgrid_shopify_app_store \
+  --product-ref merchgrid-shopify-app \
+  --through 2026-09-07 \
+  --context artifacts/merchgrid/context/merchgrid-visibility-context.json \
+  --listing-context artifacts/merchgrid/context/merchgrid-listing-context.json
 ```
 
-For new visibility reviews, `--run-id` is optional. If omitted, Buffr writes the
-workflow run under a date-first folder such as:
+`--product-ref` is the owner's stable, lowercase kebab-case identity for one
+marketplace product. Use the same value on every review and keep it equal to the
+`productRef` in the context JSON. Buffr combines it with the profile and
+`--through` date to generate the run id, for example:
 
 ```text
-2026-08-25-merchgrid-visibility-2026-08-07-listing-context
+2026-09-07-merchgrid_shopify_app_store-merchgrid-shopify-app
 ```
 
-Keep the printed run id because approval, rejection, and result commands still
-need it.
+Do not supply or carry a run id between commands. Buffr finds the latest run by
+exact `profile + productRef`, and retrying the same through-date returns the
+same cycle without repeating owner prompts, events, artifacts, or model work.
+
+When a prior experiment plan is still awaiting an application decision, the
+command interactively asks `Was it applied? (yes/no)` with no default. A `yes`
+requires the UTC application date. Buffr validates that the new weekly result
+window begins later, closes the prior run through M2 Results and M7, then starts
+a separate next run through M6. A `no` records a stopped prior run and starts
+the next run without fabricated result learning.
+
+For an applied prior experiment, one fresh weekly artifact has two lineage
+roles: it is the prior run's result evidence and the next run's baseline
+evidence. The two immutable `run.json` records point to the same artifact, while
+the next run receives only a bounded, validated M7 learning projection through
+`previousRunRef` and `priorLearning`.
 
 The `--context` argument overrides `MERCHGRID_VISIBILITY_CONTEXT_PATH`. Use a
 local curated JSON file with only the product-facing context required for a
@@ -882,6 +950,13 @@ docs/examples/merchgrid-listing-context.example.json
 Do not put private dashboard pages, cookies, raw HTML, credentials, or merchant
 data in either context file.
 
+The weekly evidence prerequisite remains separate from marketplace review. Use
+`merchgrid:collect` after each completed UTC date. You may run
+`merchgrid:weekly-review` explicitly after two adjacent seven-day windows are
+available; if that artifact is missing, `marketplace:next-review` attempts to
+derive it from the already-persisted local snapshots. It does not call PostHog,
+Fly, Shopify, or another provider to fill gaps.
+
 If the brief is complete, zero metrics can still produce an `approval_wait`
 recommendation. If required context is missing, the command stops with the
 specific missing fields.
@@ -897,7 +972,8 @@ Research receives one bounded question and returns structured citations to the
 module that requested it. It never opens a private dashboard, uses an
 authenticated marketplace session, or edits a listing. Call, time, token, and
 cost controls are documented in `.env.example`, and the existing owner approval
-gate remains mandatory before any marketplace change.
+boundary remains mandatory before any marketplace change. Buffr records the
+owner's answer; the owner performs the external action manually.
 
 Automated tests stay fully offline: they inject runners and hosted tools, use
 synthetic `.example.test` URLs, fixed clocks, and temporary directories, and
