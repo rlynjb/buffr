@@ -3,7 +3,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { AppError } from '../../core/errors.js';
-import { JsonFileRunRepository, type RunRepository } from '../../storage/runs.js';
+import {
+  JsonFileRunRepository,
+  type MarketplaceRunHistoryRepository,
+  type RunRepository,
+} from '../../storage/runs.js';
 
 let rootDir: string;
 
@@ -255,7 +259,117 @@ describe('JsonFileRunRepository', () => {
       message: 'Invalid workflow run id: ../escape',
     } satisfies Partial<AppError>);
   });
+
+  it('returns undefined when no run matches the exact product identity', async () => {
+    const repository: MarketplaceRunHistoryRepository = new JsonFileRunRepository({ rootDir });
+
+    await repository.create(rollingRun('other-product', '2026-09-08T00:00:00.000Z', 'other-app'));
+
+    await expect(repository.findLatestByProduct(rollingIdentity())).resolves.toBeUndefined();
+  });
+
+  it('finds only the newest exact profile and productRef match', async () => {
+    const repository: MarketplaceRunHistoryRepository = new JsonFileRunRepository({ rootDir });
+
+    await repository.create(rollingRun('older', '2026-09-01T00:00:00.000Z'));
+    await repository.create(rollingRun('newer', '2026-09-08T00:00:00.000Z'));
+    await repository.create(rollingRun('other-product', '2026-09-09T00:00:00.000Z', 'other-app'));
+
+    await expect(repository.findLatestByProduct(rollingIdentity())).resolves.toMatchObject({ runId: 'newer' });
+  });
+
+  it('isolates runs by marketplace profile', async () => {
+    const repository: MarketplaceRunHistoryRepository = new JsonFileRunRepository({ rootDir });
+
+    await repository.create(rollingRun('shopify', '2026-09-08T00:00:00.000Z'));
+    await repository.create(rollingRun('etsy', '2026-09-09T00:00:00.000Z', 'merchgrid-shopify-app', 'etsy_listing'));
+
+    await expect(repository.findLatestByProduct(rollingIdentity())).resolves.toMatchObject({ runId: 'shopify' });
+  });
+
+  it('isolates runs by productRef', async () => {
+    const repository: MarketplaceRunHistoryRepository = new JsonFileRunRepository({ rootDir });
+
+    await repository.create(rollingRun('target', '2026-09-08T00:00:00.000Z'));
+    await repository.create(rollingRun('other', '2026-09-09T00:00:00.000Z', 'other-app'));
+
+    await expect(repository.findLatestByProduct(rollingIdentity())).resolves.toMatchObject({ runId: 'target' });
+  });
+
+  it('chooses the newest createdAt before comparing run ids', async () => {
+    const repository: MarketplaceRunHistoryRepository = new JsonFileRunRepository({ rootDir });
+
+    await repository.create(rollingRun('newer-id', '2026-09-09T00:00:00.000Z'));
+    await repository.create(rollingRun('older-id', '2026-09-08T00:00:00.000Z'));
+
+    await expect(repository.findLatestByProduct(rollingIdentity())).resolves.toMatchObject({ runId: 'newer-id' });
+  });
+
+  it('breaks createdAt ties deterministically by descending runId', async () => {
+    const repository: MarketplaceRunHistoryRepository = new JsonFileRunRepository({ rootDir });
+
+    await repository.create(rollingRun('run-a', '2026-09-08T00:00:00.000Z'));
+    await repository.create(rollingRun('run-z', '2026-09-08T00:00:00.000Z'));
+
+    await expect(repository.findLatestByProduct(rollingIdentity())).resolves.toMatchObject({ runId: 'run-z' });
+  });
+
+  it('omits valid legacy runs without marketplace identity', async () => {
+    const repository: MarketplaceRunHistoryRepository = new JsonFileRunRepository({ rootDir });
+
+    await repository.create({ ...baseState, runId: 'legacy', createdAt: '2026-09-09T00:00:00.000Z' });
+    await repository.create(rollingRun('identified', '2026-09-08T00:00:00.000Z'));
+
+    await expect(repository.findLatestByProduct(rollingIdentity())).resolves.toMatchObject({ runId: 'identified' });
+  });
+
+  it('fails visibly when a discovered candidate is corrupt', async () => {
+    const repository: MarketplaceRunHistoryRepository = new JsonFileRunRepository({ rootDir });
+
+    await repository.create(rollingRun('valid', '2026-09-08T00:00:00.000Z'));
+    await mkdir(join(rootDir, 'corrupt'), { recursive: true });
+    await writeFile(join(rootDir, 'corrupt', 'run.json'), '{not json', 'utf8');
+
+    await expect(repository.findLatestByProduct(rollingIdentity())).rejects.toMatchObject({
+      name: 'AppError',
+      code: 'storage_failed',
+      message: 'Workflow run JSON is corrupt: corrupt',
+    } satisfies Partial<AppError>);
+  });
+
+  it('returns undefined when the configured run root does not exist', async () => {
+    const repository: MarketplaceRunHistoryRepository = new JsonFileRunRepository({ rootDir });
+    await rm(rootDir, { recursive: true, force: true });
+
+    await expect(repository.findLatestByProduct(rollingIdentity())).resolves.toBeUndefined();
+  });
 });
+
+function rollingIdentity() {
+  return {
+    profile: 'merchgrid_shopify_app_store' as const,
+    productRef: 'merchgrid-shopify-app',
+  };
+}
+
+function rollingRun(
+  runId: string,
+  createdAt: string,
+  productRef = 'merchgrid-shopify-app',
+  workflowKind: 'marketplace_visibility_review' | 'etsy_listing' = 'marketplace_visibility_review',
+) {
+  return {
+    ...baseState,
+    runId,
+    createdAt,
+    updatedAt: createdAt,
+    workflowKind,
+    marketplaceIdentity: {
+      profile: workflowKind === 'etsy_listing' ? 'etsy_listing' as const : 'merchgrid_shopify_app_store' as const,
+      productRef,
+    },
+  };
+}
 
 async function mkdtempCompat(prefix: string): Promise<string> {
   const { mkdtemp } = await import('node:fs/promises');

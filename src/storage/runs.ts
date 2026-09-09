@@ -1,11 +1,13 @@
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { AppError } from '../core/errors.js';
 import {
+  parseWithSchema,
   WorkflowRunStateSchema,
   type WorkflowRunState,
   type WorkflowRunStateInput,
 } from '../contracts/workflow.js';
+import { MarketplaceProductIdentitySchema, type MarketplaceProductIdentity } from '../contracts/marketplace-visibility.js';
 import { assertNoCredentialKeys } from '../workflow/guards.js';
 
 export type RunRepository = {
@@ -14,11 +16,15 @@ export type RunRepository = {
   save(state: WorkflowRunStateInput): Promise<void>;
 };
 
+export type MarketplaceRunHistoryRepository = RunRepository & {
+  findLatestByProduct(identity: MarketplaceProductIdentity): Promise<WorkflowRunState | undefined>;
+};
+
 export type JsonFileRunRepositoryOptions = {
   rootDir: string;
 };
 
-export class JsonFileRunRepository implements RunRepository {
+export class JsonFileRunRepository implements MarketplaceRunHistoryRepository {
   private readonly rootDir: string;
 
   constructor(options: JsonFileRunRepositoryOptions) {
@@ -68,6 +74,37 @@ export class JsonFileRunRepository implements RunRepository {
     }
 
     return parseRunState(parsed, runId);
+  }
+
+  async findLatestByProduct(identity: MarketplaceProductIdentity): Promise<WorkflowRunState | undefined> {
+    const validIdentity = parseWithSchema(MarketplaceProductIdentitySchema, identity, 'marketplace product identity');
+    let entries;
+    try {
+      entries = await readdir(this.rootDir, { withFileTypes: true });
+    } catch (error) {
+      if (isNodeError(error) && error.code === 'ENOENT') {
+        return undefined;
+      }
+      throw new AppError('storage_failed', `Workflow runs could not be listed: ${this.rootDir}`, { cause: error });
+    }
+
+    const runIds = entries
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+      .sort();
+    const matches: WorkflowRunState[] = [];
+    for (const runId of runIds) {
+      const state = await this.load(runId);
+      if (
+        state.marketplaceIdentity?.profile === validIdentity.profile
+        && state.marketplaceIdentity.productRef === validIdentity.productRef
+      ) {
+        matches.push(state);
+      }
+    }
+
+    matches.sort(compareLatestRun);
+    return matches[0];
   }
 
   async save(state: WorkflowRunStateInput): Promise<void> {
@@ -186,4 +223,15 @@ function parseRunState(value: unknown, runId: string): WorkflowRunState {
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {
   return error instanceof Error && 'code' in error;
+}
+
+function compareLatestRun(left: WorkflowRunState, right: WorkflowRunState): number {
+  const createdAtDifference = Date.parse(right.createdAt) - Date.parse(left.createdAt);
+  if (createdAtDifference !== 0) {
+    return createdAtDifference;
+  }
+  if (left.runId === right.runId) {
+    return 0;
+  }
+  return left.runId < right.runId ? 1 : -1;
 }
