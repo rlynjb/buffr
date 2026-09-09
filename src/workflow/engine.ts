@@ -149,6 +149,7 @@ export function createWorkflowEngine(deps: {
 }): WorkflowEngine {
   const now = deps.now ?? (() => new Date());
   const researchLimits = deps.researchLimits ?? DEFAULT_RESEARCH_LIMITS;
+  const experimentApplicationLocks = new Map<string, Promise<void>>();
 
   async function persist(state: WorkflowRunState, emitFromIndex = Math.max(0, state.events.length - 1)): Promise<WorkflowRunState> {
     await deps.repository.save(state);
@@ -256,6 +257,7 @@ export function createWorkflowEngine(deps: {
 
   async function step(runId: string): Promise<WorkflowRunState> {
     const state = await deps.repository.load(runId);
+    assertRunCanTransition(state);
     if (state.status === 'waiting_for_data') {
       throw new AppError('route_not_allowed', 'Cannot step workflow while waiting for more data');
     }
@@ -288,6 +290,7 @@ export function createWorkflowEngine(deps: {
 
   async function resumeWithExperimentResults(input: ResumeExperimentInput): Promise<WorkflowRunState> {
     const state = await deps.repository.load(input.runId);
+    assertRunCanTransition(state);
     if (state.stage !== 'experiment_wait') {
       throw new AppError('route_not_allowed', `Cannot resume experiment results from ${state.stage}`);
     }
@@ -313,6 +316,7 @@ export function createWorkflowEngine(deps: {
 
   async function approveExperiment(runId: string): Promise<WorkflowRunState> {
     const state = await deps.repository.load(runId);
+    assertRunCanTransition(state);
     if (state.stage !== 'approval_wait' || state.status !== 'awaiting_approval') {
       throw new AppError('route_not_allowed', 'Experiment approval is only allowed while awaiting approval');
     }
@@ -331,44 +335,48 @@ export function createWorkflowEngine(deps: {
   }
 
   async function recordExperimentApplication(input: RecordExperimentApplicationInput): Promise<WorkflowRunState> {
-    const state = await deps.repository.load(input.runId);
-    if (state.stage !== 'approval_wait' || state.status !== 'awaiting_approval' || state.experimentApplication) {
-      throw new AppError('route_not_allowed', 'Experiment application is only allowed while awaiting approval');
-    }
     const application = parseWithSchema(ExperimentApplicationSchema, input.application, 'experiment application');
+    return withExperimentApplicationLock(input.runId, async () => {
+      const state = await deps.repository.load(input.runId);
+      assertRunCanTransition(state);
+      if (state.stage !== 'approval_wait' || state.status !== 'awaiting_approval' || state.experimentApplication) {
+        throw new AppError('route_not_allowed', 'Experiment application is only allowed while awaiting approval');
+      }
 
-    if (application.status === 'applied') {
-      const next = withEvent(
-        {
-          ...state,
-          stage: 'experiment_wait',
-          status: 'ready_for_experiment',
-          experimentApplication: application,
-        },
-        'experiment.applied',
-        'Experiment application recorded',
-        { status: application.status, appliedAt: application.appliedAt },
+      if (application.status === 'applied') {
+        const next = withEvent(
+          {
+            ...state,
+            stage: 'experiment_wait',
+            status: 'ready_for_experiment',
+            experimentApplication: application,
+          },
+          'experiment.applied',
+          'Experiment application recorded',
+          { status: application.status, appliedAt: application.appliedAt },
+        );
+        assertCanRunStage(next, 'experiment_wait');
+        return persist(next);
+      }
+
+      return persist(
+        withEvent(
+          {
+            ...state,
+            status: 'stopped',
+            experimentApplication: application,
+          },
+          'experiment.not_applied',
+          'Experiment not applied',
+          { status: application.status, decidedAt: application.decidedAt },
+        ),
       );
-      assertCanRunStage(next, 'experiment_wait');
-      return persist(next);
-    }
-
-    return persist(
-      withEvent(
-        {
-          ...state,
-          status: 'stopped',
-          experimentApplication: application,
-        },
-        'experiment.not_applied',
-        'Experiment not applied',
-        { status: application.status, decidedAt: application.decidedAt },
-      ),
-    );
+    });
   }
 
   async function rejectExperiment(input: { runId: string; reason: string }): Promise<WorkflowRunState> {
     const state = await deps.repository.load(input.runId);
+    assertRunCanTransition(state);
     if (state.stage !== 'approval_wait' || state.status !== 'awaiting_approval') {
       throw new AppError('route_not_allowed', 'Experiment rejection is only allowed while awaiting approval');
     }
@@ -392,6 +400,7 @@ export function createWorkflowEngine(deps: {
 
   async function waitForMoreData(input: { runId: string; reason: string }): Promise<WorkflowRunState> {
     const state = await deps.repository.load(input.runId);
+    assertRunCanTransition(state);
     if (state.stage !== 'experiment_wait') {
       throw new AppError('route_not_allowed', `Cannot wait for data from ${state.stage}`);
     }
@@ -406,12 +415,33 @@ export function createWorkflowEngine(deps: {
 
   async function requestResearch(runId: string, request: ResearchRequest): Promise<WorkflowRunState> {
     const state = await deps.repository.load(runId);
+    assertRunCanTransition(state);
     return requestResearchFromState(state, request);
   }
 
   async function completeResearch(runId: string, output: ResearchOutput): Promise<WorkflowRunState> {
     const state = await deps.repository.load(runId);
+    assertRunCanTransition(state);
     return completeResearchFromState(state, output);
+  }
+
+  async function withExperimentApplicationLock<T>(runId: string, operation: () => Promise<T>): Promise<T> {
+    const previous = experimentApplicationLocks.get(runId) ?? Promise.resolve();
+    let release = () => {};
+    const current = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    experimentApplicationLocks.set(runId, current);
+    await previous;
+
+    try {
+      return await operation();
+    } finally {
+      release();
+      if (experimentApplicationLocks.get(runId) === current) {
+        experimentApplicationLocks.delete(runId);
+      }
+    }
   }
 
   async function completeResearchFromState(
@@ -981,6 +1011,12 @@ const WORKFLOW_STAGES: readonly WorkflowStage[] = [
 function assertCurrentStage(state: WorkflowRunState, expected: WorkflowStage): void {
   if (state.stage !== expected) {
     throw new AppError('route_not_allowed', `Expected workflow stage ${expected}, got ${state.stage}`);
+  }
+}
+
+function assertRunCanTransition(state: WorkflowRunState): void {
+  if (state.status === 'stopped') {
+    throw new AppError('route_not_allowed', 'Stopped workflows cannot transition');
   }
 }
 

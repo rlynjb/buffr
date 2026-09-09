@@ -46,6 +46,22 @@ describe('marketplace visibility workflow engine entry', () => {
     expect(repository.created[0]?.evidenceRefs[0]).toContain('marketplace_visibility');
   });
 
+  it('rejects malformed runtime rolling metadata before creating a marketplace run', async () => {
+    const repository = new InMemoryRunRepository();
+    const engine = createWorkflowEngine({ repository, modules: moduleExecutor(), now: fixedNow });
+
+    await expect(engine.startMarketplaceVisibility({
+      runId: 'visibility-invalid-lineage',
+      subjectRef: 'marketplace_visibility:merchgrid_shopify_app_store:2026-08-22',
+      initialEvidence: visibilityEvidence(),
+      marketplaceIdentity: {
+        profile: 'merchgrid_shopify_app_store',
+        productRef: 'MerchGrid Shopify App',
+      } as never,
+    })).rejects.toMatchObject({ code: 'validation_failed' });
+    expect(repository.created).toHaveLength(0);
+  });
+
   it('routes a completed M6 visibility plan to approval wait', async () => {
     const repository = new InMemoryRunRepository();
     const engine = createWorkflowEngine({ repository, modules: moduleExecutor(), now: fixedNow });
