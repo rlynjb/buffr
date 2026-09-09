@@ -1,10 +1,14 @@
 import { join } from 'node:path';
 import {
   MarketplaceVisibilityEvidenceSchema,
+  MarketplaceProductIdentitySchema,
+  PriorLearningContextSchema,
   type MarketplaceListingContext,
   type MarketplaceVisibilityContext,
   type MarketplaceVisibilityEvidence,
   type MarketplaceVisibilityProfile,
+  type MarketplaceProductIdentity,
+  type PriorLearningContext,
   type VisibilityReviewMode,
 } from '../contracts/marketplace-visibility.js';
 import { UtcDateSchema } from '../contracts/metrics.js';
@@ -12,7 +16,7 @@ import type { WorkflowRunState } from '../contracts/workflow.js';
 import { AppError } from '../core/errors.js';
 import type { MerchGridReviewArtifactRepository } from '../jobs/merchgrid-source-pack.js';
 import type { MerchGridReviewEvidence } from '../metrics/evidence.js';
-import type { RunRepository } from '../storage/runs.js';
+import type { MarketplaceRunHistoryRepository, RunRepository } from '../storage/runs.js';
 
 const PROHIBITED_CLAIMS = [
   'Do not claim sparse evidence proves a marketplace visibility bottleneck',
@@ -25,6 +29,9 @@ export type MarketplaceVisibilityEngine = {
     runId: string;
     subjectRef: string;
     initialEvidence: MarketplaceVisibilityEvidence;
+    marketplaceIdentity?: MarketplaceProductIdentity;
+    previousRunRef?: string;
+    priorLearning?: PriorLearningContext;
   }): Promise<WorkflowRunState>;
   resumeWithExperimentResults(input: {
     runId: string;
@@ -59,15 +66,33 @@ export function createMarketplaceVisibilityService(deps: {
       const listingContext = input.listingContextPath
         ? await requireListingContextLoader(deps.loadListingContext)(input.listingContextPath)
         : undefined;
-      const evidence = input.profile === 'merchgrid_shopify_app_store'
-        ? await buildMerchGridVisibilityEvidence({
-            input,
-            context,
-            listingContext,
-            artifacts: deps.merchgridArtifacts,
-            artifactRootRef: deps.merchgridArtifactRootRef,
-          })
-        : buildEtsyVisibilityEvidence({ input, context, listingContext });
+      if (input.profile === 'merchgrid_shopify_app_store') {
+        const through = UtcDateSchema.parse(input.date);
+        const artifact = await deps.merchgridArtifacts.loadWeeklyReview(through);
+        if (!artifact) {
+          throw new AppError('storage_failed', `MerchGrid weekly review artifact not found: ${through}`);
+        }
+        const identity = marketplaceIdentityFromContext(input.profile, context);
+        const evidence = buildRollingVisibilityEvidence({
+          artifact,
+          identity,
+          through,
+          context,
+          listingContext,
+          artifactRootRef: deps.merchgridArtifactRootRef,
+        });
+        const previous = await findPreviousRun(deps.runRepository, identity);
+        return deps.engine.startMarketplaceVisibility({
+          runId: input.runId,
+          subjectRef: evidence.subjectRef,
+          initialEvidence: evidence,
+          marketplaceIdentity: identity,
+          ...(previous ? { previousRunRef: previous.runId } : {}),
+          ...(previous ? { priorLearning: priorLearningFromRun(previous) } : {}),
+        });
+      }
+
+      const evidence = buildEtsyVisibilityEvidence({ input, context, listingContext });
 
       return deps.engine.startMarketplaceVisibility({
         runId: input.runId,
@@ -87,12 +112,21 @@ export function createMarketplaceVisibilityService(deps: {
       if (!artifact) {
         throw new AppError('storage_failed', `MerchGrid weekly review artifact not found: ${through}`);
       }
-      assertValidMerchGridResultArtifact({
+      if (artifact.period.kind !== 'weekly') {
+        throw new AppError('validation_failed', 'MerchGrid visibility result requires a weekly review artifact');
+      }
+      if (artifact.period.current.endDate !== through) {
+        throw new AppError('validation_failed', 'MerchGrid weekly review artifact period does not match through date');
+      }
+      const freshEvidence = buildRollingVisibilityEvidence({
         artifact,
+        identity: requireMarketplaceIdentity(state, input.profile),
         through,
-        initialSubjectRef: initial.subjectRef,
-        approvalDate: state.approval?.status === 'approved' ? state.approval.decidedAt.slice(0, 10) : undefined,
+        context: initial.marketplaceContext,
+        listingContext: initial.listingContext,
+        artifactRootRef: deps.merchgridArtifactRootRef,
       });
+      assertValidMerchGridResultArtifact({ artifact, through, state, freshEvidence });
 
       const measuredSignals = numericMarketplaceSignals(artifact);
       if (Object.keys(measuredSignals).length === 0) {
@@ -102,60 +136,92 @@ export function createMarketplaceVisibilityService(deps: {
         });
       }
 
-      const evidence = MarketplaceVisibilityEvidenceSchema.parse({
-        product: 'marketplace_visibility',
-        profile: 'merchgrid_shopify_app_store',
-        subjectRef: initial.subjectRef,
-        artifactRef: merchgridArtifactRef(deps.merchgridArtifactRootRef, 'weekly-reviews', through),
-        evidenceLevel: 'sparse',
-        recommendationType: 'visibility_hypothesis',
-        reviewMode: initial.reviewMode,
-        marketplaceContext: initial.marketplaceContext,
-        measuredSignals,
-        limitations: curatedMerchGridLimitations(artifact.limitations),
-        prohibitedClaims: initial.prohibitedClaims,
-      });
+      const evidence = buildResultEvidenceForRun({ state, freshEvidence });
       return deps.engine.resumeWithExperimentResults({ runId: input.runId, resultEvidence: evidence });
     },
   };
 }
 
-async function buildMerchGridVisibilityEvidence(input: {
-  input: { date?: string; contextPath: string };
+export function buildRollingVisibilityEvidence(input: {
+  artifact: MerchGridReviewEvidence;
+  identity: MarketplaceProductIdentity;
+  through: string;
   context: MarketplaceVisibilityContext;
   listingContext?: MarketplaceListingContext;
-  artifacts: MerchGridReviewArtifactRepository;
   artifactRootRef?: string;
-}): Promise<MarketplaceVisibilityEvidence> {
+}): MarketplaceVisibilityEvidence {
+  const identity = MarketplaceProductIdentitySchema.parse(input.identity);
+  const through = UtcDateSchema.parse(input.through);
+  if (identity.profile !== 'merchgrid_shopify_app_store') {
+    throw new AppError('validation_failed', 'Rolling visibility evidence requires the MerchGrid profile');
+  }
   if (input.context.marketplace !== 'shopify_app_store') {
     throw new AppError('validation_failed', 'MerchGrid visibility profile requires Shopify App Store context');
   }
-  const date = UtcDateSchema.parse(input.input.date);
-  const artifact = await input.artifacts.loadDailyHealth(date);
-  if (!artifact) {
-    throw new AppError('storage_failed', `MerchGrid daily health artifact not found: ${date}`);
+  if (input.context.productRef !== identity.productRef) {
+    throw new AppError('validation_failed', 'MerchGrid visibility context productRef must match product identity');
   }
-  const measuredSignals = numericMarketplaceSignals(artifact);
+  if (input.artifact.period.kind !== 'weekly') {
+    throw new AppError('validation_failed', 'Rolling visibility evidence requires a weekly review artifact');
+  }
+  if (input.artifact.period.current.endDate !== through) {
+    throw new AppError('validation_failed', 'MerchGrid weekly review artifact period does not match through date');
+  }
+  const measuredSignals = numericMarketplaceSignals(input.artifact);
   const reviewMode = selectMarketplaceVisibilityMode({
     context: input.context,
     measuredSignals,
-    limitations: artifact.limitations,
+    limitations: input.artifact.limitations,
   });
   assertExploratoryMode(reviewMode);
 
   return MarketplaceVisibilityEvidenceSchema.parse({
     product: 'marketplace_visibility',
     profile: 'merchgrid_shopify_app_store',
-    subjectRef: `merchgrid:visibility:${date}`,
-    artifactRef: merchgridArtifactRef(input.artifactRootRef, 'daily-health', date),
+    productRef: identity.productRef,
+    subjectRef: `merchgrid:visibility:${through}`,
+    artifactRef: merchgridArtifactRef(input.artifactRootRef, 'weekly-reviews', through),
     evidenceLevel: 'sparse',
     recommendationType: 'visibility_hypothesis',
     reviewMode,
     marketplaceContext: input.context,
     listingContext: input.listingContext,
     measuredSignals,
-    limitations: curatedMerchGridLimitations(artifact.limitations),
+    limitations: curatedMerchGridLimitations(input.artifact.limitations),
     prohibitedClaims: PROHIBITED_CLAIMS,
+  });
+}
+
+export function buildResultEvidenceForRun(input: {
+  state: WorkflowRunState;
+  freshEvidence: MarketplaceVisibilityEvidence;
+}): MarketplaceVisibilityEvidence {
+  const initial = requireInitialVisibilityEvidence(input.state, input.freshEvidence.profile);
+  const fresh = MarketplaceVisibilityEvidenceSchema.parse(input.freshEvidence);
+  if (initial.profile !== fresh.profile || initial.subjectRef === fresh.subjectRef) {
+    throw new AppError('validation_failed', 'Visibility result requires matching initial marketplace visibility evidence');
+  }
+  const identity = requireMarketplaceIdentity(input.state, fresh.profile);
+  if (fresh.productRef !== identity.productRef || initial.productRef && initial.productRef !== identity.productRef) {
+    throw new AppError('validation_failed', 'Visibility result product identity must match the applied marketplace run');
+  }
+  return MarketplaceVisibilityEvidenceSchema.parse({ ...fresh, subjectRef: initial.subjectRef });
+}
+
+export function priorLearningFromRun(state: WorkflowRunState): PriorLearningContext | undefined {
+  if (state.experimentApplication?.status !== 'applied' || !state.moduleOutputs.m7) return undefined;
+  const result = state.evidenceSnapshots?.result;
+  if (!result || result.product !== 'marketplace_visibility') return undefined;
+  return PriorLearningContextSchema.parse({
+    sourceRunId: state.runId,
+    sourceEvidenceRef: result.artifactRef,
+    experimentPlanRef: `artifacts/workflow-runs/${state.runId}/experiment-plan.json`,
+    outcome: state.moduleOutputs.m7.outcome,
+    hypothesisEvaluation: state.moduleOutputs.m7.hypothesisEvaluation,
+    learning: state.moduleOutputs.m7.learning,
+    confidence: state.moduleOutputs.m7.confidence,
+    nextAction: state.moduleOutputs.m7.nextAction,
+    nextActionRationale: state.moduleOutputs.m7.nextActionRationale,
   });
 }
 
@@ -263,8 +329,8 @@ function requireInitialVisibilityEvidence(
 function assertValidMerchGridResultArtifact(input: {
   artifact: MerchGridReviewEvidence;
   through: string;
-  initialSubjectRef: string;
-  approvalDate?: string;
+  state: WorkflowRunState;
+  freshEvidence: MarketplaceVisibilityEvidence;
 }): void {
   if (input.artifact.period.kind !== 'weekly') {
     throw new AppError('validation_failed', 'MerchGrid visibility result requires a weekly review artifact');
@@ -272,14 +338,55 @@ function assertValidMerchGridResultArtifact(input: {
   if (input.artifact.period.current.endDate !== input.through) {
     throw new AppError('validation_failed', 'MerchGrid weekly review artifact period does not match through date');
   }
-  const initialDate = input.initialSubjectRef.slice('merchgrid:visibility:'.length);
+  const initial = requireInitialVisibilityEvidence(input.state, input.freshEvidence.profile);
+  const initialDate = initial.subjectRef.slice('merchgrid:visibility:'.length);
   if (input.through <= initialDate) {
     throw new AppError('validation_failed', 'Visibility result through date must be later than the initial visibility date');
   }
-  const boundary = input.approvalDate && input.approvalDate > initialDate ? input.approvalDate : initialDate;
-  if (input.artifact.period.current.startDate <= boundary) {
-    throw new AppError('validation_failed', 'Visibility result current window must begin after the approval boundary');
+  const application = input.state.experimentApplication;
+  if (application?.status === 'not_applied') {
+    throw new AppError('route_not_allowed', 'Visibility result requires an applied marketplace experiment');
   }
+  const appliedAt = application?.status === 'applied' ? application.appliedAt : undefined;
+  const legacyApprovalDate = !application && input.state.approval?.status === 'approved'
+    ? input.state.approval.decidedAt.slice(0, 10)
+    : undefined;
+  if (!appliedAt && !legacyApprovalDate) {
+    throw new AppError('route_not_allowed', 'Visibility result requires an applied marketplace experiment');
+  }
+  const boundary = appliedAt ?? legacyApprovalDate!;
+  if (input.artifact.period.current.startDate <= boundary) {
+    throw new AppError('validation_failed', 'Visibility result current window must begin after the application boundary');
+  }
+}
+
+function marketplaceIdentityFromContext(
+  profile: MarketplaceVisibilityProfile,
+  context: MarketplaceVisibilityContext,
+): MarketplaceProductIdentity {
+  if (!context.productRef) {
+    throw new AppError('validation_failed', 'Rolling marketplace visibility context requires productRef');
+  }
+  return MarketplaceProductIdentitySchema.parse({ profile, productRef: context.productRef });
+}
+
+function requireMarketplaceIdentity(
+  state: WorkflowRunState,
+  profile: MarketplaceVisibilityProfile,
+): MarketplaceProductIdentity {
+  const identity = state.marketplaceIdentity;
+  if (!identity || identity.profile !== profile) {
+    throw new AppError('validation_failed', 'Visibility result requires matching marketplace product identity');
+  }
+  return identity;
+}
+
+async function findPreviousRun(
+  repository: RunRepository,
+  identity: MarketplaceProductIdentity,
+): Promise<WorkflowRunState | undefined> {
+  if (!('findLatestByProduct' in repository) || typeof repository.findLatestByProduct !== 'function') return undefined;
+  return (repository as MarketplaceRunHistoryRepository).findLatestByProduct(identity);
 }
 
 function merchgridArtifactRef(

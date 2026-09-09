@@ -11,12 +11,133 @@ import { buildDailyHealthSummary } from '../../metrics/summaries.js';
 import type { RunRepository } from '../../storage/runs.js';
 import { createWorkflowEngine } from '../../workflow/engine.js';
 import {
+  buildResultEvidenceForRun,
+  buildRollingVisibilityEvidence,
   createMarketplaceVisibilityService,
+  priorLearningFromRun,
   selectMarketplaceVisibilityMode,
   type MarketplaceVisibilityEngine,
 } from '../../workflow/marketplace-visibility-profile.js';
 
 describe('marketplace visibility profile', () => {
+  it('reuses one weekly artifact as a prior result and next baseline without copying history', () => {
+    const fresh = buildRollingVisibilityEvidence({
+      artifact: weeklyArtifact({ app_opened_count: 4 }),
+      identity: { profile: 'merchgrid_shopify_app_store', productRef: 'merchgrid-shopify-app' },
+      through: '2026-09-04',
+      context: { ...readyContext(), productRef: 'merchgrid-shopify-app' },
+    });
+    const prior = appliedRun({
+      evidenceSnapshots: { initial: { ...fresh, subjectRef: 'merchgrid:visibility:2026-08-22' } },
+    });
+
+    const result = buildResultEvidenceForRun({ state: prior, freshEvidence: fresh });
+
+    expect(result.artifactRef).toBe(fresh.artifactRef);
+    expect(result.subjectRef).toBe('merchgrid:visibility:2026-08-22');
+    expect(fresh.subjectRef).toBe('merchgrid:visibility:2026-09-04');
+  });
+
+  it('rejects result evidence that changes profile or product identity', () => {
+    const fresh = buildRollingVisibilityEvidence({
+      artifact: weeklyArtifact(
+        { app_opened_count: 4 },
+        { previous: { startDate: '2026-08-22', endDate: '2026-08-28' }, current: { startDate: '2026-08-29', endDate: '2026-09-04' } },
+      ),
+      identity: { profile: 'merchgrid_shopify_app_store', productRef: 'merchgrid-shopify-app' },
+      through: '2026-09-04',
+      context: { ...readyContext(), productRef: 'merchgrid-shopify-app' },
+    });
+    const state = appliedRun({ evidenceSnapshots: { initial: { ...fresh, subjectRef: 'merchgrid:visibility:2026-08-22' } } });
+
+    expect(() => buildResultEvidenceForRun({ state, freshEvidence: { ...fresh, profile: 'etsy_listing', subjectRef: 'etsy:visibility:listing-123' } })).toThrow('matching initial marketplace visibility evidence');
+    expect(() => buildResultEvidenceForRun({ state, freshEvidence: {
+      ...fresh,
+      productRef: 'other-product',
+      marketplaceContext: { ...fresh.marketplaceContext, productRef: 'other-product' },
+    } })).toThrow('product identity');
+  });
+
+  it('uses approved date only for legacy runs and projects only selected applied M7 learning', () => {
+    const fresh = buildRollingVisibilityEvidence({
+      artifact: weeklyArtifact({ app_opened_count: 4 }),
+      identity: { profile: 'merchgrid_shopify_app_store', productRef: 'merchgrid-shopify-app' },
+      through: '2026-09-04',
+      context: { ...readyContext(), productRef: 'merchgrid-shopify-app' },
+    });
+    const legacy = appliedRun({
+      experimentApplication: undefined,
+      approval: { status: 'approved', decidedAt: '2026-08-23T00:00:00.000Z' },
+      evidenceSnapshots: { initial: { ...fresh, subjectRef: 'merchgrid:visibility:2026-08-22' } },
+    });
+    const learned = appliedRun({
+      evidenceSnapshots: {
+        initial: { ...fresh, subjectRef: 'merchgrid:visibility:2026-08-22' },
+        result: { ...fresh, subjectRef: 'merchgrid:visibility:2026-08-22' },
+      },
+      moduleOutputs: {
+        m3: [],
+        m7: {
+          outcome: 'inconclusive', hypothesisEvaluation: 'inconclusive', evidence: ['weekly review'], contextualFactors: [],
+          learning: 'Observe another weekly window before changing the listing', confidence: 'low', knowledgeSource: 'experiment',
+          nextAction: 'wait', nextActionRationale: 'A single weekly review is not enough',
+        },
+      },
+      events: [{ eventId: 'secret-event', runId: 'prior-run', type: 'provider.payload', message: 'credentials', createdAt: '2026-09-05T00:00:00.000Z', data: { apiKey: 'secret' } }],
+    });
+
+    expect(buildResultEvidenceForRun({ state: legacy, freshEvidence: fresh }).subjectRef).toBe('merchgrid:visibility:2026-08-22');
+    expect(priorLearningFromRun(learned)).toEqual({
+      sourceRunId: 'prior-run',
+      sourceEvidenceRef: fresh.artifactRef,
+      experimentPlanRef: 'artifacts/workflow-runs/prior-run/experiment-plan.json',
+      outcome: 'inconclusive', hypothesisEvaluation: 'inconclusive',
+      learning: 'Observe another weekly window before changing the listing', confidence: 'low', nextAction: 'wait',
+      nextActionRationale: 'A single weekly review is not enough',
+    });
+    expect(priorLearningFromRun({ ...learned, experimentApplication: { status: 'not_applied', decidedAt: '2026-09-05T00:00:00.000Z' } })).toBeUndefined();
+    expect(priorLearningFromRun({ ...learned, moduleOutputs: { m3: [] } })).toBeUndefined();
+  });
+
+  it('starts the next weekly run with only the prior M7 learning projection', async () => {
+    const prior = appliedRun({
+      evidenceSnapshots: {
+        initial: visibilityEvidenceForRun(),
+        result: { ...visibilityEvidenceForRun(), artifactRef: 'artifacts/merchgrid/metrics/artifacts/weekly-reviews/2026-09-04.json' },
+      },
+      moduleOutputs: {
+        m3: [],
+        m7: {
+          outcome: 'inconclusive', hypothesisEvaluation: 'inconclusive', evidence: [], contextualFactors: [],
+          learning: 'Observe another weekly window before changing the listing', confidence: 'low', knowledgeSource: 'experiment',
+          nextAction: 'wait', nextActionRationale: 'The evidence remains sparse',
+        },
+      },
+    });
+    const engine = new FakeMarketplaceVisibilityEngine();
+    const service = createMarketplaceVisibilityService({
+      engine,
+      merchgridArtifacts: new InMemoryArtifacts(undefined, { '2026-09-11': weeklyArtifact({ app_opened_count: 6 }, {
+        previous: { startDate: '2026-08-29', endDate: '2026-09-04' }, current: { startDate: '2026-09-05', endDate: '2026-09-11' },
+      }) }),
+      runRepository: new InMemoryRunRepository(prior),
+      loadContext: async () => readyContext(),
+    });
+
+    await service.startVisibilityReview({
+      profile: 'merchgrid_shopify_app_store', runId: 'next-run', date: '2026-09-11', contextPath: 'context.json',
+    });
+
+    expect(engine.lastStartInput).toMatchObject({
+      previousRunRef: 'prior-run',
+      priorLearning: {
+        sourceRunId: 'prior-run',
+        learning: 'Observe another weekly window before changing the listing',
+      },
+    });
+    expect(JSON.stringify(engine.lastStartInput)).not.toMatch(/events|apiKey|provider/u);
+  });
+
   it('selects exploratory mode for complete context even when signals are empty', () => {
     expect(selectMarketplaceVisibilityMode({
       context: readyContext(),
@@ -72,7 +193,7 @@ describe('marketplace visibility profile', () => {
   it('includes optional listing context in initial visibility evidence', async () => {
     const service = createMarketplaceVisibilityService({
       engine: new FakeMarketplaceVisibilityEngine(),
-      merchgridArtifacts: new InMemoryArtifacts(dailyArtifact()),
+      merchgridArtifacts: new InMemoryArtifacts(undefined, { '2026-08-22': weeklyArtifactFromDaily(dailyArtifact()) }),
       runRepository: new InMemoryRunRepository(),
       loadContext: async () => readyContext(),
       loadListingContext: async () => readyListingContext(),
@@ -144,7 +265,7 @@ describe('marketplace visibility profile', () => {
     const engine = new FakeMarketplaceVisibilityEngine();
     const service = createMarketplaceVisibilityService({
       engine,
-      merchgridArtifacts: new InMemoryArtifacts(dailyArtifact()),
+      merchgridArtifacts: new InMemoryArtifacts(undefined, { '2026-08-22': weeklyArtifactFromDaily(dailyArtifact()) }),
       runRepository: new InMemoryRunRepository(),
       loadContext: async () => ({
         ...readyContext(),
@@ -168,7 +289,7 @@ describe('marketplace visibility profile', () => {
     const engine = new FakeMarketplaceVisibilityEngine();
     const service = createMarketplaceVisibilityService({
       engine,
-      merchgridArtifacts: new InMemoryArtifacts(dailyArtifact()),
+      merchgridArtifacts: new InMemoryArtifacts(undefined, { '2026-08-22': weeklyArtifactFromDaily(dailyArtifact()) }),
       merchgridArtifactRootRef: 'artifacts/custom-merchgrid/artifacts',
       runRepository: new InMemoryRunRepository(),
       loadContext: async () => readyContext(),
@@ -182,7 +303,7 @@ describe('marketplace visibility profile', () => {
     });
 
     expect(state.evidenceSnapshots?.initial).toMatchObject({
-      artifactRef: 'artifacts/custom-merchgrid/artifacts/daily-health/2026-08-22.json',
+      artifactRef: 'artifacts/custom-merchgrid/artifacts/weekly-reviews/2026-08-22.json',
     });
   });
 
@@ -363,7 +484,29 @@ describe('marketplace visibility profile', () => {
       through: '2026-08-29',
     })).rejects.toMatchObject({
       code: 'validation_failed',
-      message: 'Visibility result current window must begin after the approval boundary',
+      message: 'Visibility result current window must begin after the application boundary',
+    });
+  });
+
+  it('uses the recorded application date instead of the legacy approval date for result windows', async () => {
+    const service = createResultService({
+      dailyArtifact: dailyArtifact(),
+      weeklyArtifacts: {
+        '2026-09-04': weeklyArtifact(
+          { app_opened_count: 4 },
+          { previous: { startDate: '2026-08-22', endDate: '2026-08-28' }, current: { startDate: '2026-08-29', endDate: '2026-09-04' } },
+        ),
+      },
+    });
+    await startAppliedVisibilityReview(service, 'visibility-application-boundary', '2026-08-29');
+
+    await expect(service.supplyVisibilityResult({
+      runId: 'visibility-application-boundary',
+      profile: 'merchgrid_shopify_app_store',
+      through: '2026-09-04',
+    })).rejects.toMatchObject({
+      code: 'validation_failed',
+      message: 'Visibility result current window must begin after the application boundary',
     });
   });
 });
@@ -375,7 +518,9 @@ function createService(input: {
   const engine = new FakeMarketplaceVisibilityEngine();
   return createMarketplaceVisibilityService({
     engine,
-    merchgridArtifacts: new InMemoryArtifacts(input.dailyArtifact),
+    merchgridArtifacts: new InMemoryArtifacts(undefined, {
+      '2026-08-22': weeklyArtifactFromDaily(input.dailyArtifact ?? dailyArtifact()),
+    }),
     runRepository: new InMemoryRunRepository(),
     loadContext: async () => input.context,
   });
@@ -399,7 +544,10 @@ function createResultService(input: {
   });
   const service = createMarketplaceVisibilityService({
     engine,
-    merchgridArtifacts: new InMemoryArtifacts(input.dailyArtifact, input.weeklyArtifacts),
+    merchgridArtifacts: new InMemoryArtifacts(undefined, {
+      '2026-08-22': weeklyArtifactFromDaily(input.dailyArtifact),
+      ...input.weeklyArtifacts,
+    }),
     runRepository: runs,
     loadContext: async () => readyContext(),
   });
@@ -420,8 +568,24 @@ async function startApprovedVisibilityReview(
   await service.engine.approveExperiment(runId);
 }
 
+async function startAppliedVisibilityReview(
+  service: ReturnType<typeof createResultService>,
+  runId: string,
+  appliedAt: string,
+): Promise<void> {
+  await service.startVisibilityReview({
+    profile: 'merchgrid_shopify_app_store',
+    runId,
+    date: '2026-08-22',
+    contextPath: 'artifacts/merchgrid/context/merchgrid-visibility-context.json',
+  });
+  for (let index = 0; index < 5; index += 1) await service.engine.step(runId);
+  await service.engine.recordExperimentApplication({ runId, application: { status: 'applied', appliedAt } });
+}
+
 class FakeMarketplaceVisibilityEngine implements MarketplaceVisibilityEngine {
   startCalls = 0;
+  lastStartInput: Parameters<MarketplaceVisibilityEngine['startMarketplaceVisibility']>[0] | undefined;
 
   async startMarketplaceVisibility(input: {
     runId: string;
@@ -429,6 +593,7 @@ class FakeMarketplaceVisibilityEngine implements MarketplaceVisibilityEngine {
     initialEvidence: MarketplaceVisibilityEvidence;
   }): Promise<WorkflowRunState> {
     this.startCalls += 1;
+    this.lastStartInput = input;
     return WorkflowRunStateSchema.parse({
       runId: input.runId,
       subjectRef: input.subjectRef,
@@ -450,6 +615,7 @@ class FakeMarketplaceVisibilityEngine implements MarketplaceVisibilityEngine {
 
 function readyContext() {
   return {
+    productRef: 'merchgrid-shopify-app',
     marketplace: 'shopify_app_store' as const,
     productName: 'MerchGrid',
     productType: 'shopify_app' as const,
@@ -538,6 +704,8 @@ class InMemoryArtifacts implements MerchGridReviewArtifactRepository {
 class InMemoryRunRepository implements RunRepository {
   private readonly states = new Map<string, WorkflowRunState>();
 
+  constructor(private readonly previous?: WorkflowRunState) {}
+
   async create(state: WorkflowRunStateInput): Promise<void> {
     this.states.set(state.runId, WorkflowRunStateSchema.parse(state));
   }
@@ -550,6 +718,10 @@ class InMemoryRunRepository implements RunRepository {
 
   async save(state: WorkflowRunStateInput): Promise<void> {
     this.states.set(state.runId, WorkflowRunStateSchema.parse(state));
+  }
+
+  async findLatestByProduct(): Promise<WorkflowRunState | undefined> {
+    return this.previous;
   }
 }
 
@@ -600,6 +772,60 @@ function weeklyArtifact(
   });
 }
 
+function weeklyArtifactFromDaily(daily: MerchGridReviewEvidence): MerchGridReviewEvidence {
+  const metrics = 'current' in daily.aggregateMetrics ? daily.aggregateMetrics.current : daily.aggregateMetrics;
+  return MerchGridReviewEvidenceSchema.parse({
+    period: {
+      kind: 'weekly',
+      previous: { startDate: '2026-08-09', endDate: '2026-08-15' },
+      current: { startDate: '2026-08-16', endDate: '2026-08-22' },
+    },
+    sourceCoverage: {
+      previous: { posthog: { complete: 7 }, fly_metrics: { complete: 7 }, shopify_partner: { unavailable: 7 } },
+      current: { posthog: { complete: 7 }, fly_metrics: { complete: 7 }, shopify_partner: { unavailable: 7 } },
+    },
+    sourceFreshness: { previous: {}, current: {} },
+    aggregateMetrics: { previous: {}, current: metrics, change: {} },
+    limitations: daily.limitations,
+  });
+}
+
 function fixedNow(): Date {
   return new Date('2026-08-23T00:00:00.000Z');
+}
+
+function appliedRun(overrides: Partial<WorkflowRunState>): WorkflowRunState {
+  return WorkflowRunStateSchema.parse({
+    runId: 'prior-run',
+    subjectRef: 'merchgrid:visibility:2026-08-22',
+    marketplaceIdentity: { profile: 'merchgrid_shopify_app_store', productRef: 'merchgrid-shopify-app' },
+    experimentApplication: { status: 'applied', appliedAt: '2026-08-29' },
+    workflowKind: 'marketplace_visibility_review',
+    status: 'ready_for_evaluation',
+    stage: 'm2_metrics_results',
+    createdAt: '2026-08-22T00:00:00.000Z',
+    updatedAt: '2026-09-05T00:00:00.000Z',
+    evidenceRefs: [],
+    evidenceSnapshots: { initial: visibilityEvidenceForRun() },
+    moduleOutputs: { m3: [] },
+    events: [],
+    ...overrides,
+  });
+}
+
+function visibilityEvidenceForRun(): MarketplaceVisibilityEvidence {
+  return {
+    product: 'marketplace_visibility',
+    profile: 'merchgrid_shopify_app_store',
+    productRef: 'merchgrid-shopify-app',
+    subjectRef: 'merchgrid:visibility:2026-08-22',
+    artifactRef: 'artifacts/merchgrid/metrics/artifacts/weekly-reviews/2026-08-22.json',
+    evidenceLevel: 'sparse',
+    recommendationType: 'visibility_hypothesis',
+    reviewMode: { mode: 'exploratory_visibility_test', evidenceLevel: 'sparse', confidenceBoundary: 'low', reason: 'metrics_sparse_context_sufficient' },
+    marketplaceContext: { ...readyContext(), productRef: 'merchgrid-shopify-app' },
+    measuredSignals: {},
+    limitations: ['PostHog metrics unavailable'],
+    prohibitedClaims: ['Do not claim sparse evidence proves a marketplace visibility bottleneck'],
+  };
 }

@@ -34,6 +34,45 @@ describe('marketplace visibility modules', () => {
     expect(context.notes).toContain('Listing observations are qualitative context, not conversion proof.');
   });
 
+  it('passes bounded prior learning to M1 and model modules without prior events or credentials', async () => {
+    const runner = new RecordingRunner({
+      m4: { performancePath: 'discovery', primaryBottleneck: 'The listing needs clearer value.', confidence: 'low', decision: 'proceed_to_hypothesis', notes: [] },
+      m5: { hypothesis: 'A clearer value statement may help.', primaryVariable: 'listing copy', recommendedRevision: 'Lead with the first audit result.', keepConstant: [], expectedSignal: 'Later evidence is available.', notes: [] },
+      m6: {
+        primaryMetric: 'posthog_app_opened_count', secondaryMetrics: [], baselineValue: 0, baselinePeriod: 'weekly baseline',
+        qualificationRequirements: [], expectedSupportingSignal: 'A later signal is available.', expectedWeakeningSignal: 'A later signal is flat.',
+        inconclusiveCondition: 'Traffic is sparse.', contextToMonitor: [], unresolvedMeasurementRules: [],
+      },
+    });
+    const executor = createMarketplaceVisibilityModuleExecutor({ agentRunner: runner });
+    const state = {
+      ...workflowState({ evidence: visibilityEvidence() }),
+      priorLearning: {
+        sourceRunId: 'previous-run', sourceEvidenceRef: 'artifacts/visibility/results/2026-09-04.json',
+        experimentPlanRef: 'artifacts/workflow-runs/previous-run/experiment-plan.json', outcome: 'inconclusive',
+        hypothesisEvaluation: 'inconclusive', learning: 'Observe another weekly window before changing the listing',
+        confidence: 'low' as const, nextAction: 'wait' as const, nextActionRationale: 'One week is not enough',
+      },
+      events: [{ eventId: 'prior-event', runId: 'previous-run', type: 'provider.payload', message: 'apiKey secret', createdAt: '2026-09-05T00:00:00.000Z', data: { apiKey: 'secret' } }],
+    } satisfies WorkflowRunState;
+
+    await expect(executor.runM1(state)).resolves.toMatchObject({
+      notes: expect.arrayContaining([
+        'Prior learning outcome: inconclusive',
+        'Prior learning: Observe another weekly window before changing the listing',
+      ]),
+    });
+    await executor.runM4(state);
+    await executor.runM5(state);
+    await executor.runM6(state);
+
+    expect(runner.inputs).toHaveLength(3);
+    expect(runner.inputs.every((input) => (
+      input.priorLearning as { sourceRunId?: string } | undefined
+    )?.sourceRunId === 'previous-run')).toBe(true);
+    expect(JSON.stringify(runner.inputs)).not.toMatch(/prior-event|apiKey|secret|provider\.payload|"events"/u);
+  });
+
   it('labels M2 as limited sparse evidence without blocking M4', () => {
     expect(metricsFromMarketplaceVisibilityEvidence(visibilityEvidence())).toMatchObject({
       phase: 'initial',
@@ -321,6 +360,17 @@ class SequenceRunner implements AgentRunner {
     return {
       output: parseWithSchema(input.outputSchema, this.outputs.shift(), `${input.moduleId} output`) as TOutput,
     };
+  }
+}
+
+class RecordingRunner implements AgentRunner {
+  readonly inputs: Array<Record<string, unknown>> = [];
+
+  constructor(private readonly outputs: Record<string, unknown>) {}
+
+  async runStructured<TOutput>(input: AgentRunInput<TOutput>): Promise<AgentRunResult<TOutput>> {
+    this.inputs.push(input.input as Record<string, unknown>);
+    return { output: parseWithSchema(input.outputSchema, this.outputs[input.moduleId], `${input.moduleId} output`) };
   }
 }
 

@@ -1,5 +1,5 @@
 import { AppError } from '../../core/errors.js';
-import type { MarketplaceVisibilityEvidence } from '../../contracts/marketplace-visibility.js';
+import type { MarketplaceVisibilityEvidence, PriorLearningContext } from '../../contracts/marketplace-visibility.js';
 import {
   DiagnosisOutputSchema,
   EvaluationOutputSchema,
@@ -68,7 +68,7 @@ export function createMarketplaceVisibilityModuleExecutor(
 
   return {
     async runM1(state) {
-      return deterministicMarketplaceVisibilityContext(requireInitialEvidence(state));
+      return deterministicMarketplaceVisibilityContext(requireInitialEvidence(state), state.priorLearning);
     },
     async runM2Initial(state) {
       return metricsFromMarketplaceVisibilityEvidence(requireInitialEvidence(state));
@@ -98,7 +98,7 @@ export function createMarketplaceVisibilityModuleExecutor(
         runner: deps.agentRunner,
         moduleId: 'm4',
         modulePrompt: VISIBILITY_DIAGNOSIS_PROMPT,
-        input: state,
+        input: marketplaceVisibilityAgentInput(state),
         outputSchema: DiagnosisOutputSchema,
         trace: trace(state),
       });
@@ -109,7 +109,7 @@ export function createMarketplaceVisibilityModuleExecutor(
         runner: deps.agentRunner,
         moduleId: 'm5',
         modulePrompt: VISIBILITY_HYPOTHESIS_PROMPT,
-        input: state,
+        input: marketplaceVisibilityAgentInput(state),
         outputSchema: HypothesisOutputSchema,
         trace: trace(state),
       });
@@ -120,7 +120,7 @@ export function createMarketplaceVisibilityModuleExecutor(
         runner: deps.agentRunner,
         moduleId: 'm6',
         modulePrompt: VISIBILITY_TEST_PLAN_PROMPT,
-        input: state,
+        input: marketplaceVisibilityAgentInput(state),
         outputSchema: TestPlanOutputSchema,
         trace: trace(state),
       });
@@ -143,7 +143,10 @@ export function createMarketplaceVisibilityModuleExecutor(
   };
 }
 
-export function deterministicMarketplaceVisibilityContext(evidence: MarketplaceVisibilityEvidence): ContextOutput {
+export function deterministicMarketplaceVisibilityContext(
+  evidence: MarketplaceVisibilityEvidence,
+  priorLearning?: PriorLearningContext,
+): ContextOutput {
   const listing = evidence.listingContext;
   return {
     product: evidence.marketplaceContext.productName,
@@ -172,6 +175,11 @@ export function deterministicMarketplaceVisibilityContext(evidence: MarketplaceV
     ],
     notes: [
       ...evidence.prohibitedClaims,
+      ...(priorLearning ? [
+        `Prior learning outcome: ${priorLearning.outcome}`,
+        `Prior learning: ${priorLearning.learning}`,
+        `Prior learning next action: ${priorLearning.nextAction}`,
+      ] : []),
       ...(listing ? [
         'Listing observations are qualitative context, not conversion proof.',
         `listing captured at: ${listing.capturedAt}`,
@@ -179,6 +187,25 @@ export function deterministicMarketplaceVisibilityContext(evidence: MarketplaceV
         `trust and risk reduction: ${listing.visibilityRubricNotes.trustAndRiskReduction}`,
       ] : []),
     ],
+  };
+}
+
+function marketplaceVisibilityAgentInput(state: WorkflowRunState): Record<string, unknown> {
+  const initialEvidence = requireInitialEvidence(state);
+  return {
+    run: { runId: state.runId, stage: state.stage },
+    evidence: {
+      initial: initialEvidence,
+      ...(state.evidenceSnapshots?.result ? { result: state.evidenceSnapshots.result } : {}),
+    },
+    moduleOutputs: {
+      ...(state.moduleOutputs.m1 ? { m1: state.moduleOutputs.m1 } : {}),
+      ...(state.moduleOutputs.m2Initial ? { m2Initial: state.moduleOutputs.m2Initial } : {}),
+      ...(state.moduleOutputs.m2Results ? { m2Results: state.moduleOutputs.m2Results } : {}),
+      ...(state.moduleOutputs.m4 ? { m4: state.moduleOutputs.m4 } : {}),
+      ...(state.moduleOutputs.m5 ? { m5: state.moduleOutputs.m5 } : {}),
+    },
+    ...(state.priorLearning ? { priorLearning: state.priorLearning } : {}),
   };
 }
 
