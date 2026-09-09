@@ -20,6 +20,11 @@ import { runResearchModule, type ResearchTool } from '../research/agent.js';
 import type { MarketplaceResearchConfig } from '../research/marketplace-config.js';
 import type { ModuleExecutor, ResearchRequest } from '../../workflow/engine.js';
 
+const PRIOR_LEARNING_GUIDANCE = [
+  'Fresh evidence may contradict prior learning; prefer the fresh evidence when they conflict.',
+  'One prior win is not causal proof or a universal result.',
+];
+
 const VISIBILITY_DIAGNOSIS_PROMPT = [
   'M4 Marketplace Visibility Diagnosis.',
   'Use sparse evidence honestly. Do not claim proof.',
@@ -27,12 +32,14 @@ const VISIBILITY_DIAGNOSIS_PROMPT = [
   'Use product context, marketplace context, and listing context to identify one likely visibility bottleneck hypothesis.',
   'Listing observations are qualitative evidence only.',
   'Choose proceed_to_hypothesis for one manual exploratory test unless the product or listing context is contradictory or unsafe.',
+  ...PRIOR_LEARNING_GUIDANCE,
 ].join('\n');
 
 const VISIBILITY_HYPOTHESIS_PROMPT = [
   'M5 Marketplace Visibility Hypothesis.',
   'Use sparse evidence honestly. Propose one manual, exploratory listing revision.',
   'The hypothesis may use listing copy or visual context, but must not claim the revision will improve marketplace outcomes.',
+  ...PRIOR_LEARNING_GUIDANCE,
 ].join('\n');
 
 const VISIBILITY_TEST_PLAN_PROMPT = [
@@ -40,6 +47,7 @@ const VISIBILITY_TEST_PLAN_PROMPT = [
   'Use sparse evidence honestly. Define a manual exploratory test and its later measurement needs.',
   'The output is a manual test plan. It must not claim the system will edit an external marketplace.',
   'Change one listing element at a time so the result remains interpretable.',
+  ...PRIOR_LEARNING_GUIDANCE,
 ].join('\n');
 
 const VISIBILITY_EVALUATION_PROMPT = [
@@ -116,6 +124,7 @@ export function createMarketplaceVisibilityModuleExecutor(
       return normalizeHypothesis(result.output, researchEnabled);
     },
     async runM6(state) {
+      const evidence = requireInitialEvidence(state);
       const result = await runStructuredModule({
         runner: deps.agentRunner,
         moduleId: 'm6',
@@ -124,7 +133,7 @@ export function createMarketplaceVisibilityModuleExecutor(
         outputSchema: TestPlanOutputSchema,
         trace: trace(state),
       });
-      return normalizeTestPlan(result.output, researchEnabled);
+      return normalizeTestPlan(result.output, evidence, researchEnabled);
     },
     async runM2Results(state) {
       return metricsFromMarketplaceVisibilityResult(state, requireResultEvidence(state));
@@ -221,6 +230,7 @@ function marketplaceVisibilityEvaluationInput(state: WorkflowRunState): Record<s
     ...(state.experimentApplication ? { experimentApplication: state.experimentApplication } : {}),
     moduleOutputs: {
       ...(state.moduleOutputs.m2Results ? { m2Results: state.moduleOutputs.m2Results } : {}),
+      ...(state.moduleOutputs.m3.length > 0 ? { m3: boundedResearchOutputs(state.moduleOutputs.m3) } : {}),
       ...(state.moduleOutputs.m4 ? { m4: state.moduleOutputs.m4 } : {}),
       ...(state.moduleOutputs.m5 ? { m5: state.moduleOutputs.m5 } : {}),
       ...(state.moduleOutputs.m6 ? { m6: state.moduleOutputs.m6 } : {}),
@@ -375,10 +385,23 @@ function normalizeHypothesis(output: HypothesisOutput, researchEnabled: boolean)
   };
 }
 
-function normalizeTestPlan(output: TestPlanOutput, researchEnabled: boolean): TestPlanOutput {
+function normalizeTestPlan(
+  output: TestPlanOutput,
+  evidence: MarketplaceVisibilityEvidence,
+  researchEnabled: boolean,
+): TestPlanOutput {
+  if (!Object.prototype.hasOwnProperty.call(evidence.measuredSignals, output.primaryMetric)) {
+    throw new AppError(
+      'validation_failed',
+      'Marketplace M6 primary metric must name an observed measured signal',
+    );
+  }
+  const baselineValue = evidence.measuredSignals[output.primaryMetric]!;
   const { researchNeed, ...withoutResearchNeed } = output;
   return {
     ...withoutResearchNeed,
+    baselineValue,
+    baselinePeriod: evidence.subjectRef,
     ...(researchEnabled && researchNeed ? { researchNeed } : {}),
     qualificationRequirements: uniqueStrings([
       ...withoutResearchNeed.qualificationRequirements,

@@ -14,7 +14,7 @@ describe('marketplace visibility workflow engine entry', () => {
 
     const state = await engine.startMarketplaceVisibility({
       runId: 'visibility-1',
-      subjectRef: 'marketplace_visibility:merchgrid_shopify_app_store:2026-08-22',
+      subjectRef: 'merchgrid:visibility:2026-08-22',
       initialEvidence: visibilityEvidence(),
       marketplaceIdentity: {
         profile: 'merchgrid_shopify_app_store',
@@ -52,7 +52,7 @@ describe('marketplace visibility workflow engine entry', () => {
 
     await expect(engine.startMarketplaceVisibility({
       runId: 'visibility-invalid-lineage',
-      subjectRef: 'marketplace_visibility:merchgrid_shopify_app_store:2026-08-22',
+      subjectRef: 'merchgrid:visibility:2026-08-22',
       initialEvidence: visibilityEvidence(),
       marketplaceIdentity: {
         profile: 'merchgrid_shopify_app_store',
@@ -62,12 +62,40 @@ describe('marketplace visibility workflow engine entry', () => {
     expect(repository.created).toHaveLength(0);
   });
 
+  it.each([
+    ['product identity', {
+      subjectRef: 'merchgrid:visibility:2026-08-22',
+      marketplaceIdentity: { profile: 'merchgrid_shopify_app_store', productRef: 'other-product' },
+    }],
+    ['profile identity', {
+      subjectRef: 'merchgrid:visibility:2026-08-22',
+      marketplaceIdentity: { profile: 'etsy_listing', productRef: 'merchgrid-shopify-app' },
+    }],
+    ['subject identity', {
+      subjectRef: 'merchgrid:visibility:2026-08-21',
+      marketplaceIdentity: { profile: 'merchgrid_shopify_app_store', productRef: 'merchgrid-shopify-app' },
+    }],
+  ])('rejects marketplace run start with mismatched %s before creation', async (_label, mismatch) => {
+    const repository = new InMemoryRunRepository();
+    const engine = createWorkflowEngine({ repository, modules: moduleExecutor(), now: fixedNow });
+
+    await expect(engine.startMarketplaceVisibility({
+      runId: 'visibility-mismatched-identity',
+      initialEvidence: visibilityEvidence(),
+      ...mismatch,
+    } as Parameters<typeof engine.startMarketplaceVisibility>[0])).rejects.toMatchObject({
+      code: 'validation_failed',
+      message: 'Marketplace visibility run identity must match its initial evidence',
+    });
+    expect(repository.created).toHaveLength(0);
+  });
+
   it('routes a completed M6 visibility plan to approval wait', async () => {
     const repository = new InMemoryRunRepository();
     const engine = createWorkflowEngine({ repository, modules: moduleExecutor(), now: fixedNow });
     await engine.startMarketplaceVisibility({
       runId: 'visibility-approval',
-      subjectRef: 'marketplace_visibility:merchgrid_shopify_app_store:2026-08-22',
+      subjectRef: 'merchgrid:visibility:2026-08-22',
       initialEvidence: visibilityEvidence(),
     });
 
@@ -118,10 +146,10 @@ describe('marketplace visibility workflow engine entry', () => {
 
     await engine.startMarketplaceVisibility({
       runId: 'visibility-zero-data',
-      subjectRef: 'marketplace_visibility:merchgrid_shopify_app_store:2026-08-24',
+      subjectRef: 'merchgrid:visibility:2026-08-24',
       initialEvidence: visibilityEvidence({
         subjectRef: 'merchgrid:visibility:2026-08-24',
-        measuredSignals: {},
+        measuredSignals: { posthog_app_opened_count: 0 },
         limitations: ['PostHog metrics unavailable', 'Shopify Partner metrics sparse'],
       }),
     });
@@ -147,7 +175,7 @@ describe('marketplace visibility workflow engine entry', () => {
     const engine = createWorkflowEngine({ repository, modules: moduleExecutor(), now: fixedNow });
     await engine.startMarketplaceVisibility({
       runId: 'visibility-results',
-      subjectRef: 'marketplace_visibility:merchgrid_shopify_app_store:2026-08-22',
+      subjectRef: 'merchgrid:visibility:2026-08-22',
       initialEvidence: visibilityEvidence(),
     });
     for (let index = 0; index < 5; index += 1) await engine.step('visibility-results');
@@ -173,7 +201,7 @@ describe('marketplace visibility workflow engine entry', () => {
     const engine = createWorkflowEngine({ repository, modules: moduleExecutor(), now: fixedNow });
     await engine.startMarketplaceVisibility({
       runId: 'visibility-mismatched-results',
-      subjectRef: 'marketplace_visibility:merchgrid_shopify_app_store:2026-08-22',
+      subjectRef: 'merchgrid:visibility:2026-08-22',
       initialEvidence: visibilityEvidence(),
     });
     for (let index = 0; index < 5; index += 1) await engine.step('visibility-mismatched-results');
@@ -251,6 +279,7 @@ function visibilityEvidence(overrides: Partial<MarketplaceVisibilityEvidence> = 
       reason: 'metrics_sparse_context_sufficient',
     },
     marketplaceContext: {
+      productRef: 'merchgrid-shopify-app',
       marketplace: 'shopify_app_store',
       productName: 'MerchGrid',
       productType: 'shopify_app',
@@ -265,6 +294,7 @@ function visibilityEvidence(overrides: Partial<MarketplaceVisibilityEvidence> = 
       ownerGoal: 'increase qualified app opens and first scans',
     },
     measuredSignals: { request_count: 18 },
+    productRef: 'merchgrid-shopify-app',
     limitations: ['Evidence is sparse'],
     prohibitedClaims: ['Do not claim the listing caused traffic'],
     ...overrides,

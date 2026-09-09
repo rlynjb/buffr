@@ -1,13 +1,30 @@
 import { readdir, readFile, mkdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AppError } from '../../core/errors.js';
 import {
   JsonFileRunRepository,
   type MarketplaceRunHistoryRepository,
   type RunRepository,
 } from '../../storage/runs.js';
+
+const fileFault = vi.hoisted(() => ({ writePathFragment: undefined as string | undefined }));
+
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return {
+    ...actual,
+    async writeFile(...args: Parameters<typeof actual.writeFile>) {
+      const path = String(args[0]);
+      if (fileFault.writePathFragment && path.includes(fileFault.writePathFragment)) {
+        fileFault.writePathFragment = undefined;
+        throw Object.assign(new Error('Synthetic run write failure'), { code: 'EIO' });
+      }
+      return actual.writeFile(...args);
+    },
+  };
+});
 
 let rootDir: string;
 
@@ -26,6 +43,7 @@ const baseState = {
 };
 
 beforeEach(async () => {
+  fileFault.writePathFragment = undefined;
   rootDir = await mkdtempCompat('buffr-runs-');
 });
 
@@ -82,6 +100,20 @@ describe('JsonFileRunRepository', () => {
       stage: 'm1_context',
       updatedAt: '2026-08-12T00:00:00.000Z',
     });
+  });
+
+  it('cleans an incomplete run directory when the first create write fails so retry is safe', async () => {
+    const repository = new JsonFileRunRepository({ rootDir });
+    fileFault.writePathFragment = '/run-123/run.json.';
+
+    await expect(repository.create(baseState)).rejects.toMatchObject({
+      code: 'storage_failed',
+      message: 'Workflow run could not be saved: run-123',
+    });
+    await expect(readdir(rootDir)).resolves.toEqual([]);
+
+    await expect(repository.create(baseState)).resolves.toBeUndefined();
+    await expect(repository.load('run-123')).resolves.toMatchObject({ runId: 'run-123' });
   });
 
   it('throws a clear AppError for a missing run', async () => {
@@ -337,6 +369,22 @@ describe('JsonFileRunRepository', () => {
     } satisfies Partial<AppError>);
   });
 
+  it('rejects a persisted product identity whose marketplace evidence belongs to another product', async () => {
+    const repository: MarketplaceRunHistoryRepository = new JsonFileRunRepository({ rootDir });
+    const runId = 'mismatched-product';
+    await mkdir(join(rootDir, runId), { recursive: true });
+    await writeFile(join(rootDir, runId, 'run.json'), JSON.stringify({
+      ...rollingRun(runId, '2026-09-08T00:00:00.000Z'),
+      subjectRef: 'merchgrid:visibility:2026-09-07',
+      evidenceSnapshots: { initial: storageVisibilityEvidence('other-product') },
+    }), 'utf8');
+
+    await expect(repository.findLatestByProduct(rollingIdentity())).rejects.toMatchObject({
+      code: 'validation_failed',
+      message: `workflow run ${runId} failed validation`,
+    });
+  });
+
   it('returns undefined when the configured run root does not exist', async () => {
     const repository: MarketplaceRunHistoryRepository = new JsonFileRunRepository({ rootDir });
     await rm(rootDir, { recursive: true, force: true });
@@ -368,6 +416,42 @@ function rollingRun(
       profile: workflowKind === 'etsy_listing' ? 'etsy_listing' as const : 'merchgrid_shopify_app_store' as const,
       productRef,
     },
+  };
+}
+
+function storageVisibilityEvidence(productRef: string) {
+  return {
+    product: 'marketplace_visibility' as const,
+    profile: 'merchgrid_shopify_app_store' as const,
+    productRef,
+    subjectRef: 'merchgrid:visibility:2026-09-07',
+    artifactRef: 'artifacts/merchgrid/metrics/artifacts/weekly-reviews/2026-09-07.json',
+    evidenceLevel: 'sparse' as const,
+    recommendationType: 'visibility_hypothesis' as const,
+    reviewMode: {
+      mode: 'exploratory_visibility_test' as const,
+      evidenceLevel: 'sparse' as const,
+      confidenceBoundary: 'low' as const,
+      reason: 'metrics_sparse_context_sufficient' as const,
+    },
+    marketplaceContext: {
+      productRef,
+      marketplace: 'shopify_app_store' as const,
+      productName: 'MerchGrid',
+      productType: 'shopify_app' as const,
+      targetCustomer: 'Shopify merchants',
+      customerProblem: 'Catalog issues are difficult to find',
+      currentPromise: 'Find catalog issues',
+      currentSurfaceSummary: 'Marketplace listing',
+      primaryDiscoverySurface: 'App Store search',
+      primaryActionWanted: 'Open the app',
+      constraints: ['manual changes'],
+      availableAssets: ['listing copy'],
+      ownerGoal: 'increase qualified app opens',
+    },
+    measuredSignals: { app_opened_count: 4 },
+    limitations: ['Evidence is sparse'],
+    prohibitedClaims: ['Do not claim the listing caused traffic'],
   };
 }
 

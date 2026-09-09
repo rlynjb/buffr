@@ -99,6 +99,39 @@ describe('marketplace visibility modules', () => {
     });
   });
 
+  it('warns new-run modules that fresh evidence can override non-causal prior learning', async () => {
+    const runner = new RecordingRunner({
+      m4: { performancePath: 'discovery', primaryBottleneck: 'The listing needs clearer value.', confidence: 'low', decision: 'proceed_to_hypothesis', notes: [] },
+      m5: { hypothesis: 'A clearer value statement may help.', primaryVariable: 'listing copy', recommendedRevision: 'Lead with the first audit result.', keepConstant: [], expectedSignal: 'Later evidence is available.', notes: [] },
+      m6: marketplaceTestPlan(),
+    });
+    const executor = createMarketplaceVisibilityModuleExecutor({ agentRunner: runner });
+    const state = {
+      ...workflowState({ evidence: visibilityEvidence() }),
+      priorLearning: {
+        sourceRunId: 'previous-run',
+        sourceEvidenceRef: 'artifacts/visibility/results/2026-09-04.json',
+        experimentPlanRef: 'artifacts/workflow-runs/previous-run/experiment-plan.json',
+        outcome: 'win' as const,
+        hypothesisEvaluation: 'supported' as const,
+        learning: 'The prior listing test improved its selected signal.',
+        confidence: 'low' as const,
+        nextAction: 'keep' as const,
+        nextActionRationale: 'The selected signal improved in that observation window.',
+      },
+    } satisfies WorkflowRunState;
+
+    await executor.runM4(state);
+    await executor.runM5(state);
+    await executor.runM6(state);
+
+    expect(runner.instructions).toHaveLength(3);
+    expect(runner.instructions.every((instructions) => (
+      instructions.includes('Fresh evidence may contradict prior learning')
+      && instructions.includes('One prior win is not causal proof or a universal result')
+    ))).toBe(true);
+  });
+
   it('includes bounded M3 research in resumed M4 input without exposing events', async () => {
     const runner = new RecordingRunner({
       m4: { performancePath: 'discovery', primaryBottleneck: 'The listing needs clearer value.', confidence: 'low', decision: 'proceed_to_hypothesis', notes: [] },
@@ -179,8 +212,8 @@ describe('marketplace visibility modules', () => {
           notes: ['Human approval required before changing the listing.'],
         },
         m6: {
-          primaryMetric: 'posthog.app_opened_count',
-          secondaryMetrics: ['posthog.scan_started_count'],
+          primaryMetric: 'posthog_app_opened_count',
+          secondaryMetrics: ['posthog_scan_started_count'],
           baselineValue: 0,
           baselinePeriod: 'sparse baseline from initial visibility evidence',
           qualificationRequirements: ['Collect a later completed weekly review before evaluating.'],
@@ -196,7 +229,43 @@ describe('marketplace visibility modules', () => {
     const state = workflowState({ evidence: visibilityEvidence() });
     await expect(executor.runM4(state)).resolves.toMatchObject({ performancePath: 'discovery' });
     await expect(executor.runM5(state)).resolves.toMatchObject({ primaryVariable: 'listing message' });
-    await expect(executor.runM6(state)).resolves.toMatchObject({ primaryMetric: 'posthog.app_opened_count' });
+    await expect(executor.runM6(state)).resolves.toMatchObject({ primaryMetric: 'posthog_app_opened_count' });
+  });
+
+  it.each([
+    ['prose', 'App opened count'],
+    ['an unknown normalized key', 'unknown_metric'],
+  ])('rejects an M6 primary metric expressed as %s instead of an observed signal key', async (_label, primaryMetric) => {
+    const executor = createMarketplaceVisibilityModuleExecutor({
+      agentRunner: new FakeAgentRunner({
+        m6: marketplaceTestPlan({ primaryMetric, baselineValue: 0 }),
+      }),
+    });
+
+    await expect(executor.runM6(workflowState({ evidence: visibilityEvidence() }))).rejects.toMatchObject({
+      code: 'validation_failed',
+      message: 'Marketplace M6 primary metric must name an observed measured signal',
+    });
+  });
+
+  it.each([
+    ['a nonzero signal', 4, 999, 4],
+    ['a zero signal', 0, 999, 0],
+    ['an already matching baseline', 7, 7, 7],
+  ])('derives the M6 baseline deterministically from %s', async (_label, observed, proposed, expected) => {
+    const executor = createMarketplaceVisibilityModuleExecutor({
+      agentRunner: new FakeAgentRunner({
+        m6: marketplaceTestPlan({ baselineValue: proposed }),
+      }),
+    });
+    const state = workflowState({
+      evidence: visibilityEvidence({ measuredSignals: { posthog_app_opened_count: observed } }),
+    });
+
+    await expect(executor.runM6(state)).resolves.toMatchObject({
+      primaryMetric: 'posthog_app_opened_count',
+      baselineValue: expected,
+    });
   });
 
   it('does not stop at collect_more_data when exploratory mode has complete context', async () => {
@@ -279,7 +348,7 @@ describe('marketplace visibility modules', () => {
           notes: [],
         },
         m6: {
-          primaryMetric: 'posthog.app_opened_count',
+          primaryMetric: 'posthog_app_opened_count',
           secondaryMetrics: [],
           baselineValue: 0,
           baselinePeriod: 'sparse initial evidence',
@@ -395,7 +464,7 @@ function researchSignalRunner(): AgentRunner {
       notes: [],
     },
     m6: {
-      primaryMetric: 'posthog.app_opened_count',
+      primaryMetric: 'posthog_app_opened_count',
       secondaryMetrics: [],
       baselineValue: 0,
       baselinePeriod: 'sparse initial evidence',
@@ -434,11 +503,13 @@ class SequenceRunner implements AgentRunner {
 
 class RecordingRunner implements AgentRunner {
   readonly inputs: Array<Record<string, unknown>> = [];
+  readonly instructions: string[] = [];
 
   constructor(private readonly outputs: Record<string, unknown>) {}
 
   async runStructured<TOutput>(input: AgentRunInput<TOutput>): Promise<AgentRunResult<TOutput>> {
     this.inputs.push(input.input as Record<string, unknown>);
+    this.instructions.push(input.instructions);
     return { output: parseWithSchema(input.outputSchema, this.outputs[input.moduleId], `${input.moduleId} output`) };
   }
 }
@@ -505,6 +576,22 @@ function visibilityEvidence(overrides: Partial<MarketplaceVisibilityEvidence> = 
     measuredSignals: { posthog_app_opened_count: 0 },
     limitations: ['low request volume'],
     prohibitedClaims: ['Do not claim the listing caused traffic'],
+    ...overrides,
+  };
+}
+
+function marketplaceTestPlan(overrides: Record<string, unknown> = {}) {
+  return {
+    primaryMetric: 'posthog_app_opened_count',
+    secondaryMetrics: [],
+    baselineValue: 0,
+    baselinePeriod: 'initial weekly visibility evidence',
+    qualificationRequirements: [],
+    expectedSupportingSignal: 'Qualified app opens increase.',
+    expectedWeakeningSignal: 'Qualified app opens stay flat or decline.',
+    inconclusiveCondition: 'Evidence remains too sparse to compare.',
+    contextToMonitor: [],
+    unresolvedMeasurementRules: [],
     ...overrides,
   };
 }

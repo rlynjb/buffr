@@ -122,6 +122,42 @@ describe('marketplace visibility profile', () => {
     expect(priorLearningFromRun({ ...learned, moduleOutputs: { m3: [] } })).toBeUndefined();
   });
 
+  it('refuses to project prior learning when persisted result evidence belongs to another product', () => {
+    const initial = visibilityEvidenceForRun();
+    const learned = appliedRun({
+      status: 'cycle_complete',
+      stage: 'cycle_complete',
+      evidenceSnapshots: { initial, result: { ...initial, artifactRef: 'artifacts/visibility/results/2026-09-04.json' } },
+      moduleOutputs: {
+        m3: [],
+        m7: {
+          outcome: 'inconclusive', hypothesisEvaluation: 'inconclusive', evidence: [], contextualFactors: [],
+          learning: 'Observe another qualified window', confidence: 'low', knowledgeSource: 'experiment',
+          nextAction: 'wait', nextActionRationale: 'Evidence remains sparse',
+        },
+      },
+    });
+    const mismatched = {
+      ...learned,
+      evidenceSnapshots: {
+        ...learned.evidenceSnapshots,
+        result: {
+          ...learned.evidenceSnapshots!.result!,
+          productRef: 'other-product',
+          marketplaceContext: {
+            ...(learned.evidenceSnapshots!.result as MarketplaceVisibilityEvidence).marketplaceContext,
+            productRef: 'other-product',
+          },
+        } as MarketplaceVisibilityEvidence,
+      },
+    };
+
+    expect(() => priorLearningFromRun(mismatched)).toThrowError(expect.objectContaining({
+      code: 'validation_failed',
+      message: 'Prior learning evidence must match its marketplace product identity',
+    }));
+  });
+
   it('starts the next weekly run with only the prior M7 learning projection', async () => {
     const prior = appliedRun({
       evidenceSnapshots: {

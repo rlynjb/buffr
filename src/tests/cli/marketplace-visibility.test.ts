@@ -1,10 +1,18 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { MarketplaceProductIdentity, MarketplaceVisibilityEvidence } from '../../contracts/marketplace-visibility.js';
-import type { WorkflowRunState, WorkflowStage, WorkflowStatus } from '../../contracts/workflow.js';
+import type {
+  WorkflowRunState,
+  WorkflowRunStateInput,
+  WorkflowStage,
+  WorkflowStatus,
+} from '../../contracts/workflow.js';
 import { AppError } from '../../core/errors.js';
 import {
+  createMarketplaceVisibilityDependencies,
   createOwnerApplicationPrompt,
+  marketplaceVisibilityStorageLayout,
   runMarketplaceVisibilityCli,
+  runMarketplaceVisibilityEntrypoint,
   type MarketplaceVisibilityCliDependencies,
 } from '../../cli/marketplace-visibility.js';
 import {
@@ -14,6 +22,49 @@ import {
 } from '../../workflow/marketplace-rolling-review.js';
 
 describe('marketplace visibility CLI', () => {
+  it('composes resolvable artifact and run references from the documented data directory', () => {
+    expect(marketplaceVisibilityStorageLayout('artifacts/merchgrid/metrics')).toEqual({
+      artifactRoot: 'artifacts/merchgrid/metrics/artifacts',
+      runRoot: 'artifacts/merchgrid/metrics/workflow-runs',
+    });
+  });
+
+  it.each([
+    ['an invalid enabled flag', { MARKETPLACE_RESEARCH_ENABLED: 'maybe' }],
+    ['an engine-exceeding tool-call cap', { MARKETPLACE_RESEARCH_ENABLED: 'true', MARKETPLACE_RESEARCH_MAX_TOOL_CALLS: '4' }],
+  ])('validates marketplace M3 runtime configuration for %s', (_label, researchEnv) => {
+    expect(() => createMarketplaceVisibilityDependencies({
+      MERCHGRID_METRICS_DATA_DIR: 'artifacts/merchgrid/metrics',
+      ...researchEnv,
+    })).toThrowError(expect.objectContaining({
+      code: 'configuration_failed',
+      message: 'Marketplace research configuration is invalid',
+    }));
+  });
+
+  it('surfaces bounded missing weekly source-dates through the CLI error channel', async () => {
+    const output: string[] = [];
+    const errors: string[] = [];
+    const missingMessage = 'Missing weekly metric snapshots (2): posthog/2026-08-10, fly_metrics/2026-08-20';
+
+    await runMarketplaceVisibilityEntrypoint({
+      args: nextReviewArgs(),
+      dependencies: {
+        rollingReviews: {
+          nextReview: async () => {
+            throw new AppError('storage_failed', missingMessage);
+          },
+        },
+        defaultContextPath: 'artifacts/merchgrid/context/default-review.json',
+      },
+      writeLine: (line) => output.push(line),
+      writeError: (line) => errors.push(line),
+    });
+
+    expect(output).toEqual([]);
+    expect(errors).toEqual([`storage_failed: ${missingMessage}`]);
+  });
+
   it('forwards one structured next-review request to the rolling service', async () => {
     const nextReview = vi.fn(async () => reviewResult());
 
@@ -233,11 +284,20 @@ function nextReviewArgs(): string[] {
 
 function coordinatorFixture(input: { existing?: WorkflowRunState; previous?: WorkflowRunState } = {}) {
   const prompt: OwnerApplicationPrompt = { confirm: vi.fn(async () => ({ status: 'cancelled' as const })) };
+  const states = new Map<string, WorkflowRunState>([
+    ...(input.existing ? [[input.existing.runId, structuredClone(input.existing)] as const] : []),
+    ...(input.previous ? [[input.previous.runId, structuredClone(input.previous)] as const] : []),
+  ]);
   const history = {
-    async create(): Promise<void> {},
-    async save(): Promise<void> {},
+    async create(state: WorkflowRunStateInput): Promise<void> {
+      states.set(state.runId, structuredClone(state) as WorkflowRunState);
+    },
+    async save(state: WorkflowRunStateInput): Promise<void> {
+      states.set(state.runId, structuredClone(state) as WorkflowRunState);
+    },
     async load(runId: string): Promise<WorkflowRunState> {
-      if (input.existing?.runId === runId) return input.existing;
+      const state = states.get(runId);
+      if (state) return structuredClone(state);
       throw new AppError('storage_failed', `Workflow run not found: ${runId}`);
     },
     async findLatestByProduct(): Promise<WorkflowRunState | undefined> {
@@ -308,6 +368,7 @@ function completedWorkflowState(runId: string): WorkflowRunState {
   const state = workflowState(runId, 'cycle_complete', 'cycle_complete');
   return {
     ...state,
+    subjectRef: 'merchgrid:visibility:2026-08-21',
     experimentApplication: { status: 'applied', appliedAt: '2026-08-15' },
     evidenceSnapshots: {
       initial: freshEvidence(marketplaceIdentity(), '2026-08-21'),

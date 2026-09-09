@@ -232,6 +232,22 @@ export function createWorkflowEngine(deps: {
     const priorLearning = input.priorLearning === undefined
       ? undefined
       : parseWithSchema(PriorLearningContextSchema, input.priorLearning, 'prior learning context');
+    if (
+      input.subjectRef !== evidence.subjectRef
+      || (
+        marketplaceIdentity !== undefined
+        && (
+          evidence.profile !== marketplaceIdentity.profile
+          || evidence.productRef !== marketplaceIdentity.productRef
+          || evidence.marketplaceContext.productRef !== marketplaceIdentity.productRef
+        )
+      )
+    ) {
+      throw new AppError(
+        'validation_failed',
+        'Marketplace visibility run identity must match its initial evidence',
+      );
+    }
     const state = createInitialWorkflowState({
       runId: input.runId,
       subjectRef: input.subjectRef,

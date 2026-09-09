@@ -1,4 +1,4 @@
-import { mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { AppError } from '../core/errors.js';
 import {
@@ -49,6 +49,13 @@ export class JsonFileRunRepository implements MarketplaceRunHistoryRepository {
     try {
       await this.writeRunFiles(runDir, validState);
     } catch (error) {
+      try {
+        await rm(runDir, { recursive: true, force: true });
+      } catch (cleanupError) {
+        throw new AppError('storage_failed', `Workflow run could not be saved or cleaned up: ${validState.runId}`, {
+          cause: { writeError: error, cleanupError },
+        });
+      }
       throw new AppError('storage_failed', `Workflow run could not be saved: ${validState.runId}`, { cause: error });
     }
   }
@@ -218,7 +225,35 @@ function parseRunState(value: unknown, runId: string): WorkflowRunState {
       cause: result.error,
     });
   }
+  if (!hasConsistentMarketplaceIdentity(result.data)) {
+    throw new AppError('validation_failed', `workflow run ${runId} failed validation`);
+  }
   return result.data;
+}
+
+function hasConsistentMarketplaceIdentity(state: WorkflowRunState): boolean {
+  const identity = state.marketplaceIdentity;
+  if (!identity) return true;
+  const initial = state.evidenceSnapshots?.initial;
+  if (!initial) return true;
+  if (
+    initial.product !== 'marketplace_visibility'
+    || state.subjectRef !== initial.subjectRef
+    || initial.profile !== identity.profile
+    || initial.productRef !== identity.productRef
+    || initial.marketplaceContext.productRef !== identity.productRef
+  ) {
+    return false;
+  }
+
+  const result = state.evidenceSnapshots?.result;
+  return !result || (
+    result.product === 'marketplace_visibility'
+    && result.profile === identity.profile
+    && result.productRef === identity.productRef
+    && result.marketplaceContext.productRef === identity.productRef
+    && result.subjectRef === initial.subjectRef
+  );
 }
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {

@@ -79,16 +79,18 @@ export const ExperimentApplicationSchema = z.discriminatedUnion('status', [
   }).strict(),
 ]);
 
+export const PRIOR_LEARNING_TEXT_MAX_LENGTH = 1_000;
+
 export const PriorLearningContextSchema = z.object({
   sourceRunId: z.string().min(1).max(200),
   sourceEvidenceRef: MarketplaceVisibilityArtifactRefSchema,
   experimentPlanRef: MarketplaceVisibilityArtifactRefSchema,
   outcome: EvaluationOutputSchema.shape.outcome,
   hypothesisEvaluation: EvaluationOutputSchema.shape.hypothesisEvaluation,
-  learning: EvaluationOutputSchema.shape.learning,
+  learning: EvaluationOutputSchema.shape.learning.max(PRIOR_LEARNING_TEXT_MAX_LENGTH),
   confidence: EvaluationOutputSchema.shape.confidence,
   nextAction: EvaluationOutputSchema.shape.nextAction,
-  nextActionRationale: EvaluationOutputSchema.shape.nextActionRationale,
+  nextActionRationale: EvaluationOutputSchema.shape.nextActionRationale.max(PRIOR_LEARNING_TEXT_MAX_LENGTH),
 }).strict();
 
 export const MarketplaceListingCaptureModeSchema = z.enum([

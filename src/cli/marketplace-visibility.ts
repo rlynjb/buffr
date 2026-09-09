@@ -3,6 +3,8 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { OpenAiAgentRunner } from '../agents/runner.js';
 import { createMarketplaceVisibilityModuleExecutor } from '../agents/marketplace-visibility/modules.js';
+import { createHostedWebSearchResearchTool } from '../agents/research/hosted-web-search.js';
+import { loadMarketplaceResearchConfig } from '../agents/research/marketplace-config.js';
 import {
   MarketplaceVisibilityProfileSchema,
   ProductRefSchema,
@@ -35,6 +37,14 @@ export type MarketplaceVisibilityCliDependencies = {
   rollingReviews: MarketplaceRollingReviewService;
   defaultContextPath?: string;
   defaultListingContextPath?: string;
+};
+
+export type MarketplaceVisibilityEntrypointInput = {
+  args: readonly string[];
+  env?: NodeJS.ProcessEnv;
+  dependencies?: MarketplaceVisibilityCliDependencies;
+  writeLine: (line: string) => void;
+  writeError: (line: string) => void;
 };
 
 type OwnerPromptInterface = {
@@ -75,6 +85,21 @@ export async function runMarketplaceVisibilityCli(input: {
   printReview(input.writeLine, result);
 }
 
+/** Keeps runtime failures on a bounded CLI channel while preserving actionable local evidence gaps. */
+export async function runMarketplaceVisibilityEntrypoint(
+  input: MarketplaceVisibilityEntrypointInput,
+): Promise<void> {
+  try {
+    await runMarketplaceVisibilityCli({
+      args: input.args,
+      dependencies: input.dependencies ?? createMarketplaceVisibilityDependencies(input.env),
+      writeLine: input.writeLine,
+    });
+  } catch (error) {
+    input.writeError(safeCliError(error));
+  }
+}
+
 /** Creates the interactive approval boundary used only by the runtime composition. */
 export function createOwnerApplicationPrompt(options: OwnerApplicationPromptOptions = {}): OwnerApplicationPrompt {
   const suppliedInterface = options.createInterface;
@@ -107,16 +132,34 @@ export function createMarketplaceVisibilityDependencies(
   env: NodeJS.ProcessEnv = loadLocalEnvironment(),
 ): MarketplaceVisibilityCliDependencies {
   const dataDir = required(env, 'MERCHGRID_METRICS_DATA_DIR');
-  const artifacts = new JsonFileMerchGridReviewArtifactRepository({ rootDir: join(dataDir, 'artifacts') });
+  const layout = marketplaceVisibilityStorageLayout(dataDir);
+  const artifacts = new JsonFileMerchGridReviewArtifactRepository({ rootDir: layout.artifactRoot });
   const weeklyEvidenceDependencies: MerchGridSourcePackDependencies = {
     adapters: [],
     repository: new JsonFileMetricSnapshotRepository({ rootDir: join(dataDir, 'snapshots') }),
     artifacts,
   };
-  const runs = new JsonFileRunRepository({ rootDir: join(dataDir, 'workflow-runs') });
+  const runs = new JsonFileRunRepository({ rootDir: layout.runRoot });
+  const researchConfig = loadMarketplaceResearchConfig(env);
+  const agentRunner = new OpenAiAgentRunner({ apiKey: env.OPENAI_API_KEY });
+  const researchTool = researchConfig.enabled
+    ? createHostedWebSearchResearchTool({ runner: agentRunner, config: researchConfig })
+    : undefined;
   const engine = createWorkflowEngine({
     repository: runs,
-    modules: createMarketplaceVisibilityModuleExecutor({ agentRunner: new OpenAiAgentRunner({ apiKey: env.OPENAI_API_KEY }) }),
+    modules: createMarketplaceVisibilityModuleExecutor({
+      agentRunner,
+      research: { config: researchConfig, tool: researchTool },
+    }),
+    researchLimits: {
+      maxToolCalls: researchConfig.limits.maxToolCalls,
+      maxWallClockMs: researchConfig.limits.maxWallClockMs,
+      permittedTools: ['hosted_web_search'],
+      costBudget: {
+        maxTokens: researchConfig.limits.maxTokens,
+        maxEstimatedCostUsd: researchConfig.limits.maxEstimatedCostUsd,
+      },
+    },
   });
 
   return {
@@ -125,6 +168,7 @@ export function createMarketplaceVisibilityDependencies(
       engine,
       prompt: createOwnerApplicationPrompt(),
       now: () => new Date(),
+      runRootRef: layout.runRoot,
       prepareWeeklyEvidence: async (input) => {
         const artifact = await artifacts.loadWeeklyReview(input.through)
           ?? toMerchGridReviewEvidence((await runWeeklyReview({ through: input.through, dependencies: weeklyEvidenceDependencies })).review);
@@ -138,12 +182,23 @@ export function createMarketplaceVisibilityDependencies(
           through: input.through,
           context,
           listingContext,
-          artifactRootRef: 'artifacts',
+          artifactRootRef: layout.artifactRoot,
         });
       },
     }),
     defaultContextPath: env.MERCHGRID_VISIBILITY_CONTEXT_PATH,
     defaultListingContextPath: env.MERCHGRID_LISTING_CONTEXT_PATH,
+  };
+}
+
+/** Keeps physical storage and persisted local references on the same documented layout. */
+export function marketplaceVisibilityStorageLayout(dataDir: string): {
+  artifactRoot: string;
+  runRoot: string;
+} {
+  return {
+    artifactRoot: join(dataDir, 'artifacts'),
+    runRoot: join(dataDir, 'workflow-runs'),
   };
 }
 
@@ -224,13 +279,23 @@ function required(env: NodeJS.ProcessEnv, name: string): string {
   return env[name]!;
 }
 
+const MISSING_WEEKLY_SNAPSHOTS = /^Missing weekly metric snapshots \((?:[1-9]|[1-3]\d|4[0-2])\): (?:posthog|fly_metrics|shopify_partner)\/\d{4}-\d{2}-\d{2}(?:, (?:posthog|fly_metrics|shopify_partner)\/\d{4}-\d{2}-\d{2}){0,41}$/u;
+
+function safeCliError(error: unknown): string {
+  if (!(error instanceof AppError)) return 'unexpected_error';
+  if (error.code === 'storage_failed' && MISSING_WEEKLY_SNAPSHOTS.test(error.message)) {
+    return `${error.code}: ${error.message}`;
+  }
+  return error.code;
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  runMarketplaceVisibilityCli({
+  void runMarketplaceVisibilityEntrypoint({
     args: process.argv.slice(2),
-    dependencies: createMarketplaceVisibilityDependencies(),
-    writeLine: console.log,
-  }).catch((error) => {
-    process.stderr.write(`${error instanceof AppError ? error.code : 'unexpected_error'}\n`);
-    process.exitCode = 1;
+    writeLine: (line) => process.stdout.write(`${line}\n`),
+    writeError: (line) => {
+      process.stderr.write(`${line}\n`);
+      process.exitCode = 1;
+    },
   });
 }

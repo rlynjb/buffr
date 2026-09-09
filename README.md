@@ -700,6 +700,16 @@ Writes use temporary files followed by atomic rename. Snapshot writers also use
 a per-file lock directory, which protects a date/source record from concurrent
 local writers. This is local process coordination, not a distributed lock.
 
+The workflow run store supports one sequential local CLI process. Concurrent
+CLI invocations that target the same run store are unsupported; do not schedule
+overlapping workflow commands against it. Atomic replacement protects an
+individual file write, but it is not a transaction around an OpenAI model or
+hosted-research call. If a process crashes after a provider call completes but
+before the resulting `run.json` state is durable, a retry may repeat that call.
+Those provider executions therefore have at-least-once crash semantics at that
+boundary. Once a transition is persisted, stage checks and deterministic cycle
+IDs prevent an ordinary sequential retry from repeating the durable work.
+
 Local file persistence is useful here because it is:
 
 - inspectable during development;

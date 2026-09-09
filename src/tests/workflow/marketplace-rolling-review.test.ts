@@ -4,7 +4,13 @@ import type {
   MarketplaceProductIdentity,
   MarketplaceVisibilityEvidence,
 } from '../../contracts/marketplace-visibility.js';
-import type { WorkflowRunState, WorkflowRunStateInput, WorkflowStage, WorkflowStatus } from '../../contracts/workflow.js';
+import type {
+  WorkflowEvent,
+  WorkflowRunState,
+  WorkflowRunStateInput,
+  WorkflowStage,
+  WorkflowStatus,
+} from '../../contracts/workflow.js';
 import { AppError } from '../../core/errors.js';
 import type { MarketplaceRunHistoryRepository } from '../../storage/runs.js';
 import {
@@ -71,6 +77,55 @@ describe('marketplace rolling review coordinator', () => {
     }]);
   });
 
+  it('sanitizes and caps the model-produced revision before displaying the owner prompt', async () => {
+    const fixture = createFixture({
+      previous: workflowState({
+        moduleOutputs: {
+          m3: [],
+          m5: hypothesis({
+            recommendedRevision: `  Lead with the catalog audit outcome.\n${'x'.repeat(300)}\u001B[31m  `,
+          }),
+          m6: testPlan(),
+        },
+      }),
+      nextStartStage: 'approval_wait',
+      promptResult: { status: 'applied', appliedAt: '2026-08-25' },
+    });
+
+    await fixture.service.nextReview(nextReviewInput());
+
+    const summary = fixture.prompt.inputs[0]?.experimentSummary;
+    expect(summary).toHaveLength(240);
+    expect(summary).toMatch(/^Lead with the catalog audit outcome\. x+/u);
+    expect(summary).not.toMatch(/[\u0000-\u001f\u007f-\u009f]/u);
+  });
+
+  it('persists and emits each cycle lifecycle event once without copying engine event types', async () => {
+    const fixture = createFixture({
+      previous: awaitingApplicationRun(),
+      nextStartStage: 'approval_wait',
+      promptResult: { status: 'applied', appliedAt: '2026-08-25' },
+    });
+
+    const first = await fixture.service.nextReview(nextReviewInput());
+    await fixture.service.nextReview(nextReviewInput());
+    const current = await fixture.history.load(first.currentRun.runId);
+    const expectedTypes = [
+      'rolling_review.started',
+      'rolling_review.previous_run_found',
+      'rolling_review.previous_run_evaluated',
+      'rolling_review.prior_learning_selected',
+      'rolling_review.next_run_created',
+      'rolling_review.completed',
+    ];
+
+    expect(current.events.map((event) => event.type)).toEqual(expectedTypes);
+    expect(fixture.emittedEvents.map((event) => event.type)).toEqual(expectedTypes);
+    expect(current.events.every((event) => event.runId === first.currentRun.runId)).toBe(true);
+    expect(current.events.map((event) => event.type)).not.toContain('experiment.applied');
+    expect(JSON.stringify(current.events)).not.toMatch(/"learning":|"nextActionRationale":|OPENAI_API_KEY/u);
+  });
+
   it('closes a declined prior plan without result or learning work', async () => {
     const fixture = createFixture({
       previous: awaitingApplicationRun(),
@@ -133,6 +188,21 @@ describe('marketplace rolling review coordinator', () => {
     expect(fixture.engine.startCalls).toHaveLength(1);
   });
 
+  it('resumes an executable same-cycle run after a transient M4 failure', async () => {
+    const fixture = createFixture({ failStepOnceAt: 'm4_diagnosis' });
+
+    await expect(fixture.service.nextReview(nextReviewInput())).rejects.toThrow('Synthetic m4_diagnosis failure');
+    await expect(fixture.history.load(
+      '2026-09-04-merchgrid_shopify_app_store-merchgrid-shopify-app',
+    )).resolves.toMatchObject({ stage: 'm4_diagnosis', status: 'analyzing' });
+
+    const retry = await fixture.service.nextReview(nextReviewInput());
+
+    expect(retry.currentRun).toMatchObject({ stage: 'approval_wait', status: 'awaiting_approval' });
+    expect(fixture.engine.startCalls).toHaveLength(1);
+    expect(fixture.calls.filter((call) => call === 'run-m4')).toHaveLength(2);
+  });
+
   it('does not mutate either workflow when owner confirmation is cancelled', async () => {
     const fixture = createFixture({
       previous: awaitingApplicationRun(),
@@ -177,6 +247,51 @@ describe('marketplace rolling review coordinator', () => {
     expect(future.engine.recordCalls).toHaveLength(0);
     await expect(invalid.history.load('previous-run')).resolves.toMatchObject({ status: 'awaiting_approval' });
     await expect(future.history.load('previous-run')).resolves.toMatchObject({ status: 'awaiting_approval' });
+  });
+
+  it('rejects an application date before the experiment plan existed without mutating either run', async () => {
+    const initial = freshEvidence(identity(), '2026-08-01');
+    const fixture = createFixture({
+      previous: workflowState({
+        subjectRef: initial.subjectRef,
+        evidenceSnapshots: { initial },
+        updatedAt: '2026-08-15T12:00:00.000Z',
+      }),
+      promptResult: { status: 'applied', appliedAt: '2026-08-14' },
+    });
+
+    await expect(fixture.service.nextReview(nextReviewInput())).rejects.toMatchObject({
+      code: 'validation_failed',
+      message: 'Experiment application date cannot precede experiment plan date 2026-08-15',
+    });
+    expect(fixture.engine.recordCalls).toHaveLength(0);
+    expect(fixture.engine.startCalls).toHaveLength(0);
+    const previous = await fixture.history.load('previous-run');
+    expect(previous).toMatchObject({
+      stage: 'approval_wait',
+      status: 'awaiting_approval',
+    });
+    expect(previous).not.toHaveProperty('experimentApplication');
+  });
+
+  it('rejects an application date within the prior evidence window without mutating either run', async () => {
+    const fixture = createFixture({
+      previous: workflowState({ updatedAt: '2026-08-10T12:00:00.000Z' }),
+      promptResult: { status: 'applied', appliedAt: '2026-08-13' },
+    });
+
+    await expect(fixture.service.nextReview(nextReviewInput())).rejects.toMatchObject({
+      code: 'validation_failed',
+      message: 'Experiment application date must be later than prior evidence date 2026-08-14',
+    });
+    expect(fixture.engine.recordCalls).toHaveLength(0);
+    expect(fixture.engine.startCalls).toHaveLength(0);
+    const previous = await fixture.history.load('previous-run');
+    expect(previous).toMatchObject({
+      stage: 'approval_wait',
+      status: 'awaiting_approval',
+    });
+    expect(previous).not.toHaveProperty('experimentApplication');
   });
 
   it.each([
@@ -424,6 +539,7 @@ class FakeRollingEngine implements MarketplaceRollingReviewEngine {
   readonly startCalls: unknown[] = [];
   evaluationStepCalls = 0;
   private remainingStartFailures: number;
+  private failStepOnceAt: WorkflowStage | undefined;
   private readonly nextStartStage: WorkflowStage;
   private readonly nextStartStatus: WorkflowStatus | undefined;
   private readonly history: InMemoryHistory;
@@ -434,12 +550,14 @@ class FakeRollingEngine implements MarketplaceRollingReviewEngine {
     nextStartStage: WorkflowStage;
     nextStartStatus?: WorkflowStatus;
     failNextStartCount: number;
+    failStepOnceAt?: WorkflowStage;
   }) {
     this.calls = input.calls;
     this.history = input.history;
     this.nextStartStage = input.nextStartStage;
     this.nextStartStatus = input.nextStartStatus;
     this.remainingStartFailures = input.failNextStartCount;
+    this.failStepOnceAt = input.failStepOnceAt;
   }
 
   async startMarketplaceVisibility(input: Parameters<MarketplaceRollingReviewEngine['startMarketplaceVisibility']>[0]): Promise<WorkflowRunState> {
@@ -511,6 +629,10 @@ class FakeRollingEngine implements MarketplaceRollingReviewEngine {
     }
     const call = stepCall(previous.stage);
     this.calls.push(call);
+    if (this.failStepOnceAt === previous.stage) {
+      this.failStepOnceAt = undefined;
+      throw new Error(`Synthetic ${previous.stage} failure`);
+    }
     if (previous.stage === 'm2_metrics_results' || previous.stage === 'm7_learning') this.evaluationStepCalls += 1;
     const next = transition(previous);
     await this.history.save(next);
@@ -544,8 +666,10 @@ function createFixture(input: {
   prepareError?: Error;
   preparedEvidence?: MarketplaceVisibilityEvidence;
   failNextStartCount?: number;
+  failStepOnceAt?: WorkflowStage;
 } = {}) {
   const calls: string[] = [];
+  const emittedEvents: WorkflowEvent[] = [];
   const history = new InMemoryHistory(calls, [
     ...(input.previous ? [input.previous] : []),
     ...(input.otherRuns ?? []),
@@ -556,6 +680,7 @@ function createFixture(input: {
     nextStartStage: input.nextStartStage ?? 'm1_context',
     nextStartStatus: input.nextStartStatus,
     failNextStartCount: input.failNextStartCount ?? 0,
+    failStepOnceAt: input.failStepOnceAt,
   });
   const prompt = new FakeOwnerPrompt(calls, input.promptResult ?? { status: 'cancelled' });
   const dependencies: RollingReviewDependencies = {
@@ -568,9 +693,19 @@ function createFixture(input: {
       if (input.prepareError) throw input.prepareError;
       return input.preparedEvidence ?? freshEvidence(reviewInput.identity, reviewInput.through);
     },
+    emit: (event) => {
+      emittedEvents.push(event);
+    },
   };
 
-  return { calls, engine, history, prompt, service: createMarketplaceRollingReviewService(dependencies) };
+  return {
+    calls,
+    emittedEvents,
+    engine,
+    history,
+    prompt,
+    service: createMarketplaceRollingReviewService(dependencies),
+  };
 }
 
 function nextReviewInput(): RollingReviewInput {
@@ -724,7 +859,7 @@ function testPlan() {
   } as WorkflowRunState['moduleOutputs']['m6'];
 }
 
-function hypothesis() {
+function hypothesis(overrides: Record<string, unknown> = {}) {
   return {
     hypothesis: 'A clearer first listing line may improve qualified app opens',
     primaryVariable: 'listing opening line',
@@ -732,6 +867,7 @@ function hypothesis() {
     keepConstant: ['pricing', 'app behavior'],
     expectedSignal: 'More qualified app opens',
     notes: [],
+    ...overrides,
   } as NonNullable<WorkflowRunState['moduleOutputs']['m5']>;
 }
 

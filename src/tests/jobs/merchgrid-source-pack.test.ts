@@ -224,6 +224,36 @@ describe('MerchGrid source-pack jobs', () => {
     expect(result.artifactPath).toContain('weekly-reviews');
   });
 
+  it('reports every exact missing weekly source-date before derivation or artifact writes', async () => {
+    const dependencies = await fakeDependencies();
+    const missing = new Set(['posthog/2026-08-10', 'fly_metrics/2026-08-20']);
+
+    for (const source of ['posthog', 'fly_metrics', 'shopify_partner'] as const) {
+      for (const date of datesThrough('2026-08-21', 14)) {
+        if (missing.has(`${source}/${date}`)) continue;
+        await dependencies.repository.save({
+          source,
+          date,
+          collectedAt: '2026-08-22T00:05:00.000Z',
+          status: 'complete',
+          metrics: source === 'posthog'
+            ? { app_opened_count: 8 }
+            : source === 'fly_metrics'
+              ? { request_count: 100 }
+              : { installs: 2 },
+          notes: [],
+        });
+      }
+    }
+
+    await expect(runWeeklyReview({ through: '2026-08-21', dependencies: { ...dependencies, adapters: [] } }))
+      .rejects.toMatchObject({
+        code: 'storage_failed',
+        message: 'Missing weekly metric snapshots (2): posthog/2026-08-10, fly_metrics/2026-08-20',
+      });
+    await expect(dependencies.artifacts.loadWeeklyReview('2026-08-21')).resolves.toBeUndefined();
+  });
+
   it('rejects a saved artifact that does not satisfy the aggregate evidence schema', async () => {
     const dependencies = await fakeDependencies();
     const result = await runDailyCollection({ date: '2026-08-21', dependencies });

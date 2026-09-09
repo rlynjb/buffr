@@ -211,14 +211,37 @@ export function buildResultEvidenceForRun(input: {
   return MarketplaceVisibilityEvidenceSchema.parse({ ...fresh, subjectRef: initial.subjectRef });
 }
 
-export function priorLearningFromRun(state: WorkflowRunState): PriorLearningContext | undefined {
+export function priorLearningFromRun(
+  state: WorkflowRunState,
+  runRootRef = 'artifacts/workflow-runs',
+): PriorLearningContext | undefined {
   if (state.experimentApplication?.status !== 'applied' || !state.moduleOutputs.m7) return undefined;
   const result = state.evidenceSnapshots?.result;
   if (!result || result.product !== 'marketplace_visibility') return undefined;
+  const identity = state.marketplaceIdentity;
+  const initial = state.evidenceSnapshots?.initial;
+  if (!identity) return undefined;
+  if (
+    !initial
+    || initial.product !== 'marketplace_visibility'
+    || state.subjectRef !== initial.subjectRef
+    || initial.profile !== identity.profile
+    || initial.productRef !== identity.productRef
+    || initial.marketplaceContext.productRef !== identity.productRef
+    || result.profile !== identity.profile
+    || result.productRef !== identity.productRef
+    || result.marketplaceContext.productRef !== identity.productRef
+    || result.subjectRef !== initial.subjectRef
+  ) {
+    throw new AppError(
+      'validation_failed',
+      'Prior learning evidence must match its marketplace product identity',
+    );
+  }
   return PriorLearningContextSchema.parse({
     sourceRunId: state.runId,
     sourceEvidenceRef: result.artifactRef,
-    experimentPlanRef: `artifacts/workflow-runs/${state.runId}/experiment-plan.json`,
+    experimentPlanRef: `${runRootRef}/${state.runId}/experiment-plan.json`,
     outcome: state.moduleOutputs.m7.outcome,
     hypothesisEvaluation: state.moduleOutputs.m7.hypothesisEvaluation,
     learning: state.moduleOutputs.m7.learning,

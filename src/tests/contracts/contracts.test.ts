@@ -226,6 +226,30 @@ describe('contracts', () => {
     })).toThrow();
   });
 
+  it.each(['learning', 'nextActionRationale'] as const)(
+    'caps prior-learning %s at 1000 characters',
+    (field) => {
+      const priorLearning = {
+        sourceRunId: 'marketplace-2026-09-01',
+        sourceEvidenceRef: 'artifacts/merchgrid/weekly/2026-09-01.json',
+        experimentPlanRef: 'artifacts/workflow-runs/marketplace-2026-08-25/experiment-plan.json',
+        outcome: 'inconclusive',
+        hypothesisEvaluation: 'partly_supported',
+        learning: 'A',
+        confidence: 'low',
+        nextAction: 'iterate',
+        nextActionRationale: 'B',
+        [field]: 'x'.repeat(1_000),
+      } as const;
+
+      expect(PriorLearningContextSchema.parse(priorLearning)[field]).toHaveLength(1_000);
+      expect(() => PriorLearningContextSchema.parse({
+        ...priorLearning,
+        [field]: 'x'.repeat(1_001),
+      })).toThrow();
+    },
+  );
+
   it('returns parsed schema defaults from the shared parser helper', () => {
     const result = parseWithSchema(
       ResearchOutputSchema,

@@ -162,6 +162,11 @@ export async function runWeeklyReview(input: {
     loadPeriod(input.dependencies.repository, previous.startDate, previous.endDate),
     loadPeriod(input.dependencies.repository, current.startDate, current.endDate),
   ]);
+  assertCompleteWeeklySnapshotSet(
+    [...previousSnapshots, ...currentSnapshots],
+    previous.startDate,
+    current.endDate,
+  );
   const review = buildWeeklyBusinessReview({ previous: previousSnapshots, current: currentSnapshots });
   const artifactPath = await input.dependencies.artifacts.saveWeeklyReview(through, toMerchGridReviewEvidence(review));
 
@@ -175,6 +180,36 @@ async function loadPeriod(
 ) {
   const snapshots = await Promise.all(SOURCES.map((source) => repository.list(source, fromDate, throughDate)));
   return snapshots.flat();
+}
+
+function assertCompleteWeeklySnapshotSet(
+  snapshots: readonly { source: MetricSource; date: string }[],
+  fromDate: string,
+  throughDate: string,
+): void {
+  const available = new Set(snapshots.map((snapshot) => `${snapshot.source}/${snapshot.date}`));
+  const dates = datesFromThrough(fromDate, throughDate);
+  const missing = SOURCES.flatMap((source) => dates
+    .map((date) => `${source}/${date}`)
+    .filter((key) => !available.has(key)));
+
+  if (missing.length > 0) {
+    throw new AppError(
+      'storage_failed',
+      `Missing weekly metric snapshots (${missing.length}): ${missing.join(', ')}`,
+    );
+  }
+}
+
+function datesFromThrough(fromDate: string, throughDate: string): string[] {
+  const current = new Date(`${parseDate(fromDate)}T00:00:00.000Z`);
+  const end = parseDate(throughDate);
+  const dates: string[] = [];
+  while (current.toISOString().slice(0, 10) <= end) {
+    dates.push(current.toISOString().slice(0, 10));
+    current.setUTCDate(current.getUTCDate() + 1);
+  }
+  return dates;
 }
 
 function completedUtcWindow(date: string, currentTime: Date): CollectionWindow {

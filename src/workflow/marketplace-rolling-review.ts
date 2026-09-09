@@ -19,8 +19,10 @@ import {
 } from '../contracts/workflow.js';
 import { AppError } from '../core/errors.js';
 import type { MarketplaceRunHistoryRepository } from '../storage/runs.js';
+import type { TraceSink } from '../tracing/events.js';
 import type { WorkflowEngine } from './engine.js';
 import { buildResultEvidenceForRun, priorLearningFromRun } from './marketplace-visibility-profile.js';
+import { appendEvent } from './state.js';
 
 const OwnerApplicationResponseSchema = z.discriminatedUnion('status', [
   z.object({ status: z.literal('applied'), appliedAt: z.string() }).strict(),
@@ -41,6 +43,8 @@ const EVALUATION_STAGES: ReadonlySet<WorkflowStage> = new Set([
   'm2_metrics_results',
   'm7_learning',
 ]);
+
+const OWNER_PROMPT_SUMMARY_MAX_LENGTH = 240;
 
 export type OwnerApplicationPrompt = {
   confirm(input: {
@@ -86,6 +90,8 @@ export type RollingReviewDependencies = {
   prompt: OwnerApplicationPrompt;
   prepareWeeklyEvidence(input: RollingReviewInput & { identity: MarketplaceProductIdentity }): Promise<MarketplaceVisibilityEvidence>;
   now: () => Date;
+  runRootRef?: string;
+  emit?: TraceSink['emit'];
 };
 
 export type MarketplaceRollingReviewService = {
@@ -116,7 +122,11 @@ export function createMarketplaceRollingReviewService(
     async nextReview(input): Promise<RollingReviewResult> {
       const prepared = await prepareAndValidate(input, dependencies);
       const existing = await findExistingCycle(prepared, dependencies.history);
-      if (existing) return resultForExisting(existing);
+      if (existing) {
+        const advanced = await advanceNewReview(existing, dependencies);
+        const recorded = await ensureRollingReviewEvents(advanced, prepared, dependencies);
+        return resultForExisting(recorded, dependencies.runRootRef);
+      }
 
       const previous = await dependencies.history.findLatestByProduct(prepared.identity);
       if (previous) assertRunMatchesIdentity(previous, prepared.identity, 'Previous marketplace review');
@@ -125,10 +135,11 @@ export function createMarketplaceRollingReviewService(
         ? await resolvePreviousRun(previous, prepared, dependencies)
         : undefined;
       const current = await startAndAdvanceNextRun(prepared, resolved, dependencies);
+      const recorded = await ensureRollingReviewEvents(current, prepared, dependencies, resolved);
 
       return {
         ...(resolved ? { previousRun: { runId: resolved.state.runId, resolution: resolved.resolution } } : {}),
-        currentRun: toCurrentRunResult(current),
+        currentRun: toCurrentRunResult(recorded, dependencies.runRootRef),
       };
     },
   };
@@ -220,7 +231,7 @@ async function resolvePreviousRun(
     return {
       state: previous,
       resolution: 'already_resolved',
-      priorLearning: priorLearningFromRun(previous),
+      priorLearning: priorLearningFromRun(previous, dependencies.runRootRef),
     };
   }
 
@@ -238,6 +249,7 @@ async function resolvePreviousRun(
       return { state: stopped, resolution: 'not_applied' };
     }
 
+    assertApplicationAfterPriorBoundaries(previous, application);
     assertQualifiedResultEvidence(previous, prepared, application);
     const applied = await dependencies.engine.recordExperimentApplication({
       runId: previous.runId,
@@ -263,7 +275,7 @@ async function resolvePreviousRun(
     return {
       state: completed,
       resolution: 'evaluated',
-      priorLearning: priorLearningFromRun(completed),
+      priorLearning: priorLearningFromRun(completed, dependencies.runRootRef),
     };
   }
 
@@ -325,7 +337,7 @@ async function closeAppliedPreviousRun(
   return {
     state: completed,
     resolution,
-    priorLearning: priorLearningFromRun(completed),
+    priorLearning: priorLearningFromRun(completed, dependencies.runRootRef),
   };
 }
 
@@ -334,7 +346,10 @@ async function advanceEvaluation(
   dependencies: RollingReviewDependencies,
 ): Promise<WorkflowRunState> {
   let current = initial;
-  while (EVALUATION_STAGES.has(current.stage) && current.status === 'ready_for_evaluation') {
+  while (
+    (EVALUATION_STAGES.has(current.stage) && current.status === 'ready_for_evaluation')
+    || (current.stage === 'm3_research' && current.status === 'researching')
+  ) {
     current = await dependencies.engine.step(current.runId);
   }
   if (!isCompletedWithLearning(current)) {
@@ -351,7 +366,7 @@ async function startAndAdvanceNextRun(
   previous: ResolvedPreviousRun | undefined,
   dependencies: RollingReviewDependencies,
 ): Promise<WorkflowRunState> {
-  let current = await dependencies.engine.startMarketplaceVisibility({
+  const current = await dependencies.engine.startMarketplaceVisibility({
     runId: prepared.cycleRunId,
     subjectRef: prepared.freshEvidence.subjectRef,
     initialEvidence: prepared.freshEvidence,
@@ -359,22 +374,100 @@ async function startAndAdvanceNextRun(
     ...(previous ? { previousRunRef: previous.state.runId } : {}),
     ...(previous?.priorLearning ? { priorLearning: previous.priorLearning } : {}),
   });
+  return advanceNewReview(current, dependencies);
+}
+
+async function advanceNewReview(
+  initial: WorkflowRunState,
+  dependencies: RollingReviewDependencies,
+): Promise<WorkflowRunState> {
+  let current = initial;
   while (NEW_REVIEW_STAGES.has(current.stage) && isNewReviewStageReady(current.status)) {
     current = await dependencies.engine.step(current.runId);
   }
   return current;
 }
 
-function resultForExisting(existing: WorkflowRunState): RollingReviewResult {
-  return { currentRun: toCurrentRunResult(existing) };
+async function ensureRollingReviewEvents(
+  current: WorkflowRunState,
+  prepared: PreparedReview,
+  dependencies: RollingReviewDependencies,
+  resolved?: ResolvedPreviousRun,
+): Promise<WorkflowRunState> {
+  if (current.events.some((event) => event.type === 'rolling_review.completed')) return current;
+
+  const previous = resolved?.state
+    ?? (current.previousRunRef ? await dependencies.history.load(current.previousRunRef) : undefined);
+  const priorLearning = current.priorLearning;
+  const eventInputs = [
+    {
+      type: 'rolling_review.started',
+      message: 'Rolling marketplace review started',
+      data: { ...prepared.identity, through: prepared.through },
+    },
+    ...(previous ? [{
+      type: 'rolling_review.previous_run_found',
+      message: 'Previous marketplace review found',
+      data: { previousRunId: previous.runId },
+    }] : []),
+    ...(previous && isCompletedWithLearning(previous) ? [{
+      type: 'rolling_review.previous_run_evaluated',
+      message: 'Previous marketplace review evaluation available',
+      data: { previousRunId: previous.runId },
+    }] : []),
+    ...(priorLearning ? [{
+      type: 'rolling_review.prior_learning_selected',
+      message: 'Bounded prior marketplace learning selected',
+      data: {
+        sourceRunId: priorLearning.sourceRunId,
+        sourceEvidenceRef: priorLearning.sourceEvidenceRef,
+        experimentPlanRef: priorLearning.experimentPlanRef,
+      },
+    }] : []),
+    {
+      type: 'rolling_review.next_run_created',
+      message: 'Next marketplace review run created',
+      data: { currentRunId: current.runId },
+    },
+    {
+      type: 'rolling_review.completed',
+      message: 'Rolling marketplace review completed',
+      data: { currentRunId: current.runId },
+    },
+  ];
+  const existingTypes = new Set(current.events.map((event) => event.type));
+  let next = current;
+  for (const eventInput of eventInputs) {
+    if (existingTypes.has(eventInput.type)) continue;
+    next = appendEvent(next, {
+      ...eventInput,
+      stage: current.stage,
+      now: dependencies.now(),
+    }) as WorkflowRunState;
+  }
+  if (next === current) return current;
+
+  await dependencies.history.save(next);
+  const persisted = await dependencies.history.load(current.runId);
+  for (const event of persisted.events.slice(current.events.length)) {
+    await dependencies.emit?.(event);
+  }
+  return persisted;
 }
 
-function toCurrentRunResult(state: WorkflowRunState): RollingReviewResult['currentRun'] {
+function resultForExisting(existing: WorkflowRunState, runRootRef?: string): RollingReviewResult {
+  return { currentRun: toCurrentRunResult(existing, runRootRef) };
+}
+
+function toCurrentRunResult(
+  state: WorkflowRunState,
+  runRootRef = 'artifacts/workflow-runs',
+): RollingReviewResult['currentRun'] {
   return {
     runId: state.runId,
     status: state.status,
     stage: state.stage,
-    ...(state.moduleOutputs.m6 ? { experimentPlanRef: `artifacts/workflow-runs/${state.runId}/experiment-plan.json` } : {}),
+    ...(state.moduleOutputs.m6 ? { experimentPlanRef: `${runRootRef}/${state.runId}/experiment-plan.json` } : {}),
   };
 }
 
@@ -383,7 +476,15 @@ function experimentSummary(state: WorkflowRunState): string {
   if (!revision) {
     throw new AppError('validation_failed', 'Previous marketplace review cannot request application without a test hypothesis');
   }
-  return revision;
+  const sanitized = revision
+    .replace(/[\p{Cc}\p{Cf}]/gu, ' ')
+    .replace(/\s+/gu, ' ')
+    .trim();
+  const bounded = [...sanitized].slice(0, OWNER_PROMPT_SUMMARY_MAX_LENGTH).join('');
+  if (!bounded) {
+    throw new AppError('validation_failed', 'Previous marketplace review test hypothesis is not safe to display');
+  }
+  return bounded;
 }
 
 function assertQualifiedResultEvidence(
@@ -403,6 +504,34 @@ function assertQualifiedResultEvidence(
     );
   }
   assertResultWindowAfterApplication(application.appliedAt, prepared.through);
+}
+
+function assertApplicationAfterPriorBoundaries(
+  previous: WorkflowRunState,
+  application: Extract<ExperimentApplication, { status: 'applied' }>,
+): void {
+  const planReadyEvent = [...previous.events]
+    .reverse()
+    .find((event) => event.type === 'workflow.advanced' && event.stage === 'approval_wait');
+  const planDate = (planReadyEvent?.createdAt ?? previous.updatedAt).slice(0, 10);
+  if (application.appliedAt < planDate) {
+    throw new AppError(
+      'validation_failed',
+      `Experiment application date cannot precede experiment plan date ${planDate}`,
+    );
+  }
+
+  const initial = previous.evidenceSnapshots?.initial;
+  if (!initial || initial.product !== 'marketplace_visibility') {
+    throw new AppError('validation_failed', 'Experiment application requires prior marketplace visibility evidence');
+  }
+  const priorEvidenceDate = initial.subjectRef.slice(initial.subjectRef.lastIndexOf(':') + 1);
+  if (application.appliedAt <= priorEvidenceDate) {
+    throw new AppError(
+      'validation_failed',
+      `Experiment application date must be later than prior evidence date ${priorEvidenceDate}`,
+    );
+  }
 }
 
 function assertResultWindowAfterApplication(appliedAt: string, through: string): void {
