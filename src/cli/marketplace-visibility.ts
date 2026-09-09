@@ -1,42 +1,49 @@
+import { createInterface } from 'node:readline/promises';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { OpenAiAgentRunner } from '../agents/runner.js';
 import { createMarketplaceVisibilityModuleExecutor } from '../agents/marketplace-visibility/modules.js';
-import { createHostedWebSearchResearchTool } from '../agents/research/hosted-web-search.js';
-import { loadMarketplaceResearchConfig } from '../agents/research/marketplace-config.js';
-import { MarketplaceVisibilityProfileSchema, type MarketplaceVisibilityProfile } from '../contracts/marketplace-visibility.js';
+import {
+  MarketplaceVisibilityProfileSchema,
+  ProductRefSchema,
+  type MarketplaceVisibilityProfile,
+} from '../contracts/marketplace-visibility.js';
+import { UtcDateSchema } from '../contracts/metrics.js';
 import {
   loadMarketplaceListingContext,
   loadMarketplaceVisibilityContext,
 } from '../connectors/marketplace/local-context.js';
 import { AppError } from '../core/errors.js';
 import { loadLocalEnvironment } from '../core/local-env.js';
-import { JsonFileMerchGridReviewArtifactRepository } from '../jobs/merchgrid-source-pack.js';
-import { JsonFileRunRepository, type RunRepository } from '../storage/runs.js';
+import {
+  JsonFileMerchGridReviewArtifactRepository,
+  runWeeklyReview,
+  type MerchGridSourcePackDependencies,
+} from '../jobs/merchgrid-source-pack.js';
+import { toMerchGridReviewEvidence } from '../metrics/evidence.js';
+import { JsonFileMetricSnapshotRepository } from '../storage/metric-snapshots.js';
+import { JsonFileRunRepository } from '../storage/runs.js';
 import { createWorkflowEngine } from '../workflow/engine.js';
-import { createMarketplaceVisibilityService } from '../workflow/marketplace-visibility-profile.js';
-
-type RunState = { runId: string; status: string; stage: string; evidenceRefs: string[] };
+import {
+  createMarketplaceRollingReviewService,
+  type MarketplaceRollingReviewService,
+  type OwnerApplicationPrompt,
+} from '../workflow/marketplace-rolling-review.js';
+import { buildRollingVisibilityEvidence } from '../workflow/marketplace-visibility-profile.js';
 
 export type MarketplaceVisibilityCliDependencies = {
-  service: {
-    startVisibilityReview?: (input: {
-      profile: MarketplaceVisibilityProfile;
-      runId: string;
-      date?: string;
-      contextPath: string;
-      listingContextPath?: string;
-    }) => Promise<RunState>;
-    supplyVisibilityResult?: (input: { profile: MarketplaceVisibilityProfile; runId: string; through?: string }) => Promise<RunState>;
-  };
-  engine: {
-    step?: (runId: string) => Promise<RunState>;
-    approveExperiment?: (runId: string) => Promise<RunState>;
-    rejectExperiment?: (input: { runId: string; reason: string }) => Promise<RunState>;
-  };
+  rollingReviews: MarketplaceRollingReviewService;
   defaultContextPath?: string;
   defaultListingContextPath?: string;
-  now?: () => Date;
+};
+
+type OwnerPromptInterface = {
+  question(prompt: string): Promise<string>;
+  close(): void;
+};
+
+export type OwnerApplicationPromptOptions = {
+  createInterface?: OwnerPromptInterface | (() => OwnerPromptInterface);
 };
 
 export async function runMarketplaceVisibilityCli(input: {
@@ -45,136 +52,135 @@ export async function runMarketplaceVisibilityCli(input: {
   writeLine: (line: string) => void;
 }): Promise<void> {
   const [command, ...options] = input.args;
-
-  if (command === 'visibility-review') {
-    assertOptions(options, ['--profile'], ['--run-id', '--date', '--context', '--listing-context']);
-    const profile = parseProfile(option(options, '--profile'));
-    const date = optionalOption(options, '--date');
-    if (profile === 'merchgrid_shopify_app_store' && !date) {
-      throw new AppError('validation_failed', 'Expected --date value for merchgrid_shopify_app_store');
-    }
-    if (profile === 'etsy_listing' && date) {
-      throw new AppError('validation_failed', '--date is not accepted for etsy_listing');
-    }
-
-    const contextPath = optionalOption(options, '--context') ?? input.dependencies.defaultContextPath;
-    if (!contextPath) throw new AppError('configuration_failed', 'Missing required marketplace visibility context path');
-    const listingContextPath = optionalOption(options, '--listing-context') ?? input.dependencies.defaultListingContextPath;
-
-    const runId = optionalOption(options, '--run-id') ?? defaultVisibilityRunId({
-      profile,
-      date,
-      hasListingContext: Boolean(listingContextPath),
-      now: input.dependencies.now?.() ?? new Date(),
-    });
-    let state = await requireService(input.dependencies.service, 'startVisibilityReview')({
-      profile,
-      runId,
-      date,
-      contextPath,
-      listingContextPath,
-    });
-    state = await continueWorkflowStages(
-      state,
-      runId,
-      input.dependencies.engine,
-      ['m1_context', 'm2_metrics_initial', 'm4_diagnosis', 'm5_hypothesis', 'm6_test_plan'],
-    );
-    return printRun(input.writeLine, state);
+  if (command !== 'next-review') {
+    throw new AppError('validation_failed', 'Expected next-review command');
   }
 
-  if (command === 'approve') {
-    assertOptions(options, ['--run-id']);
-    return printRun(input.writeLine, await requireEngine(input.dependencies.engine, 'approveExperiment')(option(options, '--run-id')));
-  }
+  assertOptions(options, ['--profile', '--product-ref', '--through'], ['--context', '--listing-context']);
+  const profile = parseProfile(option(options, '--profile'));
+  const productRef = parseProductRef(option(options, '--product-ref'));
+  const through = parseUtcDate(option(options, '--through'));
+  const contextPath = optionalOption(options, '--context') ?? input.dependencies.defaultContextPath;
+  if (!contextPath) throw new AppError('configuration_failed', 'Missing required marketplace visibility context path');
 
-  if (command === 'reject') {
-    assertOptions(options, ['--run-id', '--reason']);
-    return printRun(
-      input.writeLine,
-      await requireEngine(input.dependencies.engine, 'rejectExperiment')({
-        runId: option(options, '--run-id'),
-        reason: option(options, '--reason'),
-      }),
-    );
-  }
-
-  if (command === 'record-result') {
-    assertOptions(options, ['--profile', '--run-id'], ['--through']);
-    const runId = option(options, '--run-id');
-    let state = await requireService(input.dependencies.service, 'supplyVisibilityResult')({
-      profile: parseProfile(option(options, '--profile')),
-      runId,
-      through: optionalOption(options, '--through'),
-    });
-    state = await continueWorkflowStages(state, runId, input.dependencies.engine, ['m2_metrics_results', 'm7_learning']);
-    return printRun(input.writeLine, state);
-  }
-
-  throw new AppError('validation_failed', 'Expected visibility-review, approve, reject, or record-result command');
+  const result = await input.dependencies.rollingReviews.nextReview({
+    profile,
+    productRef,
+    through,
+    contextPath,
+    ...(optionalOption(options, '--listing-context') ?? input.dependencies.defaultListingContextPath
+      ? { listingContextPath: optionalOption(options, '--listing-context') ?? input.dependencies.defaultListingContextPath }
+      : {}),
+  });
+  printReview(input.writeLine, result);
 }
 
+/** Creates the interactive approval boundary used only by the runtime composition. */
+export function createOwnerApplicationPrompt(options: OwnerApplicationPromptOptions = {}): OwnerApplicationPrompt {
+  const suppliedInterface = options.createInterface;
+  const interfaceFactory: () => OwnerPromptInterface = typeof suppliedInterface === 'function'
+    ? suppliedInterface
+    : () => suppliedInterface ?? createInterface({ input: process.stdin, output: process.stdout });
+
+  return {
+    async confirm(input) {
+      let terminal: OwnerPromptInterface | undefined;
+      try {
+        terminal = interfaceFactory();
+        const applied = await askYesNo(
+          terminal,
+          `Experiment for ${input.previousRunId}: ${input.experimentSummary}\nWas it applied? (yes/no) `,
+        );
+        if (!applied) return { status: 'not_applied' };
+        return { status: 'applied', appliedAt: await askUtcDate(terminal) };
+      } catch {
+        return { status: 'cancelled' };
+      } finally {
+        terminal?.close();
+      }
+    },
+  };
+}
+
+/** Builds the runtime graph from local persisted evidence; source-provider adapters are intentionally absent. */
 export function createMarketplaceVisibilityDependencies(
   env: NodeJS.ProcessEnv = loadLocalEnvironment(),
 ): MarketplaceVisibilityCliDependencies {
   const dataDir = required(env, 'MERCHGRID_METRICS_DATA_DIR');
-  const runs: RunRepository = new JsonFileRunRepository({ rootDir: join(dataDir, 'workflow-runs') });
-  const researchConfig = loadMarketplaceResearchConfig(env);
-  const agentRunner = new OpenAiAgentRunner({ apiKey: env.OPENAI_API_KEY });
-  const researchTool = researchConfig.enabled
-    ? createHostedWebSearchResearchTool({ runner: agentRunner, config: researchConfig })
-    : undefined;
+  const artifacts = new JsonFileMerchGridReviewArtifactRepository({ rootDir: join(dataDir, 'artifacts') });
+  const weeklyEvidenceDependencies: MerchGridSourcePackDependencies = {
+    adapters: [],
+    repository: new JsonFileMetricSnapshotRepository({ rootDir: join(dataDir, 'snapshots') }),
+    artifacts,
+  };
+  const runs = new JsonFileRunRepository({ rootDir: join(dataDir, 'workflow-runs') });
   const engine = createWorkflowEngine({
     repository: runs,
-    modules: createMarketplaceVisibilityModuleExecutor({
-      agentRunner,
-      research: { config: researchConfig, tool: researchTool },
-    }),
-    researchLimits: {
-      maxToolCalls: researchConfig.limits.maxToolCalls,
-      maxWallClockMs: researchConfig.limits.maxWallClockMs,
-      permittedTools: ['hosted_web_search'],
-      costBudget: {
-        maxTokens: researchConfig.limits.maxTokens,
-        maxEstimatedCostUsd: researchConfig.limits.maxEstimatedCostUsd,
-      },
-    },
+    modules: createMarketplaceVisibilityModuleExecutor({ agentRunner: new OpenAiAgentRunner({ apiKey: env.OPENAI_API_KEY }) }),
   });
 
   return {
-    engine,
-    service: createMarketplaceVisibilityService({
+    rollingReviews: createMarketplaceRollingReviewService({
+      history: runs,
       engine,
-      merchgridArtifacts: new JsonFileMerchGridReviewArtifactRepository({ rootDir: join(dataDir, 'artifacts') }),
-      merchgridArtifactRootRef: join(dataDir, 'artifacts'),
-      runRepository: runs,
-      loadContext: loadMarketplaceVisibilityContext,
-      loadListingContext: loadMarketplaceListingContext,
+      prompt: createOwnerApplicationPrompt(),
+      now: () => new Date(),
+      prepareWeeklyEvidence: async (input) => {
+        const artifact = await artifacts.loadWeeklyReview(input.through)
+          ?? toMerchGridReviewEvidence((await runWeeklyReview({ through: input.through, dependencies: weeklyEvidenceDependencies })).review);
+        const context = await loadMarketplaceVisibilityContext(input.contextPath);
+        const listingContext = input.listingContextPath
+          ? await loadMarketplaceListingContext(input.listingContextPath)
+          : undefined;
+        return buildRollingVisibilityEvidence({
+          artifact,
+          identity: input.identity,
+          through: input.through,
+          context,
+          listingContext,
+          artifactRootRef: 'artifacts',
+        });
+      },
     }),
     defaultContextPath: env.MERCHGRID_VISIBILITY_CONTEXT_PATH,
     defaultListingContextPath: env.MERCHGRID_LISTING_CONTEXT_PATH,
   };
 }
 
-async function continueWorkflowStages(
-  initialState: RunState,
-  runId: string,
-  engine: MarketplaceVisibilityCliDependencies['engine'],
-  stages: readonly string[],
-): Promise<RunState> {
-  let state = initialState;
-  while (
-    (stages.includes(state.stage) && ['analyzing', 'ready_for_evaluation'].includes(state.status)) ||
-    (state.stage === 'm3_research' && state.status === 'researching')
-  ) {
-    state = await requireEngine(engine, 'step')(runId);
+async function askYesNo(terminal: OwnerPromptInterface, prompt: string): Promise<boolean> {
+  let question = prompt;
+  while (true) {
+    const response = (await terminal.question(question)).trim().toLowerCase();
+    if (response === 'yes') return true;
+    if (response === 'no') return false;
+    question = 'Please answer yes or no. Was it applied? (yes/no) ';
   }
-  return state;
+}
+
+async function askUtcDate(terminal: OwnerPromptInterface): Promise<string> {
+  let question = 'Applied UTC date (YYYY-MM-DD): ';
+  while (true) {
+    const result = UtcDateSchema.safeParse((await terminal.question(question)).trim());
+    if (result.success) return result.data;
+    question = 'Enter a valid UTC date (YYYY-MM-DD): ';
+  }
 }
 
 function parseProfile(value: string): MarketplaceVisibilityProfile {
   const result = MarketplaceVisibilityProfileSchema.safeParse(value);
   if (!result.success) throw new AppError('validation_failed', 'Expected supported marketplace visibility profile');
+  return result.data;
+}
+
+function parseProductRef(value: string): string {
+  const result = ProductRefSchema.safeParse(value);
+  if (!result.success) throw new AppError('validation_failed', 'Expected supported marketplace product reference');
+  return result.data;
+}
+
+function parseUtcDate(value: string): string {
+  const result = UtcDateSchema.safeParse(value);
+  if (!result.success) throw new AppError('validation_failed', 'Expected --through UTC date');
   return result.data;
 }
 
@@ -191,59 +197,30 @@ function optionalOption(options: readonly string[], name: string): string | unde
 
 function assertOptions(options: readonly string[], required: readonly string[], optional: readonly string[] = []): void {
   const names = [...required, ...optional];
-  if (options.length % 2 !== 0 || options.some((value, index) => index % 2 === 0 && !names.includes(value))
+  if (
+    options.length % 2 !== 0
+    || options.some((value, index) => index % 2 === 0 && !names.includes(value))
     || names.some((name) => options.filter((value) => value === name).length > 1)
-    || required.some((name) => !options.includes(name))) {
+    || required.some((name) => !options.includes(name))
+  ) {
     throw new AppError('validation_failed', `Expected options: ${names.join(', ')}`);
   }
 }
 
-function requireService<K extends keyof MarketplaceVisibilityCliDependencies['service']>(
-  service: MarketplaceVisibilityCliDependencies['service'],
-  name: K,
-): NonNullable<MarketplaceVisibilityCliDependencies['service'][K]> {
-  const method = service[name];
-  if (!method) throw new AppError('configuration_failed', `Missing marketplace visibility service method: ${name}`);
-  return method as NonNullable<MarketplaceVisibilityCliDependencies['service'][K]>;
-}
-
-function requireEngine<K extends keyof MarketplaceVisibilityCliDependencies['engine']>(
-  engine: MarketplaceVisibilityCliDependencies['engine'],
-  name: K,
-): NonNullable<MarketplaceVisibilityCliDependencies['engine'][K]> {
-  const method = engine[name];
-  if (!method) throw new AppError('configuration_failed', `Missing marketplace visibility engine method: ${name}`);
-  return method as NonNullable<MarketplaceVisibilityCliDependencies['engine'][K]>;
+function printReview(
+  writeLine: (line: string) => void,
+  result: Awaited<ReturnType<MarketplaceRollingReviewService['nextReview']>>,
+): void {
+  if (result.previousRun) writeLine(`previous: ${result.previousRun.runId} (${result.previousRun.resolution})`);
+  writeLine(`run: ${result.currentRun.runId}`);
+  writeLine(`status: ${result.currentRun.status}`);
+  writeLine(`stage: ${result.currentRun.stage}`);
+  if (result.currentRun.experimentPlanRef) writeLine(`experiment-plan: ${result.currentRun.experimentPlanRef}`);
 }
 
 function required(env: NodeJS.ProcessEnv, name: string): string {
   if (!env[name]) throw new AppError('configuration_failed', `Missing required marketplace visibility configuration: ${name}`);
   return env[name]!;
-}
-
-function defaultVisibilityRunId(input: {
-  profile: MarketplaceVisibilityProfile;
-  date: string | undefined;
-  hasListingContext: boolean;
-  now: Date;
-}): string {
-  const createdDate = formatRunDate(input.now);
-  if (input.profile === 'merchgrid_shopify_app_store') {
-    const suffix = input.hasListingContext ? '-listing-context' : '';
-    return `${createdDate}-merchgrid-visibility-${input.date}${suffix}`;
-  }
-  return `${createdDate}-etsy-visibility-review`;
-}
-
-function formatRunDate(date: Date): string {
-  return date.toISOString().slice(0, 10);
-}
-
-function printRun(writeLine: (line: string) => void, state: RunState): void {
-  writeLine(`run: ${state.runId}`);
-  writeLine(`status: ${state.status}`);
-  writeLine(`stage: ${state.stage}`);
-  writeLine(`artifact: ${state.evidenceRefs.at(-1) ?? 'none'}`);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

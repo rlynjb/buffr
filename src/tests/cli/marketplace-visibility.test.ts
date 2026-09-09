@@ -1,306 +1,183 @@
-import { describe, expect, it } from 'vitest';
-import { runMarketplaceVisibilityCli } from '../../cli/marketplace-visibility.js';
+import { describe, expect, it, vi } from 'vitest';
+import {
+  createOwnerApplicationPrompt,
+  runMarketplaceVisibilityCli,
+  type MarketplaceVisibilityCliDependencies,
+} from '../../cli/marketplace-visibility.js';
 
 describe('marketplace visibility CLI', () => {
-  it('prints only bounded run details for a visibility review', async () => {
+  it('forwards one structured next-review request to the rolling service', async () => {
+    const nextReview = vi.fn(async () => reviewResult());
+
+    await runMarketplaceVisibilityCli(cliInput([
+      'next-review',
+      '--profile', 'merchgrid_shopify_app_store',
+      '--product-ref', 'merchgrid-shopify-app',
+      '--through', '2026-09-07',
+      '--context', 'artifacts/merchgrid/context/review.json',
+      '--listing-context', 'artifacts/merchgrid/context/listing.json',
+    ], { rollingReviews: { nextReview } }));
+
+    expect(nextReview).toHaveBeenCalledWith({
+      profile: 'merchgrid_shopify_app_store',
+      productRef: 'merchgrid-shopify-app',
+      through: '2026-09-07',
+      contextPath: 'artifacts/merchgrid/context/review.json',
+      listingContextPath: 'artifacts/merchgrid/context/listing.json',
+    });
+  });
+
+  it('uses the configured local context defaults', async () => {
+    const nextReview = vi.fn(async () => reviewResult());
+
+    await runMarketplaceVisibilityCli(cliInput([
+      'next-review', '--profile', 'merchgrid_shopify_app_store',
+      '--product-ref', 'merchgrid-shopify-app', '--through', '2026-09-07',
+    ], {
+      rollingReviews: { nextReview },
+      defaultContextPath: 'artifacts/merchgrid/context/default-review.json',
+      defaultListingContextPath: 'artifacts/merchgrid/context/default-listing.json',
+    }));
+
+    expect(nextReview).toHaveBeenCalledWith(expect.objectContaining({
+      contextPath: 'artifacts/merchgrid/context/default-review.json',
+      listingContextPath: 'artifacts/merchgrid/context/default-listing.json',
+    }));
+  });
+
+  it('prints only bounded generated-run details', async () => {
     const lines: string[] = [];
-    const state = {
-      runId: 'visibility-1',
-      status: 'awaiting_approval',
-      stage: 'approval_wait',
-      evidenceRefs: ['initial:marketplace_visibility:merchgrid_shopify_app_store:merchgrid:visibility:2026-08-22'],
-    };
 
     await runMarketplaceVisibilityCli({
-      args: [
-        'visibility-review',
-        '--profile', 'merchgrid_shopify_app_store',
-        '--date', '2026-08-22',
-        '--run-id', 'visibility-1',
-        '--context', 'artifacts/merchgrid/context/merchgrid-visibility-context.json',
-      ],
-      dependencies: {
-        service: { startVisibilityReview: async () => state },
-        engine: { step: async () => state },
-      },
+      ...cliInput([
+        'next-review', '--profile', 'merchgrid_shopify_app_store',
+        '--product-ref', 'merchgrid-shopify-app', '--through', '2026-09-07',
+      ], {
+        rollingReviews: {
+          nextReview: async () => reviewResult({
+            previousRun: { runId: 'previous-review', resolution: 'not_applied' },
+            currentRun: {
+              runId: '2026-09-07-merchgrid_shopify_app_store-merchgrid-shopify-app',
+              status: 'awaiting_approval',
+              stage: 'approval_wait',
+              experimentPlanRef: 'artifacts/workflow-runs/current/experiment-plan.json',
+            },
+          }),
+        },
+        defaultContextPath: 'artifacts/merchgrid/context/default-review.json',
+      }),
       writeLine: (line) => lines.push(line),
     });
 
     expect(lines).toEqual([
-      'run: visibility-1',
+      'previous: previous-review (not_applied)',
+      'run: 2026-09-07-merchgrid_shopify_app_store-merchgrid-shopify-app',
       'status: awaiting_approval',
       'stage: approval_wait',
-      'artifact: initial:marketplace_visibility:merchgrid_shopify_app_store:merchgrid:visibility:2026-08-22',
+      'experiment-plan: artifacts/workflow-runs/current/experiment-plan.json',
     ]);
     expect(lines.join('\n')).not.toMatch(/OPENAI_API_KEY|POSTHOG_PERSONAL_API_KEY|FLY_ACCESS_TOKEN|myshopify/i);
   });
 
-  it('accepts reject with a reason', async () => {
-    const lines: string[] = [];
-    await runMarketplaceVisibilityCli({
-      args: ['reject', '--run-id', 'visibility-1', '--reason', 'Too broad'],
-      dependencies: {
-        service: {},
-        engine: { rejectExperiment: async () => ({ runId: 'visibility-1', status: 'stopped', stage: 'approval_wait', evidenceRefs: [] }) },
-      },
-      writeLine: (line) => lines.push(line),
+  it.each(['visibility-review', 'approve', 'reject', 'record-result'])('rejects removed command %s', async (command) => {
+    await expect(runMarketplaceVisibilityCli(cliInput([command]))).rejects.toMatchObject({
+      code: 'validation_failed',
+      message: 'Expected next-review command',
     });
-
-    expect(lines).toContain('status: stopped');
   });
 
-  it('stops stepping when a visibility review waits for more data', async () => {
-    const lines: string[] = [];
-    let stepCount = 0;
+  it('rejects malformed next-review options before calling the rolling service', async () => {
+    const nextReview = vi.fn(async () => reviewResult());
 
-    await runMarketplaceVisibilityCli({
-      args: [
-        'visibility-review',
-        '--profile', 'merchgrid_shopify_app_store',
-        '--date', '2026-08-22',
-        '--run-id', 'visibility-1',
-        '--context', 'artifacts/merchgrid/context/merchgrid-visibility-context.json',
-      ],
-      dependencies: {
-        service: {
-          startVisibilityReview: async () => ({
-            runId: 'visibility-1',
-            status: 'analyzing',
-            stage: 'm4_diagnosis',
-            evidenceRefs: ['initial-ref'],
-          }),
-        },
-        engine: {
-          step: async () => {
-            stepCount += 1;
-            if (stepCount > 1) throw new Error('CLI should not step a waiting run');
-            return {
-              runId: 'visibility-1',
-              status: 'waiting_for_data',
-              stage: 'm4_diagnosis',
-              evidenceRefs: ['initial-ref'],
-            };
-          },
-        },
-      },
-      writeLine: (line) => lines.push(line),
-    });
+    await expect(runMarketplaceVisibilityCli(cliInput([
+      'next-review', '--profile', 'merchgrid_shopify_app_store', '--product-ref', 'MerchGrid', '--through', '2026-09-07',
+    ], { rollingReviews: { nextReview } }))).rejects.toMatchObject({ code: 'validation_failed' });
 
-    expect(stepCount).toBe(1);
-    expect(lines).toContain('status: waiting_for_data');
-    expect(lines).toContain('stage: m4_diagnosis');
-  });
-
-  it('continues a visibility review through an M3 side route', async () => {
-    const states = [
-      { runId: 'visibility-1', status: 'researching', stage: 'm3_research', evidenceRefs: ['initial-ref'] },
-      { runId: 'visibility-1', status: 'analyzing', stage: 'm4_diagnosis', evidenceRefs: ['initial-ref'] },
-      { runId: 'visibility-1', status: 'awaiting_approval', stage: 'approval_wait', evidenceRefs: ['initial-ref'] },
-    ];
-    const steppedStages: string[] = [];
-    const lines: string[] = [];
-
-    await runMarketplaceVisibilityCli({
-      args: [
-        'visibility-review',
-        '--profile', 'merchgrid_shopify_app_store',
-        '--date', '2026-08-22',
-        '--run-id', 'visibility-1',
-        '--context', 'artifacts/merchgrid/context/merchgrid-visibility-context.json',
-      ],
-      dependencies: {
-        service: {
-          startVisibilityReview: async () => ({
-            runId: 'visibility-1', status: 'analyzing', stage: 'm4_diagnosis', evidenceRefs: ['initial-ref'],
-          }),
-        },
-        engine: {
-          step: async () => {
-            const state = states.shift()!;
-            steppedStages.push(state.stage);
-            return state;
-          },
-        },
-      },
-      writeLine: (line) => lines.push(line),
-    });
-
-    expect(steppedStages).toEqual(['m3_research', 'm4_diagnosis', 'approval_wait']);
-    expect(lines).toContain('stage: approval_wait');
-  });
-
-  it('forwards optional listing context path for a visibility review', async () => {
-    const calls: unknown[] = [];
-    const state = {
-      runId: 'visibility-1',
-      status: 'awaiting_approval',
-      stage: 'approval_wait',
-      evidenceRefs: ['initial-ref'],
-    };
-
-    await runMarketplaceVisibilityCli({
-      args: [
-        'visibility-review',
-        '--profile', 'merchgrid_shopify_app_store',
-        '--date', '2026-08-22',
-        '--run-id', 'visibility-1',
-        '--context', 'artifacts/merchgrid/context/merchgrid-visibility-context.json',
-        '--listing-context', 'artifacts/merchgrid/context/merchgrid-listing-context.json',
-      ],
-      dependencies: {
-        service: {
-          startVisibilityReview: async (input) => {
-            calls.push(input);
-            return state;
-          },
-        },
-        engine: { step: async () => state },
-      },
-      writeLine: () => undefined,
-    });
-
-    expect(calls).toEqual([{
-      profile: 'merchgrid_shopify_app_store',
-      runId: 'visibility-1',
-      date: '2026-08-22',
-      contextPath: 'artifacts/merchgrid/context/merchgrid-visibility-context.json',
-      listingContextPath: 'artifacts/merchgrid/context/merchgrid-listing-context.json',
-    }]);
-  });
-
-  it('generates a date-first run id when a MerchGrid visibility run omits the run id', async () => {
-    const calls: unknown[] = [];
-    const lines: string[] = [];
-
-    await runMarketplaceVisibilityCli({
-      args: [
-        'visibility-review',
-        '--profile', 'merchgrid_shopify_app_store',
-        '--date', '2026-08-07',
-        '--context', 'artifacts/merchgrid/context/merchgrid-visibility-context.json',
-        '--listing-context', 'artifacts/merchgrid/context/merchgrid-listing-context.json',
-      ],
-      dependencies: {
-        service: {
-          startVisibilityReview: async (input) => {
-            calls.push(input);
-            return {
-              runId: input.runId,
-              status: 'awaiting_approval',
-              stage: 'approval_wait',
-              evidenceRefs: [],
-            };
-          },
-        },
-        engine: {},
-        now: () => new Date('2026-08-25T13:00:00.000Z'),
-      },
-      writeLine: (line) => lines.push(line),
-    });
-
-    expect(calls).toMatchObject([{
-      runId: '2026-08-25-merchgrid-visibility-2026-08-07-listing-context',
-    }]);
-    expect(lines).toContain('run: 2026-08-25-merchgrid-visibility-2026-08-07-listing-context');
-  });
-
-  it('uses the default listing context path when the flag is omitted', async () => {
-    const calls: unknown[] = [];
-    const state = {
-      runId: 'visibility-1',
-      status: 'awaiting_approval',
-      stage: 'approval_wait',
-      evidenceRefs: ['initial-ref'],
-    };
-
-    await runMarketplaceVisibilityCli({
-      args: [
-        'visibility-review',
-        '--profile', 'merchgrid_shopify_app_store',
-        '--date', '2026-08-22',
-        '--run-id', 'visibility-1',
-        '--context', 'artifacts/merchgrid/context/merchgrid-visibility-context.json',
-      ],
-      dependencies: {
-        service: {
-          startVisibilityReview: async (input) => {
-            calls.push(input);
-            return state;
-          },
-        },
-        engine: { step: async () => state },
-        defaultListingContextPath: 'artifacts/merchgrid/context/merchgrid-listing-context.json',
-      },
-      writeLine: () => undefined,
-    });
-
-    expect(calls).toEqual([{
-      profile: 'merchgrid_shopify_app_store',
-      runId: 'visibility-1',
-      date: '2026-08-22',
-      contextPath: 'artifacts/merchgrid/context/merchgrid-visibility-context.json',
-      listingContextPath: 'artifacts/merchgrid/context/merchgrid-listing-context.json',
-    }]);
-  });
-
-  it('forwards the result identity and period to the visibility service', async () => {
-    const calls: unknown[] = [];
-
-    await runMarketplaceVisibilityCli({
-      args: [
-        'record-result',
-        '--profile', 'merchgrid_shopify_app_store',
-        '--run-id', 'visibility-1',
-        '--through', '2026-08-22',
-      ],
-      dependencies: {
-        service: {
-          supplyVisibilityResult: async (input) => {
-            calls.push(input);
-            return { runId: 'visibility-1', status: 'stopped', stage: 'approval_wait', evidenceRefs: [] };
-          },
-        },
-        engine: {},
-      },
-      writeLine: () => undefined,
-    });
-
-    expect(calls).toEqual([{
-      profile: 'merchgrid_shopify_app_store',
-      runId: 'visibility-1',
-      through: '2026-08-22',
-    }]);
-  });
-
-  it('steps result metrics and learning before printing the result outcome', async () => {
-    const steppedStages: string[] = [];
-    const lines: string[] = [];
-
-    await runMarketplaceVisibilityCli({
-      args: [
-        'record-result',
-        '--profile', 'merchgrid_shopify_app_store',
-        '--run-id', 'visibility-1',
-        '--through', '2026-09-04',
-      ],
-      dependencies: {
-        service: {
-          supplyVisibilityResult: async () => ({
-            runId: 'visibility-1', status: 'ready_for_evaluation', stage: 'm2_metrics_results', evidenceRefs: ['result-ref'],
-          }),
-        },
-        engine: {
-          step: async () => {
-            const stage = steppedStages.length === 0 ? 'm7_learning' : 'cycle_complete';
-            steppedStages.push(stage);
-            return { runId: 'visibility-1', status: stage === 'cycle_complete' ? 'cycle_complete' : 'ready_for_evaluation', stage, evidenceRefs: ['result-ref'] };
-          },
-        },
-      },
-      writeLine: (line) => lines.push(line),
-    });
-
-    expect(steppedStages).toEqual(['m7_learning', 'cycle_complete']);
-    expect(lines).toContain('stage: cycle_complete');
+    expect(nextReview).not.toHaveBeenCalled();
   });
 });
+
+describe('owner application prompt', () => {
+  it('collects an explicit applied decision followed by a UTC date', async () => {
+    const prompt = createOwnerApplicationPrompt({
+      createInterface: fakePromptInterface(['yes', '2026-09-07']),
+    });
+
+    await expect(prompt.confirm({ previousRunId: 'previous-review', experimentSummary: 'Update listing headline' }))
+      .resolves.toEqual({ status: 'applied', appliedAt: '2026-09-07' });
+  });
+
+  it('re-prompts after invalid answers and dates without inferring a default', async () => {
+    const fake = fakePromptInterface(['perhaps', 'yes', '2026-02-30', '2026-09-07']);
+    const prompt = createOwnerApplicationPrompt({ createInterface: fake });
+
+    await expect(prompt.confirm({ previousRunId: 'previous-review', experimentSummary: 'Update listing headline' }))
+      .resolves.toEqual({ status: 'applied', appliedAt: '2026-09-07' });
+    expect(fake.questions).toHaveLength(4);
+    expect(fake.questions[1]).toMatch(/yes or no/i);
+    expect(fake.questions[3]).toMatch(/UTC date/i);
+    expect(fake.closed).toBe(true);
+  });
+
+  it('returns not applied for an explicit no', async () => {
+    const prompt = createOwnerApplicationPrompt({ createInterface: fakePromptInterface(['no']) });
+
+    await expect(prompt.confirm({ previousRunId: 'previous-review', experimentSummary: 'Update listing headline' }))
+      .resolves.toEqual({ status: 'not_applied' });
+  });
+
+  it('returns cancelled and closes the interface when the terminal prompt is interrupted', async () => {
+    const fake = fakePromptInterface([new Error('readline closed')]);
+    const prompt = createOwnerApplicationPrompt({ createInterface: fake });
+
+    await expect(prompt.confirm({ previousRunId: 'previous-review', experimentSummary: 'Update listing headline' }))
+      .resolves.toEqual({ status: 'cancelled' });
+    expect(fake.closed).toBe(true);
+  });
+});
+
+function cliInput(
+  args: readonly string[],
+  dependencies: Partial<MarketplaceVisibilityCliDependencies> = {},
+): Parameters<typeof runMarketplaceVisibilityCli>[0] {
+  return {
+    args,
+    dependencies: {
+      rollingReviews: { nextReview: async () => reviewResult() },
+      ...dependencies,
+    },
+    writeLine: () => undefined,
+  };
+}
+
+function reviewResult(overrides: Record<string, unknown> = {}) {
+  return {
+    currentRun: {
+      runId: '2026-09-07-merchgrid_shopify_app_store-merchgrid-shopify-app',
+      status: 'awaiting_approval' as const,
+      stage: 'approval_wait' as const,
+    },
+    ...overrides,
+  };
+}
+
+function fakePromptInterface(answers: Array<string | Error>) {
+  const questions: string[] = [];
+  let closed = false;
+  return {
+    questions,
+    get closed() {
+      return closed;
+    },
+    async question(question: string): Promise<string> {
+      questions.push(question);
+      const answer = answers.shift();
+      if (answer instanceof Error) throw answer;
+      if (answer === undefined) throw new Error('No terminal answer available');
+      return answer;
+    },
+    close() {
+      closed = true;
+    },
+  };
+}
