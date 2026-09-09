@@ -232,6 +232,20 @@ export const MarketplaceVisibilityEvidenceSchema = z.object({
       message: 'subjectRef must match the marketplace profile',
     });
   }
+  if (value.profile === 'merchgrid_shopify_app_store' && value.marketplaceContext.marketplace !== 'shopify_app_store') {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['marketplaceContext', 'marketplace'],
+      message: 'marketplaceContext marketplace must match evidence profile',
+    });
+  }
+  if (value.profile === 'etsy_listing' && value.marketplaceContext.marketplace !== 'etsy') {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['marketplaceContext', 'marketplace'],
+      message: 'marketplaceContext marketplace must match evidence profile',
+    });
+  }
   if (value.listingContext && value.listingContext.profile !== value.profile) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,

@@ -157,6 +157,23 @@ describe('marketplace visibility evidence contract', () => {
     })).toThrow();
   });
 
+  it('rejects a marketplace context whose marketplace does not match the evidence profile', () => {
+    expect(() => MarketplaceVisibilityEvidenceSchema.parse({
+      product: 'marketplace_visibility',
+      profile: 'etsy_listing',
+      productRef: 'merchgrid-shopify-app',
+      subjectRef: 'etsy:visibility:listing-123',
+      artifactRef: 'artifacts/etsy/context/etsy-visibility-context.json',
+      evidenceLevel: 'sparse',
+      recommendationType: 'visibility_hypothesis',
+      reviewMode: exploratoryReviewMode(),
+      marketplaceContext: merchGridContext({ productRef: 'merchgrid-shopify-app' }),
+      measuredSignals: {},
+      limitations: [],
+      prohibitedClaims: [],
+    })).toThrow();
+  });
+
   it('keeps legacy evidence readable while accepting a safe product identity', () => {
     expect(MarketplaceVisibilityEvidenceSchema.parse(sparseEvidence())).not.toHaveProperty('productRef');
     expect(MarketplaceProductIdentitySchema.parse({
