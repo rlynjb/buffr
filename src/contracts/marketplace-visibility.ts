@@ -1,4 +1,6 @@
 import { z } from 'zod';
+import { UtcDateSchema } from './metrics.js';
+import { EvaluationOutputSchema } from './modules.js';
 
 /**
  * Sparse-data marketplace visibility boundary.
@@ -55,6 +57,40 @@ export const MarketplaceVisibilityProfileSchema = z.enum([
   'etsy_listing',
 ]);
 
+export const ProductRefSchema = z.string()
+  .min(3)
+  .max(80)
+  .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/u, 'must be lowercase kebab-case')
+  .refine((value) => !UncuratedDataPattern.test(value), 'must not include private or source data markers');
+
+export const MarketplaceProductIdentitySchema = z.object({
+  profile: MarketplaceVisibilityProfileSchema,
+  productRef: ProductRefSchema,
+}).strict();
+
+export const ExperimentApplicationSchema = z.discriminatedUnion('status', [
+  z.object({
+    status: z.literal('applied'),
+    appliedAt: UtcDateSchema,
+  }).strict(),
+  z.object({
+    status: z.literal('not_applied'),
+    decidedAt: z.string().datetime(),
+  }).strict(),
+]);
+
+export const PriorLearningContextSchema = z.object({
+  sourceRunId: z.string().min(1).max(200),
+  sourceEvidenceRef: MarketplaceVisibilityArtifactRefSchema,
+  experimentPlanRef: MarketplaceVisibilityArtifactRefSchema,
+  outcome: EvaluationOutputSchema.shape.outcome,
+  hypothesisEvaluation: EvaluationOutputSchema.shape.hypothesisEvaluation,
+  learning: EvaluationOutputSchema.shape.learning,
+  confidence: EvaluationOutputSchema.shape.confidence,
+  nextAction: EvaluationOutputSchema.shape.nextAction,
+  nextActionRationale: EvaluationOutputSchema.shape.nextActionRationale,
+}).strict();
+
 export const MarketplaceListingCaptureModeSchema = z.enum([
   'manual_visual_review',
   'browser_assisted_public_page',
@@ -68,6 +104,7 @@ export const MarketplaceVisibilityProductTypeSchema = z.enum([
 ]);
 
 export const MarketplaceVisibilityContextSchema = z.object({
+  productRef: ProductRefSchema.optional(),
   marketplace: z.enum(['shopify_app_store', 'etsy', 'meta_marketplace']),
   productName: safeMarketplaceText(120),
   productType: MarketplaceVisibilityProductTypeSchema,
@@ -80,6 +117,10 @@ export const MarketplaceVisibilityContextSchema = z.object({
   constraints: z.array(safeMarketplaceText(300)).max(12),
   availableAssets: z.array(safeMarketplaceText(300)).max(12),
   ownerGoal: safeMarketplaceText(300),
+}).strict();
+
+export const RollingMarketplaceVisibilityContextSchema = MarketplaceVisibilityContextSchema.extend({
+  productRef: ProductRefSchema,
 }).strict();
 
 export const ExploratoryVisibilityReviewModeSchema = z.object({
@@ -169,6 +210,7 @@ export const MarketplaceListingContextSchema = z.object({
 export const MarketplaceVisibilityEvidenceSchema = z.object({
   product: z.literal('marketplace_visibility'),
   profile: MarketplaceVisibilityProfileSchema,
+  productRef: ProductRefSchema.optional(),
   subjectRef: MarketplaceVisibilitySubjectRefSchema,
   artifactRef: MarketplaceVisibilityArtifactRefSchema,
   evidenceLevel: z.literal('sparse'),
@@ -197,11 +239,23 @@ export const MarketplaceVisibilityEvidenceSchema = z.object({
       message: 'listingContext profile must match evidence profile',
     });
   }
+  if (value.productRef && value.marketplaceContext.productRef && value.productRef !== value.marketplaceContext.productRef) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['productRef'],
+      message: 'productRef must match marketplaceContext productRef',
+    });
+  }
 });
 
 export type MarketplaceVisibilityEvidence = z.infer<typeof MarketplaceVisibilityEvidenceSchema>;
 export type MarketplaceVisibilityProfile = z.infer<typeof MarketplaceVisibilityProfileSchema>;
+export type ProductRef = z.infer<typeof ProductRefSchema>;
+export type MarketplaceProductIdentity = z.infer<typeof MarketplaceProductIdentitySchema>;
+export type ExperimentApplication = z.infer<typeof ExperimentApplicationSchema>;
+export type PriorLearningContext = z.infer<typeof PriorLearningContextSchema>;
 export type MarketplaceVisibilityContext = z.infer<typeof MarketplaceVisibilityContextSchema>;
+export type RollingMarketplaceVisibilityContext = z.infer<typeof RollingMarketplaceVisibilityContextSchema>;
 export type MarketplaceVisibilityProductType = z.infer<typeof MarketplaceVisibilityProductTypeSchema>;
 export type MarketplaceListingContext = z.infer<typeof MarketplaceListingContextSchema>;
 export type MarketplaceListingCaptureMode = z.infer<typeof MarketplaceListingCaptureModeSchema>;
@@ -210,4 +264,8 @@ export type VisibilityReviewMode = z.infer<typeof VisibilityReviewModeSchema>;
 
 export function parseMarketplaceVisibilityEvidence(value: unknown): MarketplaceVisibilityEvidence {
   return MarketplaceVisibilityEvidenceSchema.parse(value);
+}
+
+export function parseRollingMarketplaceVisibilityContext(value: unknown): RollingMarketplaceVisibilityContext {
+  return RollingMarketplaceVisibilityContextSchema.parse(value);
 }

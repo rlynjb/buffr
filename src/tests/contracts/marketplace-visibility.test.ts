@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
   MarketplaceListingContextSchema,
+  MarketplaceProductIdentitySchema,
   MarketplaceVisibilityContextSchema,
   MarketplaceVisibilityEvidenceSchema,
+  ProductRefSchema,
+  parseRollingMarketplaceVisibilityContext,
   parseMarketplaceVisibilityEvidence,
 } from '../../contracts/marketplace-visibility.js';
 
@@ -122,6 +125,47 @@ describe('marketplace visibility evidence contract', () => {
       availableAssets: ['listing copy'],
       ownerGoal: 'increase qualified app opens',
     })).toThrow();
+  });
+
+  it('requires safe stable identity at the rolling boundary while legacy context still parses', () => {
+    expect(MarketplaceVisibilityContextSchema.parse(merchGridContext())).not.toHaveProperty('productRef');
+    expect(() => parseRollingMarketplaceVisibilityContext(merchGridContext())).toThrow();
+    expect(parseRollingMarketplaceVisibilityContext({
+      ...merchGridContext(),
+      productRef: 'merchgrid-shopify-app',
+    }).productRef).toBe('merchgrid-shopify-app');
+  });
+
+  it.each(['MerchGrid App', '../merchgrid', 'shop.example.test', 'api-key'])('rejects unsafe productRef %s', (productRef) => {
+    expect(() => ProductRefSchema.parse(productRef)).toThrow();
+  });
+
+  it('requires a matching productRef when normalized evidence and context both carry stable identity', () => {
+    expect(() => MarketplaceVisibilityEvidenceSchema.parse({
+      product: 'marketplace_visibility',
+      profile: 'merchgrid_shopify_app_store',
+      productRef: 'other-shopify-app',
+      subjectRef: 'merchgrid:visibility:2026-08-22',
+      artifactRef: 'artifacts/daily-health/2026-08-22.json',
+      evidenceLevel: 'sparse',
+      recommendationType: 'visibility_hypothesis',
+      reviewMode: exploratoryReviewMode(),
+      marketplaceContext: merchGridContext({ productRef: 'merchgrid-shopify-app' }),
+      measuredSignals: {},
+      limitations: [],
+      prohibitedClaims: [],
+    })).toThrow();
+  });
+
+  it('keeps legacy evidence readable while accepting a safe product identity', () => {
+    expect(MarketplaceVisibilityEvidenceSchema.parse(sparseEvidence())).not.toHaveProperty('productRef');
+    expect(MarketplaceProductIdentitySchema.parse({
+      profile: 'merchgrid_shopify_app_store',
+      productRef: 'merchgrid-shopify-app',
+    })).toEqual({
+      profile: 'merchgrid_shopify_app_store',
+      productRef: 'merchgrid-shopify-app',
+    });
   });
 
   const sparseEvidence = () => ({

@@ -1,4 +1,5 @@
 {
+  "productRef": "merchgrid-shopify-app",
   "marketplace": "shopify_app_store",
   "productName": "MerchGrid",
   "productType": "shopify_app",

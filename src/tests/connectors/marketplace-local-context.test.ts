@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   loadMarketplaceListingContext,
+  loadRollingMarketplaceVisibilityContext,
   loadMarketplaceVisibilityContext,
 } from '../../connectors/marketplace/local-context.js';
 
@@ -29,6 +30,34 @@ describe('marketplace visibility local context loader', () => {
     await expect(loadMarketplaceVisibilityContext(file)).resolves.toMatchObject({
       marketplace: 'shopify_app_store',
       productName: 'MerchGrid',
+    });
+  });
+
+  it('keeps legacy loader compatible but requires productRef from the rolling loader', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'rolling-visibility-context-'));
+    const file = join(dir, 'merchgrid.json');
+    const legacyContext = {
+      marketplace: 'shopify_app_store',
+      productName: 'MerchGrid',
+      productType: 'shopify_app',
+      targetCustomer: 'Shopify merchants auditing catalog quality',
+      customerProblem: 'Catalog issues can hurt trust before the merchant notices',
+      currentPromise: 'Find catalog issues before they hurt sales or trust',
+      currentSurfaceSummary: 'Shopify app listing for catalog audits',
+      primaryDiscoverySurface: 'Shopify App Store search and category pages',
+      primaryActionWanted: 'Open the app and run the first catalog audit',
+      constraints: ['manual listing changes only'],
+      availableAssets: ['listing copy', 'screenshots'],
+      ownerGoal: 'increase qualified app opens and first scans',
+    };
+    await writeFile(file, JSON.stringify(legacyContext), 'utf8');
+
+    await expect(loadMarketplaceVisibilityContext(file)).resolves.toMatchObject({ productName: 'MerchGrid' });
+    await expect(loadRollingMarketplaceVisibilityContext(file)).rejects.toMatchObject({ code: 'validation_failed' });
+
+    await writeFile(file, JSON.stringify({ ...legacyContext, productRef: 'merchgrid-shopify-app' }), 'utf8');
+    await expect(loadRollingMarketplaceVisibilityContext(file)).resolves.toMatchObject({
+      productRef: 'merchgrid-shopify-app',
     });
   });
 

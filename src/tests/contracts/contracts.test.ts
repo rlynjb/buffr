@@ -1,7 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import { NormalizedListingEvidenceSchema } from '../../contracts/evidence.js';
+import {
+  ExperimentApplicationSchema,
+  PriorLearningContextSchema,
+} from '../../contracts/marketplace-visibility.js';
 import { ResearchOutputSchema, ResearchSearchSummarySchema } from '../../contracts/modules.js';
-import { parseWithSchema, WorkflowRunStateSchema } from '../../contracts/workflow.js';
+import {
+  parseWithSchema,
+  WorkflowRunStateSchema,
+} from '../../contracts/workflow.js';
 import { makeFixtureListingEvidence } from '../fixtures/listing.js';
 
 describe('contracts', () => {
@@ -134,6 +141,89 @@ describe('contracts', () => {
     });
 
     expect(state.stage).toBe('m1_context');
+    expect(state).not.toHaveProperty('marketplaceIdentity');
+  });
+
+  it('keeps applied and not-applied experiment facts mutually exclusive', () => {
+    expect(ExperimentApplicationSchema.parse({
+      status: 'applied',
+      appliedAt: '2026-09-01',
+    })).toEqual({
+      status: 'applied',
+      appliedAt: '2026-09-01',
+    });
+    expect(ExperimentApplicationSchema.parse({
+      status: 'not_applied',
+      decidedAt: '2026-09-01T12:00:00.000Z',
+    })).toEqual({
+      status: 'not_applied',
+      decidedAt: '2026-09-01T12:00:00.000Z',
+    });
+    expect(() => ExperimentApplicationSchema.parse({
+      status: 'applied',
+      appliedAt: '2026-09-01',
+      decidedAt: '2026-09-01T12:00:00.000Z',
+    })).toThrow();
+  });
+
+  it('persists optional rolling identity, application, and bounded learning fields', () => {
+    const state = WorkflowRunStateSchema.parse({
+      runId: 'marketplace-2026-09-08',
+      marketplaceIdentity: {
+        profile: 'merchgrid_shopify_app_store',
+        productRef: 'merchgrid-shopify-app',
+      },
+      experimentApplication: {
+        status: 'not_applied',
+        decidedAt: '2026-09-08T12:00:00.000Z',
+      },
+      previousRunRef: 'marketplace-2026-09-01',
+      priorLearning: {
+        sourceRunId: 'marketplace-2026-09-01',
+        sourceEvidenceRef: 'artifacts/merchgrid/weekly/2026-09-01.json',
+        experimentPlanRef: 'artifacts/workflow-runs/marketplace-2026-09-01/experiment-plan.json',
+        outcome: 'inconclusive',
+        hypothesisEvaluation: 'partly_supported',
+        learning: 'The baseline signal was too sparse for a confident decision',
+        confidence: 'low',
+        nextAction: 'iterate',
+        nextActionRationale: 'Use clearer outcome language in the next listing revision',
+      },
+      status: 'analyzing',
+      stage: 'm1_context',
+      createdAt: '2026-09-08T12:00:00.000Z',
+      updatedAt: '2026-09-08T12:00:00.000Z',
+      evidenceRefs: [],
+      moduleOutputs: {},
+      events: [],
+    });
+
+    expect(state).toMatchObject({
+      marketplaceIdentity: { productRef: 'merchgrid-shopify-app' },
+      experimentApplication: { status: 'not_applied' },
+      previousRunRef: 'marketplace-2026-09-01',
+      priorLearning: { outcome: 'inconclusive' },
+    });
+  });
+
+  it('accepts only the bounded M7 learning projection and local provenance references', () => {
+    const priorLearning = {
+      sourceRunId: 'marketplace-2026-09-01',
+      sourceEvidenceRef: 'artifacts/merchgrid/weekly/2026-09-01.json',
+      experimentPlanRef: 'artifacts/workflow-runs/marketplace-2026-08-25/experiment-plan.json',
+      outcome: 'inconclusive',
+      hypothesisEvaluation: 'partly_supported',
+      learning: 'The baseline signal was too sparse for a confident decision',
+      confidence: 'low',
+      nextAction: 'iterate',
+      nextActionRationale: 'Use clearer outcome language in the next listing revision',
+    } as const;
+
+    expect(PriorLearningContextSchema.parse(priorLearning)).toEqual(priorLearning);
+    expect(() => PriorLearningContextSchema.parse({
+      ...priorLearning,
+      rawProviderPayload: { token: 'secret' },
+    })).toThrow();
   });
 
   it('returns parsed schema defaults from the shared parser helper', () => {

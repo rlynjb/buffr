@@ -2,7 +2,12 @@ import { z } from 'zod';
 import { AppError } from '../core/errors.js';
 import { NormalizedListingEvidenceSchema } from './evidence.js';
 import { MerchGridWorkflowEvidenceSchema } from './merchgrid-workflow.js';
-import { MarketplaceVisibilityEvidenceSchema } from './marketplace-visibility.js';
+import {
+  ExperimentApplicationSchema,
+  MarketplaceProductIdentitySchema,
+  MarketplaceVisibilityEvidenceSchema,
+  PriorLearningContextSchema,
+} from './marketplace-visibility.js';
 import {
   ContextOutputSchema,
   DiagnosisOutputSchema,
@@ -85,6 +90,10 @@ export const WorkflowRunStateSchema = z
   .object({
     runId: z.string().min(1),
     subjectRef: z.string().min(1).optional(),
+    marketplaceIdentity: MarketplaceProductIdentitySchema.optional(),
+    experimentApplication: ExperimentApplicationSchema.optional(),
+    previousRunRef: z.string().min(1).optional(),
+    priorLearning: PriorLearningContextSchema.optional(),
     workflowKind: WorkflowKindSchema.default('etsy_listing'),
     listingId: z.string().min(1).optional(),
     status: WorkflowStatusSchema,
