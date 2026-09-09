@@ -43,6 +43,11 @@ describe('marketplace visibility modules', () => {
         qualificationRequirements: [], expectedSupportingSignal: 'A later signal is available.', expectedWeakeningSignal: 'A later signal is flat.',
         inconclusiveCondition: 'Traffic is sparse.', contextToMonitor: [], unresolvedMeasurementRules: [],
       },
+      m7: {
+        outcome: 'inconclusive', hypothesisEvaluation: 'inconclusive', evidence: ['weekly review'], contextualFactors: [],
+        learning: 'Observe another weekly window.', confidence: 'low', knowledgeSource: 'experiment',
+        nextAction: 'wait', nextActionRationale: 'The evidence remains sparse.',
+      },
     });
     const executor = createMarketplaceVisibilityModuleExecutor({ agentRunner: runner });
     const state = {
@@ -65,12 +70,76 @@ describe('marketplace visibility modules', () => {
     await executor.runM4(state);
     await executor.runM5(state);
     await executor.runM6(state);
+    await executor.runM7({
+      ...state,
+      stage: 'm7_learning',
+      evidenceSnapshots: { initial: visibilityEvidence(), result: visibilityEvidence({ artifactRef: 'artifacts/visibility/results/2026-09-04.json' }) },
+      experimentApplication: { status: 'applied', appliedAt: '2026-08-29' },
+      moduleOutputs: {
+        ...state.moduleOutputs,
+        m4: { performancePath: 'discovery', primaryBottleneck: 'The listing needs clearer value.', confidence: 'low', decision: 'proceed_to_hypothesis', notes: [] },
+        m5: { hypothesis: 'A clearer value statement may help.', primaryVariable: 'listing copy', recommendedRevision: 'Lead with the first audit result.', keepConstant: [], expectedSignal: 'Later evidence is available.', notes: [] },
+        m6: {
+          primaryMetric: 'posthog_app_opened_count', secondaryMetrics: [], baselineValue: 0, baselinePeriod: 'weekly baseline',
+          qualificationRequirements: [], expectedSupportingSignal: 'A later signal is available.', expectedWeakeningSignal: 'A later signal is flat.',
+          inconclusiveCondition: 'Traffic is sparse.', contextToMonitor: [], unresolvedMeasurementRules: [],
+        },
+      },
+    });
 
-    expect(runner.inputs).toHaveLength(3);
-    expect(runner.inputs.every((input) => (
+    expect(runner.inputs).toHaveLength(4);
+    expect(runner.inputs.slice(0, 3).every((input) => (
       input.priorLearning as { sourceRunId?: string } | undefined
     )?.sourceRunId === 'previous-run')).toBe(true);
     expect(JSON.stringify(runner.inputs)).not.toMatch(/prior-event|apiKey|secret|provider\.payload|"events"/u);
+    expect(runner.inputs[3]).toMatchObject({
+      evidence: { initial: expect.any(Object), result: expect.any(Object) },
+      experimentApplication: { status: 'applied', appliedAt: '2026-08-29' },
+      moduleOutputs: { m4: expect.any(Object), m5: expect.any(Object), m6: expect.any(Object) },
+    });
+  });
+
+  it('includes bounded M3 research in resumed M4 input without exposing events', async () => {
+    const runner = new RecordingRunner({
+      m4: { performancePath: 'discovery', primaryBottleneck: 'The listing needs clearer value.', confidence: 'low', decision: 'proceed_to_hypothesis', notes: [] },
+      m5: { hypothesis: 'A clearer value statement may help.', primaryVariable: 'listing copy', recommendedRevision: 'Lead with the first audit result.', keepConstant: [], expectedSignal: 'Later evidence is available.', notes: [] },
+      m6: {
+        primaryMetric: 'posthog_app_opened_count', secondaryMetrics: [], baselineValue: 0, baselinePeriod: 'weekly baseline',
+        qualificationRequirements: [], expectedSupportingSignal: 'A later signal is available.', expectedWeakeningSignal: 'A later signal is flat.',
+        inconclusiveCondition: 'Traffic is sparse.', contextToMonitor: [], unresolvedMeasurementRules: [],
+      },
+    });
+    const executor = createMarketplaceVisibilityModuleExecutor({ agentRunner: runner });
+    const state = {
+      ...workflowState({ evidence: visibilityEvidence() }),
+      moduleOutputs: {
+        m3: [{
+          status: 'resolved', next_action: 'stop', requester: 'm4', question: 'Which listing phrase is clearest?',
+          evidence: [{ source: 'web', title: 'Public guide', url: 'https://docs.example.test/guide', excerpt: 'Use a concrete outcome.', fetchedAt: '2026-09-05T00:00:00.000Z' }],
+          confidence: 'low', limitations: [], searchSummaries: [{
+            pass: 'authoritative_domains', status: 'completed', citationCount: 1, officialCitationCount: 1,
+            broaderCitationCount: 0, allowedDomainCount: 1, startedAt: '2026-09-05T00:00:00.000Z', completedAt: '2026-09-05T00:00:01.000Z',
+          }],
+        }],
+      },
+      events: [{ eventId: 'prior-event', runId: 'visibility-run-123', type: 'provider.payload', message: 'secret', createdAt: '2026-09-05T00:00:00.000Z', data: { apiKey: 'secret' } }],
+    } satisfies WorkflowRunState;
+
+    await executor.runM4(state);
+    await executor.runM5(state);
+    await executor.runM6(state);
+
+    for (const input of runner.inputs) {
+      expect(input).toMatchObject({
+        moduleOutputs: {
+          m3: [{
+            status: 'resolved', requester: 'm4',
+            evidence: [{ title: 'Public guide', url: 'https://docs.example.test/guide' }],
+          }],
+        },
+      });
+      expect(JSON.stringify(input)).not.toMatch(/prior-event|apiKey|secret|provider\.payload|searchSummaries|"events"/u);
+    }
   });
 
   it('labels M2 as limited sparse evidence without blocking M4', () => {
@@ -405,7 +474,7 @@ function incrementingNow(): () => number {
   return () => value++;
 }
 
-function visibilityEvidence(): MarketplaceVisibilityEvidence {
+function visibilityEvidence(overrides: Partial<MarketplaceVisibilityEvidence> = {}): MarketplaceVisibilityEvidence {
   return {
     product: 'marketplace_visibility',
     profile: 'merchgrid_shopify_app_store',
@@ -436,6 +505,7 @@ function visibilityEvidence(): MarketplaceVisibilityEvidence {
     measuredSignals: { posthog_app_opened_count: 0 },
     limitations: ['low request volume'],
     prohibitedClaims: ['Do not claim the listing caused traffic'],
+    ...overrides,
   };
 }
 

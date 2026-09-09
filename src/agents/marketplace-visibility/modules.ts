@@ -134,7 +134,7 @@ export function createMarketplaceVisibilityModuleExecutor(
         runner: deps.agentRunner,
         moduleId: 'm7',
         modulePrompt: VISIBILITY_EVALUATION_PROMPT,
-        input: state,
+        input: marketplaceVisibilityEvaluationInput(state),
         outputSchema: EvaluationOutputSchema,
         trace: trace(state),
       });
@@ -202,11 +202,48 @@ function marketplaceVisibilityAgentInput(state: WorkflowRunState): Record<string
       ...(state.moduleOutputs.m1 ? { m1: state.moduleOutputs.m1 } : {}),
       ...(state.moduleOutputs.m2Initial ? { m2Initial: state.moduleOutputs.m2Initial } : {}),
       ...(state.moduleOutputs.m2Results ? { m2Results: state.moduleOutputs.m2Results } : {}),
+      ...(state.moduleOutputs.m3.length > 0 ? { m3: boundedResearchOutputs(state.moduleOutputs.m3) } : {}),
       ...(state.moduleOutputs.m4 ? { m4: state.moduleOutputs.m4 } : {}),
       ...(state.moduleOutputs.m5 ? { m5: state.moduleOutputs.m5 } : {}),
     },
     ...(state.priorLearning ? { priorLearning: state.priorLearning } : {}),
   };
+}
+
+function marketplaceVisibilityEvaluationInput(state: WorkflowRunState): Record<string, unknown> {
+  const resultEvidence = state.evidenceSnapshots?.result;
+  return {
+    run: { runId: state.runId, stage: state.stage },
+    evidence: {
+      initial: requireInitialEvidence(state),
+      ...(resultEvidence ? { result: resultEvidence } : {}),
+    },
+    ...(state.experimentApplication ? { experimentApplication: state.experimentApplication } : {}),
+    moduleOutputs: {
+      ...(state.moduleOutputs.m2Results ? { m2Results: state.moduleOutputs.m2Results } : {}),
+      ...(state.moduleOutputs.m4 ? { m4: state.moduleOutputs.m4 } : {}),
+      ...(state.moduleOutputs.m5 ? { m5: state.moduleOutputs.m5 } : {}),
+      ...(state.moduleOutputs.m6 ? { m6: state.moduleOutputs.m6 } : {}),
+    },
+  };
+}
+
+function boundedResearchOutputs(outputs: WorkflowRunState['moduleOutputs']['m3']): Array<Record<string, unknown>> {
+  return outputs.map((output) => ({
+    status: output.status,
+    requester: output.requester,
+    evidence: output.evidence.map((citation) => ({
+      source: citation.source,
+      title: citation.title,
+      ...(citation.url ? { url: citation.url } : {}),
+      excerpt: citation.excerpt,
+      fetchedAt: citation.fetchedAt,
+      ...(citation.domain ? { domain: citation.domain } : {}),
+      ...(citation.sourceType ? { sourceType: citation.sourceType } : {}),
+    })),
+    confidence: output.confidence,
+    limitations: output.limitations,
+  }));
 }
 
 export function metricsFromMarketplaceVisibilityEvidence(evidence: MarketplaceVisibilityEvidence): MetricsOutput {

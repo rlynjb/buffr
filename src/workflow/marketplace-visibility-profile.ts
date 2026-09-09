@@ -15,7 +15,7 @@ import { UtcDateSchema } from '../contracts/metrics.js';
 import type { WorkflowRunState } from '../contracts/workflow.js';
 import { AppError } from '../core/errors.js';
 import type { MerchGridReviewArtifactRepository } from '../jobs/merchgrid-source-pack.js';
-import type { MerchGridReviewEvidence } from '../metrics/evidence.js';
+import { MerchGridReviewEvidenceSchema, type MerchGridReviewEvidence } from '../metrics/evidence.js';
 import type { MarketplaceRunHistoryRepository, RunRepository } from '../storage/runs.js';
 
 const PROHIBITED_CLAIMS = [
@@ -152,6 +152,7 @@ export function buildRollingVisibilityEvidence(input: {
 }): MarketplaceVisibilityEvidence {
   const identity = MarketplaceProductIdentitySchema.parse(input.identity);
   const through = UtcDateSchema.parse(input.through);
+  const artifact = MerchGridReviewEvidenceSchema.parse(input.artifact);
   if (identity.profile !== 'merchgrid_shopify_app_store') {
     throw new AppError('validation_failed', 'Rolling visibility evidence requires the MerchGrid profile');
   }
@@ -161,17 +162,19 @@ export function buildRollingVisibilityEvidence(input: {
   if (input.context.productRef !== identity.productRef) {
     throw new AppError('validation_failed', 'MerchGrid visibility context productRef must match product identity');
   }
-  if (input.artifact.period.kind !== 'weekly') {
+  if (artifact.period.kind !== 'weekly') {
     throw new AppError('validation_failed', 'Rolling visibility evidence requires a weekly review artifact');
   }
-  if (input.artifact.period.current.endDate !== through) {
+  if (artifact.period.current.endDate !== through) {
     throw new AppError('validation_failed', 'MerchGrid weekly review artifact period does not match through date');
   }
-  const measuredSignals = numericMarketplaceSignals(input.artifact);
+  const weeklyArtifact = artifact as Extract<MerchGridReviewEvidence, { period: { kind: 'weekly' } }>;
+  assertReusableWeeklyArtifact(weeklyArtifact);
+  const measuredSignals = numericMarketplaceSignals(weeklyArtifact);
   const reviewMode = selectMarketplaceVisibilityMode({
     context: input.context,
     measuredSignals,
-    limitations: input.artifact.limitations,
+    limitations: weeklyArtifact.limitations,
   });
   assertExploratoryMode(reviewMode);
 
@@ -187,7 +190,7 @@ export function buildRollingVisibilityEvidence(input: {
     marketplaceContext: input.context,
     listingContext: input.listingContext,
     measuredSignals,
-    limitations: curatedMerchGridLimitations(input.artifact.limitations),
+    limitations: curatedMerchGridLimitations(weeklyArtifact.limitations),
     prohibitedClaims: PROHIBITED_CLAIMS,
   });
 }
@@ -324,6 +327,35 @@ function requireInitialVisibilityEvidence(
     throw new AppError('validation_failed', 'Visibility result requires matching initial marketplace visibility evidence');
   }
   return initial;
+}
+
+function assertReusableWeeklyArtifact(
+  artifact: Extract<MerchGridReviewEvidence, { period: { kind: 'weekly' } }>,
+): void {
+  assertSevenDateRange(artifact.period.previous);
+  assertSevenDateRange(artifact.period.current);
+  if (nextUtcDate(artifact.period.previous.endDate) !== artifact.period.current.startDate) {
+    throw new AppError('validation_failed', 'MerchGrid weekly review windows must be adjacent seven-date periods');
+  }
+  for (const period of [artifact.sourceCoverage.previous, artifact.sourceCoverage.current]) {
+    for (const coverage of Object.values(period)) {
+      if (Object.values(coverage).reduce((total, count) => total + count, 0) !== 7) {
+        throw new AppError('validation_failed', 'MerchGrid weekly review source coverage must total seven dates');
+      }
+    }
+  }
+}
+
+function assertSevenDateRange(range: { startDate: string; endDate: string }): void {
+  if (nextUtcDate(range.startDate, 6) !== range.endDate) {
+    throw new AppError('validation_failed', 'MerchGrid weekly review windows must contain exactly seven consecutive dates');
+  }
+}
+
+function nextUtcDate(date: string, days = 1): string {
+  const value = new Date(`${date}T00:00:00.000Z`);
+  value.setUTCDate(value.getUTCDate() + days);
+  return value.toISOString().slice(0, 10);
 }
 
 function assertValidMerchGridResultArtifact(input: {

@@ -38,6 +38,29 @@ describe('marketplace visibility profile', () => {
     expect(fresh.subjectRef).toBe('merchgrid:visibility:2026-09-04');
   });
 
+  it.each([
+    ['one-day window', weeklyArtifact({ app_opened_count: 4 }, {
+      previous: { startDate: '2026-08-28', endDate: '2026-08-28' }, current: { startDate: '2026-08-29', endDate: '2026-09-04' },
+    }), 'exactly seven consecutive dates'],
+    ['overlapping windows', weeklyArtifact({ app_opened_count: 4 }, {
+      previous: { startDate: '2026-08-22', endDate: '2026-08-28' }, current: { startDate: '2026-08-28', endDate: '2026-09-03' },
+    }), 'adjacent seven-date periods'],
+    ['nonadjacent windows', weeklyArtifact({ app_opened_count: 4 }, {
+      previous: { startDate: '2026-08-22', endDate: '2026-08-28' }, current: { startDate: '2026-08-30', endDate: '2026-09-05' },
+    }), 'adjacent seven-date periods'],
+    ['incomplete source coverage', weeklyArtifactWithCoverage({
+      previous: { posthog: { complete: 6 }, fly_metrics: { complete: 7 }, shopify_partner: { unavailable: 7 } },
+      current: { posthog: { complete: 7 }, fly_metrics: { complete: 7 }, shopify_partner: { unavailable: 7 } },
+    }), 'source coverage must total seven dates'],
+  ])('rejects weekly evidence with %s', (_label, artifact, message) => {
+    expect(() => buildRollingVisibilityEvidence({
+      artifact,
+      identity: { profile: 'merchgrid_shopify_app_store', productRef: 'merchgrid-shopify-app' },
+      through: artifact.period.kind === 'weekly' ? artifact.period.current.endDate : '2026-09-04',
+      context: readyContext(),
+    })).toThrow(message);
+  });
+
   it('rejects result evidence that changes profile or product identity', () => {
     const fresh = buildRollingVisibilityEvidence({
       artifact: weeklyArtifact(
@@ -769,6 +792,23 @@ function weeklyArtifact(
     sourceFreshness: { previous: {}, current: {} },
     aggregateMetrics: { previous: {}, current: { posthog }, change: {} },
     limitations: ['previous:shopify_partner:unavailable:7', 'current:shopify_partner:unavailable:7'],
+  });
+}
+
+function weeklyArtifactWithCoverage(sourceCoverage: {
+  previous: { posthog: Record<string, number>; fly_metrics: Record<string, number>; shopify_partner: Record<string, number> };
+  current: { posthog: Record<string, number>; fly_metrics: Record<string, number>; shopify_partner: Record<string, number> };
+}): MerchGridReviewEvidence {
+  return MerchGridReviewEvidenceSchema.parse({
+    period: {
+      kind: 'weekly',
+      previous: { startDate: '2026-08-22', endDate: '2026-08-28' },
+      current: { startDate: '2026-08-29', endDate: '2026-09-04' },
+    },
+    sourceCoverage,
+    sourceFreshness: { previous: {}, current: {} },
+    aggregateMetrics: { previous: {}, current: { posthog: { app_opened_count: 4 } }, change: {} },
+    limitations: [],
   });
 }
 
