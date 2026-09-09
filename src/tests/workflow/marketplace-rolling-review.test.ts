@@ -234,6 +234,43 @@ describe('marketplace rolling review coordinator', () => {
     });
   });
 
+  it.each(['m2_metrics_results', 'm7_learning'] as const)(
+    'does not advance a persisted applied run at %s when fresh result evidence omits the M6 primary metric',
+    async (stage) => {
+      const previous = workflowState({
+        stage,
+        status: 'ready_for_evaluation',
+        experimentApplication: { status: 'applied', appliedAt: '2026-08-25' },
+      });
+      const fixture = createFixture({
+        previous,
+        preparedEvidence: {
+          ...freshEvidence(identity(), '2026-09-04'),
+          measuredSignals: { request_count: 4 },
+        },
+      });
+
+      await expect(fixture.service.nextReview(nextReviewInput())).rejects.toMatchObject({
+        code: 'route_not_allowed',
+        message: 'Waiting for qualified result evidence: required primary metric app_opened_count is unavailable',
+      });
+
+      expect(fixture.calls).toEqual([
+        'prepare-weekly-evidence',
+        'find-latest-product-run',
+      ]);
+      expect(fixture.prompt.inputs).toEqual([]);
+      expect(fixture.engine.recordCalls).toHaveLength(0);
+      expect(fixture.engine.resumeCalls).toHaveLength(0);
+      expect(fixture.engine.evaluationStepCalls).toBe(0);
+      expect(fixture.engine.startCalls).toHaveLength(0);
+      await expect(fixture.history.load('previous-run')).resolves.toMatchObject({
+        stage,
+        status: 'ready_for_evaluation',
+      });
+    },
+  );
+
   it('does not query history or mutate a workflow when fresh weekly evidence is unavailable', async () => {
     const fixture = createFixture({
       prepareError: new AppError('storage_failed', 'MerchGrid weekly review artifact not found: 2026-09-04'),

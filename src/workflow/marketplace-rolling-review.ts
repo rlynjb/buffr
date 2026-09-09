@@ -258,6 +258,7 @@ async function resolvePreviousRun(
     EVALUATION_STAGES.has(previous.stage)
     && previous.experimentApplication?.status === 'applied'
   ) {
+    assertQualifiedResultEvidence(previous, prepared, previous.experimentApplication);
     const completed = await advanceEvaluation(previous, dependencies);
     return {
       state: completed,
