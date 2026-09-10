@@ -30,7 +30,7 @@ real-world marketplace changes automatically.
 - [How to read the codebase](#how-to-read-the-codebase)
 - [Local setup](#local-setup)
 - [Core commands](#core-commands)
-- [MerchGrid operations](#merchgrid-operations)
+- [MerchGrid evidence preparation](#merchgrid-evidence-preparation)
 - [Marketplace visibility operations](#marketplace-visibility-operations)
 - [Etsy connector validation](#etsy-connector-validation)
 - [Safety rules](#safety-rules)
@@ -96,8 +96,8 @@ Buffr currently has three product-facing workflow families.
 | Workflow | Current entry point | Product surface | What it produces |
 | --- | --- | --- | --- |
 | Etsy listing workflow | Shared engine/API path; connector-validation scaffold only at the CLI | Etsy seller listing evidence | A listing experiment plan and later learning record |
-| MerchGrid daily/weekly workflow | `merchgrid:*` commands | Aggregate business and reliability metrics | Daily diagnosis, weekly recommendation, approval wait, and result learning |
-| Marketplace visibility workflow | `marketplace:next-review` | Sparse metrics plus curated product/listing context and optional public research | A rolling, low-risk visibility experiment recommendation with evidence references |
+| MerchGrid daily/weekly evidence | Internal source-pack functions | Aggregate business and reliability metrics | Daily snapshots and weekly evidence for marketplace review |
+| Marketplace visibility workflow | `marketplace:review` | Sparse metrics plus curated product/listing context and optional public research | A rolling, low-risk visibility experiment recommendation with evidence references |
 
 These workflows share the same core engine pattern. The source evidence differs,
 but the lifecycle remains deterministic and contract-driven.
@@ -326,18 +326,18 @@ M2 Results -> M7 -> completed run.json       new run.json -> M1 ... M6 -> approv
        |                                                            |
        +---------------- bounded learning --------------------------+
 
-One `marketplace:next-review` invocation closes the left-hand run and creates
+One `marketplace:review` invocation closes the left-hand run and creates
 the right-hand run. The two run records stay separate; the artifact is reused
 by reference rather than copied or reinterpreted as two different observations.
 ```
 
 Here is the same loop as an operational sequence:
 
-1. **Persist the observation window.** Collect aggregate signals for completed
-   UTC dates. A rolling review needs enough persisted snapshots to form two
-   adjacent seven-day periods. `merchgrid:weekly-review` may build the weekly
-   artifact explicitly; if it is absent, the rolling command attempts the same
-   local derivation. It never collects providers as part of the review.
+1. **Prepare the observation window.** The review command checks the two
+   adjacent seven-day periods needed for the target weekly review, reuses
+   complete source snapshots, collects missing completed source/date snapshots,
+   and builds or reuses the weekly artifact. It does not store raw provider
+   payloads or private marketplace data.
 
 2. **Run one rolling operation.** The only command-line choice is `--profile`.
    Think of the profile as a routing key: it selects the marketplace workflow,
@@ -345,7 +345,7 @@ Here is the same loop as an operational sequence:
    of review.
 
    ```bash
-   npm run marketplace:next-review -- \
+   npm run marketplace:review -- \
      --profile merchgrid_shopify_app_store
    ```
 
@@ -501,7 +501,7 @@ code do not reach into environment variables directly.
 | Listing context JSON | Owner-curated observations of a public listing | Headline, category, gallery count, trust signals, copy notes, and visual-review notes | Validated qualitative evidence; never conversion proof |
 | OpenAI model | Structured module calls through `OpenAiAgentRunner` | Validated workflow context with credential-like keys removed | Validated module output and bounded usage metadata; not raw provider payloads |
 | Public web | OpenAI hosted web search through the M3 adapter | A concrete question plus configured domain policy | Citation metadata, bounded search summaries, and research references; no page bodies |
-| Result evidence | Owner-triggered result command using a later review artifact | Qualified aggregate signals after the experiment delay | Result evidence projection plus M2/M7 outputs in the existing run |
+| Result evidence | `marketplace:review` after an owner application decision and a later review artifact | Qualified aggregate signals after the experiment delay | Result evidence projection plus M2/M7 outputs in the existing run |
 
 An implemented connector is not necessarily a complete product entry point.
 For example, Etsy has a read-only connector and a shared workflow lifecycle, but
@@ -770,9 +770,7 @@ Use this order when learning Buffr:
    - or `src/connectors/merchgrid/`
    - or `src/connectors/marketplace/local-context.ts`
 
-6. Read the CLI entry points:
-   - `src/cli/merchgrid-source-pack.ts`
-   - `src/cli/merchgrid-workflow.ts`
+6. Read the CLI entry point:
    - `src/cli/marketplace-visibility.ts`
 
 7. Read tests beside the concept you are learning:
@@ -802,7 +800,7 @@ npm run build
 Run tests:
 
 ```bash
-npm test
+npm run test
 ```
 
 Run typechecking without emitting files:
@@ -826,12 +824,12 @@ Common environment variable names:
 - `ETSY_VALIDATE_LISTING_ID`
 - `POSTHOG_PROJECT_ID`
 - `POSTHOG_PERSONAL_API_KEY`
-- `POSTHOG_BASE_URL`
-- `FLY_ORG_SLUG`
+- `POSTHOG_API_BASE_URL`
 - `FLY_ACCESS_TOKEN`
 - `FLY_APP_NAME`
+- `FLY_METRICS_URL`
 - `MERCHGRID_METRICS_DATA_DIR`
-- `SHOPIFY_PARTNER_AGGREGATES_CSV_PATH`
+- `SHOPIFY_PARTNER_CSV_PATH`
 
 Etsy connector validation uses the Etsy-related variables defined by
 `src/core/config.ts` and the Etsy configuration-boundary design. The runtime
@@ -840,20 +838,35 @@ not implement an OAuth login flow.
 
 ## Core commands
 
+The root `package.json` exposes this public command surface:
+
+| Script | Command |
+| --- | --- |
+| `build` | `tsc` |
+| `etsy:validate` | `node dist/connectors/etsy/validate.js` |
+| `marketplace:review` | `node dist/cli/marketplace-visibility.js review` |
+| `start` | `node dist/index.js` |
+| `test` | `vitest run` |
+| `test:watch` | `vitest` |
+| `typecheck` | `tsc --noEmit` |
+
+Common local commands:
+
 ```bash
 npm run build
-npm test
+npm run test
 npm run typecheck
 npm start
 ```
 
 `npm start` currently runs the built scaffold entry point. Most product behavior
-is exercised through workflow-specific CLI commands and tests.
+is exercised through the marketplace review CLI and tests.
 
-## MerchGrid operations
+## MerchGrid evidence preparation
 
-MerchGrid source-pack commands collect aggregate-only operational evidence. They
-do not store raw merchant, shop, or customer data.
+MerchGrid source-pack functions collect aggregate-only operational evidence as
+an internal part of `marketplace:review`. They do not store raw merchant, shop,
+or customer data.
 
 Place a manually exported, aggregate-only Shopify Partner CSV under
 `artifacts/merchgrid/sources/`, for example:
@@ -870,48 +883,11 @@ The CSV may include only these columns:
 - `uninstalls`
 - `earnings_amount`
 
-Collect one completed UTC day:
-
-```bash
-npm run merchgrid:collect -- --date YYYY-MM-DD
-```
-
-Build a weekly comparison through the final completed UTC day:
-
-```bash
-npm run merchgrid:weekly-review -- --through YYYY-MM-DD
-```
-
-Both commands print only the persisted artifact path and source statuses. The
-artifacts contain aggregate evidence only.
-
-After a saved daily-health or weekly-review artifact exists, run the workflow
-lifecycle:
-
-```bash
-npm run merchgrid:daily-investigate -- --date YYYY-MM-DD --run-id RUN_ID
-npm run merchgrid:weekly-recommend -- --through YYYY-MM-DD --run-id RUN_ID
-npm run merchgrid:approve -- --run-id RUN_ID
-npm run merchgrid:record-result -- --through YYYY-MM-DD --run-id RUN_ID
-```
-
-For new daily and weekly runs, `--run-id` is optional. If omitted, Buffr writes
-the workflow run under a date-first folder such as:
-
-```text
-2026-08-25-merchgrid-daily-2026-08-21
-2026-08-25-merchgrid-weekly-2026-08-21
-```
-
-The first date is the run date. The last date is the evidence-window date.
-
-Use an external scheduler after UTC midnight for daily collection and after
-Sunday closes for weekly review. This repository does not run an in-process
-scheduler.
-
-The weekly recommendation flow uses OpenAI-backed bounded modules, so local
-`.env` also needs `OPENAI_API_KEY`. The command stops at the approval gate; it
-never applies a real-world change by itself.
+During `marketplace:review`, Buffr reuses complete daily snapshots, collects
+missing completed source/date snapshots, and builds or reuses the weekly review
+artifact for the selected window. The persisted artifacts contain aggregate
+evidence only. Raw provider payloads and full CSV rows stay outside the durable
+review evidence.
 
 ## Marketplace visibility operations
 
@@ -919,13 +895,30 @@ Marketplace visibility reviews turn sparse, aggregate-only evidence and local
 context into a manual visibility recommendation. They never query private
 marketplace providers or apply marketplace edits.
 
-Run the single rolling lifecycle command after the requested weekly evidence
-window is present in local snapshots or as a saved weekly-review artifact:
+Run the single rolling lifecycle command:
 
 ```bash
-npm run marketplace:next-review -- \
+npm run marketplace:review -- \
   --profile merchgrid_shopify_app_store
 ```
+
+### What runs when `marketplace:review` runs
+
+The command is a small composition root over several bounded subsystems:
+
+- The marketplace visibility CLI parses `review` and the `--profile` routing key.
+- Runtime configuration loads product/listing context paths plus metric source settings.
+- MerchGrid runtime adapters collect or reuse daily snapshots for PostHog, Fly metrics, and the Shopify Partner CSV.
+- The evidence preparation service builds or reuses weekly evidence and emits bounded operation trace events.
+- The marketplace review facade records command-level start, failure, and completion events, then hands prepared evidence to the rolling review coordinator.
+- The rolling review coordinator resolves prior-run applicability and creates or resumes the current run.
+- The workflow engine advances legal M1, M2, M4, M5, and M6 stages, with optional M3 research side routes when enabled.
+- Agent modules perform bounded structured reasoning; M7 runs only when closing an applied previous experiment with later result evidence.
+- Storage persists snapshots, weekly artifacts, operation JSONL, `run.json`, `events.jsonl`, and `experiment-plan.json`.
+
+Trace records contain lifecycle/status facts and artifact references only. They
+do not store raw provider payloads, CSV rows, credentials, cookies, private
+context, or full prompts.
 
 `--profile` is the routing key that selects the marketplace workflow and its
 configured context. Buffr reads the stable, lowercase kebab-case `productRef`
@@ -981,22 +974,22 @@ docs/examples/merchgrid-listing-context.example.json
 Do not put private dashboard pages, cookies, raw HTML, credentials, or merchant
 data in either context file.
 
-The weekly evidence prerequisite remains separate from marketplace review. Use
-`merchgrid:collect` after each completed UTC date. You may run
-`merchgrid:weekly-review` explicitly after two adjacent seven-day windows are
-available; if that artifact is missing, `marketplace:next-review` attempts to
-derive it from the already-persisted local snapshots. It does not call PostHog,
-Fly, Shopify, or another provider to fill gaps. If snapshots are missing, the
-command falls back to the newest earlier complete window. If no complete
-fourteen-day window exists, it reports the exact bounded `source/YYYY-MM-DD`
-entries missing from the latest candidate window; it does not create a partial
-weekly artifact.
+Evidence preparation is part of marketplace review. Buffr reuses valid weekly
+artifacts, derives missing weekly artifacts from complete daily snapshots, and
+collects missing completed daily source/date snapshots before workflow start.
+If required evidence remains incomplete, it reports bounded
+`source/YYYY-MM-DD` gaps and does not close or create a workflow run.
 
-The rolling command records safe `rolling_review.*` events for cycle start,
-prior-run discovery and evaluation, prior-learning selection, next-run
-creation, and completion. `run.json` remains authoritative and `events.jsonl`
-is its reviewable projection. The durable completion marker also prevents
-duplicate cycle-level events on an ordinary retry.
+The command records safe `marketplace_review.*` events around evidence
+preparation, weekly artifact reuse or generation, workflow handoff, completion,
+and failure. The rolling coordinator also records safe `rolling_review.*`
+events for cycle start, prior-run discovery and evaluation, prior-learning
+selection, next-run creation, and completion. `run.json` remains authoritative
+for workflow state, while operation events and `events.jsonl` provide
+reviewable projections. These events are bounded application facts; they do not
+store raw provider payloads, CSV rows, credentials, cookies, private context, or
+full prompts. The durable completion markers prevent duplicate cycle-level
+events on an ordinary retry.
 
 If the brief is complete, zero metrics can still produce an `approval_wait`
 recommendation. If required context is missing, the command stops with the

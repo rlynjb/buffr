@@ -4,11 +4,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { CollectionWindow, DailyMetricSnapshot, MetricSource } from '../../contracts/metrics.js';
 import type { WorkflowEvent } from '../../contracts/workflow.js';
-import {
-  createMerchGridSourcePackDependencies,
-  runMerchGridSourcePackCli,
-  runMerchGridSourcePackEntrypoint,
-} from '../../cli/merchgrid-source-pack.js';
+import { createMerchGridMetricSourceAdapters } from '../../connectors/merchgrid/runtime.js';
 import type { HttpClient, HttpRequest, MetricSourceAdapter } from '../../connectors/merchgrid/source.js';
 import {
   JsonFileMerchGridReviewArtifactRepository,
@@ -296,43 +292,6 @@ describe('MerchGrid source-pack jobs', () => {
     await expect(dependencies.artifacts.loadDailyHealth('2026-08-21')).rejects.toThrow();
   });
 
-  it('prints only the daily artifact path and normalized source statuses', async () => {
-    const dependencies = await fakeDependencies();
-    const lines: string[] = [];
-
-    await runMerchGridSourcePackCli({
-      args: ['collect', '--date', '2026-08-21'],
-      dependencies,
-      writeLine: (line) => lines.push(line),
-    });
-
-    expect(lines).toEqual([
-      expect.stringMatching(/^artifact: .+daily-health\/2026-08-21\.json$/u),
-      'sources: posthog=complete fly_metrics=complete shopify_partner=complete',
-    ]);
-    expect(JSON.stringify(lines)).not.toContain('app_opened_count');
-    expect(JSON.stringify(lines)).not.toContain('100');
-  });
-
-  it('accepts --through for the explicit weekly-review command', async () => {
-    const dependencies = await fakeDependencies();
-    for (const date of datesThrough('2026-08-21', 14)) {
-      await runDailyCollection({ date, dependencies });
-    }
-    const lines: string[] = [];
-
-    await runMerchGridSourcePackCli({
-      args: ['weekly-review', '--through', '2026-08-21'],
-      dependencies,
-      writeLine: (line) => lines.push(line),
-    });
-
-    expect(lines).toEqual([
-      expect.stringMatching(/^artifact: .+weekly-reviews\/2026-08-21\.json$/u),
-      'sources: posthog=complete fly_metrics=complete shopify_partner=complete',
-    ]);
-  });
-
   it('configures the Fly adapter with the Prometheus query endpoint', async () => {
     const requestedUrls: string[] = [];
     const http: HttpClient = {
@@ -347,8 +306,8 @@ describe('MerchGrid source-pack jobs', () => {
         };
       },
     };
-    const dependencies = createMerchGridSourcePackDependencies({ env: fakeRuntimeEnvironment(), http });
-    const fly = dependencies.adapters.find((adapter) => adapter.source === 'fly_metrics')!;
+    const fly = createMerchGridMetricSourceAdapters({ env: fakeRuntimeEnvironment(), http })
+      .find((adapter) => adapter.source === 'fly_metrics')!;
 
     await fly.collect({
       date: '2026-08-21',
@@ -357,21 +316,6 @@ describe('MerchGrid source-pack jobs', () => {
     });
 
     expect(requestedUrls).toEqual(['https://api.fly.io/prometheus/buffr-test/api/v1/query']);
-  });
-
-  it('reports missing runtime configuration through the bounded CLI error channel', async () => {
-    const output: string[] = [];
-    const errors: string[] = [];
-
-    await runMerchGridSourcePackEntrypoint({
-      args: ['collect', '--date', '2026-08-21'],
-      env: {},
-      writeLine: (line) => output.push(line),
-      writeError: (line) => errors.push(line),
-    });
-
-    expect(output).toEqual([]);
-    expect(errors).toEqual(['configuration_failed']);
   });
 
   async function fakeDependencies(): Promise<MerchGridSourcePackDependencies> {
@@ -394,12 +338,12 @@ function fakeRuntimeEnvironment(): NodeJS.ProcessEnv {
   return {
     POSTHOG_PROJECT_ID: 'test-project',
     POSTHOG_PERSONAL_API_KEY: 'test-key',
-    POSTHOG_BASE_URL: 'https://posthog.example.test',
-    FLY_ORG_SLUG: 'buffr-test',
+    POSTHOG_API_BASE_URL: 'https://posthog.example.test',
     FLY_ACCESS_TOKEN: 'test-token',
     FLY_APP_NAME: 'buffr-test-app',
+    FLY_METRICS_URL: 'https://api.fly.io/prometheus/buffr-test/api/v1/query',
     MERCHGRID_METRICS_DATA_DIR: '/tmp/merchgrid-test-data',
-    SHOPIFY_PARTNER_AGGREGATES_CSV_PATH: '/tmp/merchgrid-test.csv',
+    SHOPIFY_PARTNER_CSV_PATH: '/tmp/merchgrid-test.csv',
   };
 }
 

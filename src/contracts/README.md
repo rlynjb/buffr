@@ -51,6 +51,7 @@ Workflow contracts
 
 Readable outputs
   ├─ run.json
+  ├─ review operation events JSONL
   ├─ experiment-plan.json
   ├─ daily health review JSON
   ├─ weekly business review JSON
@@ -249,6 +250,36 @@ roles without becoming two observations. The prior run stores it under
 `evidenceSnapshots.result`; the next run stores it under
 `evidenceSnapshots.initial`. Both projections retain the same `artifactRef`,
 while each run remains its own aggregate and keeps its own subject and events.
+
+### Marketplace review operation trace
+
+Defined by `marketplace_review.*` events persisted through
+`../storage/review-operations.ts`.
+
+The `marketplace:review` command has work to do before a workflow run may
+exist: it checks the two adjacent seven-day windows, reuses complete snapshots,
+collects missing completed source/date snapshots, and builds or reuses the
+weekly artifact. Those steps need a durable trace even when evidence
+preparation fails before `run.json` can be created.
+
+Read it as: "What did the single public marketplace review command do before
+and around the rolling workflow?"
+
+The operation trace includes bounded facts such as source/date gaps, snapshot
+reuse, weekly artifact reuse or generation, workflow handoff, completion, and
+failure stage. It must not contain raw provider payloads, prompts, credentials,
+request headers, cookies, or private marketplace data.
+
+Example artifact path:
+
+```text
+review-operations/marketplace-review%3Amerchgrid_shopify_app_store%3Amerchgrid-shopify-app%3A2026-09-06/events.jsonl
+```
+
+Once the rolling workflow starts, `run.json` and the run's own `events.jsonl`
+remain authoritative for workflow state. The operation trace is the command
+wrapper's reviewable projection, especially useful when evidence preparation
+cannot create or close a workflow run.
 
 ### `ExperimentApplication`
 
@@ -592,6 +623,7 @@ For example:
 
 - `snapshots/posthog/2026-08-24.json` is a `DailyMetricSnapshot`.
 - `artifacts/daily-health/...json` is daily `MerchGridReviewEvidence`.
+- `review-operations/.../events.jsonl` is the `marketplace:review` operation trace.
 - `workflow-runs/.../run.json` is a `WorkflowRunState`.
 - `workflow-runs/.../experiment-plan.json` is an `ExperimentPlan`.
 

@@ -7,6 +7,8 @@ import type {
   WorkflowStatus,
 } from '../../contracts/workflow.js';
 import { AppError } from '../../core/errors.js';
+import type { HttpClient } from '../../connectors/merchgrid/source.js';
+import { createMerchGridMetricSourceAdapters } from '../../connectors/merchgrid/runtime.js';
 import {
   createMarketplaceVisibilityDependencies,
   createOwnerApplicationPrompt,
@@ -18,14 +20,85 @@ import {
 import {
   createMarketplaceRollingReviewService,
   type MarketplaceRollingReviewEngine,
+  type MarketplaceRollingReviewService,
   type OwnerApplicationPrompt,
 } from '../../workflow/marketplace-rolling-review.js';
 
 describe('marketplace visibility CLI', () => {
+  it('routes review to the marketplace review service with safe output', async () => {
+    const calls: unknown[] = [];
+    const lines: string[] = [];
+
+    await runMarketplaceVisibilityCli({
+      args: ['review', '--profile', 'merchgrid_shopify_app_store', '--through', '2026-09-04'],
+      dependencies: {
+        reviews: {
+          async review(input: unknown) {
+            calls.push(input);
+            return {
+              operationId: 'marketplace-review:merchgrid_shopify_app_store:merchgrid-shopify-app:2026-09-04',
+              weeklyArtifactRef: 'artifacts/weekly-reviews/2026-09-04.json',
+              weeklyArtifactStatus: 'reused',
+              currentRun: {
+                runId: '2026-09-04-merchgrid_shopify_app_store-merchgrid-shopify-app',
+                status: 'awaiting_approval',
+                stage: 'approval_wait',
+              },
+            };
+          },
+        },
+        resolveThrough: async () => 'unused',
+        resolveProductRef: async () => 'merchgrid-shopify-app',
+        defaultContextPath: 'artifacts/merchgrid/context/default-review.json',
+      } as unknown as MarketplaceVisibilityCliDependencies,
+      writeLine: (line) => lines.push(line),
+    });
+
+    expect(calls).toEqual([{
+      profile: 'merchgrid_shopify_app_store',
+      productRef: 'merchgrid-shopify-app',
+      through: '2026-09-04',
+      contextPath: 'artifacts/merchgrid/context/default-review.json',
+    }]);
+    expect(lines).toContain('weekly-artifact: artifacts/weekly-reviews/2026-09-04.json (reused)');
+    expect(lines.join('\n')).not.toMatch(/OPENAI_API_KEY|POSTHOG_PERSONAL_API_KEY|FLY_ACCESS_TOKEN|SHOPIFY_PARTNER|prompt|raw/iu);
+  });
+
+  it('rejects the retired next-review verb before calling the review service', async () => {
+    const review = vi.fn(async () => reviewResult());
+
+    await expect(runMarketplaceVisibilityCli({
+      args: ['next-review', '--profile', 'merchgrid_shopify_app_store'],
+      dependencies: {
+        reviews: { review },
+        resolveThrough: async () => '2026-09-04',
+        resolveProductRef: async () => 'merchgrid-shopify-app',
+        defaultContextPath: 'artifacts/merchgrid/context/default-review.json',
+      } as unknown as MarketplaceVisibilityCliDependencies,
+      writeLine: () => undefined,
+    })).rejects.toMatchObject({
+      code: 'validation_failed',
+      message: 'Expected review command',
+    });
+
+    expect(review).not.toHaveBeenCalled();
+  });
+
   it('composes resolvable artifact and run references from the documented data directory', () => {
     expect(marketplaceVisibilityStorageLayout('artifacts/merchgrid/metrics')).toEqual({
       artifactRoot: 'artifacts/merchgrid/metrics/artifacts',
+      artifactRootRef: 'artifacts/merchgrid/metrics/artifacts',
       runRoot: 'artifacts/merchgrid/metrics/workflow-runs',
+      operationRoot: 'artifacts/merchgrid/metrics',
+    });
+  });
+
+  it('keeps marketplace evidence artifact refs schema-safe when storage uses an absolute path', () => {
+    expect(marketplaceVisibilityStorageLayout('/tmp/merchgrid-test-data')).toEqual({
+      artifactRoot: '/tmp/merchgrid-test-data/artifacts',
+      artifactRootRef: '.local/merchgrid/metrics/artifacts',
+      runRoot: '/tmp/merchgrid-test-data/workflow-runs',
+      operationRoot: '/tmp/merchgrid-test-data',
     });
   });
 
@@ -34,12 +107,23 @@ describe('marketplace visibility CLI', () => {
     ['an engine-exceeding tool-call cap', { MARKETPLACE_RESEARCH_ENABLED: 'true', MARKETPLACE_RESEARCH_MAX_TOOL_CALLS: '4' }],
   ])('validates marketplace M3 runtime configuration for %s', (_label, researchEnv) => {
     expect(() => createMarketplaceVisibilityDependencies({
-      MERCHGRID_METRICS_DATA_DIR: 'artifacts/merchgrid/metrics',
+      ...fakeRuntimeEnvironment(),
       ...researchEnv,
     })).toThrowError(expect.objectContaining({
       code: 'configuration_failed',
       message: 'Marketplace research configuration is invalid',
     }));
+  });
+
+  it('builds the three MerchGrid source adapters for marketplace review preparation', () => {
+    const http: HttpClient = {
+      async request() {
+        throw new Error('network must not be called while constructing adapters');
+      },
+    };
+
+    expect(createMerchGridMetricSourceAdapters({ env: fakeRuntimeEnvironment(), http }).map((adapter) => adapter.source))
+      .toEqual(['posthog', 'fly_metrics', 'shopify_partner']);
   });
 
   it('surfaces bounded missing weekly source-dates through the CLI error channel', async () => {
@@ -50,8 +134,8 @@ describe('marketplace visibility CLI', () => {
     await runMarketplaceVisibilityEntrypoint({
       args: nextReviewArgs(),
       dependencies: {
-        rollingReviews: {
-          nextReview: async () => {
+        reviews: {
+          review: async () => {
             throw new AppError('storage_failed', missingMessage);
           },
         },
@@ -67,21 +151,21 @@ describe('marketplace visibility CLI', () => {
     expect(errors).toEqual([`storage_failed: ${missingMessage}`]);
   });
 
-  it('always forwards configured context paths to the rolling service', async () => {
-    const nextReview = vi.fn(async () => reviewResult());
+  it('always forwards configured context paths to the review service', async () => {
+    const review = vi.fn(async () => reviewResult());
 
     await runMarketplaceVisibilityCli(cliInput([
-      'next-review',
+      'review',
       '--profile', 'merchgrid_shopify_app_store',
     ], {
-      rollingReviews: { nextReview },
+      reviews: { review },
       resolveThrough: async () => '2026-09-07',
       resolveProductRef: async () => 'merchgrid-shopify-app',
       defaultContextPath: 'artifacts/merchgrid/context/default-review.json',
       defaultListingContextPath: 'artifacts/merchgrid/context/default-listing.json',
     }));
 
-    expect(nextReview).toHaveBeenCalledWith({
+    expect(review).toHaveBeenCalledWith({
       profile: 'merchgrid_shopify_app_store',
       productRef: 'merchgrid-shopify-app',
       through: '2026-09-07',
@@ -91,19 +175,19 @@ describe('marketplace visibility CLI', () => {
   });
 
   it('uses the configured local context defaults', async () => {
-    const nextReview = vi.fn(async () => reviewResult());
+    const review = vi.fn(async () => reviewResult());
 
     await runMarketplaceVisibilityCli(cliInput([
-      'next-review', '--profile', 'merchgrid_shopify_app_store',
+      'review', '--profile', 'merchgrid_shopify_app_store',
     ], {
-      rollingReviews: { nextReview },
+      reviews: { review },
       resolveThrough: async () => '2026-09-07',
       resolveProductRef: async () => 'merchgrid-shopify-app',
       defaultContextPath: 'artifacts/merchgrid/context/default-review.json',
       defaultListingContextPath: 'artifacts/merchgrid/context/default-listing.json',
     }));
 
-    expect(nextReview).toHaveBeenCalledWith(expect.objectContaining({
+    expect(review).toHaveBeenCalledWith(expect.objectContaining({
       contextPath: 'artifacts/merchgrid/context/default-review.json',
       listingContextPath: 'artifacts/merchgrid/context/default-listing.json',
     }));
@@ -114,10 +198,10 @@ describe('marketplace visibility CLI', () => {
 
     await runMarketplaceVisibilityCli({
       ...cliInput([
-        'next-review', '--profile', 'merchgrid_shopify_app_store',
+        'review', '--profile', 'merchgrid_shopify_app_store',
       ], {
-        rollingReviews: {
-          nextReview: async () => reviewResult({
+        reviews: {
+          review: async () => reviewResult({
             previousRun: { runId: 'previous-review', resolution: 'not_applied' },
             currentRun: {
               runId: '2026-09-07-merchgrid_shopify_app_store-merchgrid-shopify-app',
@@ -135,6 +219,7 @@ describe('marketplace visibility CLI', () => {
     });
 
     expect(lines).toEqual([
+      'weekly-artifact: artifacts/weekly-reviews/2026-09-07.json (reused)',
       'previous: previous-review (not_applied)',
       'run: 2026-09-07-merchgrid_shopify_app_store-merchgrid-shopify-app',
       'status: awaiting_approval',
@@ -147,59 +232,55 @@ describe('marketplace visibility CLI', () => {
   it.each(['visibility-review', 'approve', 'reject', 'record-result'])('rejects removed command %s', async (command) => {
     await expect(runMarketplaceVisibilityCli(cliInput([command]))).rejects.toMatchObject({
       code: 'validation_failed',
-      message: 'Expected next-review command',
+      message: 'Expected review command',
     });
   });
 
-  it('rejects malformed next-review options before calling the rolling service', async () => {
-    const nextReview = vi.fn(async () => reviewResult());
+  it('rejects malformed review options before calling the review service', async () => {
+    const review = vi.fn(async () => reviewResult());
 
     await expect(runMarketplaceVisibilityCli(cliInput([
-      'next-review', '--profile', 'unsupported_profile',
-    ], { rollingReviews: { nextReview } }))).rejects.toMatchObject({ code: 'validation_failed' });
+      'review', '--profile', 'unsupported_profile',
+    ], { reviews: { review } }))).rejects.toMatchObject({ code: 'validation_failed' });
 
-    expect(nextReview).not.toHaveBeenCalled();
+    expect(review).not.toHaveBeenCalled();
   });
 
   it.each([
     ['a required option followed by another option', [
-      'next-review', '--profile',
+      'review', '--profile',
     ]],
     ['the removed context option', [
-      'next-review', '--profile', 'merchgrid_shopify_app_store', '--product-ref', 'merchgrid-shopify-app',
+      'review', '--profile', 'merchgrid_shopify_app_store', '--product-ref', 'merchgrid-shopify-app',
       '--context', 'artifacts/merchgrid/context/review.json',
     ]],
     ['the removed listing-context option', [
-      'next-review', '--profile', 'merchgrid_shopify_app_store', '--product-ref', 'merchgrid-shopify-app',
+      'review', '--profile', 'merchgrid_shopify_app_store', '--product-ref', 'merchgrid-shopify-app',
       '--listing-context', 'artifacts/merchgrid/context/listing.json',
     ]],
-    ['the removed through option', [
-      'next-review', '--profile', 'merchgrid_shopify_app_store', '--product-ref', 'merchgrid-shopify-app',
-      '--through', '2026-09-07',
-    ]],
     ['the removed product-ref option', [
-      'next-review', '--profile', 'merchgrid_shopify_app_store',
+      'review', '--profile', 'merchgrid_shopify_app_store',
       '--product-ref', 'merchgrid-shopify-app',
     ]],
-  ])('rejects %s before calling the rolling service', async (_caseName, args) => {
-    const nextReview = vi.fn(async () => reviewResult());
+  ])('rejects %s before calling the review service', async (_caseName, args) => {
+    const review = vi.fn(async () => reviewResult());
 
     await expect(runMarketplaceVisibilityCli(cliInput(args, {
-      rollingReviews: { nextReview },
+      reviews: { review },
       defaultContextPath: 'artifacts/merchgrid/context/default-review.json',
     }))).rejects.toMatchObject({
       code: 'validation_failed',
-      message: 'Expected options: --profile',
+      message: 'Expected options: --profile, --through',
     });
 
-    expect(nextReview).not.toHaveBeenCalled();
+    expect(review).not.toHaveBeenCalled();
   });
 
   it('does not invoke the owner prompt for the first CLI review cycle', async () => {
     const fixture = coordinatorFixture();
 
     await runMarketplaceVisibilityCli(cliInput(nextReviewArgs(), {
-      rollingReviews: fixture.service,
+      reviews: reviewFacadeForRolling(fixture.service),
       defaultContextPath: 'artifacts/merchgrid/context/default-review.json',
     }));
 
@@ -210,7 +291,7 @@ describe('marketplace visibility CLI', () => {
     const fixture = coordinatorFixture({ existing: workflowState('2026-09-07-merchgrid_shopify_app_store-merchgrid-shopify-app') });
 
     await runMarketplaceVisibilityCli(cliInput(nextReviewArgs(), {
-      rollingReviews: fixture.service,
+      reviews: reviewFacadeForRolling(fixture.service),
       defaultContextPath: 'artifacts/merchgrid/context/default-review.json',
     }));
 
@@ -221,7 +302,7 @@ describe('marketplace visibility CLI', () => {
     const fixture = coordinatorFixture({ previous: completedWorkflowState('previous-review') });
 
     await runMarketplaceVisibilityCli(cliInput(nextReviewArgs(), {
-      rollingReviews: fixture.service,
+      reviews: reviewFacadeForRolling(fixture.service),
       defaultContextPath: 'artifacts/merchgrid/context/default-review.json',
     }));
 
@@ -275,7 +356,7 @@ function cliInput(
   return {
     args,
     dependencies: {
-      rollingReviews: { nextReview: async () => reviewResult() },
+      reviews: { review: async () => reviewResult() },
       resolveThrough: async () => '2026-09-07',
       resolveProductRef: async () => 'merchgrid-shopify-app',
       ...dependencies,
@@ -286,6 +367,9 @@ function cliInput(
 
 function reviewResult(overrides: Record<string, unknown> = {}) {
   return {
+    operationId: 'marketplace-review:merchgrid_shopify_app_store:merchgrid-shopify-app:2026-09-07',
+    weeklyArtifactRef: 'artifacts/weekly-reviews/2026-09-07.json',
+    weeklyArtifactStatus: 'reused' as const,
     currentRun: {
       runId: '2026-09-07-merchgrid_shopify_app_store-merchgrid-shopify-app',
       status: 'awaiting_approval' as const,
@@ -295,9 +379,23 @@ function reviewResult(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function reviewFacadeForRolling(service: MarketplaceRollingReviewService): MarketplaceVisibilityCliDependencies['reviews'] {
+  return {
+    async review(input) {
+      const result = await service.nextReview(input);
+      return {
+        operationId: `marketplace-review:${input.profile}:${input.productRef}:${input.through}`,
+        weeklyArtifactRef: `artifacts/weekly-reviews/${input.through}.json`,
+        weeklyArtifactStatus: 'reused',
+        ...result,
+      };
+    },
+  };
+}
+
 function nextReviewArgs(): string[] {
   return [
-    'next-review', '--profile', 'merchgrid_shopify_app_store',
+    'review', '--profile', 'merchgrid_shopify_app_store',
   ];
 }
 
@@ -455,5 +553,18 @@ function fakePromptInterface(answers: Array<string | Error>) {
     close() {
       closed = true;
     },
+  };
+}
+
+function fakeRuntimeEnvironment(): NodeJS.ProcessEnv {
+  return {
+    POSTHOG_PROJECT_ID: 'test-project',
+    POSTHOG_PERSONAL_API_KEY: 'test-posthog-key',
+    POSTHOG_API_BASE_URL: 'https://posthog.example.test',
+    FLY_ACCESS_TOKEN: 'test-fly-key',
+    FLY_APP_NAME: 'buffr-test-app',
+    FLY_METRICS_URL: 'https://api.fly.io/prometheus/buffr-test/api/v1/query',
+    MERCHGRID_METRICS_DATA_DIR: '/tmp/merchgrid-test-data',
+    SHOPIFY_PARTNER_CSV_PATH: '/tmp/merchgrid-test.csv',
   };
 }

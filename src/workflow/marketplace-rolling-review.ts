@@ -69,6 +69,7 @@ export type RollingReviewInput = {
   through: string;
   contextPath: string;
   listingContextPath?: string;
+  preparedEvidence?: MarketplaceVisibilityEvidence;
 };
 
 export type RollingReviewResult = {
@@ -168,7 +169,7 @@ async function prepareAndValidate(
 
   const freshEvidence = parseWithSchema(
     MarketplaceVisibilityEvidenceSchema,
-    await dependencies.prepareWeeklyEvidence({ ...input, identity, through }),
+    input.preparedEvidence ?? await dependencies.prepareWeeklyEvidence({ ...input, identity, through }),
     'prepared marketplace weekly evidence',
   );
   if (

@@ -1,41 +1,40 @@
 import { createInterface } from 'node:readline/promises';
-import { join } from 'node:path';
+import { isAbsolute, join, relative, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { OpenAiAgentRunner } from '../agents/runner.js';
 import { createMarketplaceVisibilityModuleExecutor } from '../agents/marketplace-visibility/modules.js';
 import { createHostedWebSearchResearchTool } from '../agents/research/hosted-web-search.js';
 import { loadMarketplaceResearchConfig } from '../agents/research/marketplace-config.js';
+import { createMerchGridMetricSourceAdapters } from '../connectors/merchgrid/runtime.js';
+import type { HttpClient } from '../connectors/merchgrid/source.js';
 import {
   MarketplaceVisibilityProfileSchema,
   type MarketplaceVisibilityProfile,
 } from '../contracts/marketplace-visibility.js';
 import { UtcDateSchema } from '../contracts/metrics.js';
 import {
-  loadMarketplaceListingContext,
   loadRollingMarketplaceVisibilityContext,
-  loadMarketplaceVisibilityContext,
 } from '../connectors/marketplace/local-context.js';
 import { AppError } from '../core/errors.js';
 import { loadLocalEnvironment } from '../core/local-env.js';
 import {
   JsonFileMerchGridReviewArtifactRepository,
   resolveLatestCompleteWeeklyThrough,
-  runWeeklyReview,
   type MerchGridSourcePackDependencies,
 } from '../jobs/merchgrid-source-pack.js';
-import { toMerchGridReviewEvidence } from '../metrics/evidence.js';
 import { JsonFileMetricSnapshotRepository } from '../storage/metric-snapshots.js';
+import { JsonFileReviewOperationEventRepository } from '../storage/review-operations.js';
 import { JsonFileRunRepository } from '../storage/runs.js';
+import { createMarketplaceEvidencePreparationService } from '../workflow/marketplace-evidence-preparation.js';
 import { createWorkflowEngine } from '../workflow/engine.js';
 import {
   createMarketplaceRollingReviewService,
-  type MarketplaceRollingReviewService,
   type OwnerApplicationPrompt,
 } from '../workflow/marketplace-rolling-review.js';
-import { buildRollingVisibilityEvidence } from '../workflow/marketplace-visibility-profile.js';
+import { createMarketplaceReviewService, type MarketplaceReviewService } from '../workflow/marketplace-review.js';
 
 export type MarketplaceVisibilityCliDependencies = {
-  rollingReviews: MarketplaceRollingReviewService;
+  reviews: MarketplaceReviewService;
   resolveThrough: () => Promise<string>;
   resolveProductRef: (contextPath: string) => Promise<string>;
   defaultContextPath?: string;
@@ -59,24 +58,28 @@ export type OwnerApplicationPromptOptions = {
   createInterface?: OwnerPromptInterface | (() => OwnerPromptInterface);
 };
 
+export type MarketplaceVisibilityRuntimeOptions = {
+  http?: HttpClient;
+};
+
 export async function runMarketplaceVisibilityCli(input: {
   args: readonly string[];
   dependencies: MarketplaceVisibilityCliDependencies;
   writeLine: (line: string) => void;
 }): Promise<void> {
   const [command, ...options] = input.args;
-  if (command !== 'next-review') {
-    throw new AppError('validation_failed', 'Expected next-review command');
+  if (command !== 'review') {
+    throw new AppError('validation_failed', 'Expected review command');
   }
 
-  assertOptions(options, ['--profile']);
+  assertOptions(options, ['--profile'], ['--through']);
   const profile = parseProfile(option(options, '--profile'));
   const contextPath = input.dependencies.defaultContextPath;
   if (!contextPath) throw new AppError('configuration_failed', 'Missing required marketplace visibility context path');
   const productRef = await input.dependencies.resolveProductRef(contextPath);
-  const through = await input.dependencies.resolveThrough();
+  const through = optionalOption(options, '--through') ?? await input.dependencies.resolveThrough();
 
-  const result = await input.dependencies.rollingReviews.nextReview({
+  const result = await input.dependencies.reviews.review({
     profile,
     productRef,
     through,
@@ -130,18 +133,26 @@ export function createOwnerApplicationPrompt(options: OwnerApplicationPromptOpti
   };
 }
 
-/** Builds the runtime graph from local persisted evidence; source-provider adapters are intentionally absent. */
+/** Builds the runtime graph from local persisted evidence and bounded source adapters. */
 export function createMarketplaceVisibilityDependencies(
   env: NodeJS.ProcessEnv = loadLocalEnvironment(),
+  options: MarketplaceVisibilityRuntimeOptions = {},
 ): MarketplaceVisibilityCliDependencies {
   const dataDir = required(env, 'MERCHGRID_METRICS_DATA_DIR');
   const layout = marketplaceVisibilityStorageLayout(dataDir);
   const artifacts = new JsonFileMerchGridReviewArtifactRepository({ rootDir: layout.artifactRoot });
   const snapshotRepository = new JsonFileMetricSnapshotRepository({ rootDir: join(dataDir, 'snapshots') });
+  const operations = new JsonFileReviewOperationEventRepository({ rootDir: layout.operationRoot });
+  const now = () => new Date();
+  const operationEventSink = async (event: Parameters<typeof operations.appendEvent>[1]) => {
+    await operations.appendEvent(event.runId, event);
+  };
   const weeklyEvidenceDependencies: MerchGridSourcePackDependencies = {
-    adapters: [],
+    adapters: createMerchGridMetricSourceAdapters({ env, http: options.http }),
     repository: snapshotRepository,
     artifacts,
+    now,
+    emit: operationEventSink,
   };
   const runs = new JsonFileRunRepository({ rootDir: layout.runRoot });
   const researchConfig = loadMarketplaceResearchConfig(env);
@@ -166,30 +177,25 @@ export function createMarketplaceVisibilityDependencies(
     },
   });
 
+  const evidence = createMarketplaceEvidencePreparationService({
+    sourcePack: weeklyEvidenceDependencies,
+    repository: snapshotRepository,
+    artifacts,
+    artifactRootRef: layout.artifactRootRef,
+    now,
+    emit: operationEventSink,
+  });
+  const rollingReviews = createMarketplaceRollingReviewService({
+    history: runs,
+    engine,
+    prompt: createOwnerApplicationPrompt(),
+    now,
+    runRootRef: layout.runRoot,
+    prepareWeeklyEvidence: async (input) => (await evidence.prepare(input)).evidence,
+  });
+
   return {
-    rollingReviews: createMarketplaceRollingReviewService({
-      history: runs,
-      engine,
-      prompt: createOwnerApplicationPrompt(),
-      now: () => new Date(),
-      runRootRef: layout.runRoot,
-      prepareWeeklyEvidence: async (input) => {
-        const artifact = await artifacts.loadWeeklyReview(input.through)
-          ?? toMerchGridReviewEvidence((await runWeeklyReview({ through: input.through, dependencies: weeklyEvidenceDependencies })).review);
-        const context = await loadMarketplaceVisibilityContext(input.contextPath);
-        const listingContext = input.listingContextPath
-          ? await loadMarketplaceListingContext(input.listingContextPath)
-          : undefined;
-        return buildRollingVisibilityEvidence({
-          artifact,
-          identity: input.identity,
-          through: input.through,
-          context,
-          listingContext,
-          artifactRootRef: layout.artifactRoot,
-        });
-      },
-    }),
+    reviews: createMarketplaceReviewService({ evidence, rollingReviews, operations, now }),
     resolveThrough: () => resolveLatestCompleteWeeklyThrough({ repository: snapshotRepository }),
     resolveProductRef: async (contextPath) => (await loadRollingMarketplaceVisibilityContext(contextPath)).productRef,
     defaultContextPath: env.MERCHGRID_VISIBILITY_CONTEXT_PATH,
@@ -200,12 +206,29 @@ export function createMarketplaceVisibilityDependencies(
 /** Keeps physical storage and persisted local references on the same documented layout. */
 export function marketplaceVisibilityStorageLayout(dataDir: string): {
   artifactRoot: string;
+  artifactRootRef: string;
   runRoot: string;
+  operationRoot: string;
 } {
+  const artifactRoot = join(dataDir, 'artifacts');
   return {
-    artifactRoot: join(dataDir, 'artifacts'),
+    artifactRoot,
+    artifactRootRef: marketplaceVisibilityArtifactRootRef(artifactRoot),
     runRoot: join(dataDir, 'workflow-runs'),
+    operationRoot: dataDir,
   };
+}
+
+function marketplaceVisibilityArtifactRootRef(artifactRoot: string): string {
+  const candidate = isAbsolute(artifactRoot) ? relative(process.cwd(), artifactRoot) : artifactRoot;
+  const normalized = candidate.split(sep).join('/');
+  if (
+    (normalized.startsWith('artifacts/') || normalized.startsWith('.local/'))
+    && !normalized.includes('..')
+  ) {
+    return normalized;
+  }
+  return '.local/merchgrid/metrics/artifacts';
 }
 
 async function askYesNo(terminal: OwnerPromptInterface, prompt: string): Promise<boolean> {
@@ -259,8 +282,9 @@ function assertOptions(options: readonly string[], required: readonly string[], 
 
 function printReview(
   writeLine: (line: string) => void,
-  result: Awaited<ReturnType<MarketplaceRollingReviewService['nextReview']>>,
+  result: Awaited<ReturnType<MarketplaceReviewService['review']>>,
 ): void {
+  writeLine(`weekly-artifact: ${result.weeklyArtifactRef} (${result.weeklyArtifactStatus})`);
   if (result.previousRun) writeLine(`previous: ${result.previousRun.runId} (${result.previousRun.resolution})`);
   writeLine(`run: ${result.currentRun.runId}`);
   writeLine(`status: ${result.currentRun.status}`);
