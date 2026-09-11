@@ -32,6 +32,7 @@ real-world marketplace changes automatically.
 - [Core commands](#core-commands)
 - [MerchGrid evidence preparation](#merchgrid-evidence-preparation)
 - [Marketplace visibility operations](#marketplace-visibility-operations)
+  - [What runs when marketplace:review runs](#what-runs-when-marketplacereview-runs)
 - [Etsy connector validation](#etsy-connector-validation)
 - [Safety rules](#safety-rules)
 - [Design references](#design-references)
@@ -331,62 +332,54 @@ the right-hand run. The two run records stay separate; the artifact is reused
 by reference rather than copied or reinterpreted as two different observations.
 ```
 
-Here is the same loop as an operational sequence:
+Here is the same loop as a compact operational sequence:
 
-1. **Prepare the observation window.** The review command checks the two
-   adjacent seven-day periods needed for the target weekly review, reuses
-   complete source snapshots, collects missing completed source/date snapshots,
-   and builds or reuses the weekly artifact. It does not store raw provider
-   payloads or private marketplace data.
+```text
+(2) marketplace:review --profile merchgrid_shopify_app_store
+        |
+        v
+(1) prepare evidence -> (3) resolve product history -> (4) close applied prior -> (5) start next run
+        |                         |                          |                       |
+        v                         v                          v                       v
+snapshots + weekly          context + productRef       M2 Results + M7           M1..M6
+artifact refs               + through date             bounded learning          approval wait
+        |
+        +---------------------- (6) owner edits Shopify manually ----------------------+
+```
 
-2. **Run one rolling operation.** The only command-line choice is `--profile`.
-   Think of the profile as a routing key: it selects the marketplace workflow,
-   configured context paths, evidence rules, and module behavior for this kind
-   of review.
+1. **Prepare evidence.** `marketplace:review` internally checks the adjacent
+   seven-day windows, reuses complete snapshots, collects missing completed
+   source/date snapshots, and builds or reuses the weekly artifact.
 
-   ```bash
-   npm run marketplace:review -- \
-     --profile merchgrid_shopify_app_store
-   ```
+2. **Run one command.** The owner supplies only `--profile`; Buffr loads the
+   configured context paths, reads `productRef` from validated context, and
+   resolves the newest complete `through` date internally.
 
-   For `merchgrid_shopify_app_store`, Buffr loads the context configured by
-   `MERCHGRID_VISIBILITY_CONTEXT_PATH` and the optional public listing context
-   configured by `MERCHGRID_LISTING_CONTEXT_PATH`. The validated context
-   supplies the stable `productRef`, such as `merchgrid-shopify-app`. The owner
-   no longer enters that value, but Buffr still uses it internally to find the
-   correct product history and prevent unrelated products from sharing runs.
+3. **Resolve prior history.** Buffr finds the latest run for the exact
+   `profile + productRef`. If a prior M6 plan is awaiting action, it asks
+   whether the owner applied it; `yes` requires a UTC application date, and
+   cancellation happens before workflow mutation.
 
-   Buffr also scans the persisted snapshots and automatically chooses the
-   newest completed UTC date backed by all three sources across both required
-   seven-day periods. The owner no longer enters `--through`, but the resolved
-   date is still recorded internally as `through` so the evidence window, run
-   id, and later result comparison remain reproducible.
+4. **Close applied work.** For an applied prior experiment, the fresh weekly
+   artifact must include the M6 primary metric and start after the application
+   date. Buffr uses it as result evidence, runs M2 Results and M7, and stores
+   only bounded learning references rather than copying raw evidence forward.
 
-3. **Confirm the prior real-world action.** If Buffr finds an unresolved prior
-   M6 plan for the exact `profile + productRef`, it asks whether the owner
-   actually applied it. There is no default answer. A `yes` also requires the
-   UTC application date; a `no` stops that prior run without inventing result
-   metrics or M7 learning. Cancellation happens before workflow mutation.
+5. **Start the next run.** The same weekly artifact reference becomes the new
+   baseline, and the workflow engine advances legal M1, M2, M4, M5, and M6
+   stages with optional M3 research side routes. M6 reaches approval wait only
+   after its primary metric is grounded in the validated baseline evidence.
 
-4. **Close one run and create the next.** For an applied experiment, the fresh
-   weekly artifact must contain the M6 primary metric and its current seven-day
-   window must begin after the application date. Buffr uses it as the prior
-   run's result, executes M2 Results and M7, and completes that `run.json`.
-   Buffr then uses the same artifact reference as the new run's baseline,
-   carries only the validated M7 learning projection, and advances the new run
-   through M6. The generated run id is deterministic, so retrying the identical
-   cycle does not repeat events, model calls, artifacts, or owner questions.
+6. **Act outside Buffr.** The owner reviews `experiment-plan.json` and makes any
+   Shopify or marketplace change manually. Retrying the same cycle resumes
+   deterministically without duplicating prompts, events, artifacts, or model
+   work.
 
-   M6 cannot invent a prose-only measurement here. Before a plan reaches the
-   approval wait, Buffr requires `primaryMetric` to name an actual key in the
-   validated baseline evidence and replaces any model-proposed baseline number
-   with that evidence's value and period. This makes the later comparison
-   reproducible instead of trusting the model to remember a metric or baseline.
-
-5. **Review and act manually.** Inspect the new `experiment-plan.json`, decide
-   whether to apply it, and make any Shopify change yourself. Buffr has no
-   marketplace-write path. A later invocation with fresh weekly evidence will
-   ask what actually happened before closing this run and opening another one.
+This section stays at the business-level loop: owner action, result evidence,
+learning, and the next recommendation. For the lower-level component path
+behind these steps—CLI, adapters, evidence prep, facade, coordinator, engine,
+modules, and storage—see
+[What runs when marketplace:review runs](#what-runs-when-marketplacereview-runs).
 
 For a junior developer, the important lesson is that an experiment plan is only
 half of the product. A completed feedback loop needs a real owner action plus a
