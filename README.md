@@ -401,6 +401,60 @@ can mistake normal noise for an effect. Statuses such as `awaiting_approval`,
 `ready_for_experiment`, and `waiting_for_data` make the delay visible and
 resumable. They are valid workflow outcomes, not crashes or unfinished code.
 
+The status is the condition of the whole run, while the stage is the exact
+workflow step. Approval is one gate; delays are the broader set of human,
+evidence, and time gates that keep the run from advancing too early. Most
+statuses are not owned by one module; they are workflow-control states that the
+engine sets and other subsystems inspect.
+
+```text
+new run
+  |
+  v
+[analyzing] M1/M2 initial/M4/M5/M6
+  |                    |
+  | needs M3           | missing or too-early evidence
+  v                    v
+[researching] M3   [waiting_for_data]
+  |                    |
+  | research returns   | later qualified evidence
+  +---------+----------+
+            |
+            v
+       [analyzing]
+            |
+            v
+       [awaiting_approval] M6 plan ready
+            |
+       +----+----+
+       |         |
+ approved   rejected or not applied
+       |         |
+       v         v
+[ready_for_experiment]   [stopped]
+       |
+       | owner action, experiment period, later evidence
+       v
+[ready_for_evaluation] M2 Results/M7
+       |
+       v
+[cycle_complete]
+
+[experiment_running] is reserved for future active experiment tracking.
+```
+
+| Status | Gate or delay meaning | Modules that run under it | Components/subsystems that use it |
+| --- | --- | --- | --- |
+| `analyzing` | No gate; normal M1/M2/M4/M5/M6 work is moving | M1, M2 initial, M4, M5, M6 | Workflow engine sets it while stepping; rolling review coordinator resumes active runs |
+| `researching` | Tool-use gate while optional M3 research is in progress | M3 research | Workflow engine sets it; research route and research tool adapter use it |
+| `waiting_for_data` | Evidence/time gate until qualified input exists | None while paused | Workflow engine sets it; readiness checks and rolling review coordinator inspect it |
+| `awaiting_approval` | Human decision gate for a proposed experiment plan | None while paused | Workflow engine sets it at `approval_wait`; owner prompt and rolling review coordinator inspect it |
+| `ready_for_experiment` | Human action/time gate after approval or recorded application | None while waiting for the owner/action window | Workflow engine sets it at `experiment_wait`; rolling review coordinator checks it before result evaluation |
+| `experiment_running` | Reserved experiment-period status for an active manual experiment | None in the current marketplace flow | Workflow contract defines it for future experiment tracking; current flow does not actively assign it |
+| `ready_for_evaluation` | Evidence gate has been satisfied enough to evaluate results | M2 Results and M7 | Workflow engine sets it around result evaluation; rolling review coordinator resumes evaluation stages from it |
+| `cycle_complete` | No gate; the run has finished and learning/output is recorded | None | Workflow engine sets it; storage persists it; history lookup and rolling review coordinator use it as completed prior learning |
+| `stopped` | No further progress; the owner rejected or did not apply the plan | None | Workflow engine sets it; guards block further transitions; rolling review coordinator treats it as resolved prior history |
+
 When working on wait behavior, do not “fix” it by inventing missing evidence or
 advancing the stage. Determine what real event or qualified input is required
 to resume the run.
