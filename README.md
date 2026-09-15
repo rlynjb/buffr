@@ -13,6 +13,8 @@ LLM-backed modules provide bounded judgment inside that lifecycle. Buffr does no
 let a model decide which business-process stage runs next, and it does not apply
 real-world marketplace changes automatically.
 
+---
+
 ## Table of contents
 
 - [Product mental model](#product-mental-model)
@@ -20,6 +22,15 @@ real-world marketplace changes automatically.
 - [Current workflows](#current-workflows)
 - [System at a glance](#system-at-a-glance)
 - [Buffr through a systems-thinking lens](#buffr-through-a-systems-thinking-lens)
+  - [> Purpose: what job does the whole system perform?](#-purpose-what-job-does-the-whole-system-perform)
+  - [> System boundary: what is inside Buffr, and what is outside?](#-system-boundary-what-is-inside-buffr-and-what-is-outside)
+  - [> Stocks: what does Buffr remember?](#-stocks-what-does-buffr-remember)
+  - [> Flows: what changes those stocks?](#-flows-what-changes-those-stocks)
+  - [> Feedback loop: how does a result affect the next decision?](#-feedback-loop-how-does-a-result-affect-the-next-decision)
+  - [> Delays: why does Buffr sometimes wait?](#-delays-why-does-buffr-sometimes-wait)
+  - [> Decision rules: what determines what happens next?](#-decision-rules-what-determines-what-happens-next)
+  - [> Leverage points: which small controls have a large effect?](#-leverage-points-which-small-controls-have-a-large-effect)
+  - [> Putting the concepts together: one M3-assisted run](#-putting-the-concepts-together-one-m3-assisted-run)
 - [Subsystem inventory](#subsystem-inventory)
 - [Sources and trust boundaries](#sources-and-trust-boundaries)
 - [Technology stack](#technology-stack)
@@ -32,10 +43,12 @@ real-world marketplace changes automatically.
 - [Core commands](#core-commands)
 - [MerchGrid evidence preparation](#merchgrid-evidence-preparation)
 - [Marketplace visibility operations](#marketplace-visibility-operations)
-  - [What runs when marketplace:review runs](#what-runs-when-marketplacereview-runs)
+  - [> What runs when marketplace:review runs](#-what-runs-when-marketplacereview-runs)
 - [Etsy connector validation](#etsy-connector-validation)
 - [Safety rules](#safety-rules)
 - [Design references](#design-references)
+
+---
 
 ## Product mental model
 
@@ -74,6 +87,8 @@ The product is intentionally conservative. It can recommend listing changes,
 visibility experiments, measurement windows, and follow-up learning. The owner
 still applies marketplace or product changes manually.
 
+---
+
 ## What Buffr does
 
 Buffr helps answer questions like:
@@ -90,6 +105,8 @@ It is not a hosted SaaS product yet. The current version is a local,
 single-owner workflow engine with file persistence, command-line workflows, and
 mockable module boundaries.
 
+---
+
 ## Current workflows
 
 Buffr currently has three product-facing workflow families.
@@ -102,6 +119,8 @@ Buffr currently has three product-facing workflow families.
 
 These workflows share the same core engine pattern. The source evidence differs,
 but the lifecycle remains deterministic and contract-driven.
+
+---
 
 ## System at a glance
 
@@ -177,6 +196,8 @@ What each boundary means:
 - Buffr produces recommendations and records learning. It never applies an
   Etsy, Shopify, or other marketplace change automatically.
 
+---
+
 ## Buffr through a systems-thinking lens
 
 You do not need to have read Donella H. Meadows's *Thinking in Systems* to use
@@ -187,7 +208,7 @@ questions: What is the system trying to accomplish? What does it remember? What
 changes that memory? Where does information enter and leave? What makes the
 system wait, continue, or stop?
 
-### Purpose: what job does the whole system perform?
+### > Purpose: what job does the whole system perform?
 
 A system's **purpose** is the outcome produced by all of its parts working
 together. It is different from the responsibility of a single module. For
@@ -207,7 +228,7 @@ feature: does it improve the evidence-to-experiment-to-learning loop, or does it
 introduce unrelated automation? Buffr optimizes for better, safer decisions—not
 for the largest possible number of autonomous actions.
 
-### System boundary: what is inside Buffr, and what is outside?
+### > System boundary: what is inside Buffr, and what is outside?
 
 A **system boundary** is the line around the behavior and data that Buffr owns.
 The boundary is about responsibility and control, not merely where code runs.
@@ -231,7 +252,7 @@ external information enters Buffr, add or reuse an adapter and validate the
 result at the boundary. If a real-world action leaves Buffr, preserve the human
 approval gate instead of hiding the action inside a module.
 
-### Stocks: what does Buffr remember?
+### > Stocks: what does Buffr remember?
 
 A **stock** is state that exists at a point in time and remains available after
 the operation that produced it has finished. In this repository, a stock does
@@ -254,7 +275,7 @@ projections of that state; they should not independently redefine it. This
 distinction matters during debugging: start with the source of record, then
 check whether a projection was built correctly.
 
-### Flows: what changes those stocks?
+### > Flows: what changes those stocks?
 
 A **flow** is an operation that creates, transforms, or appends to a stock. A
 connector response is not automatically trusted state. It becomes part of the
@@ -304,7 +325,7 @@ reliable than starting inside an AI prompt and trying to reason backward.
 > and never copy credentials, private inputs, full prompts, or raw provider
 > payloads into Buffr events.
 
-### Feedback loop: how does a result affect the next decision?
+### > Feedback loop: how does a result affect the next decision?
 
 A **feedback loop** exists when the result of an action returns as information
 that can influence a later decision. Buffr's current Shopify visibility loop is
@@ -379,7 +400,7 @@ This section stays at the business-level loop: owner action, result evidence,
 learning, and the next recommendation. For the lower-level component path
 behind these steps—CLI, adapters, evidence prep, facade, coordinator, engine,
 modules, and storage—see
-[What runs when marketplace:review runs](#what-runs-when-marketplacereview-runs).
+[What runs when marketplace:review runs](#-what-runs-when-marketplacereview-runs).
 
 For a junior developer, the important lesson is that an experiment plan is only
 half of the product. A completed feedback loop needs a real owner action plus a
@@ -387,7 +408,7 @@ qualified later observation. Buffr makes their relationship traceable, but it
 does not confuse a recommendation with an applied change or a new experiment
 with an update to the old run.
 
-### Delays: why does Buffr sometimes wait?
+### > Delays: why does Buffr sometimes wait?
 
 A **delay** is the time between an action and trustworthy evidence about its
 effect. Software can execute immediately, but the business signal often cannot.
@@ -459,7 +480,7 @@ When working on wait behavior, do not “fix” it by inventing missing evidence
 advancing the stage. Determine what real event or qualified input is required
 to resume the run.
 
-### Decision rules: what determines what happens next?
+### > Decision rules: what determines what happens next?
 
 A **decision rule** is a deterministic condition that converts the current
 state into an allowed next action. Buffr keeps these rules in schemas, readiness
@@ -479,7 +500,7 @@ If you change one of these rules, test both the newly allowed path and the path
 that must remain rejected. A permissive guard or schema change can affect every
 module downstream even when the edit itself looks small.
 
-### Leverage points: which small controls have a large effect?
+### > Leverage points: which small controls have a large effect?
 
 A **leverage point** is a place where a focused change can alter the behavior of
 the whole system. In Buffr, the highest-leverage safety control is human
@@ -495,7 +516,7 @@ junior developer should ask, “How many downstream decisions rely on this rule?
 before changing an approval gate, contract, readiness check, route, or research
 limit.
 
-### Putting the concepts together: one M3-assisted run
+### > Putting the concepts together: one M3-assisted run
 
 Suppose a marketplace visibility run has valid local context but a diagnosis
 needs current public evidence. The existing workflow run is the **stock**. A
@@ -511,6 +532,8 @@ That single example is the reason M3 has its own subsystem row below while
 still participating in the shared agent runtime: research crosses an external
 trust boundary and needs special tools, limits, citations, and validation, but
 the workflow engine still owns when M3 runs and where its output goes.
+
+---
 
 ## Subsystem inventory
 
@@ -536,6 +559,8 @@ The CLI files are the runtime composition roots. Tests replace their network,
 clock, model, and filesystem dependencies with fakes; the domain and workflow
 code do not reach into environment variables directly.
 
+---
+
 ## Sources and trust boundaries
 
 | Source | Access path | What enters Buffr | What is retained |
@@ -555,6 +580,8 @@ For example, Etsy has a read-only connector and a shared workflow lifecycle, but
 the current user-facing Etsy command is configuration validation rather than a
 full listing-review CLI. `npm start` likewise loads only the scaffold entry
 point; operational work runs through the workflow-specific commands below.
+
+---
 
 ## Technology stack
 
@@ -582,6 +609,8 @@ The architecture combines a few standard implementation patterns:
 | Product entry | Profile service / facade | `src/workflow/*-profile.ts` |
 | LLM reasoning | Bounded specialist strategies | `src/agents/<role>/`, workflow-specific `modules.ts` files |
 | Research detours | Tool-use loop with deterministic circuit breakers | `src/agents/research/`, `src/workflow/engine.ts` |
+
+---
 
 ## Workflow lifecycle
 
@@ -644,6 +673,8 @@ Specialist modules own:
 - confidence and evidence explanations;
 - tool choice only when explicitly granted by the engine.
 
+---
+
 ## Agent modules
 
 Agent modules live under `src/agents/`.
@@ -678,6 +709,8 @@ There are also workflow-specific module sets:
 - `src/agents/marketplace-visibility/modules.ts`
 
 Those files adapt the general M1-M7 module idea to specific product workflows.
+
+---
 
 ## Data boundaries
 
@@ -715,6 +748,8 @@ Read these first:
 The workflow engine should not know raw Etsy endpoint shapes, PostHog API
 responses, Fly response details, Shopify Partner CSV quirks, OAuth token files,
 or environment variable names. Those belong at the adapter/configuration edge.
+
+---
 
 ## Persistence and artifacts
 
@@ -790,6 +825,8 @@ Real `.env` files, credentials, raw provider payloads, private customer data,
 and unapproved source exports must stay out of git and out of persisted
 workflow data.
 
+---
+
 ## How to read the codebase
 
 Use this order when learning Buffr:
@@ -829,6 +866,8 @@ Use this order when learning Buffr:
 The fastest mental model is: contracts define the language, connectors create
 trusted evidence, the engine controls the lifecycle, modules make bounded
 judgments, and storage records what happened.
+
+---
 
 ## Local setup
 
@@ -883,6 +922,8 @@ Etsy connector validation uses the Etsy-related variables defined by
 token provider remains an injected connector dependency; this repository does
 not implement an OAuth login flow.
 
+---
+
 ## Core commands
 
 The root `package.json` exposes this public command surface:
@@ -908,6 +949,8 @@ npm start
 
 `npm start` currently runs the built scaffold entry point. Most product behavior
 is exercised through the marketplace review CLI and tests.
+
+---
 
 ## MerchGrid evidence preparation
 
@@ -936,6 +979,8 @@ artifact for the selected window. The persisted artifacts contain aggregate
 evidence only. Raw provider payloads and full CSV rows stay outside the durable
 review evidence.
 
+---
+
 ## Marketplace visibility operations
 
 Marketplace visibility reviews turn sparse, aggregate-only evidence and local
@@ -949,7 +994,7 @@ npm run marketplace:review -- \
   --profile merchgrid_shopify_app_store
 ```
 
-### What runs when `marketplace:review` runs
+### > What runs when `marketplace:review` runs
 
 The command is a small composition root over several bounded subsystems:
 
@@ -1063,6 +1108,8 @@ live validation, reviewers can inspect `run.json` as the source of record,
 bounded search events in `events.jsonl`, and citation-only
 `metadata.researchRefs` in `experiment-plan.json`.
 
+---
+
 ## Etsy connector validation
 
 The Etsy workflow engine design started around one Etsy seller: the project
@@ -1086,6 +1133,8 @@ transaction evidence and maps provider-specific listing responses into Buffr's
 normalized contracts. It must not expose raw credential material to workflow
 state or agent modules.
 
+---
+
 ## Safety rules
 
 Buffr is designed around explicit safety boundaries:
@@ -1103,6 +1152,8 @@ Buffr is designed around explicit safety boundaries:
   it cannot route the lifecycle.
 - Experiment plans require owner approval.
 - Etsy, Shopify, or marketplace listing changes remain manual.
+
+---
 
 ## Design references
 
