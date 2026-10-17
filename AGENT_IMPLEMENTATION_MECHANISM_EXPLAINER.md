@@ -4,6 +4,21 @@
 
 **Verification:** 43 focused tests pass across six files, and `npm run typecheck` passes.
 
+## Table of Contents
+
+1. [What Did The Agent Implement?](#1-what-did-the-agent-implement)
+2. [FODE Data Engineering Lifecycle View](#2-fode-data-engineering-lifecycle-view)
+3. [ASCII Data Flow Diagram](#3-ascii-data-flow-diagram)
+4. [DDIA Mechanism Explanation](#4-ddia-mechanism-explanation)
+5. [Functional Requirements Recovered From The Code](#5-functional-requirements-recovered-from-the-code)
+6. [Nonfunctional Requirements Recovered From The Code](#6-nonfunctional-requirements-recovered-from-the-code)
+7. [System Design View](#7-system-design-view)
+8. [Algorithmic Thinking View](#8-algorithmic-thinking-view)
+9. [Read Path and Write Path](#9-read-path-and-write-path)
+10. [Failure and Concurrency Walkthrough](#10-failure-and-concurrency-walkthrough)
+11. [Concept Glossary](#11-concept-glossary)
+12. [Learning Summary](#12-learning-summary)
+
 ## 1. What Did The Agent Implement?
 
 ### Plain explanation
